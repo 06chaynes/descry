@@ -29,8 +29,8 @@ from starlette.responses import JSONResponse, FileResponse, Response, StreamingR
 from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
 
-# Configure logging — check DESCRY_LOG_LEVEL first, fall back to CODEGRAPH_LOG_LEVEL
-_log_level = os.environ.get("DESCRY_LOG_LEVEL") or os.environ.get("CODEGRAPH_LOG_LEVEL", "INFO")
+# Configure logging
+_log_level = os.environ.get("DESCRY_LOG_LEVEL", "INFO")
 logging.basicConfig(
     level=getattr(logging, _log_level.upper(), logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -105,7 +105,7 @@ def _find_project_root() -> Path:
 
 
 PROJECT_ROOT = _find_project_root()
-_cache_dir_env = os.environ.get("DESCRY_CACHE_DIR") or os.environ.get("CODEGRAPH_CACHE_DIR")
+_cache_dir_env = os.environ.get("DESCRY_CACHE_DIR")
 CACHE_DIR = Path(_cache_dir_env) if _cache_dir_env else PROJECT_ROOT / ".descry_cache"
 GRAPH_PATH = CACHE_DIR / "codebase_graph.json"
 MAX_STALE_HOURS = 24
@@ -280,6 +280,14 @@ def _caller_to_dict(caller_id: str, q: GraphQuerier) -> dict:
     return result
 
 
+def _openapi_path_exists() -> bool:
+    """Check if an OpenAPI spec file exists in the project."""
+    for name in ("latest.json", "openapi.json"):
+        if (PROJECT_ROOT / "public" / "api" / name).exists():
+            return True
+    return False
+
+
 # --- API Endpoint Handlers ---
 
 async def api_health(request: Request) -> JSONResponse:
@@ -293,7 +301,7 @@ async def api_health(request: Request) -> JSONResponse:
             "scip": scip_available(),
             "embeddings": SEMANTIC_AVAILABLE,
             "git_history": GIT_HISTORY_AVAILABLE,
-            "cross_lang": CROSS_LANG_AVAILABLE,
+            "cross_lang": CROSS_LANG_AVAILABLE and _openapi_path_exists(),
             "docs_search": DOCS_SEARCH_LOADED and DOCS_EMBEDDINGS_AVAILABLE,
         },
     })
@@ -727,7 +735,7 @@ async def api_path(request: Request) -> JSONResponse:
 
 async def api_cross_lang(request: Request) -> JSONResponse:
     if not CROSS_LANG_AVAILABLE:
-        return JSONResponse({"error": "Cross-language tracing not available"}, status_code=503)
+        return JSONResponse({"not_configured": True, "message": "Cross-language tracing module not available. Install the descry cross_lang dependency."})
 
     mode = request.query_params.get("mode", "endpoint")
     method = request.query_params.get("method")
@@ -738,7 +746,7 @@ async def api_cross_lang(request: Request) -> JSONResponse:
     if not openapi_path.exists():
         openapi_path = PROJECT_ROOT / "public" / "api" / "openapi.json"
     if not openapi_path.exists():
-        return JSONResponse({"error": "OpenAPI spec not found"}, status_code=404)
+        return JSONResponse({"not_configured": True, "message": "No OpenAPI spec found. Place your spec at public/api/openapi.json relative to the project root."})
 
     graph_path = str(GRAPH_PATH) if GRAPH_PATH.exists() else None
     tracer = CrossLangTracer(str(openapi_path), graph_path)
@@ -962,6 +970,137 @@ async def api_source(request: Request) -> JSONResponse:
     })
 
 
+async def api_examples(request: Request) -> JSONResponse:
+    """Return dynamic example symbols derived from the indexed graph.
+
+    Picks interesting symbols (high in-degree, classes, good flow candidates)
+    so the UI "Try:" links always work with the current project.
+    """
+    q = _get_querier()
+    if not q:
+        return JSONResponse({"available": False})
+
+    nodes = q.data.get("nodes", [])
+    if not nodes:
+        return JSONResponse({"available": False})
+
+    edges = q.data.get("edges", [])
+
+    # Categorize nodes
+    functions = []
+    classes = []
+    methods = []
+    for n in nodes:
+        meta = n.get("metadata", {})
+        ntype = n.get("type", "")
+        name = meta.get("name", "")
+        # Skip test nodes and private/dunder names
+        if not name or name.startswith("_") or "test" in n.get("id", "").lower():
+            continue
+        entry = {
+            "name": name,
+            "id": n["id"],
+            "type": ntype,
+            "in_degree": meta.get("in_degree", 0),
+            "token_count": meta.get("token_count", 0),
+            "file": n["id"].replace("FILE:", "").split("::")[0] if "::" in n["id"] else "",
+        }
+        if ntype == "Function":
+            functions.append(entry)
+        elif ntype in ("Class", "Struct"):
+            classes.append(entry)
+        elif ntype == "Method":
+            methods.append(entry)
+
+    # Sort by in_degree (most-called first) for relevance
+    functions.sort(key=lambda x: x["in_degree"], reverse=True)
+    methods.sort(key=lambda x: x["in_degree"], reverse=True)
+
+    # Build outgoing edge counts for flow examples
+    out_degree = {}
+    for e in edges:
+        src = e.get("source", "")
+        out_degree[src] = out_degree.get(src, 0) + 1
+
+    # Pick "interesting" symbols for each tool
+    # Search: a popular function, a class, and a method
+    search_examples = []
+    if functions:
+        search_examples.append(functions[0]["name"])
+    if classes:
+        search_examples.append(classes[0]["name"])
+    if methods and len(search_examples) < 3:
+        search_examples.append(methods[0]["name"])
+
+    # Quick/callers/callees: functions with high in-degree (many callers)
+    popular = [f for f in functions if f["in_degree"] >= 2][:3]
+    popular_names = [f["name"] for f in popular] or [f["name"] for f in functions[:3]]
+
+    # Flow: find a function with good fanout (interesting forward trace)
+    flow_candidates = []
+    for f in functions[:20]:
+        od = out_degree.get(f["id"], 0)
+        if od >= 2:
+            flow_candidates.append({"name": f["name"], "out_degree": od})
+    flow_candidates.sort(key=lambda x: x["out_degree"], reverse=True)
+    flow_fwd = flow_candidates[0]["name"] if flow_candidates else (popular_names[0] if popular_names else "")
+    # Backward: pick a popular callee that differs from the forward symbol
+    flow_bwd = ""
+    for pn in popular_names:
+        if pn != flow_fwd:
+            flow_bwd = pn
+            break
+    if not flow_bwd:
+        flow_bwd = popular_names[0] if popular_names else ""
+
+    # Path: pick two symbols likely connected
+    path_start = flow_fwd
+    path_end = popular_names[0] if popular_names else ""
+    if path_start == path_end and len(popular_names) > 1:
+        path_end = popular_names[1]
+
+    # Structure: pick files that have multiple symbols
+    file_counts = {}
+    for n in nodes:
+        nid = n.get("id", "")
+        if "::" in nid:
+            f = nid.replace("FILE:", "").split("::")[0]
+            file_counts[f] = file_counts.get(f, 0) + 1
+    structure_files = sorted(file_counts.items(), key=lambda x: x[1], reverse=True)
+    structure_examples = [f for f, _ in structure_files[:3]]
+
+    # Flatten: pick a class
+    flatten_example = classes[0]["id"] if classes else ""
+
+    # Impls: pick method names that might have multiple implementations
+    impl_candidates = []
+    seen_names = {}
+    for m in methods:
+        n = m["name"]
+        seen_names[n] = seen_names.get(n, 0) + 1
+    impl_candidates = sorted(
+        [(name, count) for name, count in seen_names.items() if count >= 2],
+        key=lambda x: x[1], reverse=True,
+    )
+    impl_examples = [name for name, _ in impl_candidates[:3]]
+
+    return JSONResponse({
+        "available": True,
+        "search": search_examples,
+        "quick": popular_names[:3],
+        "callers": popular_names[:3],
+        "callees": popular_names[:2],
+        "flow_forward": flow_fwd,
+        "flow_backward": flow_bwd,
+        "path_start": path_start,
+        "path_end": path_end,
+        "structure": structure_examples,
+        "flatten": flatten_example,
+        "impls": impl_examples,
+        "evolution": popular_names[:2],
+    })
+
+
 # --- App entrypoint ---
 
 async def index_page(request: Request) -> FileResponse:
@@ -970,6 +1109,7 @@ async def index_page(request: Request) -> FileResponse:
 
 routes = [
     Route("/", index_page),
+    Route("/api/examples", api_examples),
     Route("/api/health", api_health),
     Route("/api/status", api_status),
     Route("/api/ensure", api_ensure, methods=["POST"]),
