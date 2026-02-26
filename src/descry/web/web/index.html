@@ -39,7 +39,7 @@
         <span x-text="health?.graph?.nodes?.toLocaleString() + 'n / ' + health?.graph?.edges?.toLocaleString() + 'e'"></span>
         <span x-show="health?.graph?.age_str" x-text="' | ' + health?.graph?.age_str" style="color:var(--text-muted)"></span>
     </div>
-    <button class="help-btn" @click="showHelp = !showHelp" title="Symbol legend & tips">?</button>
+    <button class="help-btn" @click="showHelp ? (showHelp = false) : openHelp()" title="Encyclopedia">?</button>
 </div>
 
 <!-- Layout -->
@@ -109,13 +109,6 @@
     </div>
 
     <div class="sidebar-group">
-        <div class="sidebar-group-title">Docs</div>
-        <div class="sidebar-item" :class="activeTool === 'docs' && 'active'" @click="setTool('docs')">
-            <span class="icon">&#x00A7;</span> Search Docs
-        </div>
-    </div>
-
-    <div class="sidebar-group">
         <div class="sidebar-group-title">Admin</div>
         <div class="sidebar-item" :class="activeTool === 'health' && 'active'" @click="setTool('health')">
             <span class="icon">&#x2764;</span> Health
@@ -154,17 +147,17 @@
         <div>
             <div class="tool-form">
                 <h3>Search Symbols</h3>
-                <p class="tool-desc">Find functions, classes, methods, and constants across the codebase using hybrid keyword + semantic matching. Filter by language, crate, or symbol type to narrow results. Use this as a starting point to discover symbols, then click any result to view its full context. Models should use this to locate entry points before tracing call flows.</p>
+                <p class="tool-desc">Find functions, classes, methods, and constants across the codebase using hybrid keyword + semantic matching. Filter by language, package, or symbol type to narrow results. Use this as a starting point to discover symbols, then click any result to view its full context. Useful for locating entry points before tracing call flows.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Search Terms</label>
                         <input type="text" x-model="forms.search.terms" placeholder="e.g. validate_token, authentication logic"
                                @keydown.enter="runSearch()">
-                        <div class="input-hints">
+                        <div class="input-hints" x-show="examples">
                             Try:
-                            <a @click.prevent="forms.search.terms = 'create_deployment'; runSearch()">create_deployment</a>
-                            <a @click.prevent="forms.search.terms = 'JwtAuth'; runSearch()">JwtAuth</a>
-                            <a @click.prevent="forms.search.terms = 'authentication and token validation'; runSearch()">authentication and token validation</a>
+                            <template x-for="name in (examples?.search || [])" :key="name">
+                                <a @click.prevent="forms.search.terms = name; runSearch()" x-text="name"></a>
+                            </template>
                         </div>
                     </div>
                     <div class="form-group">
@@ -182,7 +175,7 @@
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>Crate</label>
+                        <label>Package</label>
                         <input type="text" x-model="forms.search.crate" placeholder="e.g. backend" style="width:120px">
                     </div>
                     <div class="form-group">
@@ -228,7 +221,7 @@
         <div>
             <div class="tool-form">
                 <h3>Semantic Search</h3>
-                <p class="tool-desc">Search by meaning using code embeddings rather than exact names. Describe what you're looking for in natural language (e.g. "rate limiting middleware" or "database connection pooling") and get results ranked by conceptual similarity. Best when you know what a function does but not what it's called. Models benefit from this for exploratory queries where keyword search would miss relevant results.</p>
+                <p class="tool-desc">Search by meaning using code embeddings rather than exact names. Describe what you're looking for in natural language (e.g. "rate limiting middleware" or "database connection pooling") and get results ranked by conceptual similarity. Best when you know what a function does but not what it's called. Especially useful for exploratory queries where keyword search would miss relevant results.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Natural Language Query</label>
@@ -274,17 +267,17 @@
         <div>
             <div class="tool-form">
                 <h3>Quick Lookup</h3>
-                <p class="tool-desc">The fastest way to get full details on a symbol. Combines search and context in one step: finds the best match and immediately returns its source code, callers, callees, and related tests. Use when you already know a symbol name and want everything about it at once. Ideal for models that need a complete picture in a single API call instead of search-then-context round trips.</p>
+                <p class="tool-desc">The fastest way to get full details on a symbol. Combines search and context in one step: finds the best match and immediately returns its source code, callers, callees, and related tests. Use when you already know a symbol name and want everything about it at once. Ideal when you need a complete picture in a single call instead of search-then-context round trips.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Symbol Name</label>
                         <input type="text" x-model="forms.quick.name" placeholder="e.g. validate_token"
                                @keydown.enter="runQuick()">
-                        <div class="input-hints">
+                        <div class="input-hints" x-show="examples">
                             Try:
-                            <a @click.prevent="forms.quick.name = 'register_with_token'; runQuick()">register_with_token</a>
-                            <a @click.prevent="forms.quick.name = 'health_check'; runQuick()">health_check</a>
-                            <a @click.prevent="forms.quick.name = 'dispatch'; runQuick()">dispatch</a>
+                            <template x-for="name in (examples?.quick || [])" :key="name">
+                                <a @click.prevent="forms.quick.name = name; runQuick()" x-text="name"></a>
+                            </template>
                         </div>
                     </div>
                     <div class="checkbox-row">
@@ -314,11 +307,11 @@
                         <label>Symbol Name</label>
                         <input type="text" x-model="forms.callers.name" placeholder="e.g. validate_token"
                                @keydown.enter="runCallers()">
-                        <div class="input-hints">
+                        <div class="input-hints" x-show="examples">
                             Try:
-                            <a @click.prevent="forms.callers.name = 'create_deployment'; runCallers()">create_deployment</a>
-                            <a @click.prevent="forms.callers.name = 'health_check'; runCallers()">health_check</a>
-                            <a @click.prevent="forms.callers.name = 'dispatch'; runCallers()">dispatch</a>
+                            <template x-for="name in (examples?.callers || [])" :key="name">
+                                <a @click.prevent="forms.callers.name = name; runCallers()" x-text="name"></a>
+                            </template>
                         </div>
                     </div>
                     <div class="form-group">
@@ -349,16 +342,17 @@
         <div>
             <div class="tool-form">
                 <h3>Find Callees</h3>
-                <p class="tool-desc">Lists every function or method that the given symbol calls. Use this to understand a function's dependencies and downstream effects before modifying it. Helps answer "what will break if this dependency changes?" and "what side effects does this function trigger?" Models use this for dependency analysis when planning changes.</p>
+                <p class="tool-desc">Lists every function or method that the given symbol calls. Use this to understand a function's dependencies and downstream effects before modifying it. Helps answer "what will break if this dependency changes?" and "what side effects does this function trigger?" Useful for dependency analysis when planning changes.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Symbol Name</label>
                         <input type="text" x-model="forms.callees.name" placeholder="e.g. validate_token"
                                @keydown.enter="runCallees()">
-                        <div class="input-hints">
+                        <div class="input-hints" x-show="examples">
                             Try:
-                            <a @click.prevent="forms.callees.name = 'register_with_token'; runCallees()">register_with_token</a>
-                            <a @click.prevent="forms.callees.name = 'create_deployment'; runCallees()">create_deployment</a>
+                            <template x-for="name in (examples?.callees || [])" :key="name">
+                                <a @click.prevent="forms.callees.name = name; runCallees()" x-text="name"></a>
+                            </template>
                         </div>
                     </div>
                     <div class="form-group">
@@ -389,11 +383,11 @@
         <div>
             <div class="tool-form">
                 <h3>Symbol Context</h3>
-                <p class="tool-desc">The complete dossier for a symbol: source code, list of callers, list of callees, and related tests. Usually reached by clicking a search result. Toggle "Full" to see the complete source without truncation, or "Expand callees" to inline the source of small dependencies directly in the output. Models use this as the primary way to gather all information needed to understand or modify a symbol.</p>
+                <p class="tool-desc">The complete dossier for a symbol: source code, list of callers, list of callees, and related tests. Usually reached by clicking a search result. Toggle "Full" to see the complete source without truncation, or "Expand callees" to inline the source of small dependencies directly in the output. Use this as the primary way to gather all information needed to understand or modify a symbol.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Node ID</label>
-                        <input type="text" x-model="forms.context.node_id" placeholder="e.g. FILE:backend/src/auth.rs::validate_token"
+                        <input type="text" x-model="forms.context.node_id" placeholder="e.g. FILE:src/app.py::MyClass"
                                @keydown.enter="runContext()">
                     </div>
                     <div class="checkbox-row">
@@ -421,17 +415,17 @@
         <div>
             <div class="tool-form">
                 <h3>File Structure</h3>
-                <p class="tool-desc">Shows the skeleton of a file: imports, constants, classes, and functions with line numbers, without reading the full source. Much faster than opening a large file when you just need to know what's defined in it. Click any symbol to jump to its full context. Models use this for orientation when entering an unfamiliar file.</p>
+                <p class="tool-desc">Shows the skeleton of a file: imports, constants, classes, and functions with line numbers, without reading the full source. Much faster than opening a large file when you just need to know what's defined in it. Click any symbol to jump to its full context. Useful for orientation when entering an unfamiliar file.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Filename</label>
-                        <input type="text" x-model="forms.structure.filename" placeholder="e.g. server.rs, auth.rs"
+                        <input type="text" x-model="forms.structure.filename" placeholder="e.g. handlers.py, query.py"
                                @keydown.enter="runStructure()">
-                        <div class="input-hints">
+                        <div class="input-hints" x-show="examples">
                             Try:
-                            <a @click.prevent="forms.structure.filename = 'auth.rs'; runStructure()">auth.rs</a>
-                            <a @click.prevent="forms.structure.filename = 'server.rs'; runStructure()">server.rs</a>
-                            <a @click.prevent="forms.structure.filename = 'dispatchers/mod.rs'; runStructure()">dispatchers/mod.rs</a>
+                            <template x-for="name in (examples?.structure || [])" :key="name">
+                                <a @click.prevent="forms.structure.filename = name; runStructure()" x-text="name"></a>
+                            </template>
                         </div>
                     </div>
                     <button class="btn btn-primary" @click="runStructure()" :disabled="loading">Go</button>
@@ -469,15 +463,15 @@
         <div>
             <div class="tool-form">
                 <h3>Flatten Class API</h3>
-                <p class="tool-desc">Shows the effective public API of a class including methods inherited from traits and parent types. Requires the full node ID (e.g. FILE:crate/src/path.rs::ClassName). Use this to understand the complete interface of a struct or class without manually tracing trait implementations. Models use this to enumerate all available methods when working with a type.</p>
+                <p class="tool-desc">Shows the effective public API of a class including methods inherited from traits, interfaces, and parent types. Requires the full node ID (e.g. FILE:src/app.py::MyClass). Use this to understand the complete interface of a type without manually tracing implementations. Useful for enumerating all available methods when working with a class or struct.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Class Node ID</label>
-                        <input type="text" x-model="forms.flatten.class_node_id" placeholder="e.g. FILE:mantisctl/src/api/client.rs::ApiClient"
+                        <input type="text" x-model="forms.flatten.class_node_id" placeholder="e.g. FILE:src/app.py::MyClass"
                                @keydown.enter="runFlatten()">
-                        <div class="input-hints">
+                        <div class="input-hints" x-show="examples?.flatten">
                             Try:
-                            <a @click.prevent="forms.flatten.class_node_id = 'FILE:mantisctl/src/api/client.rs::ApiClient'; runFlatten()">ApiClient</a>
+                            <a @click.prevent="forms.flatten.class_node_id = examples.flatten; runFlatten()" x-text="examples.flatten.split('::').pop()"></a>
                         </div>
                     </div>
                     <button class="btn btn-primary" @click="runFlatten()" :disabled="loading">Go</button>
@@ -494,17 +488,17 @@
         <div>
             <div class="tool-form">
                 <h3>Trait Implementations</h3>
-                <p class="tool-desc">Find every struct that implements a given trait method across the codebase. Essential for polymorphic code where grep matches dozens of false positives. For example, searching "from_request_parts" shows JwtAuth, Pagination, and other Axum extractors. Optionally filter by trait name. Models use this to find all concrete implementations of an interface method.</p>
+                <p class="tool-desc">Find every type (struct, class) that implements a given trait or interface method across the codebase. Essential for polymorphic code where grep matches dozens of false positives. For example, searching a method name shows all types implementing it. Optionally filter by trait name. Use this to find all concrete implementations of an abstract method.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Method Name</label>
-                        <input type="text" x-model="forms.impls.method" placeholder="e.g. from_request_parts"
+                        <input type="text" x-model="forms.impls.method" placeholder="e.g. parse, validate"
                                @keydown.enter="runImpls()">
-                        <div class="input-hints">
+                        <div class="input-hints" x-show="examples?.impls?.length">
                             Try:
-                            <a @click.prevent="forms.impls.method = 'from_request_parts'; runImpls()">from_request_parts</a>
-                            <a @click.prevent="forms.impls.method = 'call'; runImpls()">call</a>
-                            <a @click.prevent="forms.impls.method = 'into_response'; runImpls()">into_response</a>
+                            <template x-for="name in (examples?.impls || [])" :key="name">
+                                <a @click.prevent="forms.impls.method = name; runImpls()" x-text="name"></a>
+                            </template>
                         </div>
                     </div>
                     <div class="form-group">
@@ -546,10 +540,10 @@
                         <label>Start Symbol</label>
                         <input type="text" x-model="forms.flow.start" placeholder="e.g. validate_token"
                                @keydown.enter="runFlow()">
-                        <div class="input-hints">
+                        <div class="input-hints" x-show="examples">
                             Try:
-                            <a @click.prevent="forms.flow.start = 'dispatch'; forms.flow.direction = 'forward'; forms.flow.depth = 3; runFlow()">dispatch (fwd)</a>
-                            <a @click.prevent="forms.flow.start = 'create_deployment'; forms.flow.direction = 'backward'; forms.flow.depth = 2; runFlow()">create_deployment (bwd)</a>
+                            <a x-show="examples?.flow_forward" @click.prevent="forms.flow.start = examples.flow_forward; forms.flow.direction = 'forward'; forms.flow.depth = 3; runFlow()" x-text="examples?.flow_forward + ' (fwd)'"></a>
+                            <a x-show="examples?.flow_backward" @click.prevent="forms.flow.start = examples.flow_backward; forms.flow.direction = 'backward'; forms.flow.depth = 2; runFlow()" x-text="examples?.flow_backward + ' (bwd)'"></a>
                         </div>
                     </div>
                     <div class="form-group">
@@ -600,16 +594,16 @@
         <div>
             <div class="tool-form">
                 <h3>Find Call Path</h3>
-                <p class="tool-desc">Find the shortest call chain between two symbols. Answers "how does function A eventually call function B?" by showing each hop with the call site code snippet. More focused than Trace, which shows the entire call tree. Use this when you know both endpoints and need to understand the connection between them. Models use this for debugging or verifying that a specific code path exists.</p>
+                <p class="tool-desc">Find the shortest call chain between two symbols. Answers "how does function A eventually call function B?" by showing each hop with the call site code snippet. More focused than Trace, which shows the entire call tree. Use this when you know both endpoints and need to understand the connection between them. Useful for debugging or verifying that a specific code path exists.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Start</label>
-                        <input type="text" x-model="forms.path.start" placeholder="e.g. register_with_token"
+                        <input type="text" x-model="forms.path.start" placeholder="e.g. main"
                                @keydown.enter="runPath()">
                     </div>
                     <div class="form-group flex-1">
                         <label>End</label>
-                        <input type="text" x-model="forms.path.end" placeholder="e.g. check_rate_limit"
+                        <input type="text" x-model="forms.path.end" placeholder="e.g. validate"
                                @keydown.enter="runPath()">
                     </div>
                     <div class="form-group">
@@ -618,11 +612,9 @@
                     </div>
                     <button class="btn btn-primary" @click="runPath()" :disabled="loading">Go</button>
                 </div>
-                <div class="input-hints">
+                <div class="input-hints" x-show="examples?.path_start && examples?.path_end">
                     Try:
-                    <a @click.prevent="forms.path.start = 'process_pending_requests'; forms.path.end = 'select_instance'; runPath()">process_pending_requests &rarr; select_instance</a>
-                    <a @click.prevent="forms.path.start = 'create_deployment'; forms.path.end = 'with_sensitive_data'; runPath()">create_deployment &rarr; with_sensitive_data</a>
-                    <a @click.prevent="forms.path.start = 'register_with_token'; forms.path.end = 'check_rate_limit'; runPath()">register_with_token &rarr; check_rate_limit</a>
+                    <a @click.prevent="forms.path.start = examples.path_start; forms.path.end = examples.path_end; runPath()" x-text="examples.path_start + ' \u2192 ' + examples.path_end"></a>
                 </div>
             </div>
             <div class="results" x-show="results.path">
@@ -639,7 +631,7 @@
         <div>
             <div class="tool-form">
                 <h3>Cross-Language Trace</h3>
-                <p class="tool-desc">Bridge the frontend-backend gap by mapping TypeScript API calls (Lens) to their Rust handler functions (Mandible) via the OpenAPI spec. Use "Endpoint" mode to find which Rust handler serves a specific route. Use "List" mode to see all endpoints for a resource like "deployments". Use "Stats" mode for an overview of API coverage. Models use this to trace user actions from the UI all the way to the database layer.</p>
+                <p class="tool-desc">Bridge the frontend-backend gap by mapping frontend API calls to their backend handler functions via the OpenAPI spec. Use "Endpoint" mode to find which handler serves a specific route. Use "List" mode to see all endpoints for a resource. Use "Stats" mode for an overview of API coverage. Useful for tracing user actions from the UI all the way to the backend layer.</p>
                 <div class="form-row">
                     <div class="form-group">
                         <label>Mode</label>
@@ -661,21 +653,19 @@
                     </div>
                     <div class="form-group flex-1" x-show="forms.crossLang.mode === 'endpoint'">
                         <label>Path</label>
-                        <input type="text" x-model="forms.crossLang.path" placeholder="/api/v1/deployments"
+                        <input type="text" x-model="forms.crossLang.path" placeholder="/api/v1/users"
                                @keydown.enter="runCrossLang()">
                     </div>
                     <div class="form-group" x-show="forms.crossLang.mode === 'list'">
                         <label>Tag (optional)</label>
-                        <input type="text" x-model="forms.crossLang.tag" placeholder="e.g. deployments" style="width:150px">
+                        <input type="text" x-model="forms.crossLang.tag" placeholder="e.g. users" style="width:150px">
                     </div>
                     <button class="btn btn-primary" @click="runCrossLang()" :disabled="loading">Go</button>
                 </div>
                 <div class="input-hints">
                     Try:
-                    <a @click.prevent="forms.crossLang.mode = 'endpoint'; forms.crossLang.method = 'GET'; forms.crossLang.path = '/api/v1/deployments'; runCrossLang()">GET /api/v1/deployments</a>
-                    <a @click.prevent="forms.crossLang.mode = 'endpoint'; forms.crossLang.method = 'POST'; forms.crossLang.path = '/api/v1/actions'; runCrossLang()">POST /api/v1/actions</a>
-                    <a @click.prevent="forms.crossLang.mode = 'list'; forms.crossLang.tag = 'deployments'; runCrossLang()">list: deployments</a>
                     <a @click.prevent="forms.crossLang.mode = 'stats'; runCrossLang()">stats</a>
+                    <a @click.prevent="forms.crossLang.mode = 'list'; forms.crossLang.tag = ''; runCrossLang()">list all endpoints</a>
                 </div>
             </div>
             <!-- Error -->
@@ -901,10 +891,11 @@
                         <label>Symbol Name</label>
                         <input type="text" x-model="forms.evolution.name" placeholder="e.g. validate_token"
                                @keydown.enter="runEvolution()">
-                        <div class="input-hints">
+                        <div class="input-hints" x-show="examples?.evolution?.length">
                             Try:
-                            <a @click.prevent="forms.evolution.name = 'create_deployment'; runEvolution()">create_deployment</a>
-                            <a @click.prevent="forms.evolution.name = 'register_with_token'; forms.evolution.show_diff = true; runEvolution()">register_with_token (+diffs)</a>
+                            <template x-for="(name, idx) in (examples?.evolution || [])" :key="name">
+                                <a @click.prevent="forms.evolution.name = name; forms.evolution.show_diff = idx > 0; runEvolution()" x-text="name + (idx > 0 ? ' (+diffs)' : '')"></a>
+                            </template>
                         </div>
                     </div>
                     <div class="form-group">
@@ -1038,67 +1029,12 @@
         </div>
     </template>
 
-    <!-- ========= DOCS SEARCH ========= -->
-    <template x-if="activeTool === 'docs'">
-        <div>
-            <div class="tool-form">
-                <h3>Search Documentation</h3>
-                <p class="tool-desc">Semantic search across the project's User Guide, Admin Guide, and Developer Guide. Returns relevant documentation sections with file paths and line numbers. Filter by collection to focus on a specific guide. Click results to view the source file. Use this to find configuration instructions, architecture explanations, or how-to guides without leaving the explorer.</p>
-                <div class="form-row">
-                    <div class="form-group flex-1">
-                        <label>Query</label>
-                        <input type="text" x-model="forms.docs.query" placeholder="e.g. configure TLS"
-                               @keydown.enter="runDocs()">
-                        <div class="input-hints">
-                            Try:
-                            <a @click.prevent="forms.docs.query = 'configure TLS'; runDocs()">configure TLS</a>
-                            <a @click.prevent="forms.docs.query = 'deployment targets'; runDocs()">deployment targets</a>
-                            <a @click.prevent="forms.docs.query = 'database migrations'; forms.docs.collection = 'developer'; runDocs()">database migrations</a>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>Collection</label>
-                        <select x-model="forms.docs.collection">
-                            <option value="">All</option>
-                            <option value="user">User Guide</option>
-                            <option value="admin">Admin Guide</option>
-                            <option value="developer">Developer Guide</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Limit</label>
-                        <input type="number" x-model.number="forms.docs.limit" min="1" max="20" style="width:70px">
-                    </div>
-                    <button class="btn btn-primary" @click="runDocs()" :disabled="loading">Go</button>
-                </div>
-            </div>
-            <div class="results" x-show="results.docs">
-                <div class="results-header">
-                    <span x-text="results.docs?.total + ' documentation match(es)'"></span>
-                </div>
-                <div class="results-body">
-                    <template x-for="(r, i) in results.docs?.results || []" :key="i">
-                        <div class="result-card doc-result-card">
-                            <div class="rc-header" @click="viewSource(r.file_path, r.line_start)" style="cursor:pointer">
-                                <span class="rc-type fil">doc</span>
-                                <span class="rc-name" x-text="r.heading || r.title"></span>
-                                <span class="rc-meta" x-text="'[' + r.collection_name + '] score: ' + r.score?.toFixed(3)"></span>
-                            </div>
-                            <div class="rc-location" @click="viewSource(r.file_path, r.line_start)" style="cursor:pointer" x-text="r.file_path + ':' + r.line_start"></div>
-                            <div class="doc-content markdown-body" x-html="safeHtml(r.content)" x-effect="$nextTick(() => renderMermaid($el))"></div>
-                        </div>
-                    </template>
-                </div>
-            </div>
-        </div>
-    </template>
-
     <!-- ========= HEALTH ========= -->
     <template x-if="activeTool === 'health'">
         <div>
             <div class="tool-form">
                 <h3>System Health</h3>
-                <p class="tool-desc">Check the status of the descry server, including graph freshness, node/edge counts, and feature availability (SCIP type-aware resolution, semantic embeddings). Use this to verify the MCP connection is working and diagnose issues. The graph age indicates when the index was last rebuilt.</p>
+                <p class="tool-desc">Check the status of the descry server, including graph freshness, node/edge counts, and feature availability (SCIP type-aware resolution, semantic embeddings, git history, cross-language tracing). Use this to verify the server is running and diagnose issues. The graph age indicates when the index was last rebuilt.</p>
                 <button class="btn btn-primary" @click="fetchHealth()" :disabled="loading">Refresh</button>
             </div>
             <div class="results" x-show="health">
@@ -1114,7 +1050,7 @@
         <div>
             <div class="tool-form">
                 <h3>Reindex Codebase</h3>
-                <p class="tool-desc">Regenerate the full codebase graph, SCIP type-aware indices, and semantic search embeddings from scratch. Run this after significant code changes such as new files, refactoring, or renamed symbols to keep the graph accurate. Progress streams live to the output log below. This can take several minutes for large Rust codebases due to SCIP compilation.</p>
+                <p class="tool-desc">Regenerate the full codebase graph, SCIP type-aware indices, and semantic search embeddings from scratch. Run this after significant code changes such as new files, refactoring, or renamed symbols to keep the graph accurate. Progress streams live to the output log below. This may take several minutes for large codebases, especially when SCIP compilation is enabled.</p>
                 <div class="form-row">
                     <button class="btn btn-primary" @click="runReindex()" :disabled="reindexing">
                         <span x-show="!reindexing">Go</span>
@@ -1152,16 +1088,17 @@
         <div>
             <div class="tool-form">
                 <h3>Source Viewer</h3>
-                <p class="tool-desc">Read source files directly in the browser with line numbers. Optionally jump to a specific line which will be highlighted. Reached automatically when clicking file locations in other tools, or use directly to browse any project file. Paths are relative to the project root (e.g. backend/src/auth.rs).</p>
+                <p class="tool-desc">Read source files directly in the browser with line numbers. Optionally jump to a specific line which will be highlighted. Reached automatically when clicking file locations in other tools, or use directly to browse any project file. Paths are relative to the project root.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>File Path</label>
-                        <input type="text" x-model="forms.source.file" placeholder="e.g. backend/src/auth.rs"
+                        <input type="text" x-model="forms.source.file" placeholder="e.g. src/handlers.py"
                                @keydown.enter="runSource()">
-                        <div class="input-hints">
+                        <div class="input-hints" x-show="examples?.structure?.length">
                             Try:
-                            <a @click.prevent="forms.source.file = 'src/handlers.py'; forms.source.line = 1; runSource()">handlers.py:1</a>
-                            <a @click.prevent="forms.source.file = 'src/descry/query.py'; forms.source.line = 1; runSource()">query.py:1</a>
+                            <template x-for="name in (examples?.structure || []).slice(0, 2)" :key="name">
+                                <a @click.prevent="forms.source.file = name; forms.source.line = 1; runSource()" x-text="name.split('/').pop() + ':1'"></a>
+                            </template>
                         </div>
                     </div>
                     <div class="form-group">
@@ -1213,17 +1150,17 @@
         <div class="es-title">Descry Explorer</div>
         <div class="es-subtitle">Search symbols, trace call flows, and navigate your codebase</div>
         <div class="welcome-scenarios">
-            <div class="scenario-card" @click="forms.search.terms = 'create_deployment'; setTool('search'); runSearch();">
+            <div class="scenario-card" @click="forms.search.terms = ex('search', 0, 'main'); setTool('search'); runSearch();">
                 <div class="sc-title">Find a function</div>
-                <div class="sc-desc">Search for <code>create_deployment</code> across the codebase</div>
+                <div class="sc-desc">Search for <code x-text="ex('search', 0, 'main')"></code> across the codebase</div>
             </div>
-            <div class="scenario-card" @click="forms.impls.method = 'from_request_parts'; setTool('impls'); runImpls();">
-                <div class="sc-title">Find trait implementations</div>
-                <div class="sc-desc">See all implementors of <code>from_request_parts</code></div>
+            <div class="scenario-card" @click="forms.quick.name = ex('quick', 0, 'init'); setTool('quick'); runQuick();">
+                <div class="sc-title">Quick lookup</div>
+                <div class="sc-desc">Get full details on <code x-text="ex('quick', 0, 'init')"></code> in a single step</div>
             </div>
-            <div class="scenario-card" @click="forms.flow.start = 'dispatch'; forms.flow.direction = 'forward'; forms.flow.depth = 3; setTool('flow'); runFlow();">
+            <div class="scenario-card" @click="forms.flow.start = ex('flow_forward', null, 'main'); forms.flow.direction = 'forward'; forms.flow.depth = 3; setTool('flow'); runFlow();">
                 <div class="sc-title">Trace a call flow</div>
-                <div class="sc-desc">Follow <code>dispatch</code> forward through the call graph</div>
+                <div class="sc-desc">Follow <code x-text="ex('flow_forward', null, 'main')"></code> forward through the call graph</div>
             </div>
             <div class="scenario-card" @click="forms.churn.mode = 'symbols'; forms.churn.time_range = 'last 30 days'; forms.churn.path_filter = ''; setTool('churn'); runChurn();">
                 <div class="sc-title">Find churn hotspots</div>
@@ -1233,9 +1170,9 @@
                 <div class="sc-title">Review recent changes</div>
                 <div class="sc-desc">Impact analysis of the last 5 commits</div>
             </div>
-            <div class="scenario-card" @click="forms.structure.filename = 'auth.rs'; setTool('structure'); runStructure();">
+            <div class="scenario-card" @click="forms.structure.filename = ex('structure', 0, 'handlers.py'); setTool('structure'); runStructure();">
                 <div class="sc-title">Explore a file</div>
-                <div class="sc-desc">See the structure of <code>auth.rs</code></div>
+                <div class="sc-desc">See the structure of <code x-text="ex('structure', 0, 'handlers.py').split('/').pop()"></code></div>
             </div>
         </div>
     </div>
@@ -1263,6 +1200,44 @@ function app() {
         breadcrumbs: [{label: 'Home', tool: 'home'}],
         results: {},
 
+        // Dynamic examples from graph (populated on init)
+        examples: null,
+
+        // Encyclopedia state
+        helpSearch: '',
+        helpArticle: null,
+        helpArticles: [
+            // Tools
+            { slug: 'search', title: 'Search', category: 'tools', desc: 'Hybrid keyword + semantic symbol search', keywords: ['keyword', 'filter', 'regex', 'find', 'symbol'] },
+            { slug: 'semantic', title: 'Semantic Search', category: 'tools', desc: 'Vector similarity search by meaning', keywords: ['embedding', 'vector', 'natural language', 'meaning', 'conceptual'] },
+            { slug: 'quick', title: 'Quick Lookup', category: 'tools', desc: 'Full details on a symbol in one step', keywords: ['symbol', 'lookup', 'details', 'fast'] },
+            { slug: 'callers', title: 'Callers', category: 'tools', desc: 'Who calls this function', keywords: ['call', 'reference', 'impact', 'upstream', 'who calls'] },
+            { slug: 'callees', title: 'Callees', category: 'tools', desc: 'What this function calls', keywords: ['dependency', 'downstream', 'calls', 'what calls'] },
+            { slug: 'context', title: 'Context', category: 'tools', desc: 'Full node dossier: source, callers, callees', keywords: ['details', 'source', 'node', 'dossier'] },
+            { slug: 'structure', title: 'Structure', category: 'tools', desc: 'File skeleton with all symbols', keywords: ['file', 'skeleton', 'outline', 'symbols', 'imports'] },
+            { slug: 'flatten', title: 'Flatten', category: 'tools', desc: 'Inheritance and trait hierarchy', keywords: ['inheritance', 'trait', 'interface', 'hierarchy', 'class'] },
+            { slug: 'impls', title: 'Implementations', category: 'tools', desc: 'Find all implementations of a method', keywords: ['trait', 'interface', 'implement', 'polymorphic', 'concrete'] },
+            { slug: 'flow', title: 'Flow Trace', category: 'tools', desc: 'Forward/backward call tree visualization', keywords: ['trace', 'call tree', 'dataflow', 'forward', 'backward'] },
+            { slug: 'path', title: 'Call Path', category: 'tools', desc: 'Shortest call chain between two symbols', keywords: ['path', 'route', 'chain', 'between', 'connection'] },
+            { slug: 'cross-lang', title: 'Cross-Language', category: 'tools', desc: 'Frontend-to-backend API call tracing', keywords: ['api', 'frontend', 'backend', 'openapi', 'endpoint', 'cross'] },
+            { slug: 'churn', title: 'Churn', category: 'tools', desc: 'Most-changed code from git history', keywords: ['hotspot', 'frequency', 'change', 'git', 'coupling'] },
+            { slug: 'evolution', title: 'Evolution', category: 'tools', desc: 'Commit timeline for a symbol or file', keywords: ['timeline', 'history', 'commits', 'diff', 'author'] },
+            { slug: 'changes', title: 'Changes', category: 'tools', desc: 'Impact analysis of recent commits', keywords: ['impact', 'commit', 'blast radius', 'review', 'callers'] },
+            { slug: 'health', title: 'Health', category: 'tools', desc: 'Graph status and feature availability', keywords: ['status', 'graph', 'nodes', 'edges', 'stale'] },
+            { slug: 'reindex', title: 'Reindex', category: 'tools', desc: 'Rebuild the knowledge graph', keywords: ['rebuild', 'regenerate', 'refresh', 'index'] },
+            { slug: 'source', title: 'Source', category: 'tools', desc: 'View source files with line numbers', keywords: ['file', 'code', 'read', 'view', 'line'] },
+            // Concepts
+            { slug: 'concept-graph', title: 'The Knowledge Graph', category: 'concepts', desc: 'How nodes and edges model your code', keywords: ['graph', 'node', 'edge', 'model', 'architecture'] },
+            { slug: 'concept-symbols', title: 'Symbol Types', category: 'concepts', desc: 'FUN, MET, CLA, CON, FIL, CFG explained', keywords: ['type', 'badge', 'legend', 'function', 'method', 'class'] },
+            { slug: 'concept-scip', title: 'SCIP Indexing', category: 'concepts', desc: 'Precise cross-references via compiler data', keywords: ['scip', 'compiler', 'type-aware', 'precise', 'resolution'] },
+            { slug: 'concept-embeddings', title: 'Semantic Embeddings', category: 'concepts', desc: 'How vector search finds similar code', keywords: ['vector', 'embedding', 'similarity', 'model', 'cosine'] },
+            { slug: 'concept-git', title: 'Git History Analysis', category: 'concepts', desc: 'How descry uses git log for insights', keywords: ['git', 'log', 'blame', 'churn', 'history'] },
+            // Workflows
+            { slug: 'workflow-investigate', title: 'Investigating a Function', category: 'workflows', desc: 'Start with a name, expand outward', keywords: ['investigate', 'function', 'deep dive', 'understand'] },
+            { slug: 'workflow-explore', title: 'Understanding a Codebase', category: 'workflows', desc: 'Get the lay of the land', keywords: ['explore', 'codebase', 'orientation', 'new project'] },
+            { slug: 'workflow-changes', title: 'Tracking Recent Changes', category: 'workflows', desc: 'See what has been happening', keywords: ['recent', 'changes', 'review', 'commits', 'impact'] },
+        ],
+
         // Form state per tool
         forms: {
             search: { terms: '', limit: 10, lang: '', crate: '', type: '' },
@@ -1280,12 +1255,54 @@ function app() {
             churn: { mode: 'symbols', time_range: '', path_filter: '', limit: 20 },
             evolution: { name: '', time_range: '', limit: 10, show_diff: false },
             changes: { commit_range: 'HEAD~5..HEAD', time_range: '', path_filter: '', show_callers: true },
-            docs: { query: '', collection: '', limit: 5 },
             source: { file: '', line: null },
         },
 
         async init() {
             await this.fetchHealth();
+            await this.fetchExamples();
+        },
+
+        async fetchExamples() {
+            try {
+                const r = await fetch('/api/examples');
+                const data = await r.json();
+                if (data.available) this.examples = data;
+            } catch(e) { /* silent — examples are optional */ }
+        },
+
+        // Helper: get example value with fallback.
+        // For arrays: ex('search', 0, 'main') returns examples.search[0]
+        // For scalars: ex('flow_forward', null, 'main') returns examples.flow_forward
+        ex(category, index, fallback) {
+            if (!this.examples || this.examples[category] === undefined) return fallback || '';
+            const val = this.examples[category];
+            if (index === null || index === undefined) return val || fallback || '';
+            if (Array.isArray(val) && val[index] !== undefined) return val[index];
+            return fallback || '';
+        },
+
+        openHelp() {
+            this.helpSearch = '';
+            const toolMatch = this.helpArticles.find(a => a.slug === this.activeTool);
+            this.helpArticle = toolMatch ? this.activeTool : null;
+            this.showHelp = true;
+        },
+
+        openHelpTOC() {
+            this.helpSearch = '';
+            this.helpArticle = null;
+            this.showHelp = true;
+        },
+
+        filteredHelpArticles() {
+            if (!this.helpSearch.trim()) return this.helpArticles;
+            const q = this.helpSearch.toLowerCase();
+            return this.helpArticles.filter(a =>
+                a.title.toLowerCase().includes(q) ||
+                a.desc.toLowerCase().includes(q) ||
+                a.keywords.some(k => k.includes(q))
+            );
         },
 
         goHome() {
@@ -1309,7 +1326,7 @@ function app() {
                 structure: 'Structure', flatten: 'Flatten', impls: 'Impls',
                 flow: 'Flow Trace', path: 'Call Path', 'cross-lang': 'Cross-Lang',
                 churn: 'Churn', evolution: 'Evolution', changes: 'Changes',
-                docs: 'Docs', health: 'Health', reindex: 'Reindex', source: 'Source',
+                health: 'Health', reindex: 'Reindex', source: 'Source',
             };
             return labels[tool] || tool;
         },
@@ -1724,14 +1741,6 @@ function app() {
             this.results.changes = await this.api('/api/changes?' + p);
         },
 
-        async runDocs() {
-            const f = this.forms.docs;
-            if (!f.query.trim()) return;
-            const p = new URLSearchParams({query: f.query, limit: f.limit});
-            if (f.collection) p.set('collection', f.collection);
-            this.results.docs = await this.api('/api/docs/search?' + p);
-        },
-
         async runSource() {
             const f = this.forms.source;
             if (!f.file.trim()) return;
@@ -1828,7 +1837,7 @@ function app() {
                 <div class="help-legend-row"><span class="rc-type met">MET</span><span class="help-legend-name">Method</span><span class="help-legend-desc">Methods on a class, struct, or impl block</span></div>
                 <div class="help-legend-row"><span class="rc-type cla">CLA</span><span class="help-legend-name">Class</span><span class="help-legend-desc">Classes, structs, enums, traits, interfaces, protobuf messages</span></div>
                 <div class="help-legend-row"><span class="rc-type con">CON</span><span class="help-legend-name">Constant</span><span class="help-legend-desc">Exported constants and static values</span></div>
-                <div class="help-legend-row"><span class="rc-type fil">FIL</span><span class="help-legend-name">File</span><span class="help-legend-desc">Source files (.rs, .ts, .svelte, .proto, .py)</span></div>
+                <div class="help-legend-row"><span class="rc-type fil">FIL</span><span class="help-legend-name">File</span><span class="help-legend-desc">Source files (.py, .rs, .ts, .svelte, .go, .proto, etc.)</span></div>
                 <div class="help-legend-row"><span class="rc-type cfg">CFG</span><span class="help-legend-name">Configuration</span><span class="help-legend-desc">Interceptors, middleware, and event handlers</span></div>
             </div>
             <div class="help-divider"></div>
