@@ -1887,9 +1887,546 @@ function app() {
                 </template>
             </div>
 
-            <!-- Article Views will go here (Tasks 4-8) -->
+            <!-- ===== TOOL ARTICLES ===== -->
 
-        </div>
+            <!-- Search -->
+            <div class="ency-article" x-show="helpArticle === 'search'">
+                <h2>Search</h2>
+                <p class="ency-oneliner">Find symbols using hybrid keyword + semantic matching.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>terms</td><td>Keywords to match against symbol names, docstrings, and code</td></tr>
+                    <tr><td>limit</td><td>Max results to return (default: 10)</td></tr>
+                    <tr><td>lang</td><td>Filter by language: python, rust, typescript, etc.</td></tr>
+                    <tr><td>package</td><td>Filter by top-level directory / package name</td></tr>
+                    <tr><td>type</td><td>Filter by symbol type: function, method, class, constant, file</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Search for <code>validate</code> &rarr; returns functions, methods, and classes whose name, docstring, or code contains "validate", ranked by relevance score (0&ndash;1).
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Combines keyword matching with semantic similarity when embeddings are available</li>
+                    <li>Click any result to jump to its full Context view</li>
+                    <li>For conceptual queries like "error handling middleware", try Semantic Search instead</li>
+                </ul>
+            </div>
+
+            <!-- Semantic Search -->
+            <div class="ency-article" x-show="helpArticle === 'semantic'">
+                <h2>Semantic Search</h2>
+                <p class="ency-oneliner">Search by meaning using code embeddings rather than exact names.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>query</td><td>Natural language description of what you're looking for</td></tr>
+                    <tr><td>limit</td><td>Max results to return (default: 10)</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Query <code>database connection pooling</code> &rarr; finds functions related to connection pools even if they're named <code>get_pool</code> or <code>acquire_conn</code>.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Requires semantic embeddings to be built (check Health for availability)</li>
+                    <li>Best when you know what code does but not what it's called</li>
+                    <li>Use keyword Search when you know the exact symbol name</li>
+                </ul>
+            </div>
+
+            <!-- Quick Lookup -->
+            <div class="ency-article" x-show="helpArticle === 'quick'">
+                <h2>Quick Lookup</h2>
+                <p class="ency-oneliner">Get full details on a symbol in a single step.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>name</td><td>Symbol name to look up (e.g. function or class name)</td></tr>
+                    <tr><td>full</td><td>Show complete source without truncation</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Look up <code>parse_config</code> &rarr; returns source code, callers, callees, and related tests for the best-matching symbol, all in one response.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Combines Search + Context into one step &mdash; fastest way to get a complete picture</li>
+                    <li>If the wrong match is found, use Search to pick the right one, then Context</li>
+                </ul>
+            </div>
+
+            <!-- Callers -->
+            <div class="ency-article" x-show="helpArticle === 'callers'">
+                <h2>Callers</h2>
+                <p class="ency-oneliner">Find every function or method that calls the given symbol.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>name</td><td>Symbol name to find callers of</td></tr>
+                    <tr><td>limit</td><td>Max callers to return (default: 20)</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Callers of <code>validate_token</code> &rarr; shows every function that invokes <code>validate_token</code>, with file locations and call count.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>More reliable than grep &mdash; uses the call graph to distinguish real calls from comments and strings</li>
+                    <li>Essential before refactoring: know who depends on a function before changing its signature</li>
+                    <li>Click any caller to view its full Context</li>
+                </ul>
+            </div>
+
+            <!-- Callees -->
+            <div class="ency-article" x-show="helpArticle === 'callees'">
+                <h2>Callees</h2>
+                <p class="ency-oneliner">Find every function or method that the given symbol calls.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>name</td><td>Symbol name to find callees of</td></tr>
+                    <tr><td>limit</td><td>Max callees to return (default: 20)</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Callees of <code>handle_request</code> &rarr; shows every function that <code>handle_request</code> invokes internally.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Answers "what will break if this dependency changes?"</li>
+                    <li>Use Flow Trace for a recursive view (callees of callees of callees...)</li>
+                </ul>
+            </div>
+
+            <!-- Context -->
+            <div class="ency-article" x-show="helpArticle === 'context'">
+                <h2>Context</h2>
+                <p class="ency-oneliner">Complete dossier for a symbol: source, callers, callees, tests.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>node_id</td><td>Full node ID (e.g. <code>FILE:src/app.py::MyClass::init</code>)</td></tr>
+                    <tr><td>full</td><td>Show complete source without truncation</td></tr>
+                    <tr><td>expand callees</td><td>Inline source of small callees directly in the output</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Context for a function &rarr; shows its signature, docstring, full source code, list of callers, list of callees, and any test functions that reference it.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Usually reached by clicking a result in Search, Callers, or other tools</li>
+                    <li>The node_id is the full graph identifier &mdash; you rarely need to type it manually</li>
+                    <li>"Expand callees" inlines the source of small helper functions so you can read them in place</li>
+                </ul>
+            </div>
+
+            <!-- Structure -->
+            <div class="ency-article" x-show="helpArticle === 'structure'">
+                <h2>Structure</h2>
+                <p class="ency-oneliner">Show the skeleton of a file: all symbols with line numbers.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>filename</td><td>File path or partial filename to match (e.g. <code>handlers.py</code>)</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Structure of <code>server.py</code> &rarr; lists imports, constants, classes, and functions defined in the file, with line numbers and types. Much faster than reading the full source.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Great for orientation when entering an unfamiliar file</li>
+                    <li>Click any symbol to jump to its full Context</li>
+                    <li>Partial filenames work &mdash; <code>server</code> matches <code>web/server.py</code></li>
+                </ul>
+            </div>
+
+            <!-- Flatten -->
+            <div class="ency-article" x-show="helpArticle === 'flatten'">
+                <h2>Flatten</h2>
+                <p class="ency-oneliner">Show the full public API of a type including inherited methods.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>class_node_id</td><td>Full node ID of the class/struct (e.g. <code>FILE:src/app.py::MyClass</code>)</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Flatten <code>HttpClient</code> &rarr; shows all methods including those inherited from traits, interfaces, or parent classes, giving you the complete available API.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Requires the full node ID &mdash; use Search or Structure to find it first</li>
+                    <li>Shows methods from all levels of the inheritance hierarchy</li>
+                </ul>
+            </div>
+
+            <!-- Implementations -->
+            <div class="ency-article" x-show="helpArticle === 'impls'">
+                <h2>Implementations</h2>
+                <p class="ency-oneliner">Find all types that implement a trait or interface method.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>method</td><td>Method name to find implementations of</td></tr>
+                    <tr><td>trait_name</td><td>Optional: filter to a specific trait or interface</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Impls of <code>parse</code> &rarr; shows every struct, class, or type that has a <code>parse</code> method, grouped by trait when applicable.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Far more precise than grep for polymorphic code &mdash; filters out false positives</li>
+                    <li>Add a trait name to narrow results when a method name is common</li>
+                </ul>
+            </div>
+
+            <!-- Flow Trace -->
+            <div class="ency-article" x-show="helpArticle === 'flow'">
+                <h2>Flow Trace</h2>
+                <p class="ency-oneliner">Visualize the recursive call tree from any symbol.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>start</td><td>Symbol name to start tracing from</td></tr>
+                    <tr><td>direction</td><td><code>forward</code> (what it calls) or <code>backward</code> (what calls it)</td></tr>
+                    <tr><td>depth</td><td>How many levels deep to trace (default: 3)</td></tr>
+                    <tr><td>target</td><td>Optional: stop tracing when this symbol is reached</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Flow forward from <code>main</code>, depth 3 &rarr; shows a tree of <code>main</code> &rarr; its callees &rarr; their callees &rarr; their callees. Small functions are inlined with source code.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Forward = "what happens when this runs?" / Backward = "how do we get here?"</li>
+                    <li>Click any node in the tree to jump to its Context</li>
+                    <li>Set a target to focus the trace on a specific call path</li>
+                    <li>Use Call Path instead if you just need the shortest route between two symbols</li>
+                </ul>
+            </div>
+
+            <!-- Call Path -->
+            <div class="ency-article" x-show="helpArticle === 'path'">
+                <h2>Call Path</h2>
+                <p class="ency-oneliner">Find the shortest call chain between two symbols.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>start</td><td>Source symbol name</td></tr>
+                    <tr><td>end</td><td>Target symbol name</td></tr>
+                    <tr><td>max_depth</td><td>Maximum hops to search (default: 10)</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Path from <code>handle_request</code> to <code>write_log</code> &rarr; shows each hop with the call site code snippet: <code>handle_request</code> &rarr; <code>process</code> &rarr; <code>write_log</code>.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>More focused than Flow Trace, which shows the entire tree</li>
+                    <li>Useful for verifying that a specific code path exists</li>
+                    <li>If no path is found, the symbols may be in disconnected parts of the graph</li>
+                </ul>
+            </div>
+
+            <!-- Cross-Language -->
+            <div class="ency-article" x-show="helpArticle === 'cross-lang'">
+                <h2>Cross-Language</h2>
+                <p class="ency-oneliner">Trace API calls from frontend to backend via OpenAPI spec.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>mode</td><td><code>endpoint</code> (single route), <code>list</code> (all routes for a tag), or <code>stats</code> (coverage overview)</td></tr>
+                    <tr><td>method</td><td>HTTP method: GET, POST, PUT, DELETE</td></tr>
+                    <tr><td>path</td><td>API path (e.g. <code>/api/v1/users</code>)</td></tr>
+                    <tr><td>tag</td><td>OpenAPI tag to filter by (for list mode)</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Endpoint <code>GET /api/v1/users</code> &rarr; shows which backend handler function serves this route and which frontend functions call it.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Requires an OpenAPI spec to be configured (see project config)</li>
+                    <li>Use "stats" mode first to see available endpoints and coverage</li>
+                    <li>Bridges the gap when tracing user actions from UI to backend</li>
+                </ul>
+            </div>
+
+            <!-- Churn -->
+            <div class="ency-article" x-show="helpArticle === 'churn'">
+                <h2>Churn</h2>
+                <p class="ency-oneliner">Find the most frequently changed code using git history.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>mode</td><td><code>symbols</code> (function-level), <code>files</code> (file-level), or <code>co-change</code> (coupled pairs)</td></tr>
+                    <tr><td>time_range</td><td>Git time range, e.g. <code>last 30 days</code>, <code>since 2024-01-01</code></td></tr>
+                    <tr><td>path_filter</td><td>Optional: limit to files matching a path prefix or pattern</td></tr>
+                    <tr><td>limit</td><td>Max results (default: 20)</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Churn in <code>symbols</code> mode, last 30 days &rarr; ranks functions by how many commits touched them. High-churn symbols may need refactoring or better test coverage.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li><code>co-change</code> mode reveals hidden coupling: pairs of symbols that always change together</li>
+                    <li>Filter by path to focus on a specific module or directory</li>
+                    <li>Use Evolution to drill into a specific high-churn symbol's history</li>
+                </ul>
+            </div>
+
+            <!-- Evolution -->
+            <div class="ency-article" x-show="helpArticle === 'evolution'">
+                <h2>Evolution</h2>
+                <p class="ency-oneliner">Track the commit history of a specific function or file.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>name</td><td>Symbol or file name to track</td></tr>
+                    <tr><td>time_range</td><td>Optional: limit to a time window</td></tr>
+                    <tr><td>limit</td><td>Max commits to show (default: 10)</td></tr>
+                    <tr><td>show_diff</td><td>Include actual code diffs at each commit</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Evolution of <code>parse_config</code> with diffs &rarr; shows a timeline of commits, authors, dates, and the actual code changes at each point. Follows the function across renames.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Uses git's native function tracking to follow symbols across line drift and renames</li>
+                    <li>Enable "Show diffs" to see what changed at each commit</li>
+                    <li>Great for understanding why a function looks the way it does</li>
+                </ul>
+            </div>
+
+            <!-- Changes -->
+            <div class="ency-article" x-show="helpArticle === 'changes'">
+                <h2>Changes</h2>
+                <p class="ency-oneliner">Analyze recent commits to see modified symbols and their callers.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>commit_range</td><td>Git range, e.g. <code>HEAD~5..HEAD</code>, <code>main..feature</code></td></tr>
+                    <tr><td>time_range</td><td>Alternative: time-based range like <code>last 7 days</code></td></tr>
+                    <tr><td>path_filter</td><td>Optional: limit to files matching a pattern</td></tr>
+                    <tr><td>show_callers</td><td>Include callers of changed functions (blast radius)</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Changes in <code>HEAD~5..HEAD</code> with callers &rarr; shows which functions were modified in the last 5 commits, plus every function that calls them, revealing the full blast radius.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>The "show callers" option is what makes this powerful &mdash; it reveals ripple risk</li>
+                    <li>Use for code review: see at a glance what a PR touches and what depends on it</li>
+                    <li>Defaults to the last commit if no range is specified</li>
+                </ul>
+            </div>
+
+            <!-- Health -->
+            <div class="ency-article" x-show="helpArticle === 'health'">
+                <h2>Health</h2>
+                <p class="ency-oneliner">Check graph status, feature availability, and freshness.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td colspan="2"><em>No parameters &mdash; runs automatically</em></td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Health &rarr; shows node count, edge count, graph age, and which features are available (SCIP indexing, semantic embeddings, git history, cross-language tracing).
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Check this first if tools return unexpected results &mdash; the graph may be stale</li>
+                    <li>The status dot in the header gives a quick summary (green = fresh, yellow = stale)</li>
+                </ul>
+            </div>
+
+            <!-- Reindex -->
+            <div class="ency-article" x-show="helpArticle === 'reindex'">
+                <h2>Reindex</h2>
+                <p class="ency-oneliner">Rebuild the knowledge graph from scratch.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td colspan="2"><em>No parameters &mdash; rebuilds everything</em></td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Reindex &rarr; re-scans all source files, rebuilds the call graph, regenerates SCIP indices and semantic embeddings. Progress streams live to the output log.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Run after significant code changes: new files, renames, refactoring</li>
+                    <li>May take several minutes for large codebases with SCIP enabled</li>
+                    <li>Progress is streamed live &mdash; watch the log for current step</li>
+                </ul>
+            </div>
+
+            <!-- Source -->
+            <div class="ency-article" x-show="helpArticle === 'source'">
+                <h2>Source</h2>
+                <p class="ency-oneliner">View source files with line numbers and optional line highlighting.</p>
+                <h3>Parameters</h3>
+                <table>
+                    <tr><th>Field</th><th>Description</th></tr>
+                    <tr><td>file</td><td>File path relative to project root</td></tr>
+                    <tr><td>line</td><td>Optional: line number to highlight and scroll to</td></tr>
+                </table>
+                <h3>Example</h3>
+                <div class="ency-example">
+                    Source <code>src/app.py</code> line 42 &rarr; opens the file with line 42 highlighted. Useful for examining the surrounding code of a specific call site.
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Usually reached by clicking file locations in other tools</li>
+                    <li>Markdown files can be toggled between raw and rendered view</li>
+                </ul>
+            </div>
+
+            <!-- ===== CONCEPT ARTICLES ===== -->
+
+            <!-- The Knowledge Graph -->
+            <div class="ency-article" x-show="helpArticle === 'concept-graph'">
+                <h2>The Knowledge Graph</h2>
+                <p class="ency-oneliner">How descry models your codebase as nodes and edges.</p>
+                <h3>Nodes</h3>
+                <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">Every symbol in your code becomes a node: functions, methods, classes, constants, files, and configuration items. Each node has a unique ID like <code>FILE:src/app.py::MyClass::init</code> encoding its location in the file hierarchy.</p>
+                <h3>Edges</h3>
+                <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">Edges represent relationships: <strong>calls</strong> (function A calls function B), <strong>contains</strong> (file contains class), <strong>inherits</strong> (class extends parent), and <strong>imports</strong>. This structure enables tools like Callers, Callees, Flow Trace, and Call Path.</p>
+                <h3>How It's Built</h3>
+                <p style="font-size:13px;color:var(--text-secondary)">Descry parses source files using language-aware AST parsers for Python, Rust, TypeScript, Go, Svelte, and more. When SCIP indexing is available, cross-references are precise (compiler-level accuracy). The graph is cached as JSON and rebuilt on demand via Reindex.</p>
+            </div>
+
+            <!-- Symbol Types -->
+            <div class="ency-article" x-show="helpArticle === 'concept-symbols'">
+                <h2>Symbol Types</h2>
+                <p class="ency-oneliner">The badge system used throughout descry results.</p>
+                <h3>Legend</h3>
+                <div>
+                    <div class="ency-legend-row"><span class="rc-type fun">FUN</span><span class="ency-legend-name">Function</span><span class="ency-legend-desc">Standalone functions and arrow functions</span></div>
+                    <div class="ency-legend-row"><span class="rc-type met">MET</span><span class="ency-legend-name">Method</span><span class="ency-legend-desc">Methods on a class, struct, or impl block</span></div>
+                    <div class="ency-legend-row"><span class="rc-type cla">CLA</span><span class="ency-legend-name">Class</span><span class="ency-legend-desc">Classes, structs, enums, traits, interfaces, protobuf messages</span></div>
+                    <div class="ency-legend-row"><span class="rc-type con">CON</span><span class="ency-legend-name">Constant</span><span class="ency-legend-desc">Exported constants and static values</span></div>
+                    <div class="ency-legend-row"><span class="rc-type fil">FIL</span><span class="ency-legend-name">File</span><span class="ency-legend-desc">Source files (.py, .rs, .ts, .svelte, .go, .proto, etc.)</span></div>
+                    <div class="ency-legend-row"><span class="rc-type cfg">CFG</span><span class="ency-legend-name">Configuration</span><span class="ency-legend-desc">Interceptors, middleware, and event handlers</span></div>
+                </div>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>The <strong>Score</strong> (0&ndash;1) shown in search results combines keyword and semantic relevance</li>
+                    <li>Click any badge in results to view that symbol's full Context</li>
+                    <li>Use the type filter in Search to narrow results to a specific kind of symbol</li>
+                </ul>
+            </div>
+
+            <!-- SCIP Indexing -->
+            <div class="ency-article" x-show="helpArticle === 'concept-scip'">
+                <h2>SCIP Indexing</h2>
+                <p class="ency-oneliner">Compiler-level precision for cross-references and type resolution.</p>
+                <h3>What is SCIP?</h3>
+                <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">SCIP (Source Code Intelligence Protocol) is a standard for representing code intelligence data. Descry uses SCIP indices produced by language-specific indexers (rust-analyzer for Rust, scip-typescript for TypeScript) to resolve cross-references with compiler-level accuracy.</p>
+                <h3>Why It Matters</h3>
+                <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">Without SCIP, descry relies on AST-based name matching which can produce false positives (e.g., two functions with the same name in different modules). With SCIP, every reference is resolved to its exact definition &mdash; no ambiguity.</p>
+                <h3>Supported Languages</h3>
+                <p style="font-size:13px;color:var(--text-secondary)">Rust (via rust-analyzer), TypeScript/JavaScript (via scip-typescript). Check Health to see if SCIP is available for your project. SCIP is optional &mdash; all tools work without it, just with less precision.</p>
+            </div>
+
+            <!-- Semantic Embeddings -->
+            <div class="ency-article" x-show="helpArticle === 'concept-embeddings'">
+                <h2>Semantic Embeddings</h2>
+                <p class="ency-oneliner">How vector search finds conceptually similar code.</p>
+                <h3>How It Works</h3>
+                <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">Each symbol's name, docstring, and signature are converted into a high-dimensional vector using a code embedding model. When you search, your query is also embedded, and results are ranked by cosine similarity &mdash; how close two vectors point in the same direction.</p>
+                <h3>When to Use</h3>
+                <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px"><strong>Semantic Search</strong>: when you know what code does but not its name. "rate limiting middleware" finds <code>throttle_requests</code>. <strong>Keyword Search</strong>: when you know the name. <code>throttle_requests</code> finds it directly.</p>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Embeddings are built during Reindex &mdash; check Health for availability</li>
+                    <li>The hybrid Search tool combines both approaches automatically</li>
+                </ul>
+            </div>
+
+            <!-- Git History Analysis -->
+            <div class="ency-article" x-show="helpArticle === 'concept-git'">
+                <h2>Git History Analysis</h2>
+                <p class="ency-oneliner">How descry uses git log for churn, evolution, and change impact.</p>
+                <h3>Three Perspectives</h3>
+                <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px"><strong>Churn</strong> answers "what changes most?" by counting commits per symbol or file. <strong>Evolution</strong> answers "how did this change over time?" with a commit timeline. <strong>Changes</strong> answers "what did these commits affect?" with impact analysis.</p>
+                <h3>How It Works</h3>
+                <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">Descry maps git diff output back to the knowledge graph. Changed line ranges are resolved to their enclosing functions, giving you symbol-level granularity instead of just file-level diffs.</p>
+                <h3>Tips</h3>
+                <ul class="ency-tips">
+                    <li>Requires a git repository &mdash; check Health for availability</li>
+                    <li>Time ranges use git's natural language: <code>last 30 days</code>, <code>since 2024-01-01</code></li>
+                </ul>
+            </div>
+
+            <!-- ===== WORKFLOW ARTICLES ===== -->
+
+            <!-- Investigating a Function -->
+            <div class="ency-article" x-show="helpArticle === 'workflow-investigate'">
+                <h2>Investigating a Function</h2>
+                <p class="ency-oneliner">Start with a name, expand outward to build full understanding.</p>
+                <h3>Steps</h3>
+                <div class="ency-steps">
+                    <div class="ency-step"><span class="ency-step-num">1</span><span><strong>Quick Lookup</strong> the function name to get source, callers, callees, and tests in one shot.</span></div>
+                    <div class="ency-step"><span class="ency-step-num">2</span><span><strong>Context</strong> &mdash; click any related symbol to explore its details. Toggle "full" for complete source.</span></div>
+                    <div class="ency-step"><span class="ency-step-num">3</span><span><strong>Callers</strong> &mdash; understand who depends on this function and how it's used in practice.</span></div>
+                    <div class="ency-step"><span class="ency-step-num">4</span><span><strong>Flow Trace</strong> forward to see the full execution tree, or backward to see how control reaches this point.</span></div>
+                </div>
+                <h3>When to Use</h3>
+                <ul class="ency-tips">
+                    <li>Before modifying a function &mdash; understand its callers and dependencies first</li>
+                    <li>When debugging &mdash; trace the flow to find where things go wrong</li>
+                    <li>During code review &mdash; verify that changes don't break callers</li>
+                </ul>
+            </div>
+
+            <!-- Understanding a Codebase -->
+            <div class="ency-article" x-show="helpArticle === 'workflow-explore'">
+                <h2>Understanding a Codebase</h2>
+                <p class="ency-oneliner">Get the lay of the land when entering an unfamiliar project.</p>
+                <h3>Steps</h3>
+                <div class="ency-steps">
+                    <div class="ency-step"><span class="ency-step-num">1</span><span><strong>Health</strong> &mdash; see how large the codebase is (node/edge counts) and what features are available.</span></div>
+                    <div class="ency-step"><span class="ency-step-num">2</span><span><strong>Structure</strong> on key files (e.g. <code>main.py</code>, <code>app.rs</code>) to see what's defined where.</span></div>
+                    <div class="ency-step"><span class="ency-step-num">3</span><span><strong>Search</strong> for entry points like <code>main</code>, <code>handler</code>, <code>route</code> to find where execution starts.</span></div>
+                    <div class="ency-step"><span class="ency-step-num">4</span><span><strong>Flow Trace</strong> forward from entry points to understand the main execution paths.</span></div>
+                </div>
+                <h3>When to Use</h3>
+                <ul class="ency-tips">
+                    <li>Onboarding onto a new project</li>
+                    <li>Returning to a codebase after a long break</li>
+                    <li>Evaluating an open-source library before adopting it</li>
+                </ul>
+            </div>
+
+            <!-- Tracking Recent Changes -->
+            <div class="ency-article" x-show="helpArticle === 'workflow-changes'">
+                <h2>Tracking Recent Changes</h2>
+                <p class="ency-oneliner">See what's been happening in the codebase recently.</p>
+                <h3>Steps</h3>
+                <div class="ency-steps">
+                    <div class="ency-step"><span class="ency-step-num">1</span><span><strong>Changes</strong> with <code>HEAD~5..HEAD</code> and "show callers" to see recent modifications and their blast radius.</span></div>
+                    <div class="ency-step"><span class="ency-step-num">2</span><span><strong>Churn</strong> in symbols mode to identify which functions are changing most frequently.</span></div>
+                    <div class="ency-step"><span class="ency-step-num">3</span><span><strong>Evolution</strong> on high-churn symbols to see their full change timeline and understand patterns.</span></div>
+                </div>
+                <h3>When to Use</h3>
+                <ul class="ency-tips">
+                    <li>Starting your workday &mdash; catch up on what teammates changed</li>
+                    <li>Before a release &mdash; assess the scope of recent changes</li>
+                    <li>Prioritizing refactoring &mdash; high-churn code benefits most from cleanup</li>
+                </ul>
+            </div>
+
+        </div><!-- ency-body -->
     </div>
 </div>
 
