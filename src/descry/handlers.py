@@ -27,10 +27,48 @@ _DEFAULT_PROJECT_MARKERS = [".git", "Cargo.toml", "package.json", "pyproject.tom
 _DEFAULT_API_PREFIXES = ["/api/v1", "/api/v2", "/api"]
 _DEFAULT_EXCLUDED_DIRS = {"target", "node_modules", "dist", "docs", ".git", "__pycache__", "build", "vendor"}
 
+_DEFAULT_TEST_PATH_PATTERNS = (
+    '/tests/', '/test/', '/_test/', '/spec/',
+    '/testing/', '/fixtures/', '/mocks/', '/__tests__/',
+)
+_DEFAULT_TEST_FILE_SUFFIXES = (
+    '_test.rs', '.test.ts', '.spec.ts', '_test.py',
+    '.test.js', '.spec.js', '.test.tsx', '.spec.tsx',
+)
+_DEFAULT_CODE_EXTENSIONS = {
+    ".rs", ".py", ".ts", ".tsx", ".js", ".jsx", ".svelte",
+    ".go", ".java", ".css", ".scss", ".html",
+}
+_DEFAULT_CHURN_EXCLUSIONS = [
+    ".descry_cache/", ".beads/", "Cargo.lock",
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+]
+_DEFAULT_SYNTAX_LANG_MAP = {
+    ".rs": "rust",
+    ".py": "python",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".svelte": "svelte",
+    ".proto": "protobuf",
+    ".json": "json",
+    ".toml": "toml",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".md": "markdown",
+    ".rb": "ruby",
+    ".go": "go",
+    ".java": "java",
+    ".css": "css",
+    ".scss": "scss",
+    ".html": "html",
+}
 
-def _env(new_key: str, old_key: str, default: str = "") -> str:
-    """Read env var with fallback to legacy name."""
-    return os.environ.get(new_key) or os.environ.get(old_key) or default
+
+def _env(key: str, default: str = "") -> str:
+    """Read env var with default."""
+    return os.environ.get(key, default)
 
 
 @dataclass
@@ -49,22 +87,38 @@ class DescryConfig:
     api_prefixes: list[str] = field(default_factory=lambda: list(_DEFAULT_API_PREFIXES))
     excluded_dirs: set[str] = field(default_factory=lambda: set(_DEFAULT_EXCLUDED_DIRS))
 
+    # Embeddings
+    embedding_model: str = "jinaai/jina-code-embeddings-0.5b"
+
+    # Test detection
+    test_path_patterns: tuple[str, ...] = field(default_factory=lambda: _DEFAULT_TEST_PATH_PATTERNS)
+    test_file_suffixes: tuple[str, ...] = field(default_factory=lambda: _DEFAULT_TEST_FILE_SUFFIXES)
+
+    # Code files
+    code_extensions: set[str] = field(default_factory=lambda: set(_DEFAULT_CODE_EXTENSIONS))
+
+    # Git
+    churn_exclusions: list[str] = field(default_factory=lambda: list(_DEFAULT_CHURN_EXCLUSIONS))
+    git_timeout: int = 30
+
+    # Timeouts
+    scip_timeout_minutes: int = 0  # 0 = unlimited
+    embedding_timeout: int = 60
+    query_timeout_ms: int = 4000
+
+    # Query limits
+    max_depth: int = 3
+    max_nodes: int = 100
+    max_children_per_level: int = 10
+    max_callers_shown: int = 15
+
+    # Syntax highlighting
+    syntax_lang_map: dict[str, str] = field(default_factory=lambda: dict(_DEFAULT_SYNTAX_LANG_MAP))
+
     def __post_init__(self):
         self.project_root = Path(self.project_root)
         if self.cache_dir is None:
-            # Check for legacy cache dir
-            descry_cache = self.project_root / ".descry_cache"
-            legacy_cache = self.project_root / ".codegraph_cache"
-            if descry_cache.exists():
-                self.cache_dir = descry_cache
-            elif legacy_cache.exists():
-                logger.info(
-                    "Using legacy .codegraph_cache/ "
-                    "(rename to .descry_cache/ to suppress this message)"
-                )
-                self.cache_dir = legacy_cache
-            else:
-                self.cache_dir = descry_cache
+            self.cache_dir = self.project_root / ".descry_cache"
         else:
             self.cache_dir = Path(self.cache_dir)
 
@@ -87,23 +141,123 @@ class DescryConfig:
 
         return cls(project_root=start)
 
+    @staticmethod
+    def _load_toml(project_root: Path) -> dict:
+        """Load .descry.toml from project root if it exists.
+
+        Returns:
+            Parsed TOML data as dict, or empty dict if not found/invalid.
+        """
+        import tomllib
+
+        toml_path = Path(project_root) / ".descry.toml"
+        if not toml_path.exists():
+            return {}
+        try:
+            with open(toml_path, "rb") as f:
+                return tomllib.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to parse .descry.toml: {e}")
+            return {}
+
+    def _apply_toml(self, data: dict) -> None:
+        """Apply parsed TOML data to this config instance.
+
+        Maps TOML sections/keys to config fields.
+        """
+        if not data:
+            return
+
+        # [project]
+        project = data.get("project", {})
+        if "excluded_dirs" in project:
+            self.excluded_dirs = set(project["excluded_dirs"])
+        if "max_stale_hours" in project:
+            self.max_stale_hours = project["max_stale_hours"]
+
+        # [features]
+        features = data.get("features", {})
+        if "enable_scip" in features:
+            self.enable_scip = features["enable_scip"]
+        if "enable_embeddings" in features:
+            self.enable_embeddings = features["enable_embeddings"]
+
+        # [embeddings]
+        embeddings = data.get("embeddings", {})
+        if "model" in embeddings:
+            self.embedding_model = embeddings["model"]
+
+        # [test_detection]
+        test_detection = data.get("test_detection", {})
+        if "path_patterns" in test_detection:
+            self.test_path_patterns = tuple(test_detection["path_patterns"])
+        if "file_suffixes" in test_detection:
+            self.test_file_suffixes = tuple(test_detection["file_suffixes"])
+
+        # [code_files]
+        code_files = data.get("code_files", {})
+        if "extensions" in code_files:
+            self.code_extensions = set(code_files["extensions"])
+
+        # [git]
+        git = data.get("git", {})
+        if "churn_exclusions" in git:
+            self.churn_exclusions = git["churn_exclusions"]
+        if "timeout" in git:
+            self.git_timeout = git["timeout"]
+
+        # [timeouts]
+        timeouts = data.get("timeouts", {})
+        if "scip_minutes" in timeouts:
+            self.scip_timeout_minutes = timeouts["scip_minutes"]
+        if "embedding_seconds" in timeouts:
+            self.embedding_timeout = timeouts["embedding_seconds"]
+        if "query_ms" in timeouts:
+            self.query_timeout_ms = timeouts["query_ms"]
+
+        # [query]
+        query = data.get("query", {})
+        if "max_depth" in query:
+            self.max_depth = query["max_depth"]
+        if "max_nodes" in query:
+            self.max_nodes = query["max_nodes"]
+        if "max_children_per_level" in query:
+            self.max_children_per_level = query["max_children_per_level"]
+        if "max_callers_shown" in query:
+            self.max_callers_shown = query["max_callers_shown"]
+
+        # [syntax.lang_map] — merges with defaults (additive)
+        syntax = data.get("syntax", {})
+        lang_map = syntax.get("lang_map", {})
+        if lang_map:
+            self.syntax_lang_map.update(lang_map)
+
     @classmethod
     def from_env(cls) -> "DescryConfig":
-        """Build config from DESCRY_* env vars with CODEGRAPH_* fallback."""
-        log_level = _env("DESCRY_LOG_LEVEL", "CODEGRAPH_LOG_LEVEL", "WARNING")
+        """Build config: auto_detect -> apply TOML -> apply env vars."""
+        log_level = _env("DESCRY_LOG_LEVEL", "WARNING")
         logging.getLogger("descry").setLevel(
             getattr(logging, log_level.upper(), logging.WARNING)
         )
 
-        cache_dir_str = _env("DESCRY_CACHE_DIR", "CODEGRAPH_CACHE_DIR", "")
-        no_scip = _env("DESCRY_NO_SCIP", "CODEGRAPH_NO_SCIP", "").lower() in ("1", "true", "yes")
-        no_embeddings = _env("DESCRY_NO_EMBEDDINGS", "CODEGRAPH_NO_EMBEDDINGS", "").lower() in ("1", "true", "yes")
-
+        # Step 1: auto-detect project root
         config = cls.auto_detect()
+
+        # Step 2: apply TOML (overrides defaults)
+        toml_data = cls._load_toml(config.project_root)
+        config._apply_toml(toml_data)
+
+        # Step 3: apply env vars (override TOML)
+        cache_dir_str = _env("DESCRY_CACHE_DIR")
+        no_scip = _env("DESCRY_NO_SCIP").lower() in ("1", "true", "yes")
+        no_embeddings = _env("DESCRY_NO_EMBEDDINGS").lower() in ("1", "true", "yes")
+
         if cache_dir_str:
             config.cache_dir = Path(cache_dir_str)
-        config.enable_scip = not no_scip
-        config.enable_embeddings = not no_embeddings
+        if no_scip:
+            config.enable_scip = False
+        if no_embeddings:
+            config.enable_embeddings = False
         return config
 
 
@@ -360,7 +514,7 @@ class DescryService:
             if mtime != self._querier_cache["mtime"]:
                 self._querier_cache = {
                     "mtime": mtime,
-                    "instance": self._GraphQuerier(str(gp)),
+                    "instance": self._GraphQuerier(str(gp), config=self.config),
                 }
             return self._querier_cache["instance"]
 
@@ -371,7 +525,10 @@ class DescryService:
             if self._git_cache["graph_mtime"] != current_mtime or self._git_cache["analyzer"] is None:
                 q = await self._get_querier()
                 self._git_cache["analyzer"] = self._GitHistoryAnalyzer(
-                    str(self.config.project_root), graph_querier=q
+                    str(self.config.project_root), graph_querier=q,
+                    churn_exclusions=self.config.churn_exclusions,
+                    code_extensions=self.config.code_extensions,
+                    git_timeout=self.config.git_timeout,
                 )
                 self._git_cache["graph_mtime"] = current_mtime
             return self._git_cache["analyzer"]
@@ -393,6 +550,14 @@ class DescryService:
             self._dedup_cache[content_hash] = (graph_mtime, node_id)
 
     def _clear_dedup_cache(self):
+        self._dedup_cache = {}
+
+    def reset_caches(self):
+        """Reset all cached instances. Call after reindex."""
+        self._graph_cache = {"mtime": 0, "nodes": 0, "edges": 0}
+        self._querier_cache = {"mtime": 0, "instance": None}
+        self._semantic_cache = {"mtime": 0, "instance": None, "loading": False, "error": None}
+        self._git_cache = {"analyzer": None, "graph_mtime": None}
         self._dedup_cache = {}
 
     async def _format_response(
@@ -426,7 +591,7 @@ class DescryService:
 
         try:
             def load_sync():
-                return self._SemanticSearcher(str(self.config.graph_path))
+                return self._SemanticSearcher(str(self.config.graph_path), model_name=self.config.embedding_model)
 
             searcher = await asyncio.wait_for(
                 asyncio.to_thread(load_sync), timeout=60.0
@@ -607,7 +772,7 @@ class DescryService:
                         async with self._semantic_cache_lock:
                             self._semantic_cache = {"mtime": 0, "instance": None, "loading": False, "error": None}
                         logger.info("Generating embeddings for semantic search...")
-                        searcher = self._SemanticSearcher(str(self.config.graph_path), force_rebuild=True)
+                        searcher = self._SemanticSearcher(str(self.config.graph_path), force_rebuild=True, model_name=self.config.embedding_model)
                         embeddings_status = f"\nEmbeddings: {len(searcher.nodes):,} nodes indexed"
                     except Exception as e:
                         embeddings_status = f"\nEmbeddings: Failed ({e})"
@@ -838,7 +1003,7 @@ class DescryService:
                         ):
                             self._semantic_cache = {
                                 "mtime": mtime,
-                                "instance": self._SemanticSearcher(str(self.config.graph_path)),
+                                "instance": self._SemanticSearcher(str(self.config.graph_path), model_name=self.config.embedding_model),
                                 "loading": False,
                                 "error": None,
                             }
@@ -969,7 +1134,7 @@ class DescryService:
             if mtime != self._semantic_cache["mtime"] or self._semantic_cache["instance"] is None:
                 try:
                     self._semantic_cache["mtime"] = mtime
-                    self._semantic_cache["instance"] = self._SemanticSearcher(str(gp))
+                    self._semantic_cache["instance"] = self._SemanticSearcher(str(gp), model_name=self.config.embedding_model)
                     self._semantic_cache["loading"] = False
                     self._semantic_cache["error"] = None
                 except Exception as e:

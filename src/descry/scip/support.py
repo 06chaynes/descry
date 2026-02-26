@@ -1,7 +1,7 @@
 """SCIP support with auto-discovery for multiple languages.
 
 Provides functions to detect SCIP indexer availability and manage
-SCIP-based symbol resolution for improved codegraph call resolution.
+SCIP-based symbol resolution for improved descry call resolution.
 
 SCIP (Source Code Index Protocol) is a format from Sourcegraph that
 provides type-aware symbol information from language servers.
@@ -69,7 +69,7 @@ def _check_indexer(name: str, command: str, version_flag: str = "--version") -> 
 
 def rust_analyzer_available() -> bool:
     """Check if rust-analyzer is available for Rust SCIP generation."""
-    if os.environ.get("CODEGRAPH_NO_SCIP"):
+    if os.environ.get("DESCRY_NO_SCIP"):
         return False
 
     if "rust-analyzer" not in _indexer_cache:
@@ -81,7 +81,7 @@ def rust_analyzer_available() -> bool:
 
 def scip_typescript_available() -> bool:
     """Check if scip-typescript is available for TypeScript/JavaScript SCIP generation."""
-    if os.environ.get("CODEGRAPH_NO_SCIP"):
+    if os.environ.get("DESCRY_NO_SCIP"):
         return False
 
     if "scip-typescript" not in _indexer_cache:
@@ -97,7 +97,7 @@ def scip_available() -> bool:
     Returns:
         True if at least one SCIP indexer is available.
     """
-    if os.environ.get("CODEGRAPH_NO_SCIP"):
+    if os.environ.get("DESCRY_NO_SCIP"):
         return False
 
     return rust_analyzer_available() or scip_typescript_available()
@@ -118,7 +118,7 @@ def get_scip_status() -> dict:
 
     return {
         "available": scip_available(),
-        "disabled_by_env": bool(os.environ.get("CODEGRAPH_NO_SCIP")),
+        "disabled_by_env": bool(os.environ.get("DESCRY_NO_SCIP")),
         "indexers": {
             "rust-analyzer": {
                 "available": rust_info.get("available", False),

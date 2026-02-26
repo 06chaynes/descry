@@ -114,29 +114,29 @@ class TestScipCachePerformance:
     """Tests for SCIP cache performance optimizations."""
 
     def test_get_max_workers_env_override(self):
-        """Should respect CODEGRAPH_SCIP_WORKERS env variable."""
+        """Should respect DESCRY_SCIP_WORKERS env variable."""
         # Save original
-        original = os.environ.get("CODEGRAPH_SCIP_WORKERS")
+        original = os.environ.get("DESCRY_SCIP_WORKERS")
 
         try:
-            os.environ["CODEGRAPH_SCIP_WORKERS"] = "1"
+            os.environ["DESCRY_SCIP_WORKERS"] = "1"
             manager = ScipCacheManager(Path("."))
             assert manager._get_max_workers(10) == 1
 
-            os.environ["CODEGRAPH_SCIP_WORKERS"] = "5"
+            os.environ["DESCRY_SCIP_WORKERS"] = "5"
             assert manager._get_max_workers(10) == 5
             # Should cap at num_items
             assert manager._get_max_workers(3) == 3
         finally:
             if original is None:
-                os.environ.pop("CODEGRAPH_SCIP_WORKERS", None)
+                os.environ.pop("DESCRY_SCIP_WORKERS", None)
             else:
-                os.environ["CODEGRAPH_SCIP_WORKERS"] = original
+                os.environ["DESCRY_SCIP_WORKERS"] = original
 
     def test_get_max_workers_defaults_to_reasonable_value(self):
         """Should default to reasonable worker count without env override."""
         # Ensure env var is not set
-        original = os.environ.pop("CODEGRAPH_SCIP_WORKERS", None)
+        original = os.environ.pop("DESCRY_SCIP_WORKERS", None)
         try:
             manager = ScipCacheManager(Path("."))
             workers = manager._get_max_workers(10)
@@ -144,24 +144,24 @@ class TestScipCachePerformance:
             assert 2 <= workers <= 4
         finally:
             if original is not None:
-                os.environ["CODEGRAPH_SCIP_WORKERS"] = original
+                os.environ["DESCRY_SCIP_WORKERS"] = original
 
     def test_get_prime_threads_env_override(self):
-        """Should respect CODEGRAPH_PRIME_THREADS env variable."""
-        original = os.environ.get("CODEGRAPH_PRIME_THREADS")
+        """Should respect DESCRY_PRIME_THREADS env variable."""
+        original = os.environ.get("DESCRY_PRIME_THREADS")
         try:
-            os.environ["CODEGRAPH_PRIME_THREADS"] = "8"
+            os.environ["DESCRY_PRIME_THREADS"] = "8"
             manager = ScipCacheManager(Path("."))
             assert manager._get_prime_threads() == 8
         finally:
             if original is None:
-                os.environ.pop("CODEGRAPH_PRIME_THREADS", None)
+                os.environ.pop("DESCRY_PRIME_THREADS", None)
             else:
-                os.environ["CODEGRAPH_PRIME_THREADS"] = original
+                os.environ["DESCRY_PRIME_THREADS"] = original
 
     def test_get_prime_threads_defaults_based_on_cpu(self):
         """Should default based on CPU count."""
-        original = os.environ.pop("CODEGRAPH_PRIME_THREADS", None)
+        original = os.environ.pop("DESCRY_PRIME_THREADS", None)
         try:
             manager = ScipCacheManager(Path("."))
             threads = manager._get_prime_threads()
@@ -169,4 +169,4 @@ class TestScipCachePerformance:
             assert threads == expected
         finally:
             if original is not None:
-                os.environ["CODEGRAPH_PRIME_THREADS"] = original
+                os.environ["DESCRY_PRIME_THREADS"] = original

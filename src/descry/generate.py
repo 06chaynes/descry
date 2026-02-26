@@ -2445,8 +2445,12 @@ class TSParser(BaseParser):
 
 
 class CodeGraphBuilder:
-    def __init__(self, root_dir):
+    def __init__(self, root_dir, excluded_dirs=None):
         self.root_dir = Path(root_dir).resolve()
+        self.excluded_dirs = excluded_dirs or {
+            "target", "node_modules", "dist", "build", "docs",
+            "coverage", "demo-output", ".beads",
+        }
         self.nodes = []
         self.edges = []
         self.node_registry = set()
@@ -2478,17 +2482,7 @@ class CodeGraphBuilder:
                 d
                 for d in dirs
                 if not d.startswith(".")
-                and d
-                not in [
-                    "target",
-                    "node_modules",
-                    "dist",
-                    "build",
-                    "docs",
-                    "coverage",
-                    "demo-output",
-                    ".beads",
-                ]
+                and d not in self.excluded_dirs
             ]
             for file in files:
                 file_path = Path(root) / file
@@ -2784,7 +2778,8 @@ class CodeGraphBuilder:
         )
 
 
-if __name__ == "__main__":
+def main():
+    """CLI entry point for descry-generate."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Generate codebase knowledge graph")
@@ -2806,16 +2801,25 @@ if __name__ == "__main__":
 
     target = args.path
 
+    # Load config from .descry.toml if present
+    from descry.handlers import DescryConfig
+    toml_data = DescryConfig._load_toml(Path(target).resolve())
+    config_excluded_dirs = None
+    if toml_data:
+        project_section = toml_data.get("project", {})
+        if "excluded_dirs" in project_section:
+            config_excluded_dirs = set(project_section["excluded_dirs"])
+
     # Handle SCIP opt-out
     if args.no_scip:
-        os.environ["CODEGRAPH_NO_SCIP"] = "1"
+        os.environ["DESCRY_NO_SCIP"] = "1"
 
-    # Create .codegraph_cache directory if it doesn't exist
-    cache_dir = Path(".codegraph_cache")
+    # Create cache directory if it doesn't exist
+    cache_dir = Path(".descry_cache")
     cache_dir.mkdir(exist_ok=True)
 
     # Build the graph
-    builder = CodeGraphBuilder(target)
+    builder = CodeGraphBuilder(target, excluded_dirs=config_excluded_dirs)
     builder.process_directory()
 
     # Generate SCIP indices if available
@@ -2845,7 +2849,7 @@ if __name__ == "__main__":
     elif SCIP_SUPPORT_LOADED:
         status = get_scip_status()
         if status.get("disabled_by_env"):
-            logger.info("SCIP: Disabled (CODEGRAPH_NO_SCIP=1)")
+            logger.info("SCIP: Disabled (DESCRY_NO_SCIP=1)")
         else:
             logger.info("SCIP: Unavailable (no indexers found: install rust-analyzer and/or scip-typescript)")
 
@@ -2854,7 +2858,8 @@ if __name__ == "__main__":
     builder.export(str(graph_path), scip_index=scip_index)
 
     # Generate embeddings for semantic search (if dependencies available)
-    if os.environ.get("CODEGRAPH_NO_EMBEDDINGS", "").lower() not in ("1", "true", "yes"):
+    no_embeddings = os.environ.get("DESCRY_NO_EMBEDDINGS", "")
+    if no_embeddings.lower() not in ("1", "true", "yes"):
         try:
             from descry.embeddings import embeddings_available, SemanticSearcher
             if embeddings_available():
@@ -2867,3 +2872,7 @@ if __name__ == "__main__":
             logger.debug("Embeddings: module not available, skipping")
         except Exception as e:
             logger.warning(f"Embeddings: Failed to generate ({e})")
+
+
+if __name__ == "__main__":
+    main()

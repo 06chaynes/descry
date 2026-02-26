@@ -79,9 +79,9 @@ def generate_skeleton(graph_file, output_file):
 
 
 if __name__ == "__main__":
-    # Default paths use .codegraph_cache directory
-    default_graph = ".codegraph_cache/codebase_graph.json"
-    default_output = ".codegraph_cache/codebase_skeleton.md"
+    # Default paths use .descry_cache directory
+    default_graph = ".descry_cache/codebase_graph.json"
+    default_output = ".descry_cache/codebase_skeleton.md"
 
     graph_path = sys.argv[1] if len(sys.argv) > 1 else default_graph
     out_path = sys.argv[2] if len(sys.argv) > 2 else default_output

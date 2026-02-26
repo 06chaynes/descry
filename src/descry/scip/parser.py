@@ -36,7 +36,7 @@ class ScipIndex:
     Loads multiple SCIP files and provides lookup capabilities for:
     - Finding where symbols are defined
     - Resolving references to their definitions
-    - Converting between SCIP symbol IDs and codegraph node IDs
+    - Converting between SCIP symbol IDs and descry node IDs
     """
 
     def __init__(self, scip_files: List[Path]):
@@ -190,7 +190,7 @@ class ScipIndex:
             line: Line number of the reference
 
         Returns:
-            Codegraph node ID if resolved, None otherwise
+            Descry node ID if resolved, None otherwise
         """
         # Determine language for statistics tracking
         lang = "typescript" if source_file.endswith((".ts", ".tsx", ".js", ".jsx", ".svelte")) else "rust"
@@ -201,7 +201,7 @@ class ScipIndex:
         symbol_id = self.references.get((source_file, line))
 
         # Strategy 1b: Try with package-relative path
-        # Codegraph uses: webapp/src/lib/stores/auth.ts
+        # Descry uses: webapp/src/lib/stores/auth.ts
         # SCIP indexes:   src/lib/stores/auth.ts
         if not symbol_id and "/" in source_file:
             # Try stripping the first path component (package name)
@@ -229,7 +229,7 @@ class ScipIndex:
             ref_name: Reference name to look up
 
         Returns:
-            Codegraph node ID if found, None otherwise
+            Descry node ID if found, None otherwise
         """
         # Extract simple name from qualified references
         # e.g., "ThoraxServer::start" -> "start"
@@ -255,13 +255,13 @@ class ScipIndex:
         return None
 
     def _to_node_id(self, symbol_id: str, file_path: str) -> str:
-        """Convert SCIP symbol to codegraph node ID.
+        """Convert SCIP symbol to descry node ID.
 
         SCIP symbol formats:
         - Rust: "rust-analyzer cargo backend 0.1.0 state/AppState#new()."
         - TypeScript: "scip-typescript npm webapp 0.1.0 src/lib/api/`client.ts`/getAuthToken()."
 
-        Codegraph node ID format:
+        Descry node ID format:
         "FILE:backend/src/state.rs::AppState::new"
 
         The key transformations:
@@ -274,7 +274,7 @@ class ScipIndex:
             file_path: Path to the file where the symbol is defined
 
         Returns:
-            Codegraph-style node ID
+            Descry-style node ID
         """
         parts = symbol_id.split()
         if len(parts) < 4:
@@ -286,7 +286,7 @@ class ScipIndex:
         package_name = parts[2]
 
         # Build full file path with package prefix
-        # SCIP gives: src/state.rs, codegraph expects: backend/src/state.rs
+        # SCIP gives: src/state.rs, descry expects: backend/src/state.rs
         if not file_path.startswith(package_name + "/"):
             full_path = f"{package_name}/{file_path}"
         else:
@@ -306,7 +306,7 @@ class ScipIndex:
         return f"FILE:{full_path}"
 
     def _parse_descriptors(self, descriptors: str) -> List[str]:
-        """Parse SCIP descriptors into name components for codegraph node IDs.
+        """Parse SCIP descriptors into name components for descry node IDs.
 
         SCIP descriptors use suffixes to indicate type:
         - / for namespaces/modules (SKIP these - they're in file path)
@@ -358,7 +358,7 @@ class ScipIndex:
         return names
 
     def _parse_typescript_descriptors(self, descriptors: str) -> List[str]:
-        """Parse TypeScript SCIP descriptors into name components for codegraph node IDs.
+        """Parse TypeScript SCIP descriptors into name components for descry node IDs.
 
         TypeScript SCIP descriptors use backticks to wrap filenames:
         - src/lib/api/`client.ts`/getAuthToken(). -> ["getAuthToken"]

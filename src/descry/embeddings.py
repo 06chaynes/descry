@@ -7,7 +7,7 @@
 # ]
 # ///
 """
-Optional semantic search with embeddings for codegraph.
+Optional semantic search with embeddings for descry.
 
 Uses sentence-transformers for embedding generation and numpy for similarity.
 Falls back to TF-IDF search if dependencies are not available.
@@ -55,7 +55,7 @@ class SemanticSearcher:
     # Significantly better code search quality than general-purpose models
     MODEL_NAME = "jinaai/jina-code-embeddings-0.5b"
 
-    def __init__(self, graph_path: str, cache_dir: Optional[str] = None, force_rebuild: bool = False):
+    def __init__(self, graph_path: str, cache_dir: Optional[str] = None, force_rebuild: bool = False, model_name: str | None = None):
         """Initialize the semantic searcher.
 
         Args:
@@ -63,21 +63,23 @@ class SemanticSearcher:
             cache_dir: Optional directory for caching embeddings
             force_rebuild: Force regeneration of embeddings even if cache exists
         """
+        self.model_name = model_name or self.MODEL_NAME
+
         if not EMBEDDINGS_AVAILABLE:
             raise ImportError(
                 "Embeddings require sentence-transformers and numpy. "
-                "Install with: just codegraph-install-embeddings"
+                "Install with: just descry-install-embeddings"
             )
 
         # Resolve to absolute path to avoid nested directory issues when CWD is inside cache
         self.graph_path = Path(graph_path).resolve()
         if cache_dir:
             self.cache_dir = Path(cache_dir).resolve()
-        elif self.graph_path.parent.name == ".codegraph_cache":
+        elif self.graph_path.parent.name == ".descry_cache":
             # Graph is already in cache dir, use it directly
             self.cache_dir = self.graph_path.parent
         else:
-            self.cache_dir = self.graph_path.parent / ".codegraph_cache"
+            self.cache_dir = self.graph_path.parent / ".descry_cache"
 
         # Load graph
         with open(self.graph_path) as f:
@@ -162,7 +164,7 @@ class SemanticSearcher:
         Weights: name=0.2, signature=0.3, docstring=0.5
         """
         logger.info("Loading embedding model...")
-        self.model = SentenceTransformer(self.MODEL_NAME)
+        self.model = SentenceTransformer(self.model_name)
 
         # Collect texts for each component
         names = []
@@ -247,7 +249,7 @@ class SemanticSearcher:
         import math
 
         if self.model is None:
-            self.model = SentenceTransformer(self.MODEL_NAME)
+            self.model = SentenceTransformer(self.model_name)
 
         # Encode query
         query_embedding = self.model.encode([query], convert_to_numpy=True)[0]
@@ -348,7 +350,7 @@ _searcher_lock = threading.Lock()
 
 def semantic_search(
     query: str,
-    graph_path: str = ".codegraph_cache/codebase_graph.json",
+    graph_path: str = ".descry_cache/codebase_graph.json",
     limit: int = 10,
 ) -> list:
     """Convenience function for semantic search (thread-safe).
@@ -375,7 +377,7 @@ def semantic_search(
     return searcher.search(query, limit=limit)
 
 
-def get_embeddings_status(graph_path: str = ".codegraph_cache/codebase_graph.json") -> dict:
+def get_embeddings_status(graph_path: str = ".descry_cache/codebase_graph.json") -> dict:
     """Get embeddings status for diagnostics.
 
     Args:
@@ -430,7 +432,7 @@ if __name__ == "__main__":
 
     if not EMBEDDINGS_AVAILABLE:
         print("Embeddings not available. Install with:")
-        print("  just codegraph-install-embeddings")
+        print("  just descry-install-embeddings")
         sys.exit(1)
 
     if len(sys.argv) < 2:

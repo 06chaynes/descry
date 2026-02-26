@@ -37,12 +37,12 @@ class ScipCacheManager:
     checksums. When a project's sources haven't changed, the cached SCIP
     index is reused.
 
-    Cache location: {project_root}/.codegraph_cache/scip/
+    Cache location: {project_root}/.descry_cache/scip/
     """
 
     _DEFAULT_EXCLUDED_DIRS = {"target", "node_modules", "dist", "docs", ".git", "__pycache__", "build", "vendor"}
 
-    def __init__(self, project_root: Path, excluded_dirs: set[str] | None = None):
+    def __init__(self, project_root: Path, excluded_dirs: set[str] | None = None, scip_timeout_minutes: int | None = None):
         """Initialize the cache manager.
 
         Args:
@@ -50,11 +50,14 @@ class ScipCacheManager:
             excluded_dirs: Directory names to skip during discovery.
                 Defaults to a standard set including target, node_modules,
                 dist, docs, .git, __pycache__, build, and vendor.
+            scip_timeout_minutes: Timeout in minutes for SCIP generation.
+                0 means unlimited. None means use env var or default.
         """
         self.project_root = project_root
-        self.cache_dir = project_root / ".codegraph_cache" / "scip"
+        self.cache_dir = project_root / ".descry_cache" / "scip"
         self.checksums_file = self.cache_dir / "checksums.json"
         self.excluded_dirs = excluded_dirs if excluded_dirs is not None else self._DEFAULT_EXCLUDED_DIRS
+        self._scip_timeout_minutes = scip_timeout_minutes
 
     def get_projects(self) -> List[Tuple[str, str]]:
         """Auto-discover all indexable projects.
@@ -395,7 +398,7 @@ class ScipCacheManager:
         """Get number of parallel workers based on memory constraints.
 
         Modern systems (32GB+ RAM) can safely run 3-4 rust-analyzer instances.
-        Override with CODEGRAPH_SCIP_WORKERS environment variable.
+        Override with DESCRY_SCIP_WORKERS environment variable.
 
         Args:
             num_items: Number of items to process
@@ -403,7 +406,7 @@ class ScipCacheManager:
         Returns:
             Number of workers to use
         """
-        env_workers = os.environ.get("CODEGRAPH_SCIP_WORKERS")
+        env_workers = os.environ.get("DESCRY_SCIP_WORKERS")
         if env_workers:
             return min(int(env_workers), num_items)
 
@@ -424,12 +427,12 @@ class ScipCacheManager:
     def _get_prime_threads(self) -> int:
         """Get thread count for rust-analyzer cache priming.
 
-        Uses CODEGRAPH_PRIME_THREADS env or defaults based on available CPUs.
+        Uses DESCRY_PRIME_THREADS env or defaults based on available CPUs.
 
         Returns:
             Number of threads for cache priming
         """
-        env_threads = os.environ.get("CODEGRAPH_PRIME_THREADS")
+        env_threads = os.environ.get("DESCRY_PRIME_THREADS")
         if env_threads:
             return int(env_threads)
         # Default: use available CPUs minus 2 (leave room for system)
@@ -484,20 +487,20 @@ class ScipCacheManager:
             return False
 
     def _get_timeout(self, is_first_run: bool = False) -> int | None:
-        """Get timeout in seconds based on environment and run type.
+        """Get timeout in seconds based on config, environment, and run type.
 
-        Args:
-            is_first_run: Whether this is the first SCIP generation
-
-        Returns:
-            Timeout in seconds, or None for no timeout
+        Priority: config value > env var > default (no timeout)
         """
-        # Configurable timeout via environment variable
-        # CODEGRAPH_SCIP_TIMEOUT: timeout in minutes (set to enable timeout)
-        # Default: no timeout (rust-analyzer can take a long time on large crates)
-        env_timeout = os.environ.get("CODEGRAPH_SCIP_TIMEOUT", "").lower()
+        # Config value takes priority
+        if self._scip_timeout_minutes is not None:
+            if self._scip_timeout_minutes == 0:
+                return None  # 0 means unlimited
+            return self._scip_timeout_minutes * 60
+
+        # Then check environment variable
+        env_timeout = os.environ.get("DESCRY_SCIP_TIMEOUT", "").lower()
         if env_timeout in ("0", "none", "unlimited", ""):
-            return None  # No timeout (default)
+            return None
         else:
             return int(env_timeout) * 60
 

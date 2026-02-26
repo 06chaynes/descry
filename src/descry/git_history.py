@@ -3,7 +3,7 @@
 Git History Analysis Module
 
 Provides symbol-level git history analysis by combining git operations
-with codegraph's structural knowledge. Enables churn hotspot detection,
+with descry's structural knowledge. Enables churn hotspot detection,
 symbol evolution tracking, and change impact analysis.
 
 Usage:
@@ -29,7 +29,7 @@ class GitError(Exception):
 
 
 DEFAULT_CHURN_EXCLUSIONS = [
-    ".codegraph_cache/",
+    ".descry_cache/",
     ".beads/",
     "Cargo.lock",
     "package-lock.json",
@@ -44,25 +44,33 @@ CODE_EXTENSIONS = {
 
 
 class GitHistoryAnalyzer:
-    """Analyzes git history at the symbol level using codegraph metadata."""
+    """Analyzes git history at the symbol level using descry metadata."""
 
-    def __init__(self, project_root: str, graph_querier=None):
+    def __init__(self, project_root: str, graph_querier=None, churn_exclusions=None, code_extensions=None, git_timeout=30):
         """Initialize the analyzer.
 
         Args:
             project_root: Path to the git repository root.
             graph_querier: Optional GraphQuerier instance for symbol resolution.
+            churn_exclusions: List of path patterns to exclude from churn analysis.
+                Defaults to DEFAULT_CHURN_EXCLUSIONS.
+            code_extensions: Set of file extensions considered as code.
+                Defaults to CODE_EXTENSIONS.
+            git_timeout: Default timeout in seconds for git commands.
         """
         self.project_root = Path(project_root).resolve()
         self.querier = graph_querier
         self._verified = False
+        self.churn_exclusions = churn_exclusions if churn_exclusions is not None else DEFAULT_CHURN_EXCLUSIONS
+        self.code_extensions = code_extensions if code_extensions is not None else CODE_EXTENSIONS
+        self.default_timeout = git_timeout
 
-    def _run_git(self, args: list[str], timeout: int = 30) -> str:
+    def _run_git(self, args: list[str], timeout: int | None = None) -> str:
         """Run a git command and return stdout.
 
         Args:
             args: Git command arguments (without 'git' prefix).
-            timeout: Timeout in seconds.
+            timeout: Timeout in seconds. Defaults to self.default_timeout.
 
         Returns:
             Command stdout as string.
@@ -70,6 +78,8 @@ class GitHistoryAnalyzer:
         Raises:
             GitError: If git command fails or times out.
         """
+        if timeout is None:
+            timeout = self.default_timeout
         cmd = ["git"] + args
         try:
             result = subprocess.run(
@@ -290,7 +300,7 @@ class GitHistoryAnalyzer:
         if path_filter:
             git_args.extend(["--", path_filter])
         elif exclude_generated:
-            exclusions = [f":!{p}" for p in DEFAULT_CHURN_EXCLUSIONS]
+            exclusions = [f":!{p}" for p in self.churn_exclusions]
             git_args.extend(["--", "."] + exclusions)
 
         output = self._run_git(git_args, timeout=60)
@@ -398,7 +408,7 @@ class GitHistoryAnalyzer:
                 is_file_fallback = k.startswith("FILE:") and "::" not in k
                 if is_file_fallback:
                     ext = Path(k.replace("FILE:", "")).suffix.lower()
-                    if ext not in CODE_EXTENSIONS:
+                    if ext not in self.code_extensions:
                         continue  # Drop non-code FILE entries
                     file_fallbacks[k] = v
                 else:
@@ -456,7 +466,7 @@ class GitHistoryAnalyzer:
         if path_filter:
             git_args.extend(["--", path_filter])
         elif exclude_generated:
-            exclusions = [f":!{p}" for p in DEFAULT_CHURN_EXCLUSIONS]
+            exclusions = [f":!{p}" for p in self.churn_exclusions]
             git_args.extend(["--", "."] + exclusions)
 
         output = self._run_git(git_args, timeout=60)
@@ -549,7 +559,7 @@ class GitHistoryAnalyzer:
             is_file_fallback = k.startswith("FILE:") and "::" not in k
             if is_file_fallback:
                 ext = Path(k.replace("FILE:", "")).suffix.lower()
-                if ext not in CODE_EXTENSIONS:
+                if ext not in self.code_extensions:
                     continue
                 file_fallbacks[k] = v
             else:
@@ -635,7 +645,7 @@ class GitHistoryAnalyzer:
             # Fall back to file-level co-change
             code_files = {
                 f: commits for f, commits in file_commits.items()
-                if Path(f).suffix.lower() in CODE_EXTENSIONS
+                if Path(f).suffix.lower() in self.code_extensions
             }
             if code_files:
                 commit_files: dict[str, set[str]] = defaultdict(set)
@@ -745,7 +755,7 @@ class GitHistoryAnalyzer:
         # Filter to code files only
         code_files = {
             f: commits for f, commits in file_commits.items()
-            if Path(f).suffix.lower() in CODE_EXTENSIONS
+            if Path(f).suffix.lower() in self.code_extensions
         }
         if not code_files:
             return "No co-change patterns found in code files."
@@ -849,7 +859,7 @@ class GitHistoryAnalyzer:
         if not file_path:
             return (
                 f"Could not resolve symbol '{name}'. "
-                "Try codegraph_search to find the exact name."
+                "Try descry_search to find the exact name."
             )
 
         # Try git log -L :name:file (git's native function tracking)
@@ -863,7 +873,7 @@ class GitHistoryAnalyzer:
         except GitError:
             output = None
 
-        # Fallback: try line-range based -L using codegraph metadata
+        # Fallback: try line-range based -L using descry metadata
         if not output and resolved_node_id and self.querier:
             node_info = self.querier.get_node_info(resolved_node_id)
             if node_info:

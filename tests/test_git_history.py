@@ -189,6 +189,16 @@ class TestGitHistoryEndToEnd:
 
     def test_changes_head(self, analyzer):
         """Should return change impact for HEAD~1..HEAD."""
+        import subprocess
+        test_dir = Path(__file__).resolve().parent
+        project_root = test_dir.parent
+        # Need at least 2 commits for HEAD~1..HEAD
+        ret = subprocess.run(
+            ["git", "rev-parse", "HEAD~1"],
+            cwd=str(project_root), capture_output=True,
+        )
+        if ret.returncode != 0:
+            pytest.skip("Need at least 2 commits for HEAD~1..HEAD")
         result = analyzer.get_changes(commit_range="HEAD~1..HEAD")
         assert "Change Impact" in result or "No changes" in result
 

@@ -84,32 +84,28 @@ except ImportError:
     GitError = Exception
 
 
-# --- Project paths ---
+# --- Project config (lazy-loaded via DescryConfig) ---
 
-from descry.handlers import DescryConfig, _DEFAULT_PROJECT_MARKERS
+from descry.handlers import DescryConfig, DescryService
 
-
-def _find_project_root() -> Path:
-    """Find project root using the same markers as DescryConfig."""
-    markers = _DEFAULT_PROJECT_MARKERS
-    script_dir = Path(__file__).resolve().parent
-    candidates = [Path.cwd(), script_dir, script_dir.parent, script_dir.parent.parent]
-    for start in candidates:
-        for path in [start] + list(start.parents):
-            for marker in markers:
-                if (path / marker).exists():
-                    return path
-            if path == Path.home():
-                break
-    return script_dir.parent.parent
-
-
-PROJECT_ROOT = _find_project_root()
-_cache_dir_env = os.environ.get("DESCRY_CACHE_DIR")
-CACHE_DIR = Path(_cache_dir_env) if _cache_dir_env else PROJECT_ROOT / ".descry_cache"
-GRAPH_PATH = CACHE_DIR / "codebase_graph.json"
-MAX_STALE_HOURS = 24
 WEB_DIR = Path(__file__).parent / "web"
+
+_config: DescryConfig | None = None
+_service: DescryService | None = None
+
+
+def _get_config() -> DescryConfig:
+    global _config
+    if _config is None:
+        _config = DescryConfig.from_env()
+    return _config
+
+
+def _get_service() -> DescryService:
+    global _service
+    if _service is None:
+        _service = DescryService(_get_config())
+    return _service
 
 
 # --- Helper functions (pure functions) ---
@@ -147,66 +143,81 @@ def reciprocal_rank_fusion(tfidf_results: list, semantic_results: list, k: int =
     return [(node_lookup[nid], rrf_scores[nid]) for nid in sorted_ids]
 
 
-# --- Cached instances ---
+# --- Cached instances (delegate to DescryService) ---
 
-_querier_cache = {"mtime": 0, "instance": None}
-_semantic_cache = {"mtime": 0, "instance": None}
-_docs_cache: dict = {"instance": None}
-_git_cache: dict = {"analyzer": None, "graph_mtime": None}
 _graph_meta = {"mtime": 0, "nodes": 0, "edges": 0}
 
 
 def _get_querier() -> GraphQuerier | None:
-    global _querier_cache
-    if not GRAPH_PATH.exists():
-        _querier_cache = {"mtime": 0, "instance": None}
+    """Get GraphQuerier, delegating caching to DescryService."""
+    cfg = _get_config()
+    if not cfg.graph_path.exists():
         return None
-    mtime = GRAPH_PATH.stat().st_mtime
-    if mtime != _querier_cache["mtime"]:
-        _querier_cache = {"mtime": mtime, "instance": GraphQuerier(str(GRAPH_PATH))}
-    return _querier_cache["instance"]
+    svc = _get_service()
+    # Use sync wrapper since web handlers call this synchronously
+    mtime = cfg.graph_path.stat().st_mtime
+    if mtime != svc._querier_cache["mtime"]:
+        svc._querier_cache = {
+            "mtime": mtime,
+            "instance": GraphQuerier(str(cfg.graph_path), config=cfg),
+        }
+    return svc._querier_cache["instance"]
 
 
 def _get_semantic_searcher() -> "SemanticSearcher | None":
-    global _semantic_cache
-    if not SEMANTIC_AVAILABLE or not GRAPH_PATH.exists():
+    cfg = _get_config()
+    if not SEMANTIC_AVAILABLE or not cfg.graph_path.exists():
         return None
-    mtime = GRAPH_PATH.stat().st_mtime
-    if mtime != _semantic_cache["mtime"] or _semantic_cache["instance"] is None:
-        _semantic_cache = {"mtime": mtime, "instance": SemanticSearcher(str(GRAPH_PATH))}
-    return _semantic_cache["instance"]
+    svc = _get_service()
+    mtime = cfg.graph_path.stat().st_mtime
+    if mtime != svc._semantic_cache["mtime"] or svc._semantic_cache["instance"] is None:
+        svc._semantic_cache = {
+            "mtime": mtime,
+            "instance": SemanticSearcher(str(cfg.graph_path), model_name=cfg.embedding_model),
+            "loading": False,
+            "error": None,
+        }
+    return svc._semantic_cache["instance"]
 
 
 def _get_git_analyzer() -> "GitHistoryAnalyzer | None":
-    global _git_cache
     if not GIT_HISTORY_AVAILABLE:
         return None
-    current_mtime = GRAPH_PATH.stat().st_mtime if GRAPH_PATH.exists() else None
-    if _git_cache["graph_mtime"] != current_mtime or _git_cache["analyzer"] is None:
+    cfg = _get_config()
+    svc = _get_service()
+    current_mtime = cfg.graph_path.stat().st_mtime if cfg.graph_path.exists() else None
+    if svc._git_cache["graph_mtime"] != current_mtime or svc._git_cache["analyzer"] is None:
         q = _get_querier()
-        _git_cache["analyzer"] = GitHistoryAnalyzer(str(PROJECT_ROOT), graph_querier=q)
-        _git_cache["graph_mtime"] = current_mtime
-    return _git_cache["analyzer"]
+        svc._git_cache["analyzer"] = GitHistoryAnalyzer(
+            str(cfg.project_root), graph_querier=q,
+            churn_exclusions=cfg.churn_exclusions,
+            code_extensions=cfg.code_extensions,
+            git_timeout=cfg.git_timeout,
+        )
+        svc._git_cache["graph_mtime"] = current_mtime
+    return svc._git_cache["analyzer"]
 
 
 def _get_docs_searcher() -> "DocsSearcher | None":
-    global _docs_cache
     if not DOCS_SEARCH_LOADED or not DOCS_EMBEDDINGS_AVAILABLE:
         return None
-    if _docs_cache["instance"] is None:
-        searcher = DocsSearcher(PROJECT_ROOT, CACHE_DIR / "docs")
+    svc = _get_service()
+    cfg = _get_config()
+    if not hasattr(svc, '_docs_cache_web') or svc._docs_cache_web is None:
+        searcher = DocsSearcher(cfg.project_root, cfg.cache_dir / "docs")
         searcher.index()
-        _docs_cache["instance"] = searcher
-    return _docs_cache["instance"]
+        svc._docs_cache_web = searcher
+    return svc._docs_cache_web
 
 
 def _update_graph_meta():
     global _graph_meta
-    if GRAPH_PATH.exists():
-        mtime = GRAPH_PATH.stat().st_mtime
+    cfg = _get_config()
+    if cfg.graph_path.exists():
+        mtime = cfg.graph_path.stat().st_mtime
         if mtime != _graph_meta["mtime"]:
             try:
-                with open(GRAPH_PATH) as f:
+                with open(cfg.graph_path) as f:
                     data = json.load(f)
                 _graph_meta = {
                     "mtime": mtime,
@@ -218,9 +229,10 @@ def _update_graph_meta():
 
 
 def _graph_status() -> dict:
-    if not GRAPH_PATH.exists():
+    cfg = _get_config()
+    if not cfg.graph_path.exists():
         return {"exists": False, "age_str": "N/A", "age_hours": None, "nodes": 0, "edges": 0}
-    mtime = GRAPH_PATH.stat().st_mtime
+    mtime = cfg.graph_path.stat().st_mtime
     age_hours = (time.time() - mtime) / 3600
     _update_graph_meta()
     return {
@@ -229,7 +241,7 @@ def _graph_status() -> dict:
         "age_hours": round(age_hours, 2),
         "nodes": _graph_meta["nodes"],
         "edges": _graph_meta["edges"],
-        "stale": age_hours > MAX_STALE_HOURS,
+        "stale": age_hours > cfg.max_stale_hours,
     }
 
 
@@ -282,8 +294,9 @@ def _caller_to_dict(caller_id: str, q: GraphQuerier) -> dict:
 
 def _openapi_path_exists() -> bool:
     """Check if an OpenAPI spec file exists in the project."""
+    cfg = _get_config()
     for name in ("latest.json", "openapi.json"):
-        if (PROJECT_ROOT / "public" / "api" / name).exists():
+        if (cfg.project_root / "public" / "api" / name).exists():
             return True
     return False
 
@@ -295,7 +308,7 @@ async def api_health(request: Request) -> JSONResponse:
     return JSONResponse({
         "status": "ok" if status["exists"] and not status.get("stale") else ("stale" if status.get("stale") else "no_graph"),
         "version": SERVER_VERSION,
-        "project_root": str(PROJECT_ROOT),
+        "project_root": str(_get_config().project_root),
         "graph": status,
         "features": {
             "scip": scip_available(),
@@ -331,11 +344,12 @@ async def api_ensure(request: Request) -> JSONResponse:
 async def _run_index(path: str) -> str:
     import subprocess
     script_path = Path(__file__).parent.parent / "generate.py"
-    index_path = str(PROJECT_ROOT) if path == "." else path
+    cfg = _get_config()
+    index_path = str(cfg.project_root) if path == "." else path
     try:
         result = subprocess.run(
             ["uv", "run", str(script_path), index_path],
-            capture_output=True, text=True, cwd=str(PROJECT_ROOT), timeout=600,
+            capture_output=True, text=True, cwd=str(cfg.project_root), timeout=600,
         )
         return result.stdout.strip() if result.returncode == 0 else f"Error: {result.stderr}"
     except subprocess.TimeoutExpired:
@@ -346,10 +360,7 @@ async def _run_index(path: str) -> str:
 
 def _reset_caches():
     """Reset all caches after reindexing."""
-    global _querier_cache, _semantic_cache, _git_cache
-    _querier_cache = {"mtime": 0, "instance": None}
-    _semantic_cache = {"mtime": 0, "instance": None}
-    _git_cache = {"analyzer": None, "graph_mtime": None}
+    _get_service().reset_caches()
 
 
 async def api_index(request: Request) -> JSONResponse:
@@ -367,12 +378,13 @@ async def api_index_stream(request: Request) -> StreamingResponse:
     async def event_stream():
         yield f"data: {json.dumps({'type': 'start', 'message': 'Starting reindex...'})}\n\n"
 
+        cfg = _get_config()
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         proc = await asyncio.create_subprocess_exec(
-            "uv", "run", str(script_path), str(PROJECT_ROOT),
+            "uv", "run", str(script_path), str(cfg.project_root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            cwd=str(PROJECT_ROOT),
+            cwd=str(cfg.project_root),
             env=env,
             limit=10 * 1024 * 1024,  # 10MB line buffer (indexer can emit large lines)
         )
@@ -434,7 +446,7 @@ async def api_search(request: Request) -> JSONResponse:
     # Semantic search if available
     semantic_results = []
     search_method = "keyword"
-    if SEMANTIC_AVAILABLE and GRAPH_PATH.exists():
+    if SEMANTIC_AVAILABLE and _get_config().graph_path.exists():
         if is_natural_language_query(terms) or len(tfidf_results) < 3:
             try:
                 searcher = _get_semantic_searcher()
@@ -742,13 +754,14 @@ async def api_cross_lang(request: Request) -> JSONResponse:
     path = request.query_params.get("path")
     tag = request.query_params.get("tag")
 
-    openapi_path = PROJECT_ROOT / "public" / "api" / "latest.json"
+    cfg = _get_config()
+    openapi_path = cfg.project_root / "public" / "api" / "latest.json"
     if not openapi_path.exists():
-        openapi_path = PROJECT_ROOT / "public" / "api" / "openapi.json"
+        openapi_path = cfg.project_root / "public" / "api" / "openapi.json"
     if not openapi_path.exists():
         return JSONResponse({"not_configured": True, "message": "No OpenAPI spec found. Place your spec at public/api/openapi.json relative to the project root."})
 
-    graph_path = str(GRAPH_PATH) if GRAPH_PATH.exists() else None
+    graph_path = str(cfg.graph_path) if cfg.graph_path.exists() else None
     tracer = CrossLangTracer(str(openapi_path), graph_path)
 
     if mode == "stats":
@@ -927,7 +940,7 @@ async def api_source(request: Request) -> JSONResponse:
     target_line = int(line) if line else None
 
     # Resolve the file path relative to project root
-    file_path = PROJECT_ROOT / file_param
+    file_path = _get_config().project_root / file_param
     if not file_path.exists():
         return JSONResponse({"error": f"File not found: {file_param}"}, status_code=404)
 
@@ -1148,16 +1161,17 @@ def main():
     parser.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1)")
     args = parser.parse_args()
 
+    cfg = _get_config()
     logger.info(f"Starting Descry Web UI on http://{args.host}:{args.port}")
-    logger.info(f"Project root: {PROJECT_ROOT}")
-    logger.info(f"Graph path: {GRAPH_PATH}")
+    logger.info(f"Project root: {cfg.project_root}")
+    logger.info(f"Graph path: {cfg.graph_path}")
 
     # GraphQuerier resolves source file paths relative to CWD, so we must
     # run from the project root (same as the MCP server does).
-    os.chdir(PROJECT_ROOT)
+    os.chdir(cfg.project_root)
 
     # Pre-warm the graph
-    if GRAPH_PATH.exists():
+    if cfg.graph_path.exists():
         logger.info("Pre-warming graph...")
         _get_querier()
         _update_graph_meta()

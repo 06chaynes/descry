@@ -501,45 +501,45 @@ class TestNamingConventionNormalization:
 
 
 class TestCrateFilter:
-    """Tests for the crate filter in search."""
+    """Tests for the package/crate filter in search."""
 
     @pytest.fixture
-    def multi_crate_graph(self):
-        """Create a graph with nodes from multiple crates."""
+    def multi_package_graph(self):
+        """Create a graph with nodes from multiple packages (mirrors descry's own structure)."""
         graph = {
             "nodes": [
-                # mandible crate
+                # src/descry package (Python)
                 {
-                    "id": "FILE:mandible/src/routes/handlers.rs",
+                    "id": "FILE:src/descry/handlers.py",
                     "type": "File",
-                    "metadata": {"path": "mandible/src/routes/handlers.rs", "name": "handlers.rs"},
+                    "metadata": {"path": "src/descry/handlers.py", "name": "handlers.py"},
                 },
                 {
-                    "id": "FILE:mandible/src/routes/handlers.rs::create_deployment",
-                    "type": "Function",
-                    "metadata": {"name": "create_deployment", "docstring": "Create a new deployment"},
-                },
-                # instinct crate
-                {
-                    "id": "FILE:instinct/src/models/deployment.rs",
-                    "type": "File",
-                    "metadata": {"path": "instinct/src/models/deployment.rs", "name": "deployment.rs"},
-                },
-                {
-                    "id": "FILE:instinct/src/models/deployment.rs::Deployment",
+                    "id": "FILE:src/descry/handlers.py::DescryService",
                     "type": "Class",
-                    "metadata": {"name": "Deployment", "docstring": "Deployment model"},
+                    "metadata": {"name": "DescryService", "docstring": "Core service for graph queries"},
                 },
-                # lens crate (TypeScript)
+                # src/descry/scip subpackage (Python)
                 {
-                    "id": "FILE:lens/src/lib/api/deployments.ts",
+                    "id": "FILE:src/descry/scip/parser.py",
                     "type": "File",
-                    "metadata": {"path": "lens/src/lib/api/deployments.ts", "name": "deployments.ts"},
+                    "metadata": {"path": "src/descry/scip/parser.py", "name": "parser.py"},
                 },
                 {
-                    "id": "FILE:lens/src/lib/api/deployments.ts::fetchDeployments",
-                    "type": "Function",
-                    "metadata": {"name": "fetchDeployments", "docstring": "Fetch deployments from API"},
+                    "id": "FILE:src/descry/scip/parser.py::ScipIndex",
+                    "type": "Class",
+                    "metadata": {"name": "ScipIndex", "docstring": "Parses SCIP index for graph queries"},
+                },
+                # tests package (Python)
+                {
+                    "id": "FILE:tests/test_generate.py",
+                    "type": "File",
+                    "metadata": {"path": "tests/test_generate.py", "name": "test_generate.py"},
+                },
+                {
+                    "id": "FILE:tests/test_generate.py::TestStdlibFilter",
+                    "type": "Class",
+                    "metadata": {"name": "TestStdlibFilter", "docstring": "Tests for stdlib filter in graph queries"},
                 },
             ],
             "edges": [],
@@ -552,67 +552,66 @@ class TestCrateFilter:
 
         os.unlink(f.name)
 
-    def test_filter_by_crate_mandible(self, multi_crate_graph):
-        """Should return only results from mandible crate."""
+    def test_filter_by_package_src(self, multi_package_graph):
+        """Should return only results from src/descry package."""
         from descry.query import GraphQuerier
-        q = GraphQuerier(multi_crate_graph)
-        results = q.search_docs(["deployment"], crate="mandible")
+        q = GraphQuerier(multi_package_graph)
+        results = q.search_docs(["graph", "queries"], crate="src")
 
-        # Should find create_deployment from mandible
         assert len(results) > 0
         for r in results:
-            assert r["id"].startswith("FILE:mandible/")
+            assert r["id"].startswith("FILE:src/")
 
-    def test_filter_by_crate_instinct(self, multi_crate_graph):
-        """Should return only results from instinct crate."""
+    def test_filter_by_package_includes_subpackages(self, multi_package_graph):
+        """Filtering by top-level package should include subpackages (scip lives under src/)."""
         from descry.query import GraphQuerier
-        q = GraphQuerier(multi_crate_graph)
-        results = q.search_docs(["deployment"], crate="instinct")
+        q = GraphQuerier(multi_package_graph)
+        results = q.search_docs(["graph", "queries"], crate="src")
 
-        # Should find Deployment from instinct
+        # Should find both handlers.py and scip/parser.py since both are under src/
+        ids = {r["id"] for r in results}
+        assert any("handlers" in i for i in ids)
+        assert any("scip" in i for i in ids)
+
+    def test_filter_by_tests(self, multi_package_graph):
+        """Should return only results from tests package."""
+        from descry.query import GraphQuerier
+        q = GraphQuerier(multi_package_graph)
+        results = q.search_docs(["graph", "queries"], crate="tests")
+
         assert len(results) > 0
         for r in results:
-            assert r["id"].startswith("FILE:instinct/")
+            assert r["id"].startswith("FILE:tests/")
 
-    def test_filter_by_crate_lens(self, multi_crate_graph):
-        """Should return only results from lens crate."""
+    def test_no_filter_returns_all_packages(self, multi_package_graph):
+        """Should return results from all packages when no filter."""
         from descry.query import GraphQuerier
-        q = GraphQuerier(multi_crate_graph)
-        results = q.search_docs(["deployment"], crate="lens")
+        q = GraphQuerier(multi_package_graph)
+        results = q.search_docs(["graph", "queries"])
 
-        # Should find fetchDeployments from lens
-        assert len(results) > 0
-        for r in results:
-            assert r["id"].startswith("FILE:lens/")
+        # Should find results from multiple packages
+        paths = {r["id"] for r in results}
+        has_src = any("src/descry" in p for p in paths)
+        has_tests = any("tests/" in p for p in paths)
+        assert has_src
+        assert has_tests
 
-    def test_no_filter_returns_all_crates(self, multi_crate_graph):
-        """Should return results from all crates when no filter."""
+    def test_nonexistent_crate_returns_empty(self, multi_package_graph):
+        """Should return empty results for non-existent package."""
         from descry.query import GraphQuerier
-        q = GraphQuerier(multi_crate_graph)
-        results = q.search_docs(["deployment"])
-
-        # Should find results from all crates
-        crates_found = {r["id"].split("/")[0].replace("FILE:", "") for r in results}
-        assert "mandible" in crates_found
-        assert "instinct" in crates_found
-        assert "lens" in crates_found
-
-    def test_nonexistent_crate_returns_empty(self, multi_crate_graph):
-        """Should return empty results for non-existent crate."""
-        from descry.query import GraphQuerier
-        q = GraphQuerier(multi_crate_graph)
-        results = q.search_docs(["deployment"], crate="nonexistent")
+        q = GraphQuerier(multi_package_graph)
+        results = q.search_docs(["graph"], crate="nonexistent")
 
         assert len(results) == 0
 
-    def test_combine_crate_and_lang_filters(self, multi_crate_graph):
-        """Should combine crate and language filters."""
+    def test_combine_crate_and_lang_filters(self, multi_package_graph):
+        """Should combine package and language filters."""
         from descry.query import GraphQuerier
-        q = GraphQuerier(multi_crate_graph)
+        q = GraphQuerier(multi_package_graph)
 
-        # Filter by lens crate (TypeScript) - this is the only TS crate
-        results = q.search_docs(["deployment"], crate="lens")
-        assert all("lens" in r["id"] for r in results)
+        # Filter by src package with python lang
+        results = q.search_docs(["graph", "queries"], crate="src")
+        assert all("src" in r["id"] for r in results)
 
 
 class TestExcludeTestsFilter:

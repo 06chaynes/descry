@@ -422,7 +422,7 @@ class TestFlowDisambiguation:
 
 
 class TestExpandCallees:
-    """Tests for expand_callees feature in codegraph_context."""
+    """Tests for expand_callees feature in descry context."""
 
     @pytest.fixture
     def graph_with_callees(self, tmp_path):
@@ -562,7 +562,7 @@ fn fetch_user(user_id: &str) -> Result<User> {
 
 
 class TestFuzzyNodeMatching:
-    """Tests for fuzzy node ID matching in codegraph_context."""
+    """Tests for fuzzy node ID matching in descry context."""
 
     @pytest.fixture
     def graph_with_symbols(self, tmp_path):

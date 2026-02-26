@@ -55,10 +55,12 @@ def _clear_file_cache():
     _read_file_cached.cache_clear()
 
 
-def _get_syntax_lang(file_path: str) -> str:
+def _get_syntax_lang(file_path: str, lang_map: dict[str, str] | None = None) -> str:
     """Determine syntax highlighting language from file extension."""
     ext = os.path.splitext(file_path)[1].lower()
-    lang_map = {
+    if lang_map:
+        return lang_map.get(ext, "")
+    default_lang_map = {
         ".rs": "rust",
         ".py": "python",
         ".ts": "typescript",
@@ -73,7 +75,7 @@ def _get_syntax_lang(file_path: str) -> str:
         ".yml": "yaml",
         ".md": "markdown",
     }
-    return lang_map.get(ext, "")
+    return default_lang_map.get(ext, "")
 
 
 def _normalize_name(name: str) -> str:
@@ -157,7 +159,7 @@ def _clean_ref_name(ref_name: str, max_len: int = 60) -> str:
 
 
 class GraphQuerier:
-    def __init__(self, graph_file):
+    def __init__(self, graph_file, config=None):
         with open(graph_file, "r", encoding="utf-8") as f:
             self.data = json.load(f)
 
@@ -170,6 +172,16 @@ class GraphQuerier:
         for edge in self.edges:
             self.outgoing[edge["source"]].append(edge)
             self.incoming[edge["target"]].append(edge)
+
+        # Config-driven limits (fall back to module-level constants)
+        self._max_depth = config.max_depth if config else MAX_DEPTH
+        self._max_nodes = config.max_nodes if config else MAX_NODES_PER_OPERATION
+        self._max_children_per_level = config.max_children_per_level if config else MAX_CHILDREN_PER_LEVEL
+        self._max_callers_shown = config.max_callers_shown if config else MAX_CALLERS_SHOWN
+        self._timeout_ms = config.query_timeout_ms if config else TIMEOUT_MS
+        self._test_path_patterns = config.test_path_patterns if config else None
+        self._test_file_suffixes = config.test_file_suffixes if config else None
+        self._syntax_lang_map = config.syntax_lang_map if config else None
 
         # Build IDF cache for TF-IDF search
         self._idf_cache = self._build_idf_cache()
@@ -228,11 +240,11 @@ class GraphQuerier:
         }
 
         # Test detection patterns
-        test_path_patterns = (
+        test_path_patterns = self._test_path_patterns or (
             '/tests/', '/test/', '/_test/', '/spec/',
             '/testing/', '/fixtures/', '/mocks/', '/__tests__/',
         )
-        test_file_suffixes = (
+        test_file_suffixes = self._test_file_suffixes or (
             '_test.rs', '.test.ts', '.spec.ts', '_test.py',
             '.test.js', '.spec.js', '.test.tsx', '.spec.tsx',
         )
@@ -396,7 +408,7 @@ class GraphQuerier:
             max_tokens = DEFAULT_TOKEN_BUDGET
         if inline_threshold is None:
             inline_threshold = CALLEE_INLINE_THRESHOLD
-        depth = min(max(depth, 1), MAX_DEPTH)  # Clamp to 1-3
+        depth = min(max(depth, 1), self._max_depth)  # Clamp to 1-3
 
         # Resolve node ID with fuzzy matching
         resolved_id, resolve_msg = self._resolve_node_id(node_id)
@@ -417,7 +429,7 @@ class GraphQuerier:
             return f"ERROR: Source file '{file_path_rel}' not found on disk."
 
         # Determine syntax highlighting language
-        source_lang = _get_syntax_lang(file_path_rel)
+        source_lang = _get_syntax_lang(file_path_rel, self._syntax_lang_map)
 
         # 2. Get Source Code with smart truncation (or full if requested)
         meta = node["metadata"]
@@ -515,7 +527,7 @@ class GraphQuerier:
                     c_file = callee_node["id"].split("::")[0].replace("FILE:", "")
                     c_meta = callee_node["metadata"]
                     c_tokens = c_meta.get("token_count", 999)
-                    c_lang = _get_syntax_lang(c_file)
+                    c_lang = _get_syntax_lang(c_file, self._syntax_lang_map)
 
                     # Header info
                     sig = c_meta.get("signature", f"{c_meta.get('name')}(...)")
@@ -585,7 +597,7 @@ class GraphQuerier:
                 by_file[ex["file"]].append(ex)
 
             for file_path, examples in by_file.items():
-                ex_lang = _get_syntax_lang(file_path)
+                ex_lang = _get_syntax_lang(file_path, self._syntax_lang_map)
                 output.append(f"\n**From `{file_path}`:**")
                 for ex in examples:
                     output.append(f"Line {ex['lineno']}:")
@@ -901,7 +913,7 @@ class GraphQuerier:
                     "file": file_path,
                     "lineno": start_line,
                     "tokens": tokens,
-                    "lang": _get_syntax_lang(file_path),
+                    "lang": _get_syntax_lang(file_path, self._syntax_lang_map),
                     "source": source.rstrip(),
                 })
                 budget_remaining -= tokens
@@ -1088,7 +1100,7 @@ class GraphQuerier:
             List of dicts with caller info, sorted by token count (simpler first)
         """
         if limit is None:
-            limit = MAX_CALLERS_SHOWN
+            limit = self._max_callers_shown
 
         target_node = self.nodes.get(target_node_id)
         if not target_node:
@@ -1153,7 +1165,7 @@ class GraphQuerier:
 
         # Check timeout
         elapsed_ms = (time.time() - start_time) * 1000
-        if elapsed_ms > TIMEOUT_MS:
+        if elapsed_ms > self._timeout_ms:
             return [f"{'  ' * indent}*(timeout reached)*"], 0
 
         # Check depth limit
@@ -1169,7 +1181,7 @@ class GraphQuerier:
 
         results = []
         tokens_used = 0
-        callees = self.get_callees(node_id)[:MAX_CHILDREN_PER_LEVEL]
+        callees = self.get_callees(node_id)[:self._max_children_per_level]
 
         for callee_id in callees:
             if callee_id in expanded:
@@ -1177,7 +1189,7 @@ class GraphQuerier:
             expanded.add(callee_id)
 
             # Check timeout periodically
-            if (time.time() - start_time) * 1000 > TIMEOUT_MS:
+            if (time.time() - start_time) * 1000 > self._timeout_ms:
                 results.append(f"{'  ' * indent}*(timeout)*")
                 break
 
@@ -1192,7 +1204,7 @@ class GraphQuerier:
                 c_name = c_meta.get("name", "?")
                 c_sig = c_meta.get("signature", f"{c_name}(...)")
                 c_doc = (c_meta.get("docstring", "") or "").split("\n")[0][:80]
-                c_lang = _get_syntax_lang(c_file)
+                c_lang = _get_syntax_lang(c_file, self._syntax_lang_map)
 
                 # Inline small functions if budget allows
                 if c_tokens <= inline_threshold and c_tokens <= budget and os.path.exists(c_file):
@@ -1255,7 +1267,7 @@ class GraphQuerier:
             Formatted flow trace as markdown string
         """
         if timeout_ms is None:
-            timeout_ms = TIMEOUT_MS
+            timeout_ms = self._timeout_ms
         depth = min(depth, 5)  # Hard limit
 
         # Resolve start node
@@ -1307,7 +1319,7 @@ class GraphQuerier:
                 return False
             if current_depth > depth or node_id in visited:
                 return False
-            if nodes_visited >= MAX_NODES_PER_OPERATION:
+            if nodes_visited >= self._max_nodes:
                 output.append("  " * (current_depth - 1) + "*(node limit)*")
                 return False
 
@@ -1330,9 +1342,9 @@ class GraphQuerier:
 
             # Get next level
             if direction == "forward":
-                next_ids = self.get_callees(node_id)[:MAX_CHILDREN_PER_LEVEL]
+                next_ids = self.get_callees(node_id)[:self._max_children_per_level]
             else:
-                next_ids = self.get_callers(name)[:MAX_CHILDREN_PER_LEVEL]
+                next_ids = self.get_callers(name)[:self._max_children_per_level]
 
             # Format node
             indent = "  " * (current_depth - 1)
@@ -1346,7 +1358,7 @@ class GraphQuerier:
                     start_line = meta.get("lineno", 1)
                     end_line = meta.get("end_lineno", start_line + 10)
                     code = self.get_source_segment(file_path, start_line, end_line)
-                    lang = _get_syntax_lang(file_path)
+                    lang = _get_syntax_lang(file_path, self._syntax_lang_map)
                     output.append(f"{indent}  ```{lang}")
                     output.append(code.rstrip())
                     output.append(f"{indent}  ```")
@@ -1382,7 +1394,7 @@ class GraphQuerier:
         Each tree node has: id, name, type, tokens, file, line, code, lang, children.
         """
         if timeout_ms is None:
-            timeout_ms = TIMEOUT_MS
+            timeout_ms = self._timeout_ms
         depth = min(depth, 5)
 
         # Resolve start node
@@ -1430,7 +1442,7 @@ class GraphQuerier:
                 return None
             if current_depth > depth or node_id in visited:
                 return None
-            if nodes_visited >= MAX_NODES_PER_OPERATION:
+            if nodes_visited >= self._max_nodes:
                 return None
 
             visited.add(node_id)
@@ -1446,7 +1458,7 @@ class GraphQuerier:
             node_type = node.get("type", "?")[:3]
             file_path = node_id.split("::")[0].replace("FILE:", "")
             line = meta.get("lineno")
-            lang = _get_syntax_lang(file_path)
+            lang = _get_syntax_lang(file_path, self._syntax_lang_map)
 
             # Inline small functions
             code = None
@@ -1458,9 +1470,9 @@ class GraphQuerier:
 
             # Recurse into children
             if direction == "forward":
-                next_ids = self.get_callees(node_id)[:MAX_CHILDREN_PER_LEVEL]
+                next_ids = self.get_callees(node_id)[:self._max_children_per_level]
             else:
-                next_ids = self.get_callers(name)[:MAX_CHILDREN_PER_LEVEL]
+                next_ids = self.get_callers(name)[:self._max_children_per_level]
 
             children = []
             for next_id in next_ids:
@@ -2140,8 +2152,7 @@ def _find_default_graph() -> str:
     """Find the default graph file by searching for project markers."""
     from pathlib import Path
 
-    # Check CODEGRAPH_CACHE_DIR first
-    cache_dir_env = os.environ.get("CODEGRAPH_CACHE_DIR")
+    cache_dir_env = os.environ.get("DESCRY_CACHE_DIR")
     if cache_dir_env:
         graph_path = Path(cache_dir_env) / "codebase_graph.json"
         if graph_path.exists():
@@ -2153,12 +2164,12 @@ def _find_default_graph() -> str:
         if path == Path.home():
             break
         # Check for project markers
-        if (path / ".mcp.json").exists() or (path / "Cargo.toml").exists():
-            graph_path = path / ".codegraph_cache" / "codebase_graph.json"
+        if any((path / m).exists() for m in (".git", "Cargo.toml", "package.json", "pyproject.toml")):
+            graph_path = path / ".descry_cache" / "codebase_graph.json"
             return str(graph_path)
 
     # Fall back to current directory
-    return str(Path.cwd() / ".codegraph_cache" / "codebase_graph.json")
+    return str(Path.cwd() / ".descry_cache" / "codebase_graph.json")
 
 
 def _handle_status(graph_file: str) -> None:
@@ -2169,7 +2180,7 @@ def _handle_status(graph_file: str) -> None:
     graph_path = Path(graph_file)
     cache_dir = graph_path.parent
 
-    print("Codegraph Status")
+    print("Descry Status")
     print("=" * 50)
 
     # Graph status
@@ -2194,8 +2205,8 @@ def _handle_status(graph_file: str) -> None:
     # SCIP status
     print()
     scip_dir = cache_dir / "scip"
-    if os.environ.get("CODEGRAPH_NO_SCIP", "").lower() in ("1", "true"):
-        print("SCIP: Disabled (CODEGRAPH_NO_SCIP=1)")
+    if os.environ.get("DESCRY_NO_SCIP", "").lower() in ("1", "true"):
+        print("SCIP: Disabled (DESCRY_NO_SCIP=1)")
     elif scip_dir.exists():
         scip_files = list(scip_dir.glob("*.scip"))
         if scip_files:
@@ -2211,8 +2222,8 @@ def _handle_status(graph_file: str) -> None:
 
     # Embeddings status
     print()
-    if os.environ.get("CODEGRAPH_NO_EMBEDDINGS", "").lower() in ("1", "true"):
-        print("Embeddings: Disabled (CODEGRAPH_NO_EMBEDDINGS=1)")
+    if os.environ.get("DESCRY_NO_EMBEDDINGS", "").lower() in ("1", "true"):
+        print("Embeddings: Disabled (DESCRY_NO_EMBEDDINGS=1)")
     else:
         emb_files = list(cache_dir.glob("embeddings_*.npz"))
         if emb_files:
@@ -2234,10 +2245,10 @@ def _handle_index(graph_file: str, root_path: str) -> None:
     from pathlib import Path
 
     script_dir = Path(__file__).parent
-    generate_script = script_dir / "generate_codegraph.py"
+    generate_script = script_dir / "generate.py"
 
     if not generate_script.exists():
-        print(f"Error: generate_codegraph.py not found at {generate_script}")
+        print(f"Error: generate.py not found at {generate_script}")
         sys.exit(1)
 
     print(f"Regenerating codebase graph from {root_path}...")
@@ -2268,8 +2279,8 @@ def _handle_semantic(graph_file: str, query: str, limit: int) -> None:
     from pathlib import Path
 
     # Try to import embeddings
-    if os.environ.get("CODEGRAPH_NO_EMBEDDINGS", "").lower() in ("1", "true"):
-        print("Semantic search disabled (CODEGRAPH_NO_EMBEDDINGS=1)")
+    if os.environ.get("DESCRY_NO_EMBEDDINGS", "").lower() in ("1", "true"):
+        print("Semantic search disabled (DESCRY_NO_EMBEDDINGS=1)")
         print("Falling back to keyword search...")
         # Fall back to keyword search
         q = GraphQuerier(graph_file)
@@ -2348,12 +2359,12 @@ Examples:
   %(prog)s index
 
 Environment variables:
-  CODEGRAPH_CACHE_DIR    Override cache location (default: .codegraph_cache)
-  CODEGRAPH_LOG_LEVEL    Logging verbosity (DEBUG/INFO/WARNING/ERROR)
-  CODEGRAPH_NO_SCIP      Set to 1 to disable SCIP resolution
-  CODEGRAPH_NO_EMBEDDINGS  Set to 1 to disable semantic search
+  DESCRY_CACHE_DIR       Override cache location (default: .descry_cache)
+  DESCRY_LOG_LEVEL       Logging verbosity (DEBUG/INFO/WARNING/ERROR)
+  DESCRY_NO_SCIP         Set to 1 to disable SCIP resolution
+  DESCRY_NO_EMBEDDINGS   Set to 1 to disable semantic search
 
-Run from project root or set CODEGRAPH_CACHE_DIR.
+Run from project root or set DESCRY_CACHE_DIR.
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
