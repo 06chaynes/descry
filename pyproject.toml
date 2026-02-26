@@ -1,0 +1,26 @@
+[project]
+name = "descry"
+version = "0.1.0"
+description = "Codebase knowledge graph: polyglot indexer, semantic search, call-graph analysis"
+requires-python = ">=3.11"
+dependencies = ["protobuf>=4.0.0"]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0.0"]
+web = ["starlette>=0.40.0", "uvicorn>=0.30.0"]
+embeddings = ["sentence-transformers>=2.2.0", "numpy>=1.24.0"]
+all = ["descry[mcp,web,embeddings]"]
+dev = ["descry[all]", "pytest>=7.0.0", "pytest-asyncio>=0.21.0", "ruff>=0.1.0"]
+
+[project.scripts]
+descry = "descry.cli:main"
+descry-mcp = "descry.mcp_server:main"
+descry-generate = "descry.generate:main"
+descry-web = "descry.web.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/descry"]

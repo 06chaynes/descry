@@ -1,0 +1,1845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Descry Explorer</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/rust.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script>document.addEventListener('DOMContentLoaded', () => { mermaid.initialize({ startOnLoad: false, theme: 'dark', themeVariables: { primaryColor: '#3b82f6', primaryTextColor: '#e2e8f0', lineColor: '#64748b', secondaryColor: '#1e293b', tertiaryColor: '#0f172a' }}); });</script>
+</head>
+<body x-data="app()" x-init="init()">
+
+<!-- Header -->
+<div class="header">
+    <div class="header-logo" @click="goHome()" style="cursor:pointer">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+        </svg>
+        <span>Descry Explorer</span>
+    </div>
+
+    <div class="search-bar">
+        <span class="search-icon">&#x1F50D;</span>
+        <input type="text" placeholder="Search symbols... (Enter to search)"
+               x-model="globalSearch"
+               @keydown.enter="doGlobalSearch()">
+    </div>
+
+    <div class="header-status" x-show="health">
+        <span class="status-dot" :class="health?.status === 'ok' ? 'ok' : health?.status === 'stale' ? 'stale' : 'error'"></span>
+        <span x-text="health?.graph?.nodes?.toLocaleString() + 'n / ' + health?.graph?.edges?.toLocaleString() + 'e'"></span>
+        <span x-show="health?.graph?.age_str" x-text="' | ' + health?.graph?.age_str" style="color:var(--text-muted)"></span>
+    </div>
+    <button class="help-btn" @click="showHelp = !showHelp" title="Symbol legend & tips">?</button>
+</div>
+
+<!-- Layout -->
+<div class="layout">
+
+<!-- Sidebar -->
+<div class="sidebar">
+    <div class="sidebar-group">
+        <div class="sidebar-group-title">Search</div>
+        <div class="sidebar-item" :class="activeTool === 'search' && 'active'" @click="setTool('search')">
+            <span class="icon">&#x2315;</span> Search
+        </div>
+        <div class="sidebar-item" :class="activeTool === 'semantic' && 'active'" @click="setTool('semantic')">
+            <span class="icon">&#x2248;</span> Semantic
+        </div>
+        <div class="sidebar-item" :class="activeTool === 'quick' && 'active'" @click="setTool('quick')">
+            <span class="icon">&#x21AF;</span> Quick Lookup
+        </div>
+    </div>
+
+    <div class="sidebar-group">
+        <div class="sidebar-group-title">Navigate</div>
+        <div class="sidebar-item" :class="activeTool === 'callers' && 'active'" @click="setTool('callers')">
+            <span class="icon">&larr;</span> Callers
+        </div>
+        <div class="sidebar-item" :class="activeTool === 'callees' && 'active'" @click="setTool('callees')">
+            <span class="icon">&rarr;</span> Callees
+        </div>
+        <div class="sidebar-item" :class="activeTool === 'context' && 'active'" @click="setTool('context')">
+            <span class="icon">&#x25A3;</span> Context
+        </div>
+        <div class="sidebar-item" :class="activeTool === 'structure' && 'active'" @click="setTool('structure')">
+            <span class="icon">&#x2630;</span> Structure
+        </div>
+        <div class="sidebar-item" :class="activeTool === 'flatten' && 'active'" @click="setTool('flatten')">
+            <span class="icon">&#x25BD;</span> Flatten
+        </div>
+        <div class="sidebar-item" :class="activeTool === 'impls' && 'active'" @click="setTool('impls')">
+            <span class="icon">&#x2261;</span> Impls
+        </div>
+    </div>
+
+    <div class="sidebar-group">
+        <div class="sidebar-group-title">Flow</div>
+        <div class="sidebar-item" :class="activeTool === 'flow' && 'active'" @click="setTool('flow')">
+            <span class="icon">&#x27A1;</span> Trace
+        </div>
+        <div class="sidebar-item" :class="activeTool === 'path' && 'active'" @click="setTool('path')">
+            <span class="icon">&#x2194;</span> Path
+        </div>
+        <div class="sidebar-item" :class="activeTool === 'cross-lang' && 'active'" @click="setTool('cross-lang')">
+            <span class="icon">&#x29C9;</span> Cross-Lang
+        </div>
+    </div>
+
+    <div class="sidebar-group">
+        <div class="sidebar-group-title">History</div>
+        <div class="sidebar-item" :class="activeTool === 'churn' && 'active'" @click="setTool('churn')">
+            <span class="icon">&#x2666;</span> Churn
+        </div>
+        <div class="sidebar-item" :class="activeTool === 'evolution' && 'active'" @click="setTool('evolution')">
+            <span class="icon">&#x29D6;</span> Evolution
+        </div>
+        <div class="sidebar-item" :class="activeTool === 'changes' && 'active'" @click="setTool('changes')">
+            <span class="icon">&#x0394;</span> Changes
+        </div>
+    </div>
+
+    <div class="sidebar-group">
+        <div class="sidebar-group-title">Docs</div>
+        <div class="sidebar-item" :class="activeTool === 'docs' && 'active'" @click="setTool('docs')">
+            <span class="icon">&#x00A7;</span> Search Docs
+        </div>
+    </div>
+
+    <div class="sidebar-group">
+        <div class="sidebar-group-title">Admin</div>
+        <div class="sidebar-item" :class="activeTool === 'health' && 'active'" @click="setTool('health')">
+            <span class="icon">&#x2764;</span> Health
+        </div>
+        <div class="sidebar-item" :class="activeTool === 'reindex' && 'active'" @click="setTool('reindex')">
+            <span class="icon">&#x21BB;</span> Reindex
+        </div>
+    </div>
+
+    <div class="sidebar-group">
+        <div class="sidebar-group-title">Source</div>
+        <div class="sidebar-item" :class="activeTool === 'source' && 'active'" @click="setTool('source')">
+            <span class="icon">&#x2039;&#x203A;</span> View File
+        </div>
+    </div>
+</div>
+
+<!-- Main Content -->
+<div class="main">
+
+    <!-- Breadcrumbs -->
+    <div class="breadcrumbs" x-show="breadcrumbs.length > 1">
+        <template x-for="(crumb, idx) in breadcrumbs" :key="idx">
+            <span>
+                <span x-show="idx > 0" class="sep"> / </span>
+                <span class="crumb" @click="navigateTo(idx)" x-text="crumb.label"></span>
+            </span>
+        </template>
+    </div>
+
+    <!-- Error Banner -->
+    <div class="error-banner" x-show="error" x-text="error"></div>
+
+    <!-- ========= SEARCH TOOL ========= -->
+    <template x-if="activeTool === 'search'">
+        <div>
+            <div class="tool-form">
+                <h3>Search Symbols</h3>
+                <p class="tool-desc">Find functions, classes, methods, and constants across the codebase using hybrid keyword + semantic matching. Filter by language, crate, or symbol type to narrow results. Use this as a starting point to discover symbols, then click any result to view its full context. Models should use this to locate entry points before tracing call flows.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Search Terms</label>
+                        <input type="text" x-model="forms.search.terms" placeholder="e.g. validate_token, authentication logic"
+                               @keydown.enter="runSearch()">
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.search.terms = 'create_deployment'; runSearch()">create_deployment</a>
+                            <a @click.prevent="forms.search.terms = 'JwtAuth'; runSearch()">JwtAuth</a>
+                            <a @click.prevent="forms.search.terms = 'authentication and token validation'; runSearch()">authentication and token validation</a>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Limit</label>
+                        <input type="number" x-model.number="forms.search.limit" min="1" max="50" style="width:70px">
+                    </div>
+                    <div class="form-group">
+                        <label>Language</label>
+                        <select x-model="forms.search.lang">
+                            <option value="">All</option>
+                            <option value="rust">Rust</option>
+                            <option value="typescript">TypeScript</option>
+                            <option value="python">Python</option>
+                            <option value="svelte">Svelte</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Crate</label>
+                        <input type="text" x-model="forms.search.crate" placeholder="e.g. backend" style="width:120px">
+                    </div>
+                    <div class="form-group">
+                        <label>Type</label>
+                        <select x-model="forms.search.type">
+                            <option value="">All</option>
+                            <option value="function">Function</option>
+                            <option value="class">Class</option>
+                            <option value="method">Method</option>
+                            <option value="constant">Constant</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-primary" @click="runSearch()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.search">
+                <div class="results-header">
+                    <span x-text="results.search?.total + ' result(s)' + (results.search?.method ? ' [' + results.search.method + ']' : '')"></span>
+                </div>
+                <div class="results-body">
+                    <template x-if="results.search?.results?.length === 0">
+                        <div class="empty-state"><div class="es-title">No results found</div></div>
+                    </template>
+                    <template x-for="(r, i) in results.search?.results || []" :key="r.id">
+                        <div class="result-card" @click="viewContext(r.id)">
+                            <div class="rc-header">
+                                <span class="rc-type" :class="typeClass(r.type)" x-text="typeLabel(r.type)" :title="r.type"></span>
+                                <span class="rc-name" x-text="r.parent_name ? r.parent_name + '::' + r.name : r.name"></span>
+                                <span class="rc-meta" x-text="r.token_count + 't, ' + r.in_degree + 'c'"></span>
+                            </div>
+                            <div class="rc-location" x-text="r.location"></div>
+                            <div class="rc-signature" x-show="r.signature" x-text="r.signature"></div>
+                            <div class="rc-docstring" x-show="r.docstring" x-text="r.docstring?.split('\\n')[0]?.substring(0, 120)"></div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= SEMANTIC TOOL ========= -->
+    <template x-if="activeTool === 'semantic'">
+        <div>
+            <div class="tool-form">
+                <h3>Semantic Search</h3>
+                <p class="tool-desc">Search by meaning using code embeddings rather than exact names. Describe what you're looking for in natural language (e.g. "rate limiting middleware" or "database connection pooling") and get results ranked by conceptual similarity. Best when you know what a function does but not what it's called. Models benefit from this for exploratory queries where keyword search would miss relevant results.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Natural Language Query</label>
+                        <input type="text" x-model="forms.semantic.query" placeholder="e.g. authentication and token validation"
+                               @keydown.enter="runSemantic()">
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.semantic.query = 'rate limiting and request throttling'; runSemantic()">rate limiting</a>
+                            <a @click.prevent="forms.semantic.query = 'database connection pooling'; runSemantic()">connection pooling</a>
+                            <a @click.prevent="forms.semantic.query = 'TLS certificate verification'; runSemantic()">TLS verification</a>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Limit</label>
+                        <input type="number" x-model.number="forms.semantic.limit" min="1" max="50" style="width:70px">
+                    </div>
+                    <button class="btn btn-primary" @click="runSemantic()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.semantic">
+                <div class="results-header">
+                    <span x-text="results.semantic?.total + ' result(s)'"></span>
+                </div>
+                <div class="results-body">
+                    <template x-for="r in results.semantic?.results || []" :key="r.id">
+                        <div class="result-card" @click="viewContext(r.id)">
+                            <div class="rc-header">
+                                <span class="rc-type" :class="typeClass(r.type)" x-text="typeLabel(r.type)" :title="r.type"></span>
+                                <span class="rc-name" x-text="r.name"></span>
+                                <span class="rc-meta" x-text="'score: ' + r.score"></span>
+                            </div>
+                            <div class="rc-location" x-text="r.location"></div>
+                            <div class="rc-signature" x-show="r.signature" x-text="r.signature"></div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= QUICK LOOKUP ========= -->
+    <template x-if="activeTool === 'quick'">
+        <div>
+            <div class="tool-form">
+                <h3>Quick Lookup</h3>
+                <p class="tool-desc">The fastest way to get full details on a symbol. Combines search and context in one step: finds the best match and immediately returns its source code, callers, callees, and related tests. Use when you already know a symbol name and want everything about it at once. Ideal for models that need a complete picture in a single API call instead of search-then-context round trips.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Symbol Name</label>
+                        <input type="text" x-model="forms.quick.name" placeholder="e.g. validate_token"
+                               @keydown.enter="runQuick()">
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.quick.name = 'register_with_token'; runQuick()">register_with_token</a>
+                            <a @click.prevent="forms.quick.name = 'health_check'; runQuick()">health_check</a>
+                            <a @click.prevent="forms.quick.name = 'dispatch'; runQuick()">dispatch</a>
+                        </div>
+                    </div>
+                    <div class="checkbox-row">
+                        <input type="checkbox" id="quick-full" x-model="forms.quick.full">
+                        <label for="quick-full">Full source</label>
+                    </div>
+                    <button class="btn btn-primary" @click="runQuick()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.quick">
+                <div class="results-header">
+                    <span x-text="results.quick?.symbol?.name + (results.quick?.other_matches > 0 ? ' (+' + results.quick.other_matches + ' others)' : '')"></span>
+                </div>
+                <div class="results-body markdown-body" x-html="safeHtml(results.quick?.markdown)" x-effect="if(results.quick?.markdown) $nextTick(() => renderMermaid($el))"></div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= CALLERS ========= -->
+    <template x-if="activeTool === 'callers'">
+        <div>
+            <div class="tool-form">
+                <h3>Find Callers</h3>
+                <p class="tool-desc">Lists every function or method that calls the given symbol. More reliable than grep because it uses the call graph to distinguish actual call sites from definitions, comments, and string matches. Essential for impact analysis before refactoring: understand who depends on a function before changing its signature or behavior.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Symbol Name</label>
+                        <input type="text" x-model="forms.callers.name" placeholder="e.g. validate_token"
+                               @keydown.enter="runCallers()">
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.callers.name = 'create_deployment'; runCallers()">create_deployment</a>
+                            <a @click.prevent="forms.callers.name = 'health_check'; runCallers()">health_check</a>
+                            <a @click.prevent="forms.callers.name = 'dispatch'; runCallers()">dispatch</a>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Limit</label>
+                        <input type="number" x-model.number="forms.callers.limit" min="1" max="100" style="width:70px">
+                    </div>
+                    <button class="btn btn-primary" @click="runCallers()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.callers">
+                <div class="results-header">
+                    <span x-text="results.callers?.total + ' caller(s) of ' + results.callers?.symbol + (results.callers?.fuzzy ? ' (fuzzy)' : '')"></span>
+                </div>
+                <div class="results-body">
+                    <template x-for="c in results.callers?.callers || []" :key="c.id">
+                        <div class="symbol-list-item" @click="viewContext(c.id)">
+                            <span x-text="c.name"></span>
+                            <span class="sl-location" x-text="c.location"></span>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= CALLEES ========= -->
+    <template x-if="activeTool === 'callees'">
+        <div>
+            <div class="tool-form">
+                <h3>Find Callees</h3>
+                <p class="tool-desc">Lists every function or method that the given symbol calls. Use this to understand a function's dependencies and downstream effects before modifying it. Helps answer "what will break if this dependency changes?" and "what side effects does this function trigger?" Models use this for dependency analysis when planning changes.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Symbol Name</label>
+                        <input type="text" x-model="forms.callees.name" placeholder="e.g. validate_token"
+                               @keydown.enter="runCallees()">
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.callees.name = 'register_with_token'; runCallees()">register_with_token</a>
+                            <a @click.prevent="forms.callees.name = 'create_deployment'; runCallees()">create_deployment</a>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Limit</label>
+                        <input type="number" x-model.number="forms.callees.limit" min="1" max="100" style="width:70px">
+                    </div>
+                    <button class="btn btn-primary" @click="runCallees()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.callees">
+                <div class="results-header">
+                    <span x-text="results.callees?.total + ' callee(s) of ' + results.callees?.symbol + (results.callees?.fuzzy ? ' (fuzzy)' : '')"></span>
+                </div>
+                <div class="results-body">
+                    <template x-for="c in results.callees?.callees || []" :key="c.id">
+                        <div class="symbol-list-item" @click="viewContext(c.id)">
+                            <span x-text="c.name"></span>
+                            <span class="sl-location" x-text="c.location"></span>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= CONTEXT ========= -->
+    <template x-if="activeTool === 'context'">
+        <div>
+            <div class="tool-form">
+                <h3>Symbol Context</h3>
+                <p class="tool-desc">The complete dossier for a symbol: source code, list of callers, list of callees, and related tests. Usually reached by clicking a search result. Toggle "Full" to see the complete source without truncation, or "Expand callees" to inline the source of small dependencies directly in the output. Models use this as the primary way to gather all information needed to understand or modify a symbol.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Node ID</label>
+                        <input type="text" x-model="forms.context.node_id" placeholder="e.g. FILE:backend/src/auth.rs::validate_token"
+                               @keydown.enter="runContext()">
+                    </div>
+                    <div class="checkbox-row">
+                        <input type="checkbox" id="ctx-full" x-model="forms.context.full">
+                        <label for="ctx-full">Full</label>
+                    </div>
+                    <div class="checkbox-row">
+                        <input type="checkbox" id="ctx-expand" x-model="forms.context.expand_callees">
+                        <label for="ctx-expand">Expand callees</label>
+                    </div>
+                    <button class="btn btn-primary" @click="runContext()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.context">
+                <div class="results-header">
+                    <span x-text="results.context?.node_id"></span>
+                </div>
+                <div class="results-body markdown-body" x-html="safeHtml(results.context?.markdown)" x-effect="if(results.context?.markdown) $nextTick(() => renderMermaid($el))"></div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= STRUCTURE ========= -->
+    <template x-if="activeTool === 'structure'">
+        <div>
+            <div class="tool-form">
+                <h3>File Structure</h3>
+                <p class="tool-desc">Shows the skeleton of a file: imports, constants, classes, and functions with line numbers, without reading the full source. Much faster than opening a large file when you just need to know what's defined in it. Click any symbol to jump to its full context. Models use this for orientation when entering an unfamiliar file.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Filename</label>
+                        <input type="text" x-model="forms.structure.filename" placeholder="e.g. server.rs, auth.rs"
+                               @keydown.enter="runStructure()">
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.structure.filename = 'auth.rs'; runStructure()">auth.rs</a>
+                            <a @click.prevent="forms.structure.filename = 'server.rs'; runStructure()">server.rs</a>
+                            <a @click.prevent="forms.structure.filename = 'dispatchers/mod.rs'; runStructure()">dispatchers/mod.rs</a>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" @click="runStructure()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.structure">
+                <div class="results-header">
+                    <span x-text="results.structure?.file"></span>
+                </div>
+                <div class="results-body">
+                    <template x-if="results.structure?.imports?.length">
+                        <div style="margin-bottom:12px">
+                            <div style="font-weight:600;margin-bottom:4px;color:var(--text-secondary);font-size:12px">IMPORTS</div>
+                            <div style="font-family:var(--font-mono);font-size:12px;color:var(--text-muted)" x-text="results.structure.imports.join(', ')"></div>
+                        </div>
+                    </template>
+                    <template x-for="(items, kind) in results.structure?.definitions || {}" :key="kind">
+                        <div style="margin-bottom:12px">
+                            <div style="font-weight:600;margin-bottom:4px;color:var(--text-secondary);font-size:12px;text-transform:uppercase" x-text="kind"></div>
+                            <template x-for="item in items" :key="item.id || item.name">
+                                <div class="symbol-list-item" @click="item.id && viewContext(item.id)">
+                                    <span x-text="item.name"></span>
+                                    <span class="sl-location" x-show="item.lineno" x-text="'L' + item.lineno"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= FLATTEN ========= -->
+    <template x-if="activeTool === 'flatten'">
+        <div>
+            <div class="tool-form">
+                <h3>Flatten Class API</h3>
+                <p class="tool-desc">Shows the effective public API of a class including methods inherited from traits and parent types. Requires the full node ID (e.g. FILE:crate/src/path.rs::ClassName). Use this to understand the complete interface of a struct or class without manually tracing trait implementations. Models use this to enumerate all available methods when working with a type.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Class Node ID</label>
+                        <input type="text" x-model="forms.flatten.class_node_id" placeholder="e.g. FILE:mantisctl/src/api/client.rs::ApiClient"
+                               @keydown.enter="runFlatten()">
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.flatten.class_node_id = 'FILE:mantisctl/src/api/client.rs::ApiClient'; runFlatten()">ApiClient</a>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" @click="runFlatten()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.flatten">
+                <div class="results-body markdown-body" x-html="safeHtml(results.flatten?.markdown)" x-effect="if(results.flatten?.markdown) $nextTick(() => renderMermaid($el))"></div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= IMPLS ========= -->
+    <template x-if="activeTool === 'impls'">
+        <div>
+            <div class="tool-form">
+                <h3>Trait Implementations</h3>
+                <p class="tool-desc">Find every struct that implements a given trait method across the codebase. Essential for polymorphic code where grep matches dozens of false positives. For example, searching "from_request_parts" shows JwtAuth, Pagination, and other Axum extractors. Optionally filter by trait name. Models use this to find all concrete implementations of an interface method.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Method Name</label>
+                        <input type="text" x-model="forms.impls.method" placeholder="e.g. from_request_parts"
+                               @keydown.enter="runImpls()">
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.impls.method = 'from_request_parts'; runImpls()">from_request_parts</a>
+                            <a @click.prevent="forms.impls.method = 'call'; runImpls()">call</a>
+                            <a @click.prevent="forms.impls.method = 'into_response'; runImpls()">into_response</a>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Trait Filter</label>
+                        <input type="text" x-model="forms.impls.trait_name" placeholder="(optional)" style="width:150px">
+                    </div>
+                    <button class="btn btn-primary" @click="runImpls()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.impls">
+                <div class="results-header">
+                    <span x-text="results.impls?.total + ' implementation(s) of ' + results.impls?.method"></span>
+                </div>
+                <div class="results-body">
+                    <template x-for="impl in results.impls?.implementations || []" :key="impl.id">
+                        <div class="result-card" @click="viewContext(impl.id)">
+                            <div class="rc-header">
+                                <span class="rc-type met">impl</span>
+                                <span class="rc-name" x-text="impl.struct_name + '::' + results.impls?.method"></span>
+                            </div>
+                            <div class="rc-location" x-text="impl.file_path + (impl.lineno ? ':' + impl.lineno : '')"></div>
+                            <div class="rc-signature" x-show="impl.signature" x-text="impl.signature"></div>
+                            <div class="rc-meta" x-text="'trait: ' + impl.trait_name"></div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= FLOW ========= -->
+    <template x-if="activeTool === 'flow'">
+        <div>
+            <div class="tool-form">
+                <h3>Trace Call Flow</h3>
+                <p class="tool-desc">Visualize the call tree starting from any symbol. "Forward" traces what a function calls (and what those call, recursively). "Backward" traces what calls the function. Set depth to control how many levels deep to explore. Optionally set a target to stop when a specific symbol is reached. Small functions are inlined so you can read the logic without leaving the page.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Start Symbol</label>
+                        <input type="text" x-model="forms.flow.start" placeholder="e.g. validate_token"
+                               @keydown.enter="runFlow()">
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.flow.start = 'dispatch'; forms.flow.direction = 'forward'; forms.flow.depth = 3; runFlow()">dispatch (fwd)</a>
+                            <a @click.prevent="forms.flow.start = 'create_deployment'; forms.flow.direction = 'backward'; forms.flow.depth = 2; runFlow()">create_deployment (bwd)</a>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Direction</label>
+                        <select x-model="forms.flow.direction">
+                            <option value="forward">Forward (callees)</option>
+                            <option value="backward">Backward (callers)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Depth</label>
+                        <input type="number" x-model.number="forms.flow.depth" min="1" max="10" style="width:70px">
+                    </div>
+                    <div class="form-group">
+                        <label>Target (optional)</label>
+                        <input type="text" x-model="forms.flow.target" placeholder="stop at..." style="width:150px">
+                    </div>
+                    <button class="btn btn-primary" @click="runFlow()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.flow?.tree">
+                <div class="results-header">
+                    <span x-text="'Flow from ' + results.flow?.start + ' (' + results.flow?.direction + ', depth ' + results.flow?.depth + ')'"></span>
+                    <button class="btn btn-sm" @click="flowToggleAll()" x-text="flowExpandAll ? 'Collapse all' : 'Expand all'" style="font-size:11px; padding: 2px 8px;"></button>
+                </div>
+                <!-- Disambiguation note -->
+                <div class="flow-note" x-show="results.flow?.tree?.note" x-text="results.flow?.tree?.note"></div>
+                <!-- Alternatives -->
+                <div class="flow-alternatives" x-show="results.flow?.tree?.alternatives?.length">
+                    <span class="flow-alt-label">Alternatives:</span>
+                    <template x-for="alt in (results.flow?.tree?.alternatives || [])" :key="alt.id">
+                        <a class="flow-alt-link" @click.prevent="forms.flow.start = alt.id; runFlow()" x-text="alt.name + ' (' + alt.file + ')'"></a>
+                    </template>
+                </div>
+                <!-- Error -->
+                <div class="flow-error" x-show="results.flow?.tree?.error" x-text="results.flow?.tree?.error"></div>
+                <!-- Tree -->
+                <div class="flow-tree" x-show="results.flow?.tree?.root"
+                     x-html="renderFlowTree(results.flow?.tree?.root, 0)"
+                     @click="handleFlowClick($event)"
+                     x-effect="if(results.flow?.tree?.root) $nextTick(() => highlightFlowCode($el))"></div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= PATH ========= -->
+    <template x-if="activeTool === 'path'">
+        <div>
+            <div class="tool-form">
+                <h3>Find Call Path</h3>
+                <p class="tool-desc">Find the shortest call chain between two symbols. Answers "how does function A eventually call function B?" by showing each hop with the call site code snippet. More focused than Trace, which shows the entire call tree. Use this when you know both endpoints and need to understand the connection between them. Models use this for debugging or verifying that a specific code path exists.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Start</label>
+                        <input type="text" x-model="forms.path.start" placeholder="e.g. register_with_token"
+                               @keydown.enter="runPath()">
+                    </div>
+                    <div class="form-group flex-1">
+                        <label>End</label>
+                        <input type="text" x-model="forms.path.end" placeholder="e.g. check_rate_limit"
+                               @keydown.enter="runPath()">
+                    </div>
+                    <div class="form-group">
+                        <label>Max Depth</label>
+                        <input type="number" x-model.number="forms.path.max_depth" min="1" max="20" style="width:70px">
+                    </div>
+                    <button class="btn btn-primary" @click="runPath()" :disabled="loading">Go</button>
+                </div>
+                <div class="input-hints">
+                    Try:
+                    <a @click.prevent="forms.path.start = 'process_pending_requests'; forms.path.end = 'select_instance'; runPath()">process_pending_requests &rarr; select_instance</a>
+                    <a @click.prevent="forms.path.start = 'create_deployment'; forms.path.end = 'with_sensitive_data'; runPath()">create_deployment &rarr; with_sensitive_data</a>
+                    <a @click.prevent="forms.path.start = 'register_with_token'; forms.path.end = 'check_rate_limit'; runPath()">register_with_token &rarr; check_rate_limit</a>
+                </div>
+            </div>
+            <div class="results" x-show="results.path">
+                <div class="results-header">
+                    <span x-text="results.path?.hops + ' hop(s) from ' + results.path?.start + ' to ' + results.path?.end"></span>
+                </div>
+                <div class="results-body markdown-body" x-html="safeHtml(results.path?.markdown)" x-effect="if(results.path?.markdown) $nextTick(() => renderMermaid($el))"></div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= CROSS-LANG ========= -->
+    <template x-if="activeTool === 'cross-lang'">
+        <div>
+            <div class="tool-form">
+                <h3>Cross-Language Trace</h3>
+                <p class="tool-desc">Bridge the frontend-backend gap by mapping TypeScript API calls (Lens) to their Rust handler functions (Mandible) via the OpenAPI spec. Use "Endpoint" mode to find which Rust handler serves a specific route. Use "List" mode to see all endpoints for a resource like "deployments". Use "Stats" mode for an overview of API coverage. Models use this to trace user actions from the UI all the way to the database layer.</p>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Mode</label>
+                        <select x-model="forms.crossLang.mode">
+                            <option value="endpoint">Endpoint</option>
+                            <option value="list">List</option>
+                            <option value="stats">Stats</option>
+                        </select>
+                    </div>
+                    <div class="form-group" x-show="forms.crossLang.mode === 'endpoint'">
+                        <label>Method</label>
+                        <select x-model="forms.crossLang.method">
+                            <option value="GET">GET</option>
+                            <option value="POST">POST</option>
+                            <option value="PUT">PUT</option>
+                            <option value="DELETE">DELETE</option>
+                            <option value="PATCH">PATCH</option>
+                        </select>
+                    </div>
+                    <div class="form-group flex-1" x-show="forms.crossLang.mode === 'endpoint'">
+                        <label>Path</label>
+                        <input type="text" x-model="forms.crossLang.path" placeholder="/api/v1/deployments"
+                               @keydown.enter="runCrossLang()">
+                    </div>
+                    <div class="form-group" x-show="forms.crossLang.mode === 'list'">
+                        <label>Tag (optional)</label>
+                        <input type="text" x-model="forms.crossLang.tag" placeholder="e.g. deployments" style="width:150px">
+                    </div>
+                    <button class="btn btn-primary" @click="runCrossLang()" :disabled="loading">Go</button>
+                </div>
+                <div class="input-hints">
+                    Try:
+                    <a @click.prevent="forms.crossLang.mode = 'endpoint'; forms.crossLang.method = 'GET'; forms.crossLang.path = '/api/v1/deployments'; runCrossLang()">GET /api/v1/deployments</a>
+                    <a @click.prevent="forms.crossLang.mode = 'endpoint'; forms.crossLang.method = 'POST'; forms.crossLang.path = '/api/v1/actions'; runCrossLang()">POST /api/v1/actions</a>
+                    <a @click.prevent="forms.crossLang.mode = 'list'; forms.crossLang.tag = 'deployments'; runCrossLang()">list: deployments</a>
+                    <a @click.prevent="forms.crossLang.mode = 'stats'; runCrossLang()">stats</a>
+                </div>
+            </div>
+            <!-- Error -->
+            <div class="results" x-show="results.crossLang?.error">
+                <div class="flow-error" x-text="results.crossLang?.error"></div>
+            </div>
+            <!-- Endpoint mode result -->
+            <div class="results" x-show="results.crossLang?.operationId">
+                <div class="results-header">
+                    <span x-text="results.crossLang?.method + ' ' + results.crossLang?.path"></span>
+                </div>
+                <div class="cl-endpoint-detail">
+                    <div class="cl-row">
+                        <span class="cl-label">Summary</span>
+                        <span class="cl-value" x-text="results.crossLang?.summary || 'No summary'"></span>
+                    </div>
+                    <div class="cl-row">
+                        <span class="cl-label">Operation</span>
+                        <span class="cl-value cl-mono" x-text="results.crossLang?.operationId"></span>
+                    </div>
+                    <div class="cl-row" x-show="results.crossLang?.tags?.length">
+                        <span class="cl-label">Tags</span>
+                        <span class="cl-value">
+                            <template x-for="t in (results.crossLang?.tags || [])" :key="t">
+                                <span class="cl-tag" @click="forms.crossLang.mode = 'list'; forms.crossLang.tag = t; runCrossLang()" x-text="t"></span>
+                            </template>
+                        </span>
+                    </div>
+                    <div class="cl-row">
+                        <span class="cl-label">Handler</span>
+                        <span class="cl-value" x-show="results.crossLang?.node_id">
+                            <span class="cl-handler-name" @click="forms.context.node_id = results.crossLang.node_id; setTool('context'); runContext()" x-text="results.crossLang?.node_id?.split('::').pop()"></span>
+                            <span class="cl-handler-file" @click="
+                                const nid = results.crossLang.node_id;
+                                const file = nid.split('::')[0].replace('FILE:', '');
+                                forms.source.file = file; forms.source.line = null; setTool('source'); runSource();
+                            " x-text="results.crossLang?.node_id?.split('::')[0].replace('FILE:', '').replace(/^FILE:/, '')"></span>
+                        </span>
+                        <span class="cl-value cl-no-handler" x-show="!results.crossLang?.node_id">Not linked to graph</span>
+                    </div>
+                    <div class="cl-actions" x-show="results.crossLang?.node_id">
+                        <button class="btn btn-sm" @click="forms.context.node_id = results.crossLang.node_id; setTool('context'); runContext()">View Context</button>
+                        <button class="btn btn-sm" @click="
+                            const name = results.crossLang.node_id.split('::').pop();
+                            forms.flow.start = name; forms.flow.direction = 'forward'; setTool('flow'); runFlow();
+                        ">Trace Forward</button>
+                        <button class="btn btn-sm" @click="
+                            const nid = results.crossLang.node_id;
+                            const file = nid.split('::')[0].replace('FILE:', '');
+                            forms.source.file = file; forms.source.line = null; setTool('source'); runSource();
+                        ">View Source</button>
+                    </div>
+                </div>
+            </div>
+            <!-- List mode result -->
+            <div class="results" x-show="results.crossLang?.endpoints">
+                <div class="results-header">
+                    <span x-text="(results.crossLang?.tag ? 'Tag: ' + results.crossLang.tag + ' — ' : '') + results.crossLang?.total + ' endpoints'"></span>
+                </div>
+                <div class="cl-endpoint-list">
+                    <template x-for="ep in (results.crossLang?.endpoints || [])" :key="ep.operationId">
+                        <div class="cl-endpoint-item" @click="forms.crossLang.mode = 'endpoint'; forms.crossLang.method = ep.method; forms.crossLang.path = ep.path; runCrossLang()">
+                            <span class="cl-method-badge" :class="'method-' + ep.method.toLowerCase()" x-text="ep.method"></span>
+                            <span class="cl-ep-path" x-text="ep.path"></span>
+                            <span class="cl-ep-summary" x-text="ep.summary || ''"></span>
+                            <span class="cl-ep-handler" x-show="ep.node_id" x-text="ep.node_id?.split('::').pop()"></span>
+                        </div>
+                    </template>
+                </div>
+            </div>
+            <!-- Stats mode result -->
+            <div class="results" x-show="results.crossLang?.total_endpoints !== undefined">
+                <div class="results-header">
+                    <span>API Coverage Stats</span>
+                </div>
+                <div class="cl-stats">
+                    <div class="cl-stat-card">
+                        <div class="cl-stat-value" x-text="results.crossLang?.total_endpoints"></div>
+                        <div class="cl-stat-label">Total Endpoints</div>
+                    </div>
+                    <div class="cl-stat-card">
+                        <div class="cl-stat-value" x-text="results.crossLang?.linked_to_graph"></div>
+                        <div class="cl-stat-label">Linked to Graph</div>
+                    </div>
+                    <div class="cl-stat-card">
+                        <div class="cl-stat-value" x-text="results.crossLang?.total_endpoints ? Math.round(results.crossLang.linked_to_graph / results.crossLang.total_endpoints * 100) + '%' : '—'"></div>
+                        <div class="cl-stat-label">Coverage</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= CHURN ========= -->
+    <template x-if="activeTool === 'churn'">
+        <div>
+            <div class="tool-form">
+                <h3>Code Churn Hotspots</h3>
+                <p class="tool-desc">Find the most frequently changed code using git history analysis. "Symbols" mode maps changes to specific functions and methods. "Files" mode shows file-level change frequency. "Co-change" mode reveals symbol pairs that always change together, indicating hidden coupling. Filter by time range and path. Use this to prioritize refactoring, identify unstable code, or find areas needing better test coverage.</p>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Mode</label>
+                        <select x-model="forms.churn.mode">
+                            <option value="symbols">Symbols</option>
+                            <option value="files">Files</option>
+                            <option value="co-change">Co-Change</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Time Range</label>
+                        <select x-model="forms.churn.time_range">
+                            <option value="">All time</option>
+                            <option value="last 7 days">Last 7 days</option>
+                            <option value="last 14 days">Last 14 days</option>
+                            <option value="last 30 days">Last 30 days</option>
+                            <option value="last 3 months">Last 3 months</option>
+                            <option value="last 6 months">Last 6 months</option>
+                        </select>
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.churn.mode = 'symbols'; forms.churn.time_range = 'last 30 days'; forms.churn.path_filter = ''; runChurn()">top symbols (30d)</a>
+                            <a @click.prevent="forms.churn.mode = 'files'; forms.churn.time_range = 'last 30 days'; forms.churn.path_filter = ''; runChurn()">files (30 days)</a>
+                            <a @click.prevent="forms.churn.mode = 'co-change'; forms.churn.time_range = ''; forms.churn.path_filter = ''; runChurn()">co-change pairs</a>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Path Filter</label>
+                        <input type="text" x-model="forms.churn.path_filter" placeholder="e.g. backend/" style="width:150px">
+                    </div>
+                    <div class="form-group">
+                        <label>Limit</label>
+                        <input type="number" x-model.number="forms.churn.limit" min="1" max="100" style="width:70px">
+                    </div>
+                    <button class="btn btn-primary" @click="runChurn()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.churn?.data">
+                <!-- Error -->
+                <div class="flow-error" x-show="results.churn?.data?.error" x-text="results.churn?.data?.error"></div>
+                <!-- Symbols mode -->
+                <template x-if="results.churn?.data?.symbols">
+                    <div>
+                        <div class="changes-header">
+                            <span x-text="'Top ' + results.churn.data.symbols.length + ' Most Changed Symbols'"></span>
+                            <span class="changes-meta">
+                                <span x-show="results.churn.data.time_range" x-text="results.churn.data.time_range"></span>
+                                <template x-if="results.churn.data.path_filter">
+                                    <span><span class="changes-sep">&middot;</span><span x-text="results.churn.data.path_filter"></span></span>
+                                </template>
+                            </span>
+                        </div>
+                        <div class="churn-list">
+                            <template x-for="(sym, idx) in results.churn.data.symbols" :key="sym.id">
+                                <div class="churn-item">
+                                    <span class="churn-rank" x-text="idx + 1"></span>
+                                    <span class="rc-type" :class="sym.type.toLowerCase()" x-text="sym.type"></span>
+                                    <span class="changes-sym-name" @click="forms.context.node_id = sym.id; setTool('context'); runContext()" x-text="sym.name"></span>
+                                    <span class="churn-commits" x-text="sym.commits + ' commits'"></span>
+                                    <span class="changes-diff-stat" x-show="sym.added || sym.removed">
+                                        <span class="changes-added" x-text="'+' + sym.added"></span>
+                                        <span class="changes-removed" x-text="'-' + sym.removed"></span>
+                                    </span>
+                                    <span class="changes-sym-file" x-show="sym.file" @click="forms.source.file = sym.file; forms.source.line = sym.line; setTool('source'); runSource()" x-text="sym.file.replace(/^FILE:/, '') + (sym.line ? ':' + sym.line : '')"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+                <!-- Files mode -->
+                <template x-if="results.churn?.data?.files">
+                    <div>
+                        <div class="changes-header">
+                            <span x-text="'Top ' + results.churn.data.files.length + ' Most Changed Files'"></span>
+                            <span class="changes-meta">
+                                <span x-show="results.churn.data.time_range" x-text="results.churn.data.time_range"></span>
+                            </span>
+                        </div>
+                        <div class="churn-list">
+                            <template x-for="(f, idx) in results.churn.data.files" :key="f.file">
+                                <div class="churn-item">
+                                    <span class="churn-rank" x-text="idx + 1"></span>
+                                    <span class="churn-file-name" @click="forms.source.file = f.file; forms.source.line = null; setTool('source'); runSource()" x-text="f.file"></span>
+                                    <span class="churn-commits" x-text="f.commits + ' commits'"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+                <!-- Co-change mode -->
+                <template x-if="results.churn?.data?.pairs">
+                    <div>
+                        <div class="changes-header">
+                            <span x-text="'Top ' + results.churn.data.pairs.length + ' Co-Change Pairs'"></span>
+                            <span class="changes-meta">
+                                <span x-show="results.churn.data.file_level" style="font-style:italic">file-level (symbol data sparse)</span>
+                            </span>
+                        </div>
+                        <div class="churn-list">
+                            <template x-for="(pair, idx) in results.churn.data.pairs" :key="idx">
+                                <div class="churn-pair">
+                                    <span class="churn-rank" x-text="idx + 1"></span>
+                                    <span class="churn-pair-sym" @click="if(pair.a_id) { forms.context.node_id = pair.a_id; setTool('context'); runContext(); }" :class="pair.a_id ? 'clickable' : ''" x-text="pair.a_name"></span>
+                                    <span class="churn-pair-arrow">&harr;</span>
+                                    <span class="churn-pair-sym" @click="if(pair.b_id) { forms.context.node_id = pair.b_id; setTool('context'); runContext(); }" :class="pair.b_id ? 'clickable' : ''" x-text="pair.b_name"></span>
+                                    <span class="churn-commits" x-text="pair.shared_commits + ' shared'"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= EVOLUTION ========= -->
+    <template x-if="activeTool === 'evolution'">
+        <div>
+            <div class="tool-form">
+                <h3>Symbol Evolution</h3>
+                <p class="tool-desc">Track the commit history of a specific function or method over time. Shows a timeline of commits that touched the symbol, including authors, dates, and change sizes. Enable "Show diffs" to see the actual code changes at each point. Uses git's native function tracking to follow the symbol across renames and line drift. Use this to understand why a function looks the way it does, or to find when a bug was introduced.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Symbol Name</label>
+                        <input type="text" x-model="forms.evolution.name" placeholder="e.g. validate_token"
+                               @keydown.enter="runEvolution()">
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.evolution.name = 'create_deployment'; runEvolution()">create_deployment</a>
+                            <a @click.prevent="forms.evolution.name = 'register_with_token'; forms.evolution.show_diff = true; runEvolution()">register_with_token (+diffs)</a>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Time Range</label>
+                        <select x-model="forms.evolution.time_range">
+                            <option value="">All time</option>
+                            <option value="last 7 days">Last 7 days</option>
+                            <option value="last 14 days">Last 14 days</option>
+                            <option value="last 30 days">Last 30 days</option>
+                            <option value="last 3 months">Last 3 months</option>
+                            <option value="last 6 months">Last 6 months</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Limit</label>
+                        <input type="number" x-model.number="forms.evolution.limit" min="1" max="50" style="width:70px">
+                    </div>
+                    <div class="checkbox-row">
+                        <input type="checkbox" id="evo-diff" x-model="forms.evolution.show_diff">
+                        <label for="evo-diff">Show diffs</label>
+                    </div>
+                    <button class="btn btn-primary" @click="runEvolution()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.evolution">
+                <div class="results-body markdown-body" x-html="safeHtml(results.evolution?.markdown)" x-effect="if(results.evolution?.markdown) $nextTick(() => renderMermaid($el))"></div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= CHANGES ========= -->
+    <template x-if="activeTool === 'changes'">
+        <div>
+            <div class="tool-form">
+                <h3>Change Impact Analysis</h3>
+                <p class="tool-desc">Analyze a commit range to see which symbols were modified and who calls them, revealing ripple risk. Maps changed lines to their enclosing functions, then shows callers of each changed function so you can assess the blast radius. Use for code review, pre-merge safety checks, or to generate a list of things to test after a set of commits. Defaults to the last commit if no range is specified.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Commit Range</label>
+                        <input type="text" x-model="forms.changes.commit_range" placeholder="e.g. HEAD~5..HEAD"
+                               @keydown.enter="runChanges()">
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.changes.commit_range = 'HEAD~1..HEAD'; forms.changes.show_callers = true; runChanges()">last commit</a>
+                            <a @click.prevent="forms.changes.commit_range = 'HEAD~5..HEAD'; forms.changes.show_callers = true; runChanges()">last 5</a>
+                            <a @click.prevent="forms.changes.commit_range = 'HEAD~10..HEAD'; forms.changes.path_filter = ''; forms.changes.show_callers = true; runChanges()">last 10 commits</a>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Time Range</label>
+                        <select x-model="forms.changes.time_range">
+                            <option value="">All time</option>
+                            <option value="last 7 days">Last 7 days</option>
+                            <option value="last 14 days">Last 14 days</option>
+                            <option value="last 30 days">Last 30 days</option>
+                            <option value="last 3 months">Last 3 months</option>
+                            <option value="last 6 months">Last 6 months</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Path Filter</label>
+                        <input type="text" x-model="forms.changes.path_filter" placeholder="(optional)" style="width:150px">
+                    </div>
+                    <div class="checkbox-row">
+                        <input type="checkbox" id="chg-callers" x-model="forms.changes.show_callers">
+                        <label for="chg-callers">Show callers</label>
+                    </div>
+                    <button class="btn btn-primary" @click="runChanges()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.changes?.data">
+                <!-- Error -->
+                <div class="flow-error" x-show="results.changes?.data?.error" x-text="results.changes?.data?.error"></div>
+                <!-- Summary header -->
+                <template x-if="results.changes?.data && !results.changes?.data?.error">
+                    <div>
+                        <div class="changes-header">
+                            <span class="changes-range" x-text="results.changes.data.range"></span>
+                            <span class="changes-meta">
+                                <span x-text="results.changes.data.commits + ' commit' + (results.changes.data.commits !== 1 ? 's' : '')"></span>
+                                <span class="changes-sep">&middot;</span>
+                                <span x-text="results.changes.data.files_count + ' files'"></span>
+                                <span class="changes-sep">&middot;</span>
+                                <span x-text="results.changes.data.symbols_count + ' symbols'"></span>
+                            </span>
+                        </div>
+                        <!-- File-only fallback (no symbol attribution) -->
+                        <template x-if="results.changes.data.changed_files && !results.changes.data.symbols">
+                            <div class="changes-files">
+                                <div class="changes-section-title">Changed Files</div>
+                                <template x-for="f in results.changes.data.changed_files" :key="f.file">
+                                    <div class="changes-file-row">
+                                        <span class="changes-file-path" @click="forms.source.file = f.file; forms.source.line = null; setTool('source'); runSource()" x-text="f.file"></span>
+                                        <span class="changes-diff-stat">
+                                            <span class="changes-added" x-text="'+' + f.added"></span>
+                                            <span class="changes-removed" x-text="'-' + f.removed"></span>
+                                        </span>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                        <!-- Symbol list -->
+                        <template x-if="results.changes.data.symbols">
+                            <div class="changes-symbols">
+                                <div class="changes-section-title" x-text="'Modified (' + results.changes.data.symbols.length + ')'"></div>
+                                <template x-for="(sym, idx) in results.changes.data.symbols" :key="sym.id">
+                                    <div class="changes-symbol">
+                                        <div class="changes-symbol-row">
+                                            <span class="rc-type" :class="sym.type.toLowerCase()" x-text="sym.type"></span>
+                                            <span class="changes-sym-name" @click="forms.context.node_id = sym.id; setTool('context'); runContext()" x-text="sym.name"></span>
+                                            <span class="changes-diff-stat">
+                                                <span class="changes-added" x-text="'+' + sym.added"></span>
+                                                <span class="changes-removed" x-text="'-' + sym.removed"></span>
+                                            </span>
+                                            <span class="changes-sym-file" x-show="sym.file" @click="forms.source.file = sym.file; forms.source.line = sym.line; setTool('source'); runSource()" x-text="sym.file.replace(/^FILE:/, '') + (sym.line ? ':' + sym.line : '')"></span>
+                                        </div>
+                                        <div class="changes-callers" x-show="sym.callers?.length">
+                                            <span class="changes-callers-label">Callers:</span>
+                                            <template x-for="c in (sym.callers || [])" :key="c.id">
+                                                <span class="changes-caller" @click="forms.context.node_id = c.id; setTool('context'); runContext()" x-text="c.name"></span>
+                                            </template>
+                                            <span class="changes-callers-more" x-show="sym.callers_total > 5" x-text="'+' + (sym.callers_total - 5) + ' more'"></span>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= DOCS SEARCH ========= -->
+    <template x-if="activeTool === 'docs'">
+        <div>
+            <div class="tool-form">
+                <h3>Search Documentation</h3>
+                <p class="tool-desc">Semantic search across the project's User Guide, Admin Guide, and Developer Guide. Returns relevant documentation sections with file paths and line numbers. Filter by collection to focus on a specific guide. Click results to view the source file. Use this to find configuration instructions, architecture explanations, or how-to guides without leaving the explorer.</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>Query</label>
+                        <input type="text" x-model="forms.docs.query" placeholder="e.g. configure TLS"
+                               @keydown.enter="runDocs()">
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.docs.query = 'configure TLS'; runDocs()">configure TLS</a>
+                            <a @click.prevent="forms.docs.query = 'deployment targets'; runDocs()">deployment targets</a>
+                            <a @click.prevent="forms.docs.query = 'database migrations'; forms.docs.collection = 'developer'; runDocs()">database migrations</a>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Collection</label>
+                        <select x-model="forms.docs.collection">
+                            <option value="">All</option>
+                            <option value="user">User Guide</option>
+                            <option value="admin">Admin Guide</option>
+                            <option value="developer">Developer Guide</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Limit</label>
+                        <input type="number" x-model.number="forms.docs.limit" min="1" max="20" style="width:70px">
+                    </div>
+                    <button class="btn btn-primary" @click="runDocs()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="results" x-show="results.docs">
+                <div class="results-header">
+                    <span x-text="results.docs?.total + ' documentation match(es)'"></span>
+                </div>
+                <div class="results-body">
+                    <template x-for="(r, i) in results.docs?.results || []" :key="i">
+                        <div class="result-card doc-result-card">
+                            <div class="rc-header" @click="viewSource(r.file_path, r.line_start)" style="cursor:pointer">
+                                <span class="rc-type fil">doc</span>
+                                <span class="rc-name" x-text="r.heading || r.title"></span>
+                                <span class="rc-meta" x-text="'[' + r.collection_name + '] score: ' + r.score?.toFixed(3)"></span>
+                            </div>
+                            <div class="rc-location" @click="viewSource(r.file_path, r.line_start)" style="cursor:pointer" x-text="r.file_path + ':' + r.line_start"></div>
+                            <div class="doc-content markdown-body" x-html="safeHtml(r.content)" x-effect="$nextTick(() => renderMermaid($el))"></div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= HEALTH ========= -->
+    <template x-if="activeTool === 'health'">
+        <div>
+            <div class="tool-form">
+                <h3>System Health</h3>
+                <p class="tool-desc">Check the status of the descry server, including graph freshness, node/edge counts, and feature availability (SCIP type-aware resolution, semantic embeddings). Use this to verify the MCP connection is working and diagnose issues. The graph age indicates when the index was last rebuilt.</p>
+                <button class="btn btn-primary" @click="fetchHealth()" :disabled="loading">Refresh</button>
+            </div>
+            <div class="results" x-show="health">
+                <div class="results-body">
+                    <pre style="white-space:pre-wrap;font-family:var(--font-mono);font-size:13px" x-text="JSON.stringify(health, null, 2)"></pre>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= REINDEX ========= -->
+    <template x-if="activeTool === 'reindex'">
+        <div>
+            <div class="tool-form">
+                <h3>Reindex Codebase</h3>
+                <p class="tool-desc">Regenerate the full codebase graph, SCIP type-aware indices, and semantic search embeddings from scratch. Run this after significant code changes such as new files, refactoring, or renamed symbols to keep the graph accurate. Progress streams live to the output log below. This can take several minutes for large Rust codebases due to SCIP compilation.</p>
+                <div class="form-row">
+                    <button class="btn btn-primary" @click="runReindex()" :disabled="reindexing">
+                        <span x-show="!reindexing">Go</span>
+                        <span x-show="reindexing">Running...</span>
+                    </button>
+                    <span x-show="reindexing" style="color:var(--text-muted);font-size:12px;display:flex;align-items:center;gap:6px">
+                        <span class="spinner"></span>
+                        <span x-text="reindexElapsed"></span>
+                    </span>
+                </div>
+            </div>
+            <div class="reindex-output" x-show="reindexLines.length > 0">
+                <div class="reindex-header">
+                    <span>Output</span>
+                    <span x-show="reindexStatus === 'success'" style="color:var(--green)">Completed</span>
+                    <span x-show="reindexStatus === 'error'" style="color:var(--red)">Failed</span>
+                </div>
+                <div class="reindex-log" x-ref="reindexLog">
+                    <template x-for="(line, i) in reindexLines" :key="i">
+                        <div class="reindex-line" :class="line.type" x-text="line.text"></div>
+                    </template>
+                </div>
+            </div>
+            <div class="results" x-show="reindexGraph">
+                <div class="results-header">Updated Graph Status</div>
+                <div class="results-body">
+                    <pre style="white-space:pre-wrap;font-family:var(--font-mono);font-size:13px" x-text="JSON.stringify(reindexGraph, null, 2)"></pre>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- ========= SOURCE VIEWER ========= -->
+    <template x-if="activeTool === 'source'">
+        <div>
+            <div class="tool-form">
+                <h3>Source Viewer</h3>
+                <p class="tool-desc">Read source files directly in the browser with line numbers. Optionally jump to a specific line which will be highlighted. Reached automatically when clicking file locations in other tools, or use directly to browse any project file. Paths are relative to the project root (e.g. backend/src/auth.rs).</p>
+                <div class="form-row">
+                    <div class="form-group flex-1">
+                        <label>File Path</label>
+                        <input type="text" x-model="forms.source.file" placeholder="e.g. backend/src/auth.rs"
+                               @keydown.enter="runSource()">
+                        <div class="input-hints">
+                            Try:
+                            <a @click.prevent="forms.source.file = 'src/handlers.py'; forms.source.line = 1; runSource()">handlers.py:1</a>
+                            <a @click.prevent="forms.source.file = 'src/descry/query.py'; forms.source.line = 1; runSource()">query.py:1</a>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Line</label>
+                        <input type="number" x-model.number="forms.source.line" placeholder="(optional)" style="width:80px">
+                    </div>
+                    <button class="btn btn-primary" @click="runSource()" :disabled="loading">Go</button>
+                </div>
+            </div>
+            <div class="source-viewer" x-show="results.source">
+                <div class="source-header">
+                    <span x-text="results.source?.file + ' (' + results.source?.total_lines + ' lines)'"></span>
+                    <span x-text="results.source?.language"></span>
+                    <template x-if="results.source?.language === 'markdown'">
+                        <button class="btn btn-sm" style="margin-left:auto;font-size:12px;padding:2px 8px"
+                                @click="sourceRenderMd = !sourceRenderMd"
+                                x-text="sourceRenderMd ? 'View Raw' : 'Render Markdown'"></button>
+                    </template>
+                </div>
+                <!-- Rendered markdown view for .md files -->
+                <div class="source-markdown markdown-body" x-show="results.source?.language === 'markdown' && sourceRenderMd"
+                     x-html="safeHtml(results.source?.content || '')"
+                     x-effect="if(results.source?.language === 'markdown' && sourceRenderMd) $nextTick(() => renderMermaid($el))">
+                </div>
+                <!-- Raw source view (default for code, toggle for markdown) -->
+                <div class="source-content" x-show="results.source?.language !== 'markdown' || !sourceRenderMd">
+                    <table>
+                        <template x-for="(line, idx) in (results.source?.content || '').split('\\n')" :key="idx">
+                            <tr :class="(results.source?.start_line + idx) === results.source?.target_line && 'highlight'">
+                                <td class="line-number" x-text="results.source?.start_line + idx"></td>
+                                <td class="line-code" x-text="line"></td>
+                            </tr>
+                        </template>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- Loading Overlay -->
+    <div class="loading" x-show="loading">
+        <div class="spinner"></div>
+        <span>Loading...</span>
+    </div>
+
+    <!-- Welcome Screen (Home) -->
+    <div class="welcome-screen" x-show="activeTool === 'home'">
+        <div class="es-icon">&#x1F50D;</div>
+        <div class="es-title">Descry Explorer</div>
+        <div class="es-subtitle">Search symbols, trace call flows, and navigate your codebase</div>
+        <div class="welcome-scenarios">
+            <div class="scenario-card" @click="forms.search.terms = 'create_deployment'; setTool('search'); runSearch();">
+                <div class="sc-title">Find a function</div>
+                <div class="sc-desc">Search for <code>create_deployment</code> across the codebase</div>
+            </div>
+            <div class="scenario-card" @click="forms.impls.method = 'from_request_parts'; setTool('impls'); runImpls();">
+                <div class="sc-title">Find trait implementations</div>
+                <div class="sc-desc">See all implementors of <code>from_request_parts</code></div>
+            </div>
+            <div class="scenario-card" @click="forms.flow.start = 'dispatch'; forms.flow.direction = 'forward'; forms.flow.depth = 3; setTool('flow'); runFlow();">
+                <div class="sc-title">Trace a call flow</div>
+                <div class="sc-desc">Follow <code>dispatch</code> forward through the call graph</div>
+            </div>
+            <div class="scenario-card" @click="forms.churn.mode = 'symbols'; forms.churn.time_range = 'last 30 days'; forms.churn.path_filter = ''; setTool('churn'); runChurn();">
+                <div class="sc-title">Find churn hotspots</div>
+                <div class="sc-desc">Most-changed symbols over last 30 days</div>
+            </div>
+            <div class="scenario-card" @click="forms.changes.commit_range = 'HEAD~5..HEAD'; forms.changes.show_callers = true; setTool('changes'); runChanges();">
+                <div class="sc-title">Review recent changes</div>
+                <div class="sc-desc">Impact analysis of the last 5 commits</div>
+            </div>
+            <div class="scenario-card" @click="forms.structure.filename = 'auth.rs'; setTool('structure'); runStructure();">
+                <div class="sc-title">Explore a file</div>
+                <div class="sc-desc">See the structure of <code>auth.rs</code></div>
+            </div>
+        </div>
+    </div>
+
+</div>
+</div>
+
+<script>
+function app() {
+    return {
+        // State
+        activeTool: 'home',
+        showHelp: false,
+        globalSearch: '',
+        loading: false,
+        error: null,
+        health: null,
+        reindexing: false,
+        reindexLines: [],
+        reindexStatus: null,
+        reindexGraph: null,
+        sourceRenderMd: true,  // Default to rendered view for markdown files
+        reindexElapsed: '',
+        reindexTimer: null,
+        breadcrumbs: [{label: 'Home', tool: 'home'}],
+        results: {},
+
+        // Form state per tool
+        forms: {
+            search: { terms: '', limit: 10, lang: '', crate: '', type: '' },
+            semantic: { query: '', limit: 10 },
+            quick: { name: '', full: false },
+            callers: { name: '', limit: 20 },
+            callees: { name: '', limit: 20 },
+            context: { node_id: '', full: false, expand_callees: false },
+            structure: { filename: '' },
+            flatten: { class_node_id: '' },
+            impls: { method: '', trait_name: '' },
+            flow: { start: '', direction: 'forward', depth: 3, target: '' },
+            path: { start: '', end: '', max_depth: 10 },
+            crossLang: { mode: 'endpoint', method: 'GET', path: '', tag: '' },
+            churn: { mode: 'symbols', time_range: '', path_filter: '', limit: 20 },
+            evolution: { name: '', time_range: '', limit: 10, show_diff: false },
+            changes: { commit_range: 'HEAD~5..HEAD', time_range: '', path_filter: '', show_callers: true },
+            docs: { query: '', collection: '', limit: 5 },
+            source: { file: '', line: null },
+        },
+
+        async init() {
+            await this.fetchHealth();
+        },
+
+        goHome() {
+            this.activeTool = 'home';
+            this.error = null;
+            this.results = {};
+            this.breadcrumbs = [{label: 'Home', tool: 'home'}];
+        },
+
+        setTool(tool) {
+            this.activeTool = tool;
+            this.error = null;
+            this.breadcrumbs = [{label: this.toolLabel(tool), tool}];
+        },
+
+        toolLabel(tool) {
+            const labels = {
+                home: 'Home',
+                search: 'Search', semantic: 'Semantic', quick: 'Quick Lookup',
+                callers: 'Callers', callees: 'Callees', context: 'Context',
+                structure: 'Structure', flatten: 'Flatten', impls: 'Impls',
+                flow: 'Flow Trace', path: 'Call Path', 'cross-lang': 'Cross-Lang',
+                churn: 'Churn', evolution: 'Evolution', changes: 'Changes',
+                docs: 'Docs', health: 'Health', reindex: 'Reindex', source: 'Source',
+            };
+            return labels[tool] || tool;
+        },
+
+        typeClass(type) {
+            if (!type) return '';
+            const map = {
+                'function': 'fun', 'method': 'met', 'class': 'cla',
+                'constant': 'con', 'file': 'fil', 'configuration': 'cfg'
+            };
+            return map[type.toLowerCase()] || '';
+        },
+
+        typeLabel(type) {
+            const labels = {
+                'function': 'FUN', 'method': 'MET', 'class': 'CLA',
+                'constant': 'CON', 'file': 'FIL', 'configuration': 'CFG'
+            };
+            return labels[type?.toLowerCase()] || type?.substring(0,3)?.toUpperCase() || '';
+        },
+
+        hasResults() {
+            return Object.keys(this.results).some(k => this.results[k]);
+        },
+
+        pushBreadcrumb(label, tool, params) {
+            this.breadcrumbs.push({label, tool, params});
+        },
+
+        navigateTo(idx) {
+            const crumb = this.breadcrumbs[idx];
+            this.breadcrumbs = this.breadcrumbs.slice(0, idx + 1);
+            this.activeTool = crumb.tool;
+            if (crumb.params) {
+                Object.assign(this.forms[crumb.tool] || {}, crumb.params);
+            }
+        },
+
+        // Navigation helpers
+        viewContext(nodeId) {
+            this.forms.context.node_id = nodeId;
+            this.activeTool = 'context';
+            const shortName = nodeId.split('::').pop() || nodeId;
+            this.pushBreadcrumb(shortName, 'context', {node_id: nodeId});
+            this.runContext();
+        },
+
+        viewSource(file, line) {
+            this.forms.source.file = file;
+            this.forms.source.line = line || null;
+            this.activeTool = 'source';
+            const shortFile = file.split('/').pop();
+            this.pushBreadcrumb(shortFile + (line ? ':' + line : ''), 'source', {file, line});
+            this.runSource();
+        },
+
+        viewCallers(name) {
+            this.forms.callers.name = name;
+            this.activeTool = 'callers';
+            this.pushBreadcrumb('callers(' + name + ')', 'callers', {name});
+            this.runCallers();
+        },
+
+        viewCallees(name) {
+            this.forms.callees.name = name;
+            this.activeTool = 'callees';
+            this.pushBreadcrumb('callees(' + name + ')', 'callees', {name});
+            this.runCallees();
+        },
+
+        // DOMPurify config: tags and attributes allowed for rendered markdown + SVG (mermaid diagrams)
+        _purifyConfig: {
+            ADD_TAGS: ['code', 'pre', 'span', 'svg', 'g', 'path', 'rect', 'text', 'tspan',
+                       'line', 'circle', 'polygon', 'polyline', 'marker', 'defs', 'style',
+                       'foreignObject', 'div', 'br', 'p', 'ul', 'ol', 'li', 'table', 'tr',
+                       'td', 'th', 'thead', 'tbody', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                       'a', 'strong', 'em', 'blockquote', 'hr', 'img', 'dl', 'dt', 'dd'],
+            ADD_ATTR: ['class', 'id', 'viewBox', 'xmlns', 'd', 'fill', 'stroke',
+                       'stroke-width', 'transform', 'x', 'y', 'width', 'height',
+                       'style', 'href', 'src', 'alt', 'text-anchor', 'dominant-baseline',
+                       'font-size', 'font-family', 'marker-end', 'points', 'rx', 'ry',
+                       'cx', 'cy', 'r', 'x1', 'y1', 'x2', 'y2'],
+        },
+
+        // Safe HTML rendering: markdown -> HTML with DOMPurify sanitization + syntax highlighting.
+        // Mermaid code blocks are converted to <pre class="mermaid"> for post-render processing
+        // via renderMermaid(). All HTML is sanitized through DOMPurify before insertion.
+        safeHtml(md) {
+            if (!md) return '';
+            try {
+                const rawHtml = marked.parse(md);
+                // First sanitize pass: clean the raw markdown-generated HTML
+                const div = document.createElement('div');
+                div.textContent = '';
+                div.appendChild(
+                    DOMPurify.sanitize(rawHtml, { ...this._purifyConfig, RETURN_DOM_FRAGMENT: true })
+                );
+                // Convert mermaid code blocks into <pre class="mermaid"> for Mermaid.js
+                div.querySelectorAll('pre code.language-mermaid').forEach(block => {
+                    const pre = block.parentElement;
+                    const mermaidPre = document.createElement('pre');
+                    mermaidPre.className = 'mermaid';
+                    mermaidPre.textContent = block.textContent;
+                    pre.replaceWith(mermaidPre);
+                });
+                // Apply syntax highlighting to remaining (non-mermaid) code blocks
+                div.querySelectorAll('pre code').forEach(block => {
+                    hljs.highlightElement(block);
+                });
+                // Final sanitize pass on the highlighted output
+                return DOMPurify.sanitize(div.innerHTML, this._purifyConfig);
+            } catch (e) {
+                // Fallback: escape and show as preformatted text
+                const escaped = md.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                return '<pre>' + escaped + '</pre>';
+            }
+        },
+
+        // Render mermaid diagrams within a container element (called via x-effect after DOM update).
+        // Uses mermaid.render() which returns sanitized SVG - inserted via DOMPurify as a safety layer.
+        async renderMermaid(el) {
+            if (!el || typeof mermaid === 'undefined') return;
+            const blocks = el.querySelectorAll('pre.mermaid:not([data-processed])');
+            for (const block of blocks) {
+                block.setAttribute('data-processed', 'true');
+                try {
+                    const id = 'mermaid-' + Math.random().toString(36).substring(2, 9);
+                    const { svg } = await mermaid.render(id, block.textContent);
+                    // Mermaid.render returns SVG - sanitize before inserting
+                    const clean = DOMPurify.sanitize(svg, this._purifyConfig);
+                    block.textContent = '';
+                    block.appendChild(
+                        DOMPurify.sanitize(svg, { ...this._purifyConfig, RETURN_DOM_FRAGMENT: true })
+                    );
+                    block.classList.add('mermaid-rendered');
+                } catch (e) {
+                    // If mermaid fails, keep the raw text visible as a code block
+                    block.classList.add('mermaid-error');
+                    console.warn('Mermaid render failed:', e.message);
+                }
+            }
+        },
+
+        // --- Flow Tree Rendering ---
+        flowExpandAll: true,
+
+        renderFlowTree(node, depth) {
+            if (!node) return '<div class="flow-empty">No results found.</div>';
+            this.flowExpandAll = true;
+            return this._renderNode(node, depth);
+        },
+
+        _renderNode(node, depth) {
+            const typeClass = node.type.toLowerCase();
+            const hasChildren = node.children && node.children.length > 0;
+            const hasCode = !!node.code;
+            const expandable = hasChildren || hasCode;
+
+            // Shorten file path for display
+            const shortFile = node.file
+                ? node.file.replace(/^FILE:/, '')
+                : '';
+            const fileLoc = shortFile + (node.line ? ':' + node.line : '');
+
+            // Escape code for safe embedding
+            const escapedCode = node.code
+                ? node.code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                : '';
+
+            // Escape data attributes
+            const safeId = node.id.replace(/"/g, '&quot;');
+            const safeFile = (node.file || '').replace(/"/g, '&quot;');
+
+            let html = `<div class="flow-node ${depth === 0 ? 'flow-root' : ''}" data-depth="${depth}">`;
+
+            // Node row - clickable to toggle
+            html += `<div class="flow-node-row">`;
+
+            // Expand/collapse toggle
+            if (expandable) {
+                html += `<span class="flow-toggle" data-action="toggle">&#x25BE;</span>`;
+            } else {
+                html += `<span class="flow-toggle flow-toggle-leaf">&#x2022;</span>`;
+            }
+
+            // Type badge
+            html += `<span class="rc-type ${typeClass}">${node.type}</span>`;
+
+            // Function name - navigates to Context
+            html += `<span class="flow-fn-name" data-action="context" data-node-id="${safeId}">${node.name}</span>`;
+
+            // Token count
+            html += `<span class="flow-tokens">${node.tokens.toLocaleString()} toks</span>`;
+
+            // File location - navigates to Source
+            if (fileLoc) {
+                html += `<span class="flow-file" data-action="source" data-file="${safeFile}" data-line="${node.line || ''}">${fileLoc}</span>`;
+            }
+
+            html += `</div>`;
+
+            // Inline code block (for small functions)
+            if (hasCode) {
+                html += `<div class="flow-code">`;
+                html += `<pre><code class="language-${node.lang || 'rust'}">${escapedCode}</code></pre>`;
+                html += `</div>`;
+            }
+
+            // Children container
+            if (hasChildren) {
+                html += `<div class="flow-children">`;
+                node.children.forEach((child) => {
+                    html += this._renderNode(child, depth + 1);
+                });
+                html += `</div>`;
+            }
+
+            html += `</div>`;
+            return html;
+        },
+
+        // Event delegation handler for flow tree clicks
+        handleFlowClick(e) {
+            const target = e.target.closest('[data-action]');
+            if (!target) {
+                // Click on row itself toggles collapse
+                const row = e.target.closest('.flow-node-row');
+                if (row) {
+                    row.closest('.flow-node').classList.toggle('collapsed');
+                }
+                return;
+            }
+
+            const action = target.dataset.action;
+            if (action === 'toggle') {
+                target.closest('.flow-node').classList.toggle('collapsed');
+            } else if (action === 'context') {
+                e.stopPropagation();
+                this.forms.context.node_id = target.dataset.nodeId;
+                this.setTool('context');
+                this.runContext();
+            } else if (action === 'source') {
+                e.stopPropagation();
+                this.forms.source.file = target.dataset.file;
+                this.forms.source.line = target.dataset.line ? parseInt(target.dataset.line) : null;
+                this.setTool('source');
+                this.runSource();
+            }
+        },
+
+        highlightFlowCode(el) {
+            if (!el) return;
+            el.querySelectorAll('pre code:not([data-highlighted])').forEach(block => {
+                hljs.highlightElement(block);
+                block.setAttribute('data-highlighted', 'true');
+            });
+        },
+
+        flowToggleAll() {
+            this.flowExpandAll = !this.flowExpandAll;
+            const tree = document.querySelector('.flow-tree');
+            if (!tree) return;
+            tree.querySelectorAll('.flow-node').forEach(node => {
+                if (this.flowExpandAll) {
+                    node.classList.remove('collapsed');
+                } else {
+                    node.classList.add('collapsed');
+                }
+            });
+        },
+
+        // API calls
+        async api(url, opts = {}) {
+            this.loading = true;
+            this.error = null;
+            try {
+                const res = await fetch(url, opts);
+                const data = await res.json();
+                if (!res.ok) {
+                    this.error = data.error || 'HTTP ' + res.status;
+                    return null;
+                }
+                return data;
+            } catch (e) {
+                this.error = e.message;
+                return null;
+            } finally {
+                this.loading = false;
+            }
+        },
+
+        async fetchHealth() {
+            this.health = await this.api('/api/health');
+        },
+
+        doGlobalSearch() {
+            if (!this.globalSearch.trim()) return;
+            this.forms.search.terms = this.globalSearch;
+            this.setTool('search');
+            this.runSearch();
+        },
+
+        async runSearch() {
+            const f = this.forms.search;
+            if (!f.terms.trim()) return;
+            const p = new URLSearchParams({terms: f.terms, limit: f.limit});
+            if (f.lang) p.set('lang', f.lang);
+            if (f.crate) p.set('crate', f.crate);
+            if (f.type) p.set('type', f.type);
+            this.results.search = await this.api('/api/search?' + p);
+        },
+
+        async runSemantic() {
+            const f = this.forms.semantic;
+            if (!f.query.trim()) return;
+            this.results.semantic = await this.api('/api/semantic?query=' + encodeURIComponent(f.query) + '&limit=' + f.limit);
+        },
+
+        async runQuick() {
+            const f = this.forms.quick;
+            if (!f.name.trim()) return;
+            this.results.quick = await this.api('/api/quick?name=' + encodeURIComponent(f.name) + '&full=' + f.full);
+        },
+
+        async runCallers() {
+            const f = this.forms.callers;
+            if (!f.name.trim()) return;
+            this.results.callers = await this.api('/api/callers?name=' + encodeURIComponent(f.name) + '&limit=' + f.limit);
+        },
+
+        async runCallees() {
+            const f = this.forms.callees;
+            if (!f.name.trim()) return;
+            this.results.callees = await this.api('/api/callees?name=' + encodeURIComponent(f.name) + '&limit=' + f.limit);
+        },
+
+        async runContext() {
+            const f = this.forms.context;
+            if (!f.node_id.trim()) return;
+            const p = new URLSearchParams({node_id: f.node_id});
+            if (f.full) p.set('full', 'true');
+            if (f.expand_callees) p.set('expand_callees', 'true');
+            this.results.context = await this.api('/api/context?' + p);
+        },
+
+        async runStructure() {
+            const f = this.forms.structure;
+            if (!f.filename.trim()) return;
+            this.results.structure = await this.api('/api/structure?filename=' + encodeURIComponent(f.filename));
+        },
+
+        async runFlatten() {
+            const f = this.forms.flatten;
+            if (!f.class_node_id.trim()) return;
+            this.results.flatten = await this.api('/api/flatten?class_node_id=' + encodeURIComponent(f.class_node_id));
+        },
+
+        async runImpls() {
+            const f = this.forms.impls;
+            if (!f.method.trim()) return;
+            const p = new URLSearchParams({method: f.method});
+            if (f.trait_name) p.set('trait_name', f.trait_name);
+            this.results.impls = await this.api('/api/impls?' + p);
+        },
+
+        async runFlow() {
+            const f = this.forms.flow;
+            if (!f.start.trim()) return;
+            const p = new URLSearchParams({start: f.start, direction: f.direction, depth: f.depth, format: 'tree'});
+            if (f.target) p.set('target', f.target);
+            this.results.flow = await this.api('/api/flow?' + p);
+        },
+
+        async runPath() {
+            const f = this.forms.path;
+            if (!f.start.trim() || !f.end.trim()) return;
+            this.results.path = await this.api('/api/path?start=' + encodeURIComponent(f.start) + '&end=' + encodeURIComponent(f.end) + '&max_depth=' + f.max_depth);
+        },
+
+        async runCrossLang() {
+            const f = this.forms.crossLang;
+            const p = new URLSearchParams({mode: f.mode});
+            if (f.mode === 'endpoint') { p.set('method', f.method); p.set('path', f.path); }
+            if (f.mode === 'list' && f.tag) p.set('tag', f.tag);
+            this.results.crossLang = await this.api('/api/cross-lang?' + p);
+        },
+
+        async runChurn() {
+            const f = this.forms.churn;
+            const p = new URLSearchParams({mode: f.mode, limit: f.limit, format: 'structured'});
+            if (f.time_range) p.set('time_range', f.time_range);
+            if (f.path_filter) p.set('path_filter', f.path_filter);
+            this.results.churn = await this.api('/api/churn?' + p);
+        },
+
+        async runEvolution() {
+            const f = this.forms.evolution;
+            if (!f.name.trim()) return;
+            const p = new URLSearchParams({name: f.name, limit: f.limit});
+            if (f.time_range) p.set('time_range', f.time_range);
+            if (f.show_diff) p.set('show_diff', 'true');
+            this.results.evolution = await this.api('/api/evolution?' + p);
+        },
+
+        async runChanges() {
+            const f = this.forms.changes;
+            const p = new URLSearchParams({limit: 50, format: 'structured'});
+            if (f.commit_range) p.set('commit_range', f.commit_range);
+            if (f.time_range) p.set('time_range', f.time_range);
+            if (f.path_filter) p.set('path_filter', f.path_filter);
+            if (f.show_callers) p.set('show_callers', 'true');
+            this.results.changes = await this.api('/api/changes?' + p);
+        },
+
+        async runDocs() {
+            const f = this.forms.docs;
+            if (!f.query.trim()) return;
+            const p = new URLSearchParams({query: f.query, limit: f.limit});
+            if (f.collection) p.set('collection', f.collection);
+            this.results.docs = await this.api('/api/docs/search?' + p);
+        },
+
+        async runSource() {
+            const f = this.forms.source;
+            if (!f.file.trim()) return;
+            const p = new URLSearchParams({file: f.file});
+            if (f.line) p.set('line', f.line);
+            this.results.source = await this.api('/api/source?' + p);
+        },
+
+        async runReindex() {
+            if (this.reindexing) return;
+            this.reindexing = true;
+            this.reindexLines = [];
+            this.reindexStatus = null;
+            this.reindexGraph = null;
+            this.error = null;
+
+            // Start elapsed timer
+            const startTime = Date.now();
+            this.reindexElapsed = '0s';
+            this.reindexTimer = setInterval(() => {
+                const secs = Math.floor((Date.now() - startTime) / 1000);
+                const mins = Math.floor(secs / 60);
+                this.reindexElapsed = mins > 0 ? `${mins}m ${secs % 60}s` : `${secs}s`;
+            }, 1000);
+
+            try {
+                const res = await fetch('/api/index/stream', {method: 'POST'});
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, {stream: true});
+
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); // keep incomplete line in buffer
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        try {
+                            const evt = JSON.parse(line.slice(6));
+                            if (evt.type === 'output') {
+                                this.reindexLines.push({text: evt.line, type: 'output'});
+                            } else if (evt.type === 'start') {
+                                this.reindexLines.push({text: evt.message, type: 'info'});
+                            } else if (evt.type === 'error') {
+                                this.reindexLines.push({text: evt.message, type: 'error'});
+                            } else if (evt.type === 'done') {
+                                this.reindexStatus = evt.success ? 'success' : 'error';
+                                if (evt.graph) this.reindexGraph = evt.graph;
+                                if (evt.success) {
+                                    this.reindexLines.push({text: 'Reindex completed successfully.', type: 'success'});
+                                    await this.fetchHealth();
+                                } else {
+                                    this.reindexLines.push({text: evt.message || 'Reindex failed.', type: 'error'});
+                                }
+                            }
+                            // Auto-scroll log
+                            this.$nextTick(() => {
+                                const log = this.$refs.reindexLog;
+                                if (log) log.scrollTop = log.scrollHeight;
+                            });
+                        } catch (e) { /* skip malformed SSE */ }
+                    }
+                }
+            } catch (e) {
+                this.error = e.message;
+                this.reindexStatus = 'error';
+            } finally {
+                this.reindexing = false;
+                clearInterval(this.reindexTimer);
+                this.reindexTimer = null;
+            }
+        },
+    };
+}
+</script>
+
+<!-- Help Modal (at end of body, inside x-data scope) -->
+<div class="help-modal-overlay"
+     :style="showHelp ? '' : 'display:none'"
+     @click.self="showHelp = false"
+     @keydown.escape.window="showHelp = false">
+    <div class="help-modal" @click.stop role="dialog" aria-modal="true">
+        <div class="help-modal-header">
+            <h3>Symbol Legend</h3>
+            <button class="help-close-btn" @click="showHelp = false">&times;</button>
+        </div>
+        <div class="help-modal-body">
+            <div class="help-legend">
+                <div class="help-legend-row"><span class="rc-type fun">FUN</span><span class="help-legend-name">Function</span><span class="help-legend-desc">Standalone functions and arrow functions</span></div>
+                <div class="help-legend-row"><span class="rc-type met">MET</span><span class="help-legend-name">Method</span><span class="help-legend-desc">Methods on a class, struct, or impl block</span></div>
+                <div class="help-legend-row"><span class="rc-type cla">CLA</span><span class="help-legend-name">Class</span><span class="help-legend-desc">Classes, structs, enums, traits, interfaces, protobuf messages</span></div>
+                <div class="help-legend-row"><span class="rc-type con">CON</span><span class="help-legend-name">Constant</span><span class="help-legend-desc">Exported constants and static values</span></div>
+                <div class="help-legend-row"><span class="rc-type fil">FIL</span><span class="help-legend-name">File</span><span class="help-legend-desc">Source files (.rs, .ts, .svelte, .proto, .py)</span></div>
+                <div class="help-legend-row"><span class="rc-type cfg">CFG</span><span class="help-legend-name">Configuration</span><span class="help-legend-desc">Interceptors, middleware, and event handlers</span></div>
+            </div>
+            <div class="help-divider"></div>
+            <div class="help-tips">
+                <div class="help-tip"><strong>Score</strong> &mdash; Relevance 0&ndash;1. Combines keyword + semantic similarity.</div>
+                <div class="help-tip"><strong>Click</strong> any result to view full context with source code.</div>
+                <div class="help-tip"><strong>Breadcrumbs</strong> track navigation history &mdash; click to go back.</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+</body>
+</html>
