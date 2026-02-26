@@ -1821,31 +1821,74 @@ function app() {
 }
 </script>
 
-<!-- Help Modal (at end of body, inside x-data scope) -->
-<div class="help-modal-overlay"
-     :style="showHelp ? '' : 'display:none'"
+<!-- Encyclopedia Panel -->
+<div class="ency-overlay"
+     x-show="showHelp"
+     x-transition.opacity
      @click.self="showHelp = false"
-     @keydown.escape.window="showHelp = false">
-    <div class="help-modal" @click.stop role="dialog" aria-modal="true">
-        <div class="help-modal-header">
-            <h3>Symbol Legend</h3>
-            <button class="help-close-btn" @click="showHelp = false">&times;</button>
+     @keydown.escape.window="showHelp = false"
+     style="display:none">
+    <div class="ency-panel" @click.stop>
+        <!-- Header -->
+        <div class="ency-header">
+            <button class="ency-back" x-show="helpArticle" @click="helpArticle = null; helpSearch = ''">&#8592; TOC</button>
+            <span class="ency-title" x-text="helpArticle ? (helpArticles.find(a => a.slug === helpArticle)?.title || 'Encyclopedia') : 'Descry Encyclopedia'"></span>
+            <input class="ency-search" type="text" placeholder="Search articles..."
+                   x-model="helpSearch" x-show="!helpArticle"
+                   @keydown.escape="helpSearch = ''">
+            <button class="ency-close" @click="showHelp = false">&times;</button>
         </div>
-        <div class="help-modal-body">
-            <div class="help-legend">
-                <div class="help-legend-row"><span class="rc-type fun">FUN</span><span class="help-legend-name">Function</span><span class="help-legend-desc">Standalone functions and arrow functions</span></div>
-                <div class="help-legend-row"><span class="rc-type met">MET</span><span class="help-legend-name">Method</span><span class="help-legend-desc">Methods on a class, struct, or impl block</span></div>
-                <div class="help-legend-row"><span class="rc-type cla">CLA</span><span class="help-legend-name">Class</span><span class="help-legend-desc">Classes, structs, enums, traits, interfaces, protobuf messages</span></div>
-                <div class="help-legend-row"><span class="rc-type con">CON</span><span class="help-legend-name">Constant</span><span class="help-legend-desc">Exported constants and static values</span></div>
-                <div class="help-legend-row"><span class="rc-type fil">FIL</span><span class="help-legend-name">File</span><span class="help-legend-desc">Source files (.py, .rs, .ts, .svelte, .go, .proto, etc.)</span></div>
-                <div class="help-legend-row"><span class="rc-type cfg">CFG</span><span class="help-legend-name">Configuration</span><span class="help-legend-desc">Interceptors, middleware, and event handlers</span></div>
+
+        <!-- Body -->
+        <div class="ency-body">
+
+            <!-- TOC View -->
+            <div x-show="!helpArticle">
+                <!-- Grouped by category when not searching -->
+                <template x-if="!helpSearch.trim()">
+                    <div>
+                        <div class="ency-category">Tools</div>
+                        <template x-for="a in helpArticles.filter(a => a.category === 'tools')" :key="a.slug">
+                            <div class="ency-toc-item" @click="helpArticle = a.slug">
+                                <span class="ency-toc-title" x-text="a.title"></span>
+                                <span class="ency-toc-desc" x-text="a.desc"></span>
+                            </div>
+                        </template>
+                        <div class="ency-category">Concepts</div>
+                        <template x-for="a in helpArticles.filter(a => a.category === 'concepts')" :key="a.slug">
+                            <div class="ency-toc-item" @click="helpArticle = a.slug">
+                                <span class="ency-toc-title" x-text="a.title"></span>
+                                <span class="ency-toc-desc" x-text="a.desc"></span>
+                            </div>
+                        </template>
+                        <div class="ency-category">Workflows</div>
+                        <template x-for="a in helpArticles.filter(a => a.category === 'workflows')" :key="a.slug">
+                            <div class="ency-toc-item" @click="helpArticle = a.slug">
+                                <span class="ency-toc-title" x-text="a.title"></span>
+                                <span class="ency-toc-desc" x-text="a.desc"></span>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+
+                <!-- Flat filtered list when searching -->
+                <template x-if="helpSearch.trim()">
+                    <div>
+                        <template x-for="a in filteredHelpArticles()" :key="a.slug">
+                            <div class="ency-toc-item" @click="helpArticle = a.slug">
+                                <span class="ency-toc-title" x-text="a.title"></span>
+                                <span class="ency-toc-desc" x-text="a.desc"></span>
+                            </div>
+                        </template>
+                        <div class="ency-no-results" x-show="filteredHelpArticles().length === 0">
+                            No articles match your search.
+                        </div>
+                    </div>
+                </template>
             </div>
-            <div class="help-divider"></div>
-            <div class="help-tips">
-                <div class="help-tip"><strong>Score</strong> &mdash; Relevance 0&ndash;1. Combines keyword + semantic similarity.</div>
-                <div class="help-tip"><strong>Click</strong> any result to view full context with source code.</div>
-                <div class="help-tip"><strong>Breadcrumbs</strong> track navigation history &mdash; click to go back.</div>
-            </div>
+
+            <!-- Article Views will go here (Tasks 4-8) -->
+
         </div>
     </div>
 </div>
