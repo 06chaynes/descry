@@ -668,8 +668,15 @@
                     <a @click.prevent="forms.crossLang.mode = 'list'; forms.crossLang.tag = ''; runCrossLang()">list all endpoints</a>
                 </div>
             </div>
-            <!-- Error -->
-            <div class="results" x-show="results.crossLang?.error">
+            <!-- Not configured notice -->
+            <div class="results" x-show="results.crossLang?.error && (results.crossLang.error.includes('not found') || results.crossLang.error.includes('not available'))">
+                <div class="tool-notice">
+                    <strong>Cross-language tracing is not configured.</strong>
+                    <p>This tool requires an OpenAPI spec to map frontend API calls to backend handlers. Place your spec at <code>public/api/openapi.json</code> relative to the project root, then try again.</p>
+                </div>
+            </div>
+            <!-- Actual error -->
+            <div class="results" x-show="results.crossLang?.error && !results.crossLang.error.includes('not found') && !results.crossLang.error.includes('not available')">
                 <div class="flow-error" x-text="results.crossLang?.error"></div>
             </div>
             <!-- Endpoint mode result -->

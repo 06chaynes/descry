@@ -868,6 +868,30 @@ pre.mermaid.mermaid-error {
     font-size: 13px;
 }
 
+.tool-notice {
+    padding: 16px 20px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin: 8px 0;
+}
+.tool-notice strong {
+    color: var(--text-primary);
+    display: block;
+    margin-bottom: 6px;
+}
+.tool-notice p {
+    margin: 0;
+    line-height: 1.5;
+}
+.tool-notice code {
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
 .flow-empty {
     padding: 24px;
     text-align: center;
