@@ -2803,12 +2803,10 @@ def main():
 
     # Load config from .descry.toml if present
     from descry.handlers import DescryConfig
-    toml_data = DescryConfig._load_toml(Path(target).resolve())
-    config_excluded_dirs = None
-    if toml_data:
-        project_section = toml_data.get("project", {})
-        if "excluded_dirs" in project_section:
-            config_excluded_dirs = set(project_section["excluded_dirs"])
+    config = DescryConfig(project_root=Path(target).resolve())
+    toml_data = DescryConfig._load_toml(config.project_root)
+    config._apply_toml(toml_data)
+    config_excluded_dirs = config.excluded_dirs if toml_data else None
 
     # Handle SCIP opt-out
     if args.no_scip:
@@ -2833,7 +2831,12 @@ def main():
             ]
             logger.info(f"SCIP: Enabled ({', '.join(enabled_indexers) or 'none'})")
 
-            cache_manager = ScipCacheManager(Path(target).resolve())
+            cache_manager = ScipCacheManager(
+                Path(target).resolve(),
+                scip_extra_args=config.scip_extra_args,
+                scip_skip_crates=config.scip_skip_crates,
+                scip_toolchain=config.scip_rust_toolchain,
+            )
             # Generate SCIP for all supported languages (Rust and TypeScript)
             scip_files = list(cache_manager.update_all().values())
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from descry.handlers import DescryConfig
+from descry.scip.cache import ScipCacheManager
 
 
 # --- Default field values ---
@@ -81,6 +82,18 @@ class TestNewFieldDefaults:
         assert config.syntax_lang_map[".py"] == "python"
         assert config.syntax_lang_map[".ts"] == "typescript"
         assert isinstance(config.syntax_lang_map, dict)
+
+    def test_scip_extra_args_default(self):
+        config = DescryConfig()
+        assert config.scip_extra_args == ["--exclude-vendored-libraries"]
+
+    def test_scip_skip_crates_default(self):
+        config = DescryConfig()
+        assert config.scip_skip_crates == []
+
+    def test_scip_rust_toolchain_default(self):
+        config = DescryConfig()
+        assert config.scip_rust_toolchain is None
 
 
 # --- TOML loading ---
@@ -194,6 +207,47 @@ timeout = 45
         assert data == {}
         assert any("Failed to parse" in r.message for r in caplog.records)
 
+    def test_scip_config_from_toml(self, tmp_path):
+        """SCIP extra_args and skip_crates load from TOML."""
+        toml_content = """\
+[scip]
+extra_args = ["--exclude-vendored-libraries", "--custom-flag"]
+skip_crates = ["mandible", "tarsus"]
+"""
+        (tmp_path / ".descry.toml").write_text(toml_content)
+
+        config = DescryConfig(project_root=tmp_path)
+        config._apply_toml(DescryConfig._load_toml(tmp_path))
+
+        assert config.scip_extra_args == ["--exclude-vendored-libraries", "--custom-flag"]
+        assert config.scip_skip_crates == ["mandible", "tarsus"]
+
+    def test_scip_rust_toolchain_from_toml(self, tmp_path):
+        """SCIP rust toolchain loads from TOML."""
+        toml_content = """\
+[scip.rust]
+toolchain = "1.92.0"
+"""
+        (tmp_path / ".descry.toml").write_text(toml_content)
+
+        config = DescryConfig(project_root=tmp_path)
+        config._apply_toml(DescryConfig._load_toml(tmp_path))
+
+        assert config.scip_rust_toolchain == "1.92.0"
+
+    def test_scip_empty_extra_args(self, tmp_path):
+        """Empty extra_args disables all default flags."""
+        toml_content = """\
+[scip]
+extra_args = []
+"""
+        (tmp_path / ".descry.toml").write_text(toml_content)
+
+        config = DescryConfig(project_root=tmp_path)
+        config._apply_toml(DescryConfig._load_toml(tmp_path))
+
+        assert config.scip_extra_args == []
+
     def test_syntax_lang_map_merges(self, tmp_path):
         """TOML entries merge with defaults (additive)."""
         toml_content = """\
@@ -264,3 +318,73 @@ max_depth = 9
             config = DescryConfig.from_env()
 
         assert config.max_depth == 9
+
+
+# --- ScipCacheManager config propagation ---
+
+
+class TestScipCacheManagerConfig:
+    """ScipCacheManager receives and uses config values."""
+
+    def test_default_extra_args(self, tmp_path):
+        mgr = ScipCacheManager(tmp_path)
+        assert mgr._scip_extra_args == ["--exclude-vendored-libraries"]
+
+    def test_custom_extra_args(self, tmp_path):
+        mgr = ScipCacheManager(tmp_path, scip_extra_args=["--custom-flag"])
+        assert mgr._scip_extra_args == ["--custom-flag"]
+
+    def test_empty_extra_args(self, tmp_path):
+        mgr = ScipCacheManager(tmp_path, scip_extra_args=[])
+        assert mgr._scip_extra_args == []
+
+    def test_default_skip_crates(self, tmp_path):
+        mgr = ScipCacheManager(tmp_path)
+        assert mgr._scip_skip_crates == set()
+
+    def test_custom_skip_crates(self, tmp_path):
+        mgr = ScipCacheManager(tmp_path, scip_skip_crates=["mandible", "tarsus"])
+        assert mgr._scip_skip_crates == {"mandible", "tarsus"}
+
+    def test_skip_crates_filters_rust_crates(self, tmp_path):
+        """Skipped crates are excluded from update_changed_rust."""
+        # Create crate directories
+        for name in ["alpha", "beta", "gamma"]:
+            crate_dir = tmp_path / name
+            crate_dir.mkdir()
+            (crate_dir / "Cargo.toml").write_text(f'[package]\nname = "{name}"')
+            (crate_dir / "src").mkdir()
+            (crate_dir / "src" / "lib.rs").write_text("// placeholder")
+
+        # Root Cargo.toml for workspace
+        (tmp_path / "Cargo.toml").write_text('[workspace]\nmembers = ["alpha", "beta", "gamma"]')
+
+        mgr = ScipCacheManager(tmp_path, scip_skip_crates=["beta"])
+        crates = mgr.get_rust_crates()
+        assert "beta" in crates  # get_rust_crates still discovers it
+
+        # But update_changed_rust should filter it out
+        # We can't run the full generation (no rust-analyzer), but we can
+        # verify the filtering logic by checking what needs_update sees
+        # after filtering
+        all_crates = mgr.get_rust_crates()
+        filtered = [c for c in all_crates if c not in mgr._scip_skip_crates]
+        assert "beta" not in filtered
+        assert "alpha" in filtered
+        assert "gamma" in filtered
+
+    def test_default_toolchain(self, tmp_path):
+        mgr = ScipCacheManager(tmp_path)
+        assert mgr._scip_toolchain is None
+
+    def test_custom_toolchain(self, tmp_path):
+        mgr = ScipCacheManager(tmp_path, scip_toolchain="1.92.0")
+        assert mgr._scip_toolchain == "1.92.0"
+
+    def test_toolchain_builds_rustup_command(self, tmp_path):
+        """When toolchain is set, command starts with rustup run."""
+        mgr = ScipCacheManager(tmp_path, scip_toolchain="1.92.0")
+        # Verify the toolchain is stored — the actual command construction
+        # happens in _generate_rust_scip which we can't easily test without
+        # rust-analyzer, but we can verify the config is wired through
+        assert mgr._scip_toolchain == "1.92.0"

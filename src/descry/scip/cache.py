@@ -42,7 +42,15 @@ class ScipCacheManager:
 
     _DEFAULT_EXCLUDED_DIRS = {"target", "node_modules", "dist", "docs", ".git", "__pycache__", "build", "vendor"}
 
-    def __init__(self, project_root: Path, excluded_dirs: set[str] | None = None, scip_timeout_minutes: int | None = None):
+    def __init__(
+        self,
+        project_root: Path,
+        excluded_dirs: set[str] | None = None,
+        scip_timeout_minutes: int | None = None,
+        scip_extra_args: list[str] | None = None,
+        scip_skip_crates: list[str] | None = None,
+        scip_toolchain: str | None = None,
+    ):
         """Initialize the cache manager.
 
         Args:
@@ -52,12 +60,22 @@ class ScipCacheManager:
                 dist, docs, .git, __pycache__, build, and vendor.
             scip_timeout_minutes: Timeout in minutes for SCIP generation.
                 0 means unlimited. None means use env var or default.
+            scip_extra_args: Extra arguments to pass to rust-analyzer scip.
+                Defaults to ["--exclude-vendored-libraries"].
+            scip_skip_crates: Crate names to skip during SCIP generation.
+                Useful for crates that trigger rust-analyzer bugs.
+            scip_toolchain: Rust toolchain to use for rust-analyzer
+                (e.g. "1.92.0"). Uses `rustup run <toolchain>` prefix.
+                None means use the default rust-analyzer on PATH.
         """
         self.project_root = project_root
         self.cache_dir = project_root / ".descry_cache" / "scip"
         self.checksums_file = self.cache_dir / "checksums.json"
         self.excluded_dirs = excluded_dirs if excluded_dirs is not None else self._DEFAULT_EXCLUDED_DIRS
         self._scip_timeout_minutes = scip_timeout_minutes
+        self._scip_extra_args = scip_extra_args if scip_extra_args is not None else ["--exclude-vendored-libraries"]
+        self._scip_skip_crates = set(scip_skip_crates) if scip_skip_crates else set()
+        self._scip_toolchain = scip_toolchain
 
     def get_projects(self) -> List[Tuple[str, str]]:
         """Auto-discover all indexable projects.
@@ -174,6 +192,13 @@ class ScipCacheManager:
         if not crates:
             logger.info("No Rust crates found in project")
             return {}
+
+        # Filter out crates configured to be skipped
+        if self._scip_skip_crates:
+            skipped = [c for c in crates if c in self._scip_skip_crates]
+            if skipped:
+                logger.info(f"SCIP: Skipping configured crates: {skipped}")
+            crates = [c for c in crates if c not in self._scip_skip_crates]
 
         changed = [c for c in crates if self.needs_update(c, "rust")]
 
@@ -297,15 +322,18 @@ class ScipCacheManager:
 
         try:
             # rust-analyzer scip runs from workspace root to share analysis cache
+            cmd = []
+            if self._scip_toolchain:
+                cmd.extend(["rustup", "run", self._scip_toolchain])
+            cmd.extend([
+                "rust-analyzer",
+                "scip",
+                str(crate_path),
+                "--output",
+                str(output_path),
+            ] + self._scip_extra_args)
             result = subprocess.run(
-                [
-                    "rust-analyzer",
-                    "scip",
-                    str(crate_path),
-                    "--output",
-                    str(output_path),
-                    "--exclude-vendored-libraries",  # Skip vendored code for speed
-                ],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
@@ -317,8 +345,12 @@ class ScipCacheManager:
                 logger.info(f"SCIP: Generated {crate}.scip ({size_kb:.1f} KB)")
                 return True
             else:
+                stderr_tail = result.stderr[-500:] if len(result.stderr) > 500 else result.stderr
                 logger.warning(
-                    f"SCIP: Failed to generate for {crate}: {result.stderr[:200]}"
+                    f"SCIP: Failed to generate for {crate} "
+                    f"(exit={result.returncode}, "
+                    f"output_exists={output_path.exists()}, "
+                    f"stderr_len={len(result.stderr)}): {stderr_tail}"
                 )
                 return False
 

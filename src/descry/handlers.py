@@ -112,6 +112,11 @@ class DescryConfig:
     max_children_per_level: int = 10
     max_callers_shown: int = 15
 
+    # SCIP
+    scip_extra_args: list[str] = field(default_factory=lambda: ["--exclude-vendored-libraries"])
+    scip_skip_crates: list[str] = field(default_factory=list)
+    scip_rust_toolchain: str | None = None  # e.g. "1.92.0" to use `rustup run 1.92.0 rust-analyzer`
+
     # Syntax highlighting
     syntax_lang_map: dict[str, str] = field(default_factory=lambda: dict(_DEFAULT_SYNTAX_LANG_MAP))
 
@@ -225,6 +230,18 @@ class DescryConfig:
             self.max_children_per_level = query["max_children_per_level"]
         if "max_callers_shown" in query:
             self.max_callers_shown = query["max_callers_shown"]
+
+        # [scip]
+        scip = data.get("scip", {})
+        if "extra_args" in scip:
+            self.scip_extra_args = scip["extra_args"]
+        if "skip_crates" in scip:
+            self.scip_skip_crates = scip["skip_crates"]
+
+        # [scip.rust]
+        scip_rust = scip.get("rust", {})
+        if "toolchain" in scip_rust:
+            self.scip_rust_toolchain = scip_rust["toolchain"]
 
         # [syntax.lang_map] — merges with defaults (additive)
         syntax = data.get("syntax", {})
