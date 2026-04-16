@@ -89,7 +89,9 @@ def extract_calls_rust(file_path: str) -> Iterator[dict]:
 
                 # If receiver looks like a type (Self, starts with uppercase), qualify the call
                 if receiver_text in ("self", "Self") or (
-                    receiver_text and receiver_text[0].isupper() and "::" not in func_name
+                    receiver_text
+                    and receiver_text[0].isupper()
+                    and "::" not in func_name
                 ):
                     qualified_name = f"{receiver_text}.{func_name}"
                 else:
@@ -220,8 +222,8 @@ def extract_imports_typescript(file_path: str) -> dict:
         - "type": import type { Foo } from 'module'
     """
     result = {
-        "imports": {},      # local_name -> (module_path, import_type)
-        "namespaces": {},   # alias -> module_path
+        "imports": {},  # local_name -> (module_path, import_type)
+        "namespaces": {},  # alias -> module_path
     }
 
     # Pattern 1: Named imports - import { foo, bar as baz } from 'module'
@@ -280,7 +282,11 @@ def extract_imports_typescript(file_path: str) -> dict:
 
                 elif import_type in ("named", "type"):
                     # import { foo, bar as baz } from 'module'
-                    imports_meta = multi.get("IMPORTS", []) if import_type == "named" else multi.get("TYPES", [])
+                    imports_meta = (
+                        multi.get("IMPORTS", [])
+                        if import_type == "named"
+                        else multi.get("TYPES", [])
+                    )
                     for imp in imports_meta:
                         text = imp.get("text", "").strip()
                         if not text:

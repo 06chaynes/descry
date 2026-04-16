@@ -55,7 +55,13 @@ class SemanticSearcher:
     # Significantly better code search quality than general-purpose models
     MODEL_NAME = "jinaai/jina-code-embeddings-0.5b"
 
-    def __init__(self, graph_path: str, cache_dir: Optional[str] = None, force_rebuild: bool = False, model_name: str | None = None):
+    def __init__(
+        self,
+        graph_path: str,
+        cache_dir: Optional[str] = None,
+        force_rebuild: bool = False,
+        model_name: str | None = None,
+    ):
         """Initialize the semantic searcher.
 
         Args:
@@ -105,7 +111,8 @@ class SemanticSearcher:
         """
         try:
             old_files = [
-                f for f in self.cache_dir.glob("embeddings_*.npz")
+                f
+                for f in self.cache_dir.glob("embeddings_*.npz")
                 if f != current_cache_path
             ]
             for old_file in old_files:
@@ -201,26 +208,32 @@ class SemanticSearcher:
             combined = f"{name} {sig} {doc}".strip()
             self.node_texts.append(combined if combined else node["id"])
 
-        logger.info(f"Generating weighted embeddings for {len(self.node_texts)} nodes...")
+        logger.info(
+            f"Generating weighted embeddings for {len(self.node_texts)} nodes..."
+        )
 
         # Generate embeddings for each component
         # batch_size keeps memory usage reasonable
         logger.info("  Encoding names...")
-        name_embeddings = self.model.encode(names, show_progress_bar=False, convert_to_numpy=True)
+        name_embeddings = self.model.encode(
+            names, show_progress_bar=False, convert_to_numpy=True
+        )
 
         logger.info("  Encoding signatures...")
-        sig_embeddings = self.model.encode(signatures, show_progress_bar=False, convert_to_numpy=True)
+        sig_embeddings = self.model.encode(
+            signatures, show_progress_bar=False, convert_to_numpy=True
+        )
 
         logger.info("  Encoding docstrings...")
-        doc_embeddings = self.model.encode(docstrings, show_progress_bar=False, convert_to_numpy=True)
+        doc_embeddings = self.model.encode(
+            docstrings, show_progress_bar=False, convert_to_numpy=True
+        )
 
         # Weighted combination: name=0.2, signature=0.3, docstring=0.5
         # Docstring gets highest weight for semantic/meaning-based queries
         logger.info("  Computing weighted composites...")
         self.embeddings = (
-            0.2 * name_embeddings +
-            0.3 * sig_embeddings +
-            0.5 * doc_embeddings
+            0.2 * name_embeddings + 0.3 * sig_embeddings + 0.5 * doc_embeddings
         )
 
         # Normalize the combined embeddings for consistent cosine similarity
@@ -377,7 +390,9 @@ def semantic_search(
     return searcher.search(query, limit=limit)
 
 
-def get_embeddings_status(graph_path: str = ".descry_cache/codebase_graph.json") -> dict:
+def get_embeddings_status(
+    graph_path: str = ".descry_cache/codebase_graph.json",
+) -> dict:
     """Get embeddings status for diagnostics.
 
     Args:

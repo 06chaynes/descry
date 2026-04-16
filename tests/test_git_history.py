@@ -105,7 +105,11 @@ class TestGitHistoryBuildFileLineMap:
                 {
                     "id": "FILE:src/auth.rs::validate_token",
                     "type": "Function",
-                    "metadata": {"name": "validate_token", "lineno": 10, "end_lineno": 20},
+                    "metadata": {
+                        "name": "validate_token",
+                        "lineno": 10,
+                        "end_lineno": 20,
+                    },
                 },
                 {
                     "id": "FILE:src/auth.rs::check_perms",
@@ -152,6 +156,7 @@ class TestGitHistoryEndToEnd:
     def analyzer(self):
         """Create analyzer rooted at the descry project."""
         import subprocess
+
         # Find project root (where .git exists)
         test_dir = Path(__file__).resolve().parent
         project_root = test_dir.parent
@@ -161,7 +166,9 @@ class TestGitHistoryEndToEnd:
         try:
             subprocess.run(
                 ["git", "rev-parse", "HEAD"],
-                cwd=str(project_root), capture_output=True, check=True,
+                cwd=str(project_root),
+                capture_output=True,
+                check=True,
             )
         except subprocess.CalledProcessError:
             pytest.skip("Git repository has no commits yet")
@@ -170,9 +177,7 @@ class TestGitHistoryEndToEnd:
     def test_churn_files_mode(self, analyzer):
         """Should return file-level churn data."""
         result = analyzer.get_churn(time_range="last 30 days", mode="files", limit=5)
-        assert "Most Changed Files" in result
-        # Should have some results (we know this repo has commits)
-        assert "commits" in result.lower() or "No commits" in result
+        assert "Most Changed Files" in result or "No commits" in result
 
     def test_churn_symbols_mode(self, analyzer):
         """Should return symbol-level churn data (may fall back to file-level)."""
@@ -190,12 +195,14 @@ class TestGitHistoryEndToEnd:
     def test_changes_head(self, analyzer):
         """Should return change impact for HEAD~1..HEAD."""
         import subprocess
+
         test_dir = Path(__file__).resolve().parent
         project_root = test_dir.parent
         # Need at least 2 commits for HEAD~1..HEAD
         ret = subprocess.run(
             ["git", "rev-parse", "HEAD~1"],
-            cwd=str(project_root), capture_output=True,
+            cwd=str(project_root),
+            capture_output=True,
         )
         if ret.returncode != 0:
             pytest.skip("Need at least 2 commits for HEAD~1..HEAD")

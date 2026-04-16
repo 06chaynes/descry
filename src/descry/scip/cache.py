@@ -40,7 +40,16 @@ class ScipCacheManager:
     Cache location: {project_root}/.descry_cache/scip/
     """
 
-    _DEFAULT_EXCLUDED_DIRS = {"target", "node_modules", "dist", "docs", ".git", "__pycache__", "build", "vendor"}
+    _DEFAULT_EXCLUDED_DIRS = {
+        "target",
+        "node_modules",
+        "dist",
+        "docs",
+        ".git",
+        "__pycache__",
+        "build",
+        "vendor",
+    }
 
     def __init__(
         self,
@@ -71,9 +80,15 @@ class ScipCacheManager:
         self.project_root = project_root
         self.cache_dir = project_root / ".descry_cache" / "scip"
         self.checksums_file = self.cache_dir / "checksums.json"
-        self.excluded_dirs = excluded_dirs if excluded_dirs is not None else self._DEFAULT_EXCLUDED_DIRS
+        self.excluded_dirs = (
+            excluded_dirs if excluded_dirs is not None else self._DEFAULT_EXCLUDED_DIRS
+        )
         self._scip_timeout_minutes = scip_timeout_minutes
-        self._scip_extra_args = scip_extra_args if scip_extra_args is not None else ["--exclude-vendored-libraries"]
+        self._scip_extra_args = (
+            scip_extra_args
+            if scip_extra_args is not None
+            else ["--exclude-vendored-libraries"]
+        )
         self._scip_skip_crates = set(scip_skip_crates) if scip_skip_crates else set()
         self._scip_toolchain = scip_toolchain
 
@@ -137,8 +152,12 @@ class ScipCacheManager:
             if pkg_dir.name in self.excluded_dirs:
                 continue
             # Check for TypeScript/JavaScript source files
-            has_ts = list(pkg_dir.glob("src/**/*.ts")) or list(pkg_dir.glob("src/**/*.tsx"))
-            has_js = list(pkg_dir.glob("src/**/*.js")) or list(pkg_dir.glob("src/**/*.jsx"))
+            has_ts = list(pkg_dir.glob("src/**/*.ts")) or list(
+                pkg_dir.glob("src/**/*.tsx")
+            )
+            has_js = list(pkg_dir.glob("src/**/*.js")) or list(
+                pkg_dir.glob("src/**/*.jsx")
+            )
             if has_ts or has_js:
                 packages.append(pkg_dir.name)
 
@@ -203,7 +222,9 @@ class ScipCacheManager:
         changed = [c for c in crates if self.needs_update(c, "rust")]
 
         if changed:
-            logger.info(f"SCIP: Regenerating for {len(changed)} changed Rust crate(s): {changed}")
+            logger.info(
+                f"SCIP: Regenerating for {len(changed)} changed Rust crate(s): {changed}"
+            )
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
             # Pre-warm cache if generating multiple crates (amortizes the cost)
@@ -245,13 +266,17 @@ class ScipCacheManager:
         changed = [p for p in packages if self.needs_update(p, "typescript")]
 
         if changed:
-            logger.info(f"SCIP: Regenerating for {len(changed)} changed TypeScript package(s): {changed}")
+            logger.info(
+                f"SCIP: Regenerating for {len(changed)} changed TypeScript package(s): {changed}"
+            )
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
             if parallel and len(changed) > 1:
                 max_workers = self._get_max_workers(len(changed))
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    results = list(executor.map(self._generate_typescript_scip, changed))
+                    results = list(
+                        executor.map(self._generate_typescript_scip, changed)
+                    )
             else:
                 results = [self._generate_typescript_scip(p) for p in changed]
 
@@ -313,11 +338,15 @@ class ScipCacheManager:
 
         # First-time generation is much slower as rust-analyzer builds workspace analysis
         # Check if any SCIP files exist to determine if this is likely a first run
-        existing_scip = list(self.cache_dir.glob("*.scip")) if self.cache_dir.exists() else []
+        existing_scip = (
+            list(self.cache_dir.glob("*.scip")) if self.cache_dir.exists() else []
+        )
         is_first_run = len(existing_scip) == 0
 
         timeout_seconds = self._get_timeout(is_first_run)
-        timeout_str = "unlimited" if timeout_seconds is None else f"{timeout_seconds//60}min"
+        timeout_str = (
+            "unlimited" if timeout_seconds is None else f"{timeout_seconds // 60}min"
+        )
         logger.info(f"SCIP: Generating index for {crate}... (timeout: {timeout_str})")
 
         try:
@@ -325,13 +354,16 @@ class ScipCacheManager:
             cmd = []
             if self._scip_toolchain:
                 cmd.extend(["rustup", "run", self._scip_toolchain])
-            cmd.extend([
-                "rust-analyzer",
-                "scip",
-                str(crate_path),
-                "--output",
-                str(output_path),
-            ] + self._scip_extra_args)
+            cmd.extend(
+                [
+                    "rust-analyzer",
+                    "scip",
+                    str(crate_path),
+                    "--output",
+                    str(output_path),
+                ]
+                + self._scip_extra_args
+            )
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -345,7 +377,9 @@ class ScipCacheManager:
                 logger.info(f"SCIP: Generated {crate}.scip ({size_kb:.1f} KB)")
                 return True
             else:
-                stderr_tail = result.stderr[-500:] if len(result.stderr) > 500 else result.stderr
+                stderr_tail = (
+                    result.stderr[-500:] if len(result.stderr) > 500 else result.stderr
+                )
                 logger.warning(
                     f"SCIP: Failed to generate for {crate} "
                     f"(exit={result.returncode}, "
@@ -376,12 +410,18 @@ class ScipCacheManager:
         output_path = self.cache_dir / f"{package}.scip"
 
         # Check if this is a first run for timeout calculation
-        existing_scip = list(self.cache_dir.glob("*.scip")) if self.cache_dir.exists() else []
+        existing_scip = (
+            list(self.cache_dir.glob("*.scip")) if self.cache_dir.exists() else []
+        )
         is_first_run = len(existing_scip) == 0
 
         timeout_seconds = self._get_timeout(is_first_run)
-        timeout_str = "unlimited" if timeout_seconds is None else f"{timeout_seconds//60}min"
-        logger.info(f"SCIP: Generating TypeScript index for {package}... (timeout: {timeout_str})")
+        timeout_str = (
+            "unlimited" if timeout_seconds is None else f"{timeout_seconds // 60}min"
+        )
+        logger.info(
+            f"SCIP: Generating TypeScript index for {package}... (timeout: {timeout_str})"
+        )
 
         # Build command with optional flags
         cmd = [
@@ -397,7 +437,9 @@ class ScipCacheManager:
         vite_config = package_path / "vite.config.ts"
         if svelte_config.exists() or vite_config.exists():
             cmd.append("--infer-tsconfig")
-            logger.debug(f"SCIP: Using --infer-tsconfig for SvelteKit project {package}")
+            logger.debug(
+                f"SCIP: Using --infer-tsconfig for SvelteKit project {package}"
+            )
 
         try:
             # scip-typescript needs to be run from the package directory
@@ -445,6 +487,7 @@ class ScipCacheManager:
         # Detect available memory and adjust
         try:
             import psutil
+
             mem_gb = psutil.virtual_memory().total / (1024**3)
             if mem_gb >= 32:
                 return min(4, num_items)  # 4 workers for 32GB+
@@ -469,6 +512,7 @@ class ScipCacheManager:
             return int(env_threads)
         # Default: use available CPUs minus 2 (leave room for system)
         import multiprocessing
+
         return max(2, multiprocessing.cpu_count() - 2)
 
     def _prime_rust_analyzer_cache(self) -> bool:

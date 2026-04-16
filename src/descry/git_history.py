@@ -13,7 +13,6 @@ Usage:
 """
 
 import logging
-import os
 import re
 import subprocess
 from collections import defaultdict
@@ -25,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 class GitError(Exception):
     """Raised for git-specific errors (not installed, not a repo, etc.)."""
+
     pass
 
 
@@ -38,15 +38,32 @@ DEFAULT_CHURN_EXCLUSIONS = [
 ]
 
 CODE_EXTENSIONS = {
-    ".rs", ".py", ".ts", ".tsx", ".js", ".jsx", ".svelte",
-    ".go", ".java", ".css", ".scss", ".html",
+    ".rs",
+    ".py",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".svelte",
+    ".go",
+    ".java",
+    ".css",
+    ".scss",
+    ".html",
 }
 
 
 class GitHistoryAnalyzer:
     """Analyzes git history at the symbol level using descry metadata."""
 
-    def __init__(self, project_root: str, graph_querier=None, churn_exclusions=None, code_extensions=None, git_timeout=30):
+    def __init__(
+        self,
+        project_root: str,
+        graph_querier=None,
+        churn_exclusions=None,
+        code_extensions=None,
+        git_timeout=30,
+    ):
         """Initialize the analyzer.
 
         Args:
@@ -61,8 +78,14 @@ class GitHistoryAnalyzer:
         self.project_root = Path(project_root).resolve()
         self.querier = graph_querier
         self._verified = False
-        self.churn_exclusions = churn_exclusions if churn_exclusions is not None else DEFAULT_CHURN_EXCLUSIONS
-        self.code_extensions = code_extensions if code_extensions is not None else CODE_EXTENSIONS
+        self.churn_exclusions = (
+            churn_exclusions
+            if churn_exclusions is not None
+            else DEFAULT_CHURN_EXCLUSIONS
+        )
+        self.code_extensions = (
+            code_extensions if code_extensions is not None else CODE_EXTENSIONS
+        )
         self.default_timeout = git_timeout
 
     def _run_git(self, args: list[str], timeout: int | None = None) -> str:
@@ -263,7 +286,11 @@ class GitHistoryAnalyzer:
         display_name = f"{parent}.{name}" if parent else name
 
         # Build location
-        file_path = node_id.split("::")[0].replace("FILE:", "") if node_id.startswith("FILE:") else ""
+        file_path = (
+            node_id.split("::")[0].replace("FILE:", "")
+            if node_id.startswith("FILE:")
+            else ""
+        )
         lineno = meta.get("lineno")
         location = f"{file_path}:{lineno}" if lineno else file_path
 
@@ -294,7 +321,10 @@ class GitHistoryAnalyzer:
 
         # Build git log command for file-level commit counts
         git_args = [
-            "log", "--format=%H", "--name-only", "--no-merges",
+            "log",
+            "--format=%H",
+            "--name-only",
+            "--no-merges",
         ]
         git_args.extend(self._parse_time_range(time_range))
         if path_filter:
@@ -331,7 +361,9 @@ class GitHistoryAnalyzer:
 
             lines = []
             range_note = f" ({time_range})" if time_range else ""
-            lines.append(f"### Top {len(sorted_files)} Most Changed Files{range_note}\n")
+            lines.append(
+                f"### Top {len(sorted_files)} Most Changed Files{range_note}\n"
+            )
 
             for rank, (file_path, commits) in enumerate(sorted_files, 1):
                 lines.append(f"{rank:>3}. {file_path} ({len(commits)} commits)")
@@ -360,7 +392,12 @@ class GitHistoryAnalyzer:
                 for commit_hash in commits:
                     try:
                         diff_output = self._run_git(
-                            ["diff", f"{commit_hash}~1..{commit_hash}", "--", file_path],
+                            [
+                                "diff",
+                                f"{commit_hash}~1..{commit_hash}",
+                                "--",
+                                file_path,
+                            ],
                             timeout=10,
                         )
                     except GitError:
@@ -398,7 +435,9 @@ class GitHistoryAnalyzer:
                         symbol_commits[sym].add(commit_hash)
 
             if not symbol_commits:
-                return "No symbol-level changes detected. Graph may not cover these files."
+                return (
+                    "No symbol-level changes detected. Graph may not cover these files."
+                )
 
             # Separate graph-resolved symbols (FILE:path::Symbol) from
             # file-level fallbacks (FILE:path with no ::).
@@ -488,7 +527,11 @@ class GitHistoryAnalyzer:
         if not file_commits:
             return {"error": "No file changes found for the given time range."}
 
-        base = {"mode": mode, "time_range": time_range or "", "path_filter": path_filter or ""}
+        base = {
+            "mode": mode,
+            "time_range": time_range or "",
+            "path_filter": path_filter or "",
+        }
 
         # FILE MODE
         if mode == "files":
@@ -496,8 +539,7 @@ class GitHistoryAnalyzer:
                 file_commits.items(), key=lambda x: len(x[1]), reverse=True
             )[:limit]
             base["files"] = [
-                {"file": fp, "commits": len(commits)}
-                for fp, commits in sorted_files
+                {"file": fp, "commits": len(commits)} for fp, commits in sorted_files
             ]
             return base
 
@@ -550,7 +592,9 @@ class GitHistoryAnalyzer:
                     symbol_commits[sym].add(commit_hash)
 
         if not symbol_commits:
-            return {"error": "No symbol-level changes detected. Graph may not cover these files."}
+            return {
+                "error": "No symbol-level changes detected. Graph may not cover these files."
+            }
 
         # Filter to graph-resolved symbols
         graph_resolved = {}
@@ -589,16 +633,18 @@ class GitHistoryAnalyzer:
             else:
                 file_path = location
             added, removed = symbol_lines.get(node_id, (0, 0))
-            symbols.append({
-                "id": node_id,
-                "type": type_badge.strip("[]"),
-                "name": name,
-                "file": file_path,
-                "line": line,
-                "commits": len(commits),
-                "added": added,
-                "removed": removed,
-            })
+            symbols.append(
+                {
+                    "id": node_id,
+                    "type": type_badge.strip("[]"),
+                    "name": name,
+                    "file": file_path,
+                    "line": line,
+                    "commits": len(commits),
+                    "added": added,
+                    "removed": removed,
+                }
+            )
 
         base["symbols"] = symbols
         return base
@@ -635,16 +681,23 @@ class GitHistoryAnalyzer:
             for (sym_a, sym_b), count in frequent_pairs[:limit]:
                 _, name_a, loc_a = self._get_node_display(sym_a)
                 _, name_b, loc_b = self._get_node_display(sym_b)
-                pairs.append({
-                    "a_id": sym_a, "a_name": name_a, "a_file": loc_a,
-                    "b_id": sym_b, "b_name": name_b, "b_file": loc_b,
-                    "shared_commits": count,
-                })
+                pairs.append(
+                    {
+                        "a_id": sym_a,
+                        "a_name": name_a,
+                        "a_file": loc_a,
+                        "b_id": sym_b,
+                        "b_name": name_b,
+                        "b_file": loc_b,
+                        "shared_commits": count,
+                    }
+                )
 
         if not pairs and file_commits:
             # Fall back to file-level co-change
             code_files = {
-                f: commits for f, commits in file_commits.items()
+                f: commits
+                for f, commits in file_commits.items()
                 if Path(f).suffix.lower() in self.code_extensions
             }
             if code_files:
@@ -666,11 +719,17 @@ class GitHistoryAnalyzer:
                 frequent_pairs.sort(key=lambda x: x[1], reverse=True)
 
                 for (file_a, file_b), count in frequent_pairs[:limit]:
-                    pairs.append({
-                        "a_id": "", "a_name": file_a, "a_file": file_a,
-                        "b_id": "", "b_name": file_b, "b_file": file_b,
-                        "shared_commits": count,
-                    })
+                    pairs.append(
+                        {
+                            "a_id": "",
+                            "a_name": file_a,
+                            "a_file": file_a,
+                            "b_id": "",
+                            "b_name": file_b,
+                            "b_file": file_b,
+                            "shared_commits": count,
+                        }
+                    )
                 base["file_level"] = True
 
         base["pairs"] = pairs
@@ -754,7 +813,8 @@ class GitHistoryAnalyzer:
         """
         # Filter to code files only
         code_files = {
-            f: commits for f, commits in file_commits.items()
+            f: commits
+            for f, commits in file_commits.items()
             if Path(f).suffix.lower() in self.code_extensions
         }
         if not code_files:
@@ -784,7 +844,9 @@ class GitHistoryAnalyzer:
             return "No co-change patterns found (need pairs with 2+ shared commits)."
 
         lines = [f"### Top {len(frequent_pairs)} Co-Change Pairs (file-level)\n"]
-        lines.append("*Symbol-level data was too sparse; showing file-level co-changes:*\n")
+        lines.append(
+            "*Symbol-level data was too sparse; showing file-level co-changes:*\n"
+        )
 
         for rank, ((file_a, file_b), count) in enumerate(frequent_pairs, 1):
             lines.append(f"{rank:>3}. {file_a} <-> {file_b} ({count} shared commits)")
@@ -827,7 +889,9 @@ class GitHistoryAnalyzer:
 
             if not matches:
                 matches = self.querier.find_nodes_by_name(name, fuzzy=True)
-                func_matches = [m for m in matches if m["type"] in ("Function", "Method")]
+                func_matches = [
+                    m for m in matches if m["type"] in ("Function", "Method")
+                ]
                 if func_matches:
                     matches = func_matches
 
@@ -837,16 +901,20 @@ class GitHistoryAnalyzer:
 
                 # Filter by crate if specified
                 if crate:
-                    crate_filtered = [m for m in matches if crate.lower() in m["id"].lower()]
+                    crate_filtered = [
+                        m for m in matches if crate.lower() in m["id"].lower()
+                    ]
                     if crate_filtered:
                         matches = crate_filtered
 
                 # Rank by in_degree (callers), non-test preferred
                 if len(matches) > 1:
+
                     def rank_match(m):
                         in_degree = m.get("metadata", {}).get("in_degree", 0)
                         is_test = "test" in m["id"].lower()
                         return (-in_degree, is_test)
+
                     matches.sort(key=rank_match)
 
                 best = matches[0]
@@ -864,8 +932,13 @@ class GitHistoryAnalyzer:
 
         # Try git log -L :name:file (git's native function tracking)
         # This works for top-level functions but fails for methods/nested fns
-        git_args = ["log", f"-L:{symbol_name}:{file_path}",
-                     "--format=%H %ad %an%n%s", "--date=short", "--no-merges"]
+        git_args = [
+            "log",
+            f"-L:{symbol_name}:{file_path}",
+            "--format=%H %ad %an%n%s",
+            "--date=short",
+            "--no-merges",
+        ]
         git_args.extend(self._parse_time_range(time_range))
 
         try:
@@ -882,8 +955,11 @@ class GitHistoryAnalyzer:
                 end_line = meta.get("end_lineno")
                 if start_line and end_line:
                     git_args = [
-                        "log", f"-L{start_line},{end_line}:{file_path}",
-                        "--format=%H %ad %an%n%s", "--date=short", "--no-merges",
+                        "log",
+                        f"-L{start_line},{end_line}:{file_path}",
+                        "--format=%H %ad %an%n%s",
+                        "--date=short",
+                        "--no-merges",
                     ]
                     git_args.extend(self._parse_time_range(time_range))
                     try:
@@ -894,7 +970,11 @@ class GitHistoryAnalyzer:
         # Build disambiguation note if multiple matches
         disambig_note = ""
         if match_count > 1:
-            _, _, location = self._get_node_display(resolved_node_id) if resolved_node_id else ("", "", file_path)
+            _, _, location = (
+                self._get_node_display(resolved_node_id)
+                if resolved_node_id
+                else ("", "", file_path)
+            )
             disambig_note = (
                 f"\n*{match_count} symbols named `{name}` — "
                 f"showing: {location}. Use `crate` to disambiguate.*"
@@ -907,8 +987,7 @@ class GitHistoryAnalyzer:
             return result + disambig_note
 
         # Fallback: simple file log filtered by symbol
-        git_args = ["log", "--format=%H %ad %an%n%s", "--date=short",
-                     "--no-merges"]
+        git_args = ["log", "--format=%H %ad %an%n%s", "--date=short", "--no-merges"]
         git_args.extend(self._parse_time_range(time_range))
         git_args.extend(["--", file_path])
 
@@ -996,12 +1075,16 @@ class GitHistoryAnalyzer:
             f"{len(commits)} commit(s) | {len(authors)} author(s) | {date_span}\n"
         )
 
-        shallow = " (shallow clone - history may be incomplete)" if self._is_shallow() else ""
+        shallow = (
+            " (shallow clone - history may be incomplete)" if self._is_shallow() else ""
+        )
         if shallow:
             lines.append(f"*Warning: {shallow}*\n")
 
         for i, commit in enumerate(commits, 1):
-            lines.append(f"{i}. **{commit['hash']}** ({commit['date']}) {commit['author']}")
+            lines.append(
+                f"{i}. **{commit['hash']}** ({commit['date']}) {commit['author']}"
+            )
             lines.append(f"   {commit['subject']}")
             if commit["added"] or commit["removed"]:
                 lines.append(f"   +{commit['added']}/-{commit['removed']} lines")
@@ -1035,12 +1118,14 @@ class GitHistoryAnalyzer:
         for line in output.strip().split("\n"):
             match = re.match(r"^([0-9a-f]{40})\s+(\S+)\s+(.+)$", line)
             if match:
-                commits.append({
-                    "hash": match.group(1)[:8],
-                    "date": match.group(2),
-                    "author": match.group(3).strip(),
-                    "subject": "",
-                })
+                commits.append(
+                    {
+                        "hash": match.group(1)[:8],
+                        "date": match.group(2),
+                        "author": match.group(3).strip(),
+                        "subject": "",
+                    }
+                )
                 authors.add(match.group(3).strip())
             elif commits and not commits[-1]["subject"]:
                 commits[-1]["subject"] = line.strip()
@@ -1061,12 +1146,12 @@ class GitHistoryAnalyzer:
         if show_diff:
             note += "\n*Diffs were requested but are not available in file-level fallback mode.*"
         lines.append(note + "\n")
-        lines.append(
-            f"{len(commits)} commit(s) | {len(authors)} author(s)\n"
-        )
+        lines.append(f"{len(commits)} commit(s) | {len(authors)} author(s)\n")
 
         for i, commit in enumerate(commits, 1):
-            lines.append(f"{i}. **{commit['hash']}** ({commit['date']}) {commit['author']}")
+            lines.append(
+                f"{i}. **{commit['hash']}** ({commit['date']}) {commit['author']}"
+            )
             lines.append(f"   {commit['subject']}")
             lines.append("")
 
@@ -1102,7 +1187,9 @@ class GitHistoryAnalyzer:
                 time_flags = self._parse_time_range(time_range)
                 git_args = ["log", "--format=%H", "--no-merges"] + time_flags
                 output = self._run_git(git_args, timeout=30)
-                commit_hashes = [h.strip() for h in output.strip().split("\n") if h.strip()]
+                commit_hashes = [
+                    h.strip() for h in output.strip().split("\n") if h.strip()
+                ]
                 if not commit_hashes:
                     return "No commits found for the given time range."
                 # oldest..newest
@@ -1130,11 +1217,13 @@ class GitHistoryAnalyzer:
             if len(parts) == 3:
                 added = int(parts[0]) if parts[0] != "-" else 0
                 removed = int(parts[1]) if parts[1] != "-" else 0
-                changed_files.append({
-                    "file": parts[2],
-                    "added": added,
-                    "removed": removed,
-                })
+                changed_files.append(
+                    {
+                        "file": parts[2],
+                        "added": added,
+                        "removed": removed,
+                    }
+                )
 
         # Count commits in range
         try:
@@ -1159,8 +1248,6 @@ class GitHistoryAnalyzer:
 
         # Attribute changes to symbols
         modified_symbols: dict[str, dict] = {}  # node_id -> {added, removed}
-        added_symbols: list[str] = []  # new node_ids
-        removed_symbols: list[str] = []  # removed node_ids
 
         # Group hunks by file
         file_hunks: dict[str, list[dict]] = defaultdict(list)
@@ -1197,7 +1284,11 @@ class GitHistoryAnalyzer:
         # Format output
         lines = []
         range_display = commit_range or time_range or "HEAD~1..HEAD"
-        count_note = f" ({commit_count} commit{'s' if commit_count != 1 else ''})" if commit_count else ""
+        count_note = (
+            f" ({commit_count} commit{'s' if commit_count != 1 else ''})"
+            if commit_count
+            else ""
+        )
         lines.append(f"### Change Impact: {range_display}{count_note}\n")
         lines.append(
             f"Scope: {len(changed_files)} file(s) | "
@@ -1206,7 +1297,9 @@ class GitHistoryAnalyzer:
 
         if not modified_symbols:
             # Show file-level summary if no symbol attribution possible
-            lines.append("*No symbol-level attribution available (graph may not cover these files).*\n")
+            lines.append(
+                "*No symbol-level attribution available (graph may not cover these files).*\n"
+            )
             lines.append("#### Changed Files")
             for f in changed_files[:limit]:
                 lines.append(f"  - {f['file']} (+{f['added']}/-{f['removed']})")
@@ -1268,7 +1361,9 @@ class GitHistoryAnalyzer:
                 time_flags = self._parse_time_range(time_range)
                 git_args = ["log", "--format=%H", "--no-merges"] + time_flags
                 output = self._run_git(git_args, timeout=30)
-                commit_hashes = [h.strip() for h in output.strip().split("\n") if h.strip()]
+                commit_hashes = [
+                    h.strip() for h in output.strip().split("\n") if h.strip()
+                ]
                 if not commit_hashes:
                     return {"error": "No commits found for the given time range."}
                 effective_range = f"{commit_hashes[-1]}~1..{commit_hashes[0]}"
@@ -1293,7 +1388,9 @@ class GitHistoryAnalyzer:
             if len(parts) == 3:
                 added = int(parts[0]) if parts[0] != "-" else 0
                 removed = int(parts[1]) if parts[1] != "-" else 0
-                changed_files.append({"file": parts[2], "added": added, "removed": removed})
+                changed_files.append(
+                    {"file": parts[2], "added": added, "removed": removed}
+                )
 
         try:
             commit_count_output = self._run_git(
@@ -1395,7 +1492,9 @@ class GitHistoryAnalyzer:
                         c_name = (
                             c_node["metadata"].get("name", "?")
                             if c_node
-                            else caller_id.split("::")[-1] if "::" in caller_id else "?"
+                            else caller_id.split("::")[-1]
+                            if "::" in caller_id
+                            else "?"
                         )
                         callers.append({"id": caller_id, "name": c_name})
                     entry["callers"] = callers

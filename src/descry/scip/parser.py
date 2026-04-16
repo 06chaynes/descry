@@ -174,9 +174,7 @@ class ScipIndex:
 
         return name_parts[-1] if name_parts else None
 
-    def resolve(
-        self, ref_name: str, source_file: str, line: int
-    ) -> Optional[str]:
+    def resolve(self, ref_name: str, source_file: str, line: int) -> Optional[str]:
         """Resolve a reference to its definition node ID.
 
         Attempts resolution in order:
@@ -193,7 +191,11 @@ class ScipIndex:
             Descry node ID if resolved, None otherwise
         """
         # Determine language for statistics tracking
-        lang = "typescript" if source_file.endswith((".ts", ".tsx", ".js", ".jsx", ".svelte")) else "rust"
+        lang = (
+            "typescript"
+            if source_file.endswith((".ts", ".tsx", ".js", ".jsx", ".svelte"))
+            else "rust"
+        )
         if lang in self._resolution_stats:
             self._resolution_stats[lang]["attempted"] += 1
 
@@ -331,7 +333,7 @@ class ScipIndex:
 
         # Pattern to match descriptors with their suffixes
         # Group 1: name, Group 2: suffix
-        pattern = r'([a-zA-Z_][a-zA-Z0-9_]*)(\([^)]*\)|[#./\[\]])?'
+        pattern = r"([a-zA-Z_][a-zA-Z0-9_]*)(\([^)]*\)|[#./\[\]])?"
 
         for match in re.finditer(pattern, descriptors):
             name = match.group(1)
@@ -389,11 +391,11 @@ class ScipIndex:
         backtick_positions = []
         i = 0
         while i < len(descriptors):
-            if descriptors[i] == '`':
+            if descriptors[i] == "`":
                 start = i
                 i += 1
                 # Find closing backtick
-                while i < len(descriptors) and descriptors[i] != '`':
+                while i < len(descriptors) and descriptors[i] != "`":
                     i += 1
                 if i < len(descriptors):
                     backtick_positions.append((start, i))
@@ -402,18 +404,18 @@ class ScipIndex:
 
         # Extract the symbol portion after the last backtick segment
         if last_backtick_end >= 0 and last_backtick_end < len(descriptors) - 1:
-            symbol_portion = descriptors[last_backtick_end + 1:]
+            symbol_portion = descriptors[last_backtick_end + 1 :]
         else:
             # No backticks found, use entire string (fallback)
             symbol_portion = descriptors
 
         # Strip leading path separator if present
-        symbol_portion = symbol_portion.lstrip('/')
+        symbol_portion = symbol_portion.lstrip("/")
 
         # Pattern to match TypeScript symbol descriptors with their suffixes
         # Handles: name#, name., name(), name[T]
         # Group 1: name, Group 2: suffix
-        pattern = r'([a-zA-Z_$][a-zA-Z0-9_$]*)(\([^)]*\)|[#./\[\]])?'
+        pattern = r"([a-zA-Z_$][a-zA-Z0-9_$]*)(\([^)]*\)|[#./\[\]])?"
 
         for match in re.finditer(pattern, symbol_portion):
             name = match.group(1)
@@ -431,7 +433,18 @@ class ScipIndex:
                 continue
 
             # Skip common TypeScript keywords that aren't real symbols
-            if name in ("export", "default", "async", "function", "class", "interface", "type", "const", "let", "var"):
+            if name in (
+                "export",
+                "default",
+                "async",
+                "function",
+                "class",
+                "interface",
+                "type",
+                "const",
+                "let",
+                "var",
+            ):
                 continue
 
             # Include types (#), terms (.), and methods/functions (())

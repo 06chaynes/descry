@@ -206,12 +206,19 @@ def main():
 
     # ensure
     sub = subparsers.add_parser("ensure", help="Ensure graph exists and is fresh")
-    sub.add_argument("--max-age-hours", type=float, default=24, help="Max graph age in hours (default: 24)")
+    sub.add_argument(
+        "--max-age-hours",
+        type=float,
+        default=24,
+        help="Max graph age in hours (default: 24)",
+    )
     sub.set_defaults(func=cmd_ensure)
 
     # index
     sub = subparsers.add_parser("index", help="Regenerate the codebase graph")
-    sub.add_argument("path", nargs="?", default=None, help="Path to index (default: project root)")
+    sub.add_argument(
+        "path", nargs="?", default=None, help="Path to index (default: project root)"
+    )
     sub.set_defaults(func=cmd_index)
 
     # callers
@@ -227,20 +234,35 @@ def main():
     sub.set_defaults(func=cmd_callees)
 
     # context
-    sub = subparsers.add_parser("context", help="Get full context for a symbol by node ID")
+    sub = subparsers.add_parser(
+        "context", help="Get full context for a symbol by node ID"
+    )
     sub.add_argument("node_id", help="Graph node ID (e.g. FILE:src/lib.rs::main)")
     sub.add_argument("--brief", action="store_true", help="Brief output")
     sub.add_argument("--full", action="store_true", help="Full source output")
-    sub.add_argument("--expand-callees", action="store_true", help="Include callee source")
-    sub.add_argument("--deduplicate", action="store_true", help="Deduplicate repeated lookups")
-    sub.add_argument("--depth", type=int, default=1, help="Traversal depth (default: 1)")
-    sub.add_argument("--max-tokens", type=int, default=2000, help="Max token budget (default: 2000)")
+    sub.add_argument(
+        "--expand-callees", action="store_true", help="Include callee source"
+    )
+    sub.add_argument(
+        "--deduplicate", action="store_true", help="Deduplicate repeated lookups"
+    )
+    sub.add_argument(
+        "--depth", type=int, default=1, help="Traversal depth (default: 1)"
+    )
+    sub.add_argument(
+        "--max-tokens", type=int, default=2000, help="Max token budget (default: 2000)"
+    )
     sub.set_defaults(func=cmd_context)
 
     # flow
     sub = subparsers.add_parser("flow", help="Trace call flow from a starting symbol")
     sub.add_argument("start", help="Starting symbol name")
-    sub.add_argument("--direction", default="forward", choices=["forward", "backward"], help="Trace direction (default: forward)")
+    sub.add_argument(
+        "--direction",
+        default="forward",
+        choices=["forward", "backward"],
+        help="Trace direction (default: forward)",
+    )
     sub.add_argument("--depth", type=int, default=3, help="Trace depth (default: 3)")
     sub.add_argument("--target", default=None, help="Target symbol to reach")
     sub.set_defaults(func=cmd_flow)
@@ -248,13 +270,19 @@ def main():
     # search
     sub = subparsers.add_parser("search", help="Search symbol names and docstrings")
     sub.add_argument("terms", nargs="+", help="Search terms")
-    sub.add_argument("--compact", action="store_true", default=True, help="Compact output (default)")
-    sub.add_argument("--no-compact", dest="compact", action="store_false", help="Detailed output")
+    sub.add_argument(
+        "--compact", action="store_true", default=True, help="Compact output (default)"
+    )
+    sub.add_argument(
+        "--no-compact", dest="compact", action="store_false", help="Detailed output"
+    )
     sub.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     sub.add_argument("--lang", default=None, help="Filter by language")
     sub.add_argument("--crate", default=None, help="Filter by crate")
     sub.add_argument("--type", default=None, help="Filter by symbol type")
-    sub.add_argument("--exclude-tests", action="store_true", help="Exclude test symbols")
+    sub.add_argument(
+        "--exclude-tests", action="store_true", help="Exclude test symbols"
+    )
     sub.set_defaults(func=cmd_search)
 
     # structure
@@ -263,40 +291,64 @@ def main():
     sub.set_defaults(func=cmd_structure)
 
     # flatten
-    sub = subparsers.add_parser("flatten", help="Show effective API of a class including inherited methods")
+    sub = subparsers.add_parser(
+        "flatten", help="Show effective API of a class including inherited methods"
+    )
     sub.add_argument("class_node_id", help="Class node ID")
     sub.set_defaults(func=cmd_flatten)
 
     # semantic
-    sub = subparsers.add_parser("semantic", help="Pure semantic search using embeddings")
+    sub = subparsers.add_parser(
+        "semantic", help="Pure semantic search using embeddings"
+    )
     sub.add_argument("query", help="Natural language query")
     sub.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     sub.set_defaults(func=cmd_semantic)
 
     # quick
-    sub = subparsers.add_parser("quick", help="Find symbol and show full context in one step")
+    sub = subparsers.add_parser(
+        "quick", help="Find symbol and show full context in one step"
+    )
     sub.add_argument("name", help="Symbol name")
     sub.add_argument("--full", action="store_true", help="Full source output")
     sub.add_argument("--brief", action="store_true", help="Brief output")
     sub.set_defaults(func=cmd_quick)
 
     # impls
-    sub = subparsers.add_parser("impls", help="Find all implementations of a trait method")
+    sub = subparsers.add_parser(
+        "impls", help="Find all implementations of a trait method"
+    )
     sub.add_argument("method", help="Method name")
     sub.add_argument("--trait-name", default=None, help="Filter by trait name")
     sub.set_defaults(func=cmd_impls)
 
     # path
-    sub = subparsers.add_parser("path", help="Find shortest call path between two symbols")
+    sub = subparsers.add_parser(
+        "path", help="Find shortest call path between two symbols"
+    )
     sub.add_argument("start", help="Starting symbol")
     sub.add_argument("end", help="Ending symbol")
-    sub.add_argument("--max-depth", type=int, default=10, help="Max search depth (default: 10)")
-    sub.add_argument("--direction", default="forward", choices=["forward", "backward"], help="Search direction (default: forward)")
+    sub.add_argument(
+        "--max-depth", type=int, default=10, help="Max search depth (default: 10)"
+    )
+    sub.add_argument(
+        "--direction",
+        default="forward",
+        choices=["forward", "backward"],
+        help="Search direction (default: forward)",
+    )
     sub.set_defaults(func=cmd_path)
 
     # cross-lang
-    sub = subparsers.add_parser("cross-lang", help="Trace API calls from frontend to backend via OpenAPI")
-    sub.add_argument("--mode", default="endpoint", choices=["endpoint", "list", "stats"], help="Trace mode (default: endpoint)")
+    sub = subparsers.add_parser(
+        "cross-lang", help="Trace API calls from frontend to backend via OpenAPI"
+    )
+    sub.add_argument(
+        "--mode",
+        default="endpoint",
+        choices=["endpoint", "list", "stats"],
+        help="Trace mode (default: endpoint)",
+    )
     sub.add_argument("--method", default=None, help="HTTP method (e.g. GET, POST)")
     sub.add_argument("--path", default=None, help="API path (e.g. /api/v1/deployments)")
     sub.add_argument("--tag", default=None, help="Filter by tag")
@@ -307,11 +359,18 @@ def main():
     sub.add_argument("--time-range", default=None, help='Time range (e.g. "30 days")')
     sub.add_argument("--path-filter", default=None, help='Path filter (e.g. "src/")')
     sub.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
-    sub.add_argument("--mode", default="symbols", choices=["symbols", "files"], help="Churn mode (default: symbols)")
+    sub.add_argument(
+        "--mode",
+        default="symbols",
+        choices=["symbols", "files"],
+        help="Churn mode (default: symbols)",
+    )
     sub.set_defaults(func=cmd_churn)
 
     # evolution
-    sub = subparsers.add_parser("evolution", help="Track how a symbol has changed over time")
+    sub = subparsers.add_parser(
+        "evolution", help="Track how a symbol has changed over time"
+    )
     sub.add_argument("name", help="Symbol name")
     sub.add_argument("--time-range", default=None, help='Time range (e.g. "90 days")')
     sub.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
@@ -320,12 +379,26 @@ def main():
     sub.set_defaults(func=cmd_evolution)
 
     # changes
-    sub = subparsers.add_parser("changes", help="Analyze change impact for a commit range")
-    sub.add_argument("--commit-range", default=None, help="Commit range (e.g. HEAD~3..HEAD)")
+    sub = subparsers.add_parser(
+        "changes", help="Analyze change impact for a commit range"
+    )
+    sub.add_argument(
+        "--commit-range", default=None, help="Commit range (e.g. HEAD~3..HEAD)"
+    )
     sub.add_argument("--time-range", default=None, help='Time range (e.g. "7 days")')
     sub.add_argument("--path-filter", default=None, help='Path filter (e.g. "src/")')
-    sub.add_argument("--show-callers", action="store_true", default=True, help="Show callers of changed symbols (default)")
-    sub.add_argument("--no-show-callers", dest="show_callers", action="store_false", help="Hide callers")
+    sub.add_argument(
+        "--show-callers",
+        action="store_true",
+        default=True,
+        help="Show callers of changed symbols (default)",
+    )
+    sub.add_argument(
+        "--no-show-callers",
+        dest="show_callers",
+        action="store_false",
+        help="Hide callers",
+    )
     sub.add_argument("--limit", type=int, default=50, help="Max results (default: 50)")
     sub.set_defaults(func=cmd_changes)
 

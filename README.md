@@ -1,0 +1,228 @@
+# Descry
+
+Polyglot codebase knowledge graph with call-graph analysis, semantic search, and SCIP integration. Built for AI coding agents (MCP), with CLI and Web UI interfaces.
+
+Descry indexes your codebase into a knowledge graph of symbols (functions, classes, constants) and their relationships (calls, imports, defines). It supports Rust, Python, TypeScript, JavaScript, Svelte, Go, Java, and more — with type-aware resolution via SCIP for Rust and TypeScript.
+
+## Quick Start
+
+```bash
+# Install with all optional features
+pip install descry[all]
+
+# Index your project
+cd your-project
+descry index
+
+# Search for symbols
+descry search authenticate
+
+# Find callers of a function
+descry callers validate_token
+
+# One-step lookup (search + full context)
+descry quick handle_request
+```
+
+## Interfaces
+
+| Interface | Command | Use Case |
+|-----------|---------|----------|
+| **CLI** | `descry <command>` | Interactive terminal use |
+| **MCP Server** | `descry-mcp` | AI coding agents (Claude Code, etc.) |
+| **Web UI** | `descry-web` | Visual exploration at `http://127.0.0.1:8787` |
+| **Pi Extension** | See `pi-extension/` | Pi coding agent integration |
+
+## MCP Setup
+
+### Claude Code
+
+Add to your Claude Code MCP settings (`.claude/settings.json` or global):
+
+```json
+{
+  "mcpServers": {
+    "descry": {
+      "command": "descry-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+Or with a specific Python path:
+
+```json
+{
+  "mcpServers": {
+    "descry": {
+      "command": "/path/to/venv/bin/descry-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+### Other MCP Hosts
+
+Descry uses the standard MCP stdio transport. Any MCP-compatible host can spawn `descry-mcp` as a subprocess.
+
+## Tools
+
+Descry provides 18 tools, available through all interfaces:
+
+| Tool | Description |
+|------|-------------|
+| `health` | Diagnostic check — version, graph status, feature availability |
+| `status` | Graph existence and freshness |
+| `ensure` | Ensure graph exists and is fresh (regenerates if stale) |
+| `index` | Regenerate graph, SCIP indices, and embeddings |
+| `search` | Search symbol names and docstrings (keyword + semantic) |
+| `semantic` | Pure semantic search using embeddings only |
+| `quick` | Find symbol and show full context in one step |
+| `callers` | Find all callers of a symbol |
+| `callees` | Find what a symbol calls |
+| `context` | Full context for a symbol — source, callers, callees, tests |
+| `flow` | Trace call flow from a starting symbol (forward/backward) |
+| `path` | Find shortest call path between two symbols |
+| `structure` | Show file structure — imports, classes, functions |
+| `flatten` | Show effective API of a class including inherited methods |
+| `impls` | Find all implementations of a trait/interface method |
+| `cross-lang` | Trace frontend API calls to backend handlers via OpenAPI |
+| `churn` | Find code churn hotspots (symbols, files, or co-change pairs) |
+| `evolution` | Track how a symbol has changed over time |
+| `changes` | Analyze change impact for a commit range |
+
+## Configuration
+
+Descry works zero-config by auto-detecting your project root (looks for `.git`, `Cargo.toml`, `package.json`, `pyproject.toml`). For customization, add a `.descry.toml` to your project root:
+
+```toml
+[project]
+excluded_dirs = ["target", "node_modules", "dist", ".git", "__pycache__", "build", "vendor"]
+max_stale_hours = 48
+
+[features]
+enable_scip = true        # Type-aware resolution (requires rust-analyzer or scip-typescript)
+enable_embeddings = true   # Semantic search (requires sentence-transformers)
+
+[embeddings]
+model = "jinaai/jina-code-embeddings-0.5b"
+
+[test_detection]
+path_patterns = ["/tests/", "/test/", "/__tests__/"]
+file_suffixes = ["_test.rs", ".test.ts", ".spec.ts", "_test.py"]
+
+[code_files]
+extensions = [".rs", ".py", ".ts", ".tsx", ".js", ".jsx", ".svelte", ".go", ".java"]
+
+[git]
+churn_exclusions = [".descry_cache/", "Cargo.lock", "package-lock.json"]
+timeout = 30
+
+[timeouts]
+scip_minutes = 0       # 0 = unlimited
+embedding_seconds = 60
+query_ms = 4000
+
+[query]
+max_depth = 3
+max_nodes = 100
+max_children_per_level = 10
+max_callers_shown = 15
+
+[scip]
+extra_args = ["--exclude-vendored-libraries"]
+skip_crates = []         # Crate names to skip during SCIP indexing
+
+[scip.rust]
+toolchain = "1.92.0"     # Pin rust-analyzer version via rustup
+
+[syntax.lang_map]
+".svelte" = "svelte"
+".proto" = "protobuf"
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DESCRY_LOG_LEVEL` | `WARNING` | Log level (DEBUG, INFO, WARNING, ERROR) |
+| `DESCRY_CACHE_DIR` | `.descry_cache/` | Override cache directory location |
+| `DESCRY_NO_SCIP` | `false` | Disable SCIP indexing |
+| `DESCRY_NO_EMBEDDINGS` | `false` | Disable semantic search |
+
+Configuration precedence: defaults < `.descry.toml` < environment variables.
+
+## Language Support
+
+| Language | Parsing | SCIP (Type-Aware) | Requirements |
+|----------|---------|-------------------|--------------|
+| Rust | Regex + AST | Yes | `rust-analyzer` via rustup |
+| TypeScript | Regex | Yes | `scip-typescript` via npm |
+| Python | Regex + AST | Planned | — |
+| JavaScript | Regex | — | — |
+| Svelte | Regex | — | — |
+| Go | Regex | — | — |
+| Java | Regex | — | — |
+
+SCIP provides precise call-graph resolution (resolving which specific function is called through traits, generics, etc.). Without SCIP, Descry falls back to regex-based name matching which handles most cases but may produce false positives on overloaded names.
+
+## Installation
+
+### Minimal (graph + CLI only)
+
+```bash
+pip install descry
+```
+
+### With MCP server
+
+```bash
+pip install descry[mcp]
+```
+
+### With Web UI
+
+```bash
+pip install descry[web]
+```
+
+### With semantic search
+
+```bash
+pip install descry[embeddings]
+```
+
+### Everything
+
+```bash
+pip install descry[all]
+```
+
+### Development
+
+```bash
+git clone https://github.com/06chaynes/descry.git
+cd descry
+just install    # Creates venv and installs with dev deps
+just test       # Run tests
+just lint       # Ruff linting
+just fmt        # Ruff formatting
+```
+
+Requires [uv](https://github.com/astral-sh/uv) and [just](https://github.com/casey/just).
+
+## How It Works
+
+1. **Index** — Descry walks your codebase, parses source files into an AST-like representation, and builds a graph of symbols and their relationships. If SCIP is available, it overlays type-aware call resolution.
+
+2. **Cache** — The graph is cached as JSON in `.descry_cache/codebase_graph.json`. Embeddings are cached separately. SCIP indices are cached per-crate/package.
+
+3. **Query** — All tools query the cached graph. Keyword search uses TF-IDF scoring. Semantic search uses sentence-transformer embeddings. Call-graph traversal follows edges in the graph.
+
+4. **Freshness** — `ensure` checks graph age against `max_stale_hours` and regenerates if needed. The MCP server pre-warms the graph on startup.
+
+## License
+
+MIT

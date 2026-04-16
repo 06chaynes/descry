@@ -154,8 +154,16 @@ async def descry_context(
 ) -> str:
     """Get full context for a symbol: source code, callers, callees, tests (~500+ tokens). Use brief=true (~50 tokens) to quickly verify a symbol before fetching full context. Options: full=true (no truncation), expand_callees=true (inline dependencies), head_lines=N (preview first N lines)."""
     return await _svc().context(
-        node_id, brief, full, expand_callees, deduplicate,
-        depth, max_tokens, callee_budget, head_lines, max_output_tokens,
+        node_id,
+        brief,
+        full,
+        expand_callees,
+        deduplicate,
+        depth,
+        max_tokens,
+        callee_budget,
+        head_lines,
+        max_output_tokens,
     )
 
 
@@ -183,7 +191,9 @@ async def descry_search(
 ) -> str:
     """Search symbol names and docstrings. Returns compact single-line results by default. After finding candidates, use descry_context with brief=true to verify relevance, then fetch full context only for confirmed-relevant symbols. Set compact=false only when you need signatures and docstrings inline. Combines keyword + semantic search. Use filters for specific crates/languages."""
     return await _svc().search(
-        terms, compact, limit,
+        terms,
+        compact,
+        limit,
         lang.value if lang else None,
         crate,
         type.value if type else None,
@@ -247,7 +257,10 @@ async def descry_cross_lang(
 ) -> str:
     """Trace API calls from frontend to backend handlers via OpenAPI spec. Maps frontend API calls to their backend implementations. Use 'endpoint' mode to find which handler serves a specific endpoint. Use 'list' mode to see all endpoints for a resource."""
     return await _svc().cross_lang(
-        mode.value, method.value if method else None, path, tag,
+        mode.value,
+        method.value if method else None,
+        path,
+        tag,
     )
 
 
@@ -260,7 +273,9 @@ async def descry_churn(
     exclude_generated: bool = True,
 ) -> str:
     """Find code churn hotspots - symbols or files that change most often. Use for identifying unstable code, refactoring targets, or areas that need better test coverage. Mode 'symbols' (default) maps changes to functions/methods via the graph, 'files' shows file-level stats, 'co-change' shows symbol pairs that frequently change together."""
-    return await _svc().churn(time_range, path_filter, limit, mode.value, exclude_generated)
+    return await _svc().churn(
+        time_range, path_filter, limit, mode.value, exclude_generated
+    )
 
 
 @mcp.tool()
@@ -284,7 +299,9 @@ async def descry_changes(
     limit: int = 50,
 ) -> str:
     """Analyze change impact for a commit range. Maps changed lines to symbols and shows their callers for ripple-risk assessment. Use for code review, understanding what a set of commits affected, or pre-merge impact analysis. Defaults to HEAD~1..HEAD if no range specified."""
-    return await _svc().changes(commit_range, time_range, path_filter, show_callers, limit)
+    return await _svc().changes(
+        commit_range, time_range, path_filter, show_callers, limit
+    )
 
 
 # --- Entry point ---

@@ -4,7 +4,6 @@ import multiprocessing
 import os
 from pathlib import Path
 
-import pytest
 
 from descry.scip.parser import ScipIndex
 from descry.scip.cache import ScipCacheManager
@@ -30,7 +29,9 @@ class TestTypescriptScipParsing:
 
         descriptors = "src/lib/stores/`users.ts`/UsersStore#fetchUsers()."
         result = index._parse_typescript_descriptors(descriptors)
-        assert result == ["UsersStore", "fetchUsers"], f"Expected ['UsersStore', 'fetchUsers'], got {result}"
+        assert result == ["UsersStore", "fetchUsers"], (
+            f"Expected ['UsersStore', 'fetchUsers'], got {result}"
+        )
 
     def test_multiple_backticks(self):
         """Should handle multiple backtick segments in path."""
@@ -38,7 +39,9 @@ class TestTypescriptScipParsing:
 
         descriptors = "src/lib/`stores`/`auth.ts`/AuthStore#login()."
         result = index._parse_typescript_descriptors(descriptors)
-        assert result == ["AuthStore", "login"], f"Expected ['AuthStore', 'login'], got {result}"
+        assert result == ["AuthStore", "login"], (
+            f"Expected ['AuthStore', 'login'], got {result}"
+        )
 
     def test_nested_class_method(self):
         """Should handle nested type/method symbols."""
@@ -63,7 +66,9 @@ class TestTypescriptImportResolution:
 
     def test_symbol_table_basic(self):
         """Should track basic imports."""
-        table = TypeScriptSymbolTable("/project/lens/src/lib/stores/test.ts", "/project")
+        table = TypeScriptSymbolTable(
+            "/project/lens/src/lib/stores/test.ts", "/project"
+        )
         table.imports = {
             "fetchData": ("./api", "named"),
             "apiClient": ("$lib/api/client", "default"),
@@ -78,7 +83,9 @@ class TestTypescriptImportResolution:
 
     def test_namespace_import(self):
         """Should identify namespace imports."""
-        table = TypeScriptSymbolTable("/project/lens/src/lib/stores/test.ts", "/project")
+        table = TypeScriptSymbolTable(
+            "/project/lens/src/lib/stores/test.ts", "/project"
+        )
         table.namespaces = {"schedulesApi": "$lib/api/schedules"}
         table.imports = {"schedulesApi": ("$lib/api/schedules", "namespace")}
 

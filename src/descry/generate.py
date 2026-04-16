@@ -871,8 +871,11 @@ def is_non_project_call(callee: str) -> bool:
         # Self:: must fall through to the last_part check so that Self::new,
         # Self::default, Self::from etc. are correctly filtered by STDLIB_FILTER,
         # while Self::project_method passes through as a project call.
-        if type_part and type_part != "Self" and type_part not in STDLIB_FILTER and not any(
-            callee.startswith(p) for p in STDLIB_PREFIXES
+        if (
+            type_part
+            and type_part != "Self"
+            and type_part not in STDLIB_FILTER
+            and not any(callee.startswith(p) for p in STDLIB_PREFIXES)
         ):
             return False
 
@@ -959,7 +962,7 @@ class TypeScriptSymbolTable:
 
         Type-only imports don't generate runtime calls.
         """
-        root = name.split('.')[0]
+        root = name.split(".")[0]
         if root in self.imports:
             _, import_type = self.imports[root]
             return import_type == "type"
@@ -971,9 +974,9 @@ class TypeScriptSymbolTable:
         Namespace calls like 'schedulesApi.list' are qualified names that
         SCIP can resolve when given the full qualified form.
         """
-        if '.' not in name:
+        if "." not in name:
             return False
-        root = name.split('.')[0]
+        root = name.split(".")[0]
         return root in self.namespaces
 
     def get_import_source(self, name: str) -> str | None:
@@ -985,7 +988,7 @@ class TypeScriptSymbolTable:
         Returns:
             Module path if imported, None otherwise
         """
-        root = name.split('.')[0]
+        root = name.split(".")[0]
         if root in self.imports:
             module, _ = self.imports[root]
             return module
@@ -1335,9 +1338,7 @@ class RustParser(BaseParser):
         re_fn_start = re.compile(
             r"^\s*(?:pub\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([a-zA-Z0-9_]+)"
         )
-        re_struct = re.compile(
-            r"^\s*(?:pub\s+)?(?:struct|trait)\s+([a-zA-Z0-9_]+)"
-        )
+        re_struct = re.compile(r"^\s*(?:pub\s+)?(?:struct|trait)\s+([a-zA-Z0-9_]+)")
         re_enum = re.compile(r"^\s*(?:pub\s+)?enum\s+([a-zA-Z0-9_]+)")
         # Enum variant patterns: Name, Name(Type), Name { field: Type }
         re_enum_variant = re.compile(r"^\s*([A-Z][a-zA-Z0-9_]*)\s*(?:[({\,]|$)")
@@ -1352,7 +1353,9 @@ class RustParser(BaseParser):
         re_call = re.compile(r"([a-zA-Z0-9_:]+)\(")
 
         current_impl_target = None
-        current_trait_impl = None  # Track trait name when in "impl Trait for Struct" block
+        current_trait_impl = (
+            None  # Track trait name when in "impl Trait for Struct" block
+        )
         current_enum_id = None  # Track if we're inside an enum for variant parsing
 
         i = 0
@@ -1457,8 +1460,13 @@ class RustParser(BaseParser):
                 end_lineno = self._find_block_end(lines, i) if "{" in line else lineno
                 token_count = (end_lineno - lineno + 1) * 10
                 self.builder.add_node(
-                    type_id, "Class", name=name, lineno=lineno, end_lineno=end_lineno,
-                    token_count=token_count, docstring=docstring
+                    type_id,
+                    "Class",
+                    name=name,
+                    lineno=lineno,
+                    end_lineno=end_lineno,
+                    token_count=token_count,
+                    docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, type_id, "DEFINES")
                 if "{" in line:
@@ -1474,8 +1482,13 @@ class RustParser(BaseParser):
                 end_lineno = self._find_block_end(lines, i) if "{" in line else lineno
                 token_count = (end_lineno - lineno + 1) * 10
                 self.builder.add_node(
-                    type_id, "Class", name=name, lineno=lineno, end_lineno=end_lineno,
-                    token_count=token_count, docstring=docstring
+                    type_id,
+                    "Class",
+                    name=name,
+                    lineno=lineno,
+                    end_lineno=end_lineno,
+                    token_count=token_count,
+                    docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, type_id, "DEFINES")
                 if "{" in line:
@@ -1487,7 +1500,17 @@ class RustParser(BaseParser):
             elif current_enum_id and (match := re_enum_variant.search(line)):
                 variant_name = match.group(1)
                 # Skip common Rust keywords/patterns that match variant regex
-                if variant_name not in ("Self", "Some", "None", "Ok", "Err", "Box", "Vec", "Option", "Result"):
+                if variant_name not in (
+                    "Self",
+                    "Some",
+                    "None",
+                    "Ok",
+                    "Err",
+                    "Box",
+                    "Vec",
+                    "Option",
+                    "Result",
+                ):
                     variant_id = f"{current_enum_id}::{variant_name}"
                     self.builder.add_node(
                         variant_id,
@@ -1589,11 +1612,22 @@ class RustParser(BaseParser):
             # Track struct instantiation patterns
             # Expanded pattern list covers common Rust constructors
             constructor_patterns = (
-                "new", "default", "builder",
-                "from", "try_from", "from_str", "from_bytes", "from_slice",
-                "open", "create", "connect",
-                "with_capacity", "with_config", "with_options",
-                "init", "initialize",
+                "new",
+                "default",
+                "builder",
+                "from",
+                "try_from",
+                "from_str",
+                "from_bytes",
+                "from_slice",
+                "open",
+                "create",
+                "connect",
+                "with_capacity",
+                "with_config",
+                "with_options",
+                "init",
+                "initialize",
             )
             if "::" in callee:
                 parts = callee.split("::")
@@ -1602,9 +1636,9 @@ class RustParser(BaseParser):
                     struct_name = parts[-2]
                     # Match constructor patterns (exact or prefix for with_*)
                     is_constructor = (
-                        method_name in constructor_patterns or
-                        method_name.startswith("with_") or
-                        method_name.startswith("from_")
+                        method_name in constructor_patterns
+                        or method_name.startswith("with_")
+                        or method_name.startswith("from_")
                     )
                     # Skip if it's a module path like std::collections::HashMap::new
                     if is_constructor and struct_name[0].isupper():
@@ -1689,9 +1723,7 @@ class RustParser(BaseParser):
             r"\b([a-z_][a-z0-9_]*)\s*\.\s*([a-z_][a-z0-9_]*)\s*\([^)]*\)"
         )
         # Chained await: .method().await
-        re_await_method = re.compile(
-            r"\.([a-z_][a-z0-9_]*)\s*\(\s*\)\s*\.await"
-        )
+        re_await_method = re.compile(r"\.([a-z_][a-z0-9_]*)\s*\(\s*\)\s*\.await")
 
         # Track which lines are inside macro bodies
         in_macro = False
@@ -2039,11 +2071,18 @@ class TSParser(BaseParser):
                 j, full_sig = consume_sig(i)
                 cid = f"{parent_id}::{name}"
                 # Find end of class block
-                end_lineno = self._find_block_end(lines, j) if "{" in lines[j] else lineno
+                end_lineno = (
+                    self._find_block_end(lines, j) if "{" in lines[j] else lineno
+                )
                 token_count = (end_lineno - lineno + 1) * 10
                 self.builder.add_node(
-                    cid, "Class", name=name, lineno=lineno, end_lineno=end_lineno,
-                    token_count=token_count, docstring=docstring
+                    cid,
+                    "Class",
+                    name=name,
+                    lineno=lineno,
+                    end_lineno=end_lineno,
+                    token_count=token_count,
+                    docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
                 if "extends" in full_sig:
@@ -2061,11 +2100,18 @@ class TSParser(BaseParser):
                 j, full_sig = consume_sig(i)
                 cid = f"{parent_id}::{name}"
                 # Find end of interface block
-                end_lineno = self._find_block_end(lines, j) if "{" in lines[j] else lineno
+                end_lineno = (
+                    self._find_block_end(lines, j) if "{" in lines[j] else lineno
+                )
                 token_count = (end_lineno - lineno + 1) * 10
                 self.builder.add_node(
-                    cid, "Class", name=name, lineno=lineno, end_lineno=end_lineno,
-                    token_count=token_count, docstring=docstring
+                    cid,
+                    "Class",
+                    name=name,
+                    lineno=lineno,
+                    end_lineno=end_lineno,
+                    token_count=token_count,
+                    docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
                 if "extends" in full_sig:
@@ -2212,7 +2258,11 @@ class TSParser(BaseParser):
                 config_name = f"{client_name}_{interceptor_type}_interceptor"
                 config_id = f"{file_id}::{config_name}"
                 # Find the callback's end by tracking braces
-                end_lineno = self._find_block_end(lines, i) if "{" in line or "=>" in line else lineno
+                end_lineno = (
+                    self._find_block_end(lines, i)
+                    if "{" in line or "=>" in line
+                    else lineno
+                )
                 # Look for next few lines if arrow function continues
                 if end_lineno == lineno:
                     for j in range(i + 1, min(i + 5, len(lines))):
@@ -2229,7 +2279,8 @@ class TSParser(BaseParser):
                     lineno=lineno,
                     end_lineno=end_lineno,
                     token_count=token_count,
-                    docstring=docstring or f"Configures {interceptor_type} interceptor for {client_name}",
+                    docstring=docstring
+                    or f"Configures {interceptor_type} interceptor for {client_name}",
                     config_type="interceptor",
                     target=client_name,
                 )
@@ -2239,7 +2290,9 @@ class TSParser(BaseParser):
                 if middleware_name and not middleware_name.startswith("("):
                     config_name = f"middleware_{middleware_name.replace('/', '_').replace('.', '_')}"
                     config_id = f"{file_id}::{config_name}"
-                    end_lineno = self._find_block_end(lines, i) if "{" in line else lineno
+                    end_lineno = (
+                        self._find_block_end(lines, i) if "{" in line else lineno
+                    )
                     token_count = max((end_lineno - lineno + 1) * 10, 30)
                     self.builder.add_node(
                         config_id,
@@ -2258,7 +2311,11 @@ class TSParser(BaseParser):
                 event_name = match.group(2)
                 config_name = f"{emitter_name}_on_{event_name.replace(':', '_')}"
                 config_id = f"{file_id}::{config_name}"
-                end_lineno = self._find_block_end(lines, i) if "{" in line or "=>" in line else lineno
+                end_lineno = (
+                    self._find_block_end(lines, i)
+                    if "{" in line or "=>" in line
+                    else lineno
+                )
                 token_count = max((end_lineno - lineno + 1) * 10, 30)
                 docstring = self.get_leading_docstring(lines, i)
                 self.builder.add_node(
@@ -2269,7 +2326,8 @@ class TSParser(BaseParser):
                     lineno=lineno,
                     end_lineno=end_lineno,
                     token_count=token_count,
-                    docstring=docstring or f"Handles '{event_name}' event on {emitter_name}",
+                    docstring=docstring
+                    or f"Handles '{event_name}' event on {emitter_name}",
                     config_type="event_handler",
                     target=emitter_name,
                     event=event_name,
@@ -2379,7 +2437,9 @@ class TSParser(BaseParser):
 
         return return_type, param_types
 
-    def _build_ts_signature(self, name: str, param_types: list, return_type: str) -> str:
+    def _build_ts_signature(
+        self, name: str, param_types: list, return_type: str
+    ) -> str:
         """Build a TypeScript-style signature string.
 
         Returns: "function name(p1: T1, p2: T2): ReturnType"
@@ -2420,7 +2480,9 @@ class TSParser(BaseParser):
                 continue
 
             # Skip type-only imports (they don't generate runtime calls)
-            if hasattr(self, 'symbol_table') and self.symbol_table.is_type_import(callee):
+            if hasattr(self, "symbol_table") and self.symbol_table.is_type_import(
+                callee
+            ):
                 continue
 
             context_id = line_to_context.get(lineno)
@@ -2448,8 +2510,14 @@ class CodeGraphBuilder:
     def __init__(self, root_dir, excluded_dirs=None):
         self.root_dir = Path(root_dir).resolve()
         self.excluded_dirs = excluded_dirs or {
-            "target", "node_modules", "dist", "build", "docs",
-            "coverage", "demo-output", ".beads",
+            "target",
+            "node_modules",
+            "dist",
+            "build",
+            "docs",
+            "coverage",
+            "demo-output",
+            ".beads",
         }
         self.nodes = []
         self.edges = []
@@ -2479,10 +2547,7 @@ class CodeGraphBuilder:
             dirs.sort()
             files.sort()
             dirs[:] = [
-                d
-                for d in dirs
-                if not d.startswith(".")
-                and d not in self.excluded_dirs
+                d for d in dirs if not d.startswith(".") and d not in self.excluded_dirs
             ]
             for file in files:
                 file_path = Path(root) / file
@@ -2606,13 +2671,23 @@ class CodeGraphBuilder:
                     if scip_resolved:
                         # Validate cross-crate resolutions to prevent false positives
                         # Extract crate names from paths (first directory component)
-                        source_crate = source_file.split("/")[0] if "/" in source_file else ""
-                        resolved_file = scip_resolved.split("::")[0].replace("FILE:", "")
-                        target_crate = resolved_file.split("/")[0] if "/" in resolved_file else ""
+                        source_crate = (
+                            source_file.split("/")[0] if "/" in source_file else ""
+                        )
+                        resolved_file = scip_resolved.split("::")[0].replace(
+                            "FILE:", ""
+                        )
+                        target_crate = (
+                            resolved_file.split("/")[0] if "/" in resolved_file else ""
+                        )
 
                         # If cross-crate, verify ref_name looks related to the target
                         # This prevents spurious matches like EnvFilter -> AuthInterceptor
-                        if source_crate and target_crate and source_crate != target_crate:
+                        if (
+                            source_crate
+                            and target_crate
+                            and source_crate != target_crate
+                        ):
                             # Extract the target symbol name
                             target_parts = scip_resolved.split("::")
                             target_name = target_parts[-1] if target_parts else ""
@@ -2641,7 +2716,8 @@ class CodeGraphBuilder:
                     # Match multi-segment qualified names (A::B or A::B::C etc.)
                     # stopping before ( or . that follows the last segment
                     chain_match = re.match(
-                        r'^((?:[A-Za-z_][A-Za-z0-9_]*::)+[A-Za-z_][A-Za-z0-9_]*)', ref_name
+                        r"^((?:[A-Za-z_][A-Za-z0-9_]*::)+[A-Za-z_][A-Za-z0-9_]*)",
+                        ref_name,
                     )
                     if chain_match:
                         base_ref = chain_match.group(1)
@@ -2656,7 +2732,9 @@ class CodeGraphBuilder:
                 # Strategy 1: Try qualified name match (Type::method or Type::Variant)
                 # Use base_ref which has trailing method chains stripped
                 if not resolved and "::" in base_ref and base_ref in qualified_lookup:
-                    matches = [m for m in qualified_lookup[base_ref] if m[1] == source_lang]
+                    matches = [
+                        m for m in qualified_lookup[base_ref] if m[1] == source_lang
+                    ]
                     if matches:
                         resolved = matches[0][0]
                         resolution_source = "regex"
@@ -2671,15 +2749,24 @@ class CodeGraphBuilder:
                         source_struct = source_parts[-2]
                         qualified_self = f"{source_struct}::{self_method}"
                         if qualified_self in qualified_lookup:
-                            matches = [m for m in qualified_lookup[qualified_self] if m[1] == source_lang]
+                            matches = [
+                                m
+                                for m in qualified_lookup[qualified_self]
+                                if m[1] == source_lang
+                            ]
                             if matches:
                                 resolved = matches[0][0]
                                 resolution_source = "self_type"
                         # Also try via node_lookup with struct preference
                         if not resolved and self_method in node_lookup:
-                            matches = [m for m in node_lookup[self_method] if m[1] == source_lang]
+                            matches = [
+                                m
+                                for m in node_lookup[self_method]
+                                if m[1] == source_lang
+                            ]
                             struct_matches = [
-                                m for m in matches
+                                m
+                                for m in matches
                                 if f"::{source_struct}::{self_method}" in m[0]
                             ]
                             if struct_matches:
@@ -2690,7 +2777,9 @@ class CodeGraphBuilder:
                 if not resolved and ref_name.startswith("self."):
                     method_name = ref_name.replace("self.", "")
                     if method_name in node_lookup:
-                        matches = [m for m in node_lookup[method_name] if m[1] == source_lang]
+                        matches = [
+                            m for m in node_lookup[method_name] if m[1] == source_lang
+                        ]
                         if matches:
                             # Extract struct name from source (FILE:path::Struct::method)
                             source_parts = source_id.split("::")
@@ -2698,7 +2787,8 @@ class CodeGraphBuilder:
                                 source_struct = source_parts[-2]
                                 # Prefer methods in the same struct
                                 struct_matches = [
-                                    m for m in matches
+                                    m
+                                    for m in matches
                                     if f"::{source_struct}::{method_name}" in m[0]
                                 ]
                                 if struct_matches:
@@ -2712,11 +2802,15 @@ class CodeGraphBuilder:
                     # Get base name (last part after . or ::)
                     base_name = ref_name.split(".")[-1].split("::")[-1]
                     if base_name in node_lookup:
-                        matches = [m for m in node_lookup[base_name] if m[1] == source_lang]
+                        matches = [
+                            m for m in node_lookup[base_name] if m[1] == source_lang
+                        ]
                         if matches:
                             # Prefer same-file matches
                             source_file = source_id.split("::")[0]
-                            same_file = [m for m in matches if m[0].startswith(source_file)]
+                            same_file = [
+                                m for m in matches if m[0].startswith(source_file)
+                            ]
                             if same_file:
                                 resolved = same_file[0][0]
                             else:
@@ -2737,11 +2831,17 @@ class CodeGraphBuilder:
 
         # Remove filtered non-project edges (stdlib + third-party library calls)
         if edges_to_remove:
-            self.edges = [e for i, e in enumerate(self.edges) if i not in edges_to_remove]
-            logger.info(f"Filtered {len(edges_to_remove)} non-project edges during resolution")
+            self.edges = [
+                e for i, e in enumerate(self.edges) if i not in edges_to_remove
+            ]
+            logger.info(
+                f"Filtered {len(edges_to_remove)} non-project edges during resolution"
+            )
 
         # Log resolution statistics
-        total = stats["scip"] + stats["regex"] + stats["self_type"] + stats["unresolved"]
+        total = (
+            stats["scip"] + stats["regex"] + stats["self_type"] + stats["unresolved"]
+        )
         if total > 0:
             scip_pct = 100 * stats["scip"] / total if total else 0
             regex_pct = 100 * stats["regex"] / total if total else 0
@@ -2773,8 +2873,11 @@ class CodeGraphBuilder:
             node["metadata"]["in_degree"] = in_degree.get(node["id"], 0)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump({"nodes": self.nodes, "edges": self.edges}, f, indent=2)
-        print(
-            f"Graph exported to {output_path}. Stats: {len(self.nodes)} nodes, {len(self.edges)} edges"
+        logger.info(
+            "Graph exported to %s. Stats: %d nodes, %d edges",
+            output_path,
+            len(self.nodes),
+            len(self.edges),
         )
 
 
@@ -2803,6 +2906,7 @@ def main():
 
     # Load config from .descry.toml if present
     from descry.handlers import DescryConfig
+
     config = DescryConfig(project_root=Path(target).resolve())
     toml_data = DescryConfig._load_toml(config.project_root)
     config._apply_toml(toml_data)
@@ -2854,7 +2958,9 @@ def main():
         if status.get("disabled_by_env"):
             logger.info("SCIP: Disabled (DESCRY_NO_SCIP=1)")
         else:
-            logger.info("SCIP: Unavailable (no indexers found: install rust-analyzer and/or scip-typescript)")
+            logger.info(
+                "SCIP: Unavailable (no indexers found: install rust-analyzer and/or scip-typescript)"
+            )
 
     # Export with optional SCIP resolution
     graph_path = cache_dir / "codebase_graph.json"
@@ -2865,12 +2971,17 @@ def main():
     if no_embeddings.lower() not in ("1", "true", "yes"):
         try:
             from descry.embeddings import embeddings_available, SemanticSearcher
+
             if embeddings_available():
                 logger.info("Generating embeddings for semantic search...")
                 searcher = SemanticSearcher(str(graph_path), force_rebuild=True)
-                logger.info(f"Embeddings generated: {len(searcher.nodes)} nodes indexed")
+                logger.info(
+                    f"Embeddings generated: {len(searcher.nodes)} nodes indexed"
+                )
             else:
-                logger.debug("Embeddings: sentence-transformers not available, skipping")
+                logger.debug(
+                    "Embeddings: sentence-transformers not available, skipping"
+                )
         except ImportError:
             logger.debug("Embeddings: module not available, skipping")
         except Exception as e:

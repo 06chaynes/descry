@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -23,25 +24,66 @@ SERVER_VERSION = "0.1.0"
 # --- Configuration ---
 
 
-_DEFAULT_PROJECT_MARKERS = [".git", "Cargo.toml", "package.json", "pyproject.toml", ".descry.toml"]
+_DEFAULT_PROJECT_MARKERS = [
+    ".git",
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    ".descry.toml",
+]
 _DEFAULT_API_PREFIXES = ["/api/v1", "/api/v2", "/api"]
-_DEFAULT_EXCLUDED_DIRS = {"target", "node_modules", "dist", "docs", ".git", "__pycache__", "build", "vendor"}
+_DEFAULT_EXCLUDED_DIRS = {
+    "target",
+    "node_modules",
+    "dist",
+    "docs",
+    ".git",
+    "__pycache__",
+    "build",
+    "vendor",
+}
 
 _DEFAULT_TEST_PATH_PATTERNS = (
-    '/tests/', '/test/', '/_test/', '/spec/',
-    '/testing/', '/fixtures/', '/mocks/', '/__tests__/',
+    "/tests/",
+    "/test/",
+    "/_test/",
+    "/spec/",
+    "/testing/",
+    "/fixtures/",
+    "/mocks/",
+    "/__tests__/",
 )
 _DEFAULT_TEST_FILE_SUFFIXES = (
-    '_test.rs', '.test.ts', '.spec.ts', '_test.py',
-    '.test.js', '.spec.js', '.test.tsx', '.spec.tsx',
+    "_test.rs",
+    ".test.ts",
+    ".spec.ts",
+    "_test.py",
+    ".test.js",
+    ".spec.js",
+    ".test.tsx",
+    ".spec.tsx",
 )
 _DEFAULT_CODE_EXTENSIONS = {
-    ".rs", ".py", ".ts", ".tsx", ".js", ".jsx", ".svelte",
-    ".go", ".java", ".css", ".scss", ".html",
+    ".rs",
+    ".py",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".svelte",
+    ".go",
+    ".java",
+    ".css",
+    ".scss",
+    ".html",
 }
 _DEFAULT_CHURN_EXCLUSIONS = [
-    ".descry_cache/", ".beads/", "Cargo.lock",
-    "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    ".descry_cache/",
+    ".beads/",
+    "Cargo.lock",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
 ]
 _DEFAULT_SYNTAX_LANG_MAP = {
     ".rs": "rust",
@@ -81,7 +123,9 @@ class DescryConfig:
     enable_scip: bool = True
     enable_embeddings: bool = True
     openapi_path: Path | None = None
-    project_markers: list[str] = field(default_factory=lambda: list(_DEFAULT_PROJECT_MARKERS))
+    project_markers: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_PROJECT_MARKERS)
+    )
     backend_handler_patterns: list[str] = field(default_factory=list)
     frontend_api_patterns: list[str] = field(default_factory=list)
     api_prefixes: list[str] = field(default_factory=lambda: list(_DEFAULT_API_PREFIXES))
@@ -91,18 +135,27 @@ class DescryConfig:
     embedding_model: str = "jinaai/jina-code-embeddings-0.5b"
 
     # Test detection
-    test_path_patterns: tuple[str, ...] = field(default_factory=lambda: _DEFAULT_TEST_PATH_PATTERNS)
-    test_file_suffixes: tuple[str, ...] = field(default_factory=lambda: _DEFAULT_TEST_FILE_SUFFIXES)
+    test_path_patterns: tuple[str, ...] = field(
+        default_factory=lambda: _DEFAULT_TEST_PATH_PATTERNS
+    )
+    test_file_suffixes: tuple[str, ...] = field(
+        default_factory=lambda: _DEFAULT_TEST_FILE_SUFFIXES
+    )
 
     # Code files
-    code_extensions: set[str] = field(default_factory=lambda: set(_DEFAULT_CODE_EXTENSIONS))
+    code_extensions: set[str] = field(
+        default_factory=lambda: set(_DEFAULT_CODE_EXTENSIONS)
+    )
 
     # Git
-    churn_exclusions: list[str] = field(default_factory=lambda: list(_DEFAULT_CHURN_EXCLUSIONS))
+    churn_exclusions: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_CHURN_EXCLUSIONS)
+    )
     git_timeout: int = 30
 
     # Timeouts
     scip_timeout_minutes: int = 0  # 0 = unlimited
+    index_timeout_minutes: int = 30  # Overall index timeout (0 = unlimited)
     embedding_timeout: int = 60
     query_timeout_ms: int = 4000
 
@@ -113,12 +166,18 @@ class DescryConfig:
     max_callers_shown: int = 15
 
     # SCIP
-    scip_extra_args: list[str] = field(default_factory=lambda: ["--exclude-vendored-libraries"])
+    scip_extra_args: list[str] = field(
+        default_factory=lambda: ["--exclude-vendored-libraries"]
+    )
     scip_skip_crates: list[str] = field(default_factory=list)
-    scip_rust_toolchain: str | None = None  # e.g. "1.92.0" to use `rustup run 1.92.0 rust-analyzer`
+    scip_rust_toolchain: str | None = (
+        None  # e.g. "1.92.0" to use `rustup run 1.92.0 rust-analyzer`
+    )
 
     # Syntax highlighting
-    syntax_lang_map: dict[str, str] = field(default_factory=lambda: dict(_DEFAULT_SYNTAX_LANG_MAP))
+    syntax_lang_map: dict[str, str] = field(
+        default_factory=lambda: dict(_DEFAULT_SYNTAX_LANG_MAP)
+    )
 
     def __post_init__(self):
         self.project_root = Path(self.project_root)
@@ -215,6 +274,8 @@ class DescryConfig:
         timeouts = data.get("timeouts", {})
         if "scip_minutes" in timeouts:
             self.scip_timeout_minutes = timeouts["scip_minutes"]
+        if "index_minutes" in timeouts:
+            self.index_timeout_minutes = timeouts["index_minutes"]
         if "embedding_seconds" in timeouts:
             self.embedding_timeout = timeouts["embedding_seconds"]
         if "query_ms" in timeouts:
@@ -361,9 +422,21 @@ def is_natural_language_query(terms: list[str]) -> bool:
     text = " ".join(terms).lower()
 
     nl_indicators = [
-        "how to", "what is", "where is", "where are", "find the", "show me",
-        "get the", "look for", "search for", "related to", "that handles",
-        "that does", "responsible for", "used for", "deals with",
+        "how to",
+        "what is",
+        "where is",
+        "where are",
+        "find the",
+        "show me",
+        "get the",
+        "look for",
+        "search for",
+        "related to",
+        "that handles",
+        "that does",
+        "responsible for",
+        "used for",
+        "deals with",
     ]
     if any(p in text for p in nl_indicators):
         return True
@@ -411,6 +484,7 @@ def reciprocal_rank_fusion(
 def _try_import_query():
     try:
         from descry.query import GraphQuerier, _get_syntax_lang
+
         return GraphQuerier, _get_syntax_lang
     except ImportError:
         return None, None
@@ -419,6 +493,7 @@ def _try_import_query():
 def _try_import_cross_lang():
     try:
         from descry.cross_lang import CrossLangTracer
+
         return CrossLangTracer
     except ImportError:
         return None
@@ -428,7 +503,12 @@ def _try_import_embeddings(enabled: bool):
     if not enabled:
         return False, None, None
     try:
-        from descry.embeddings import embeddings_available, SemanticSearcher, get_embeddings_status
+        from descry.embeddings import (
+            embeddings_available,
+            SemanticSearcher,
+            get_embeddings_status,
+        )
+
         return embeddings_available(), SemanticSearcher, get_embeddings_status
     except ImportError:
         return False, None, None
@@ -439,6 +519,7 @@ def _try_import_scip(enabled: bool):
         return False, None, None
     try:
         from descry.scip.support import scip_available, get_scip_status
+
         return scip_available(), scip_available, get_scip_status
     except ImportError:
         return False, None, None
@@ -447,6 +528,7 @@ def _try_import_scip(enabled: bool):
 def _try_import_git_history():
     try:
         from descry.git_history import GitHistoryAnalyzer, GitError
+
         return True, GitHistoryAnalyzer, GitError
     except ImportError:
         return False, None, Exception
@@ -470,8 +552,8 @@ class DescryService:
         )
         self._scip_loaded = scip_ok
 
-        emb_ok, self._SemanticSearcher, self._get_embeddings_status_fn = _try_import_embeddings(
-            self.config.enable_embeddings
+        emb_ok, self._SemanticSearcher, self._get_embeddings_status_fn = (
+            _try_import_embeddings(self.config.enable_embeddings)
         )
         self._semantic_available = emb_ok
 
@@ -487,7 +569,12 @@ class DescryService:
 
         self._graph_cache = {"mtime": 0, "nodes": 0, "edges": 0}
         self._querier_cache = {"mtime": 0, "instance": None}
-        self._semantic_cache = {"mtime": 0, "instance": None, "loading": False, "error": None}
+        self._semantic_cache = {
+            "mtime": 0,
+            "instance": None,
+            "loading": False,
+            "error": None,
+        }
         self._git_cache = {"analyzer": None, "graph_mtime": None}
         self._dedup_cache: dict[str, tuple[float, str]] = {}
         self._max_dedup_entries = 100
@@ -539,10 +626,14 @@ class DescryService:
         async with self._git_cache_lock:
             gp = self.config.graph_path
             current_mtime = gp.stat().st_mtime if gp.exists() else None
-            if self._git_cache["graph_mtime"] != current_mtime or self._git_cache["analyzer"] is None:
+            if (
+                self._git_cache["graph_mtime"] != current_mtime
+                or self._git_cache["analyzer"] is None
+            ):
                 q = await self._get_querier()
                 self._git_cache["analyzer"] = self._GitHistoryAnalyzer(
-                    str(self.config.project_root), graph_querier=q,
+                    str(self.config.project_root),
+                    graph_querier=q,
                     churn_exclusions=self.config.churn_exclusions,
                     code_extensions=self.config.code_extensions,
                     git_timeout=self.config.git_timeout,
@@ -573,7 +664,12 @@ class DescryService:
         """Reset all cached instances. Call after reindex."""
         self._graph_cache = {"mtime": 0, "nodes": 0, "edges": 0}
         self._querier_cache = {"mtime": 0, "instance": None}
-        self._semantic_cache = {"mtime": 0, "instance": None, "loading": False, "error": None}
+        self._semantic_cache = {
+            "mtime": 0,
+            "instance": None,
+            "loading": False,
+            "error": None,
+        }
         self._git_cache = {"analyzer": None, "graph_mtime": None}
         self._dedup_cache = {}
 
@@ -595,20 +691,28 @@ class DescryService:
             return f"[Graph: NOT FOUND]\n\n{content}"
 
         await self._update_cache()
-        stale = " STALE" if age_hours and age_hours > self.config.max_stale_hours else ""
+        stale = (
+            " STALE" if age_hours and age_hours > self.config.max_stale_hours else ""
+        )
         header = f"[{self._graph_cache['nodes']:,}n/{self._graph_cache['edges']:,}e | {age_str}{stale}]"
         return f"{header}\n\n{content}"
 
     async def _load_embeddings_background(self):
         async with self._semantic_cache_lock:
-            if self._semantic_cache["instance"] is not None or self._semantic_cache["loading"]:
+            if (
+                self._semantic_cache["instance"] is not None
+                or self._semantic_cache["loading"]
+            ):
                 return
             self._semantic_cache["loading"] = True
             self._semantic_cache["error"] = None
 
         try:
+
             def load_sync():
-                return self._SemanticSearcher(str(self.config.graph_path), model_name=self.config.embedding_model)
+                return self._SemanticSearcher(
+                    str(self.config.graph_path), model_name=self.config.embedding_model
+                )
 
             searcher = await asyncio.wait_for(
                 asyncio.to_thread(load_sync), timeout=60.0
@@ -675,15 +779,21 @@ class DescryService:
                 health["features"]["scip_note"] = "Disabled by DESCRY_NO_SCIP"
 
         async with self._semantic_cache_lock:
-            health["features"]["embeddings"] = self._semantic_cache["instance"] is not None
+            health["features"]["embeddings"] = (
+                self._semantic_cache["instance"] is not None
+            )
             health["features"]["embeddings_loading"] = self._semantic_cache["loading"]
             health["features"]["embeddings_error"] = self._semantic_cache.get("error")
 
         if not self._semantic_available:
             if not self.config.enable_embeddings:
-                health["features"]["embeddings_note"] = "Disabled by DESCRY_NO_EMBEDDINGS"
+                health["features"]["embeddings_note"] = (
+                    "Disabled by DESCRY_NO_EMBEDDINGS"
+                )
             else:
-                health["features"]["embeddings_note"] = "sentence-transformers not installed"
+                health["features"]["embeddings_note"] = (
+                    "sentence-transformers not installed"
+                )
 
         if not exists:
             health["status"] = "no_graph"
@@ -710,7 +820,9 @@ class DescryService:
             scip_status = self._get_scip_status_fn()
             if scip_status.get("available"):
                 indexers = scip_status.get("indexers", {})
-                enabled = [name for name, info in indexers.items() if info.get("available")]
+                enabled = [
+                    name for name, info in indexers.items() if info.get("available")
+                ]
                 scip_info = f"\nSCIP: Enabled ({', '.join(enabled) or 'none'})"
                 scip_cache_dir = self.config.cache_dir / "scip"
                 if scip_cache_dir.exists():
@@ -727,9 +839,13 @@ class DescryService:
         if self._semantic_available and self._get_embeddings_status_fn:
             emb_status = self._get_embeddings_status_fn(str(self.config.graph_path))
             if emb_status.get("cached"):
-                emb_info = f"\nEmbeddings: Ready ({emb_status.get('node_count', 0):,} nodes)"
+                emb_info = (
+                    f"\nEmbeddings: Ready ({emb_status.get('node_count', 0):,} nodes)"
+                )
             elif emb_status.get("stale"):
-                emb_info = "\nEmbeddings: STALE (graph updated, will rebuild on first search)"
+                emb_info = (
+                    "\nEmbeddings: STALE (graph updated, will rebuild on first search)"
+                )
             else:
                 emb_info = "\nEmbeddings: Not generated (will build on first search)"
         else:
@@ -755,20 +871,20 @@ class DescryService:
 
     async def index(self, path: str = ".") -> str:
         """Regenerate the codebase graph."""
-        try:
-            from descry.generate import main as generate_main
-        except ImportError:
-            pass
-
         index_path = str(self.config.project_root) if path == "." else path
 
         try:
+            timeout = (
+                self.config.index_timeout_minutes * 60
+                if self.config.index_timeout_minutes
+                else None
+            )
             result = subprocess.run(
-                ["python", "-m", "descry.generate", index_path],
+                [sys.executable, "-m", "descry.generate", index_path],
                 capture_output=True,
                 text=True,
                 cwd=str(self.config.project_root),
-                timeout=600,
+                timeout=timeout,
             )
 
             if result.returncode == 0:
@@ -776,21 +892,42 @@ class DescryService:
                 self._clear_dedup_cache()
 
                 scip_status = ""
-                if self._scip_loaded and self._scip_available_fn and self._scip_available_fn():
+                if (
+                    self._scip_loaded
+                    and self._scip_available_fn
+                    and self._scip_available_fn()
+                ):
                     scip_cache_dir = self.config.cache_dir / "scip"
                     if scip_cache_dir.exists():
                         scip_files = list(scip_cache_dir.glob("*.scip"))
                         if scip_files:
-                            scip_status = f"\nSCIP: {len(scip_files)} project(s) indexed"
+                            scip_status = (
+                                f"\nSCIP: {len(scip_files)} project(s) indexed"
+                            )
 
                 embeddings_status = ""
-                if self._semantic_available and self._SemanticSearcher and self.config.graph_path.exists():
+                if (
+                    self._semantic_available
+                    and self._SemanticSearcher
+                    and self.config.graph_path.exists()
+                ):
                     try:
                         async with self._semantic_cache_lock:
-                            self._semantic_cache = {"mtime": 0, "instance": None, "loading": False, "error": None}
+                            self._semantic_cache = {
+                                "mtime": 0,
+                                "instance": None,
+                                "loading": False,
+                                "error": None,
+                            }
                         logger.info("Generating embeddings for semantic search...")
-                        searcher = self._SemanticSearcher(str(self.config.graph_path), force_rebuild=True, model_name=self.config.embedding_model)
-                        embeddings_status = f"\nEmbeddings: {len(searcher.nodes):,} nodes indexed"
+                        searcher = self._SemanticSearcher(
+                            str(self.config.graph_path),
+                            force_rebuild=True,
+                            model_name=self.config.embedding_model,
+                        )
+                        embeddings_status = (
+                            f"\nEmbeddings: {len(searcher.nodes):,} nodes indexed"
+                        )
                     except Exception as e:
                         embeddings_status = f"\nEmbeddings: Failed ({e})"
                         logger.warning(f"Embeddings generation failed: {e}")
@@ -800,7 +937,8 @@ class DescryService:
                 return f"Index failed:\n{result.stderr}"
 
         except subprocess.TimeoutExpired:
-            return "Index timed out after 10 minutes."
+            mins = self.config.index_timeout_minutes
+            return f"Index timed out after {mins} minutes. Set [timeouts] index_minutes in .descry.toml to increase."
         except Exception as e:
             return f"Index error: {e}"
 
@@ -819,7 +957,9 @@ class DescryService:
                 fuzzy_note = " (fuzzy match)"
 
         if not all_callers:
-            result = f"No callers of '{name}'. Try descry search to verify symbol exists."
+            result = (
+                f"No callers of '{name}'. Try descry search to verify symbol exists."
+            )
         else:
             total_count = len(all_callers)
             callers = sorted(all_callers)[:limit]
@@ -836,7 +976,9 @@ class DescryService:
                 else:
                     lines.append(f"  {caller}")
             if len(callers) < total_count:
-                lines.append(f"  ... ({total_count - len(callers)} more, limit {limit})")
+                lines.append(
+                    f"  ... ({total_count - len(callers)} more, limit {limit})"
+                )
             result = "\n".join(lines)
 
         return await self._format_response(result)
@@ -931,7 +1073,9 @@ class DescryService:
             await self._record_dedup(content_hash, graph_mtime, node_id)
 
         if brief:
-            return await self._format_response(result, include_header=False, max_lines=50)
+            return await self._format_response(
+                result, include_header=False, max_lines=50
+            )
 
         depth_note = f" [depth={depth}]" if depth > 1 else ""
         full_note = " [full=true]" if full else ""
@@ -1008,7 +1152,11 @@ class DescryService:
         semantic_results = []
         search_method = "keyword"
 
-        if self._semantic_available and self._SemanticSearcher and self.config.graph_path.exists():
+        if (
+            self._semantic_available
+            and self._SemanticSearcher
+            and self.config.graph_path.exists()
+        ):
             use_semantic = is_natural_language_query(terms) or len(tfidf_results) < 3
             if use_semantic:
                 try:
@@ -1020,14 +1168,19 @@ class DescryService:
                         ):
                             self._semantic_cache = {
                                 "mtime": mtime,
-                                "instance": self._SemanticSearcher(str(self.config.graph_path), model_name=self.config.embedding_model),
+                                "instance": self._SemanticSearcher(
+                                    str(self.config.graph_path),
+                                    model_name=self.config.embedding_model,
+                                ),
                                 "loading": False,
                                 "error": None,
                             }
                         searcher = self._semantic_cache["instance"]
 
                     query = " ".join(terms)
-                    semantic_results = searcher.search(query, limit=limit * 2, min_score=0.25)
+                    semantic_results = searcher.search(
+                        query, limit=limit * 2, min_score=0.25
+                    )
                     search_method = "hybrid"
                 except Exception as e:
                     logger.warning(f"Semantic search failed, using keyword only: {e}")
@@ -1098,8 +1251,14 @@ class DescryService:
             if len(sorted_imports) > 10:
                 lines.append(f"           (+{len(sorted_imports) - 10} more)")
 
-        for type_name, type_filter in [("Const", "Constant"), ("Class", "Class"), ("Fn", "Function")]:
-            items = sorted([d["metadata"]["name"] for d in defs if d["type"] == type_filter])
+        for type_name, type_filter in [
+            ("Const", "Constant"),
+            ("Class", "Class"),
+            ("Fn", "Function"),
+        ]:
+            items = sorted(
+                [d["metadata"]["name"] for d in defs if d["type"] == type_filter]
+            )
             if items:
                 lines.append(f"  {type_name}: {', '.join(items[:15])}")
                 if len(items) > 15:
@@ -1143,15 +1302,22 @@ class DescryService:
                 return "Embeddings loading in background (~2-3s). Try again shortly."
 
             if self._semantic_cache["error"]:
-                logger.info(f"Clearing previous embedding error: {self._semantic_cache['error']}")
+                logger.info(
+                    f"Clearing previous embedding error: {self._semantic_cache['error']}"
+                )
                 self._semantic_cache["error"] = None
 
         async with self._semantic_cache_lock:
             mtime = gp.stat().st_mtime
-            if mtime != self._semantic_cache["mtime"] or self._semantic_cache["instance"] is None:
+            if (
+                mtime != self._semantic_cache["mtime"]
+                or self._semantic_cache["instance"] is None
+            ):
                 try:
                     self._semantic_cache["mtime"] = mtime
-                    self._semantic_cache["instance"] = self._SemanticSearcher(str(gp), model_name=self.config.embedding_model)
+                    self._semantic_cache["instance"] = self._SemanticSearcher(
+                        str(gp), model_name=self.config.embedding_model
+                    )
                     self._semantic_cache["loading"] = False
                     self._semantic_cache["error"] = None
                 except Exception as e:
@@ -1170,7 +1336,9 @@ class DescryService:
         else:
             lines = [f"{len(results)} semantic match(es) for '{query}':\n"]
             for i, (node, score) in enumerate(results, 1):
-                lines.append(format_search_result(node, rank=i, show_score=True, score=score))
+                lines.append(
+                    format_search_result(node, rank=i, show_score=True, score=score)
+                )
                 lines.append("")
             result = "\n".join(lines).rstrip()
 
@@ -1206,7 +1374,9 @@ class DescryService:
 
         if brief:
             context = q.get_context_prompt(node_id, brief=True)
-            other_matches = f"\n*({len(matches) - 1} other matches)*" if len(matches) > 1 else ""
+            other_matches = (
+                f"\n*({len(matches) - 1} other matches)*" if len(matches) > 1 else ""
+            )
             return await self._format_response(
                 context + other_matches, include_header=False, max_lines=50
             )
@@ -1265,7 +1435,11 @@ class DescryService:
                 nid = node.get("id", "")
                 parts = nid.split("::")
                 struct_name = parts[-2] if len(parts) >= 2 else "?"
-                file_path = nid.split("::")[0].replace("FILE:", "") if nid.startswith("FILE:") else ""
+                file_path = (
+                    nid.split("::")[0].replace("FILE:", "")
+                    if nid.startswith("FILE:")
+                    else ""
+                )
                 lineno = meta.get("lineno", "?")
                 sig = meta.get("signature", f"fn {method}(...)")
                 lines.append(f"  - **{struct_name}**::{method}")
@@ -1287,7 +1461,9 @@ class DescryService:
         if not q:
             return "ERROR: Graph not found. Run descry ensure first."
 
-        result_path = q.find_call_path(start, end, max_depth=max_depth, direction=direction)
+        result_path = q.find_call_path(
+            start, end, max_depth=max_depth, direction=direction
+        )
 
         if not result_path:
             return (
@@ -1317,7 +1493,11 @@ class DescryService:
                 lines.append(f"   {file_path}")
 
             if snippet:
-                lang = self._get_syntax_lang(file_path) if file_path and self._get_syntax_lang else ""
+                lang = (
+                    self._get_syntax_lang(file_path)
+                    if file_path and self._get_syntax_lang
+                    else ""
+                )
                 lines.append(f"```{lang}")
                 for line in snippet.split("\n"):
                     lines.append(f"   {line}")
@@ -1343,7 +1523,9 @@ class DescryService:
         if not openapi_path.exists():
             return f"OpenAPI spec not found at {openapi_path}."
 
-        graph_path = str(self.config.graph_path) if self.config.graph_path.exists() else None
+        graph_path = (
+            str(self.config.graph_path) if self.config.graph_path.exists() else None
+        )
         tracer = self._CrossLangTracer(str(openapi_path), graph_path)
 
         if mode == "stats":
@@ -1388,7 +1570,9 @@ class DescryService:
                     lines.append(f"  {ep['method']:6s} -> `{handler}` (not in graph)")
 
                 if summary:
-                    lines.append(f"           {summary[:60]}{'...' if len(summary) > 60 else ''}")
+                    lines.append(
+                        f"           {summary[:60]}{'...' if len(summary) > 60 else ''}"
+                    )
 
             lines.append("")
             lines.append(f"*{len(endpoints)} endpoint(s) total*")
@@ -1435,10 +1619,14 @@ class DescryService:
                             lines.append(f"**Signature**: `{meta['signature']}`")
 
                         lines.append("")
-                        lines.append("Use `descry context` with this node_id for full details.")
+                        lines.append(
+                            "Use `descry context` with this node_id for full details."
+                        )
             else:
                 lines.append("")
-                lines.append("*Handler not found in graph - may need to run descry index*")
+                lines.append(
+                    "*Handler not found in graph - may need to run descry index*"
+                )
 
             return "\n".join(lines)
 

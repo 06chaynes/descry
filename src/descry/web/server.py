@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import re
-import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -25,7 +24,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, FileResponse, Response, StreamingResponse
+from starlette.responses import JSONResponse, FileResponse, StreamingResponse
 from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
 
@@ -41,17 +40,23 @@ SERVER_VERSION = "1.0.0"
 
 # --- Import shared modules ---
 
-from descry.query import GraphQuerier, _get_syntax_lang
+from descry.query import GraphQuerier, _get_syntax_lang  # noqa: E402
 
 try:
     from descry.cross_lang import CrossLangTracer
+
     CROSS_LANG_AVAILABLE = True
 except ImportError:
     CROSS_LANG_AVAILABLE = False
     CrossLangTracer = None
 
 try:
-    from descry.embeddings import embeddings_available, SemanticSearcher, get_embeddings_status
+    from descry.embeddings import (
+        embeddings_available,
+        SemanticSearcher,
+        get_embeddings_status,
+    )
+
     SEMANTIC_AVAILABLE = embeddings_available()
 except ImportError:
     SEMANTIC_AVAILABLE = False
@@ -60,14 +65,17 @@ except ImportError:
     def get_embeddings_status(*args, **kwargs):
         return {"available": False}
 
+
 try:
     from descry.scip.support import scip_available, get_scip_status
 except ImportError:
+
     def scip_available():
         return False
 
     def get_scip_status():
         return {"available": False}
+
 
 # docs_search is not ported (project-specific)
 DOCS_SEARCH_LOADED = False
@@ -77,6 +85,7 @@ DOCS_EMBEDDINGS_AVAILABLE = False
 
 try:
     from descry.git_history import GitHistoryAnalyzer, GitError
+
     GIT_HISTORY_AVAILABLE = True
 except ImportError:
     GIT_HISTORY_AVAILABLE = False
@@ -86,7 +95,7 @@ except ImportError:
 
 # --- Project config (lazy-loaded via DescryConfig) ---
 
-from descry.handlers import DescryConfig, DescryService
+from descry.handlers import DescryConfig, DescryService  # noqa: E402
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -110,12 +119,25 @@ def _get_service() -> DescryService:
 
 # --- Helper functions (pure functions) ---
 
+
 def is_natural_language_query(terms: list[str]) -> bool:
     text = " ".join(terms).lower()
     nl_indicators = [
-        "how to", "what is", "where is", "where are", "find the",
-        "show me", "get the", "look for", "search for", "related to",
-        "that handles", "that does", "responsible for", "used for", "deals with",
+        "how to",
+        "what is",
+        "where is",
+        "where are",
+        "find the",
+        "show me",
+        "get the",
+        "look for",
+        "search for",
+        "related to",
+        "that handles",
+        "that does",
+        "responsible for",
+        "used for",
+        "deals with",
     ]
     if any(p in text for p in nl_indicators):
         return True
@@ -128,7 +150,9 @@ def is_natural_language_query(terms: list[str]) -> bool:
     return len(terms) >= 3
 
 
-def reciprocal_rank_fusion(tfidf_results: list, semantic_results: list, k: int = 60) -> list:
+def reciprocal_rank_fusion(
+    tfidf_results: list, semantic_results: list, k: int = 60
+) -> list:
     rrf_scores = defaultdict(float)
     node_lookup = {}
     for rank, node in enumerate(tfidf_results):
@@ -173,7 +197,9 @@ def _get_semantic_searcher() -> "SemanticSearcher | None":
     if mtime != svc._semantic_cache["mtime"] or svc._semantic_cache["instance"] is None:
         svc._semantic_cache = {
             "mtime": mtime,
-            "instance": SemanticSearcher(str(cfg.graph_path), model_name=cfg.embedding_model),
+            "instance": SemanticSearcher(
+                str(cfg.graph_path), model_name=cfg.embedding_model
+            ),
             "loading": False,
             "error": None,
         }
@@ -186,10 +212,14 @@ def _get_git_analyzer() -> "GitHistoryAnalyzer | None":
     cfg = _get_config()
     svc = _get_service()
     current_mtime = cfg.graph_path.stat().st_mtime if cfg.graph_path.exists() else None
-    if svc._git_cache["graph_mtime"] != current_mtime or svc._git_cache["analyzer"] is None:
+    if (
+        svc._git_cache["graph_mtime"] != current_mtime
+        or svc._git_cache["analyzer"] is None
+    ):
         q = _get_querier()
         svc._git_cache["analyzer"] = GitHistoryAnalyzer(
-            str(cfg.project_root), graph_querier=q,
+            str(cfg.project_root),
+            graph_querier=q,
             churn_exclusions=cfg.churn_exclusions,
             code_extensions=cfg.code_extensions,
             git_timeout=cfg.git_timeout,
@@ -203,7 +233,7 @@ def _get_docs_searcher() -> "DocsSearcher | None":
         return None
     svc = _get_service()
     cfg = _get_config()
-    if not hasattr(svc, '_docs_cache_web') or svc._docs_cache_web is None:
+    if not hasattr(svc, "_docs_cache_web") or svc._docs_cache_web is None:
         searcher = DocsSearcher(cfg.project_root, cfg.cache_dir / "docs")
         searcher.index()
         svc._docs_cache_web = searcher
@@ -231,7 +261,13 @@ def _update_graph_meta():
 def _graph_status() -> dict:
     cfg = _get_config()
     if not cfg.graph_path.exists():
-        return {"exists": False, "age_str": "N/A", "age_hours": None, "nodes": 0, "edges": 0}
+        return {
+            "exists": False,
+            "age_str": "N/A",
+            "age_hours": None,
+            "nodes": 0,
+            "edges": 0,
+        }
     mtime = cfg.graph_path.stat().st_mtime
     age_hours = (time.time() - mtime) / 3600
     _update_graph_meta()
@@ -303,21 +339,26 @@ def _openapi_path_exists() -> bool:
 
 # --- API Endpoint Handlers ---
 
+
 async def api_health(request: Request) -> JSONResponse:
     status = _graph_status()
-    return JSONResponse({
-        "status": "ok" if status["exists"] and not status.get("stale") else ("stale" if status.get("stale") else "no_graph"),
-        "version": SERVER_VERSION,
-        "project_root": str(_get_config().project_root),
-        "graph": status,
-        "features": {
-            "scip": scip_available(),
-            "embeddings": SEMANTIC_AVAILABLE,
-            "git_history": GIT_HISTORY_AVAILABLE,
-            "cross_lang": CROSS_LANG_AVAILABLE and _openapi_path_exists(),
-            "docs_search": DOCS_SEARCH_LOADED and DOCS_EMBEDDINGS_AVAILABLE,
-        },
-    })
+    return JSONResponse(
+        {
+            "status": "ok"
+            if status["exists"] and not status.get("stale")
+            else ("stale" if status.get("stale") else "no_graph"),
+            "version": SERVER_VERSION,
+            "project_root": str(_get_config().project_root),
+            "graph": status,
+            "features": {
+                "scip": scip_available(),
+                "embeddings": SEMANTIC_AVAILABLE,
+                "git_history": GIT_HISTORY_AVAILABLE,
+                "cross_lang": CROSS_LANG_AVAILABLE and _openapi_path_exists(),
+                "docs_search": DOCS_SEARCH_LOADED and DOCS_EMBEDDINGS_AVAILABLE,
+            },
+        }
+    )
 
 
 async def api_status(request: Request) -> JSONResponse:
@@ -332,26 +373,38 @@ async def api_ensure(request: Request) -> JSONResponse:
 
     if not status["exists"]:
         result = await _run_index(".")
-        return JSONResponse({"action": "generated", "result": result, "graph": _graph_status()})
+        return JSONResponse(
+            {"action": "generated", "result": result, "graph": _graph_status()}
+        )
 
     if status["age_hours"] and status["age_hours"] > max_age:
         result = await _run_index(".")
-        return JSONResponse({"action": "refreshed", "result": result, "graph": _graph_status()})
+        return JSONResponse(
+            {"action": "refreshed", "result": result, "graph": _graph_status()}
+        )
 
     return JSONResponse({"action": "ready", "graph": status})
 
 
 async def _run_index(path: str) -> str:
     import subprocess
+
     script_path = Path(__file__).parent.parent / "generate.py"
     cfg = _get_config()
     index_path = str(cfg.project_root) if path == "." else path
     try:
         result = subprocess.run(
             ["uv", "run", str(script_path), index_path],
-            capture_output=True, text=True, cwd=str(cfg.project_root), timeout=600,
+            capture_output=True,
+            text=True,
+            cwd=str(cfg.project_root),
+            timeout=600,
         )
-        return result.stdout.strip() if result.returncode == 0 else f"Error: {result.stderr}"
+        return (
+            result.stdout.strip()
+            if result.returncode == 0
+            else f"Error: {result.stderr}"
+        )
     except subprocess.TimeoutExpired:
         return "Timed out after 10 minutes"
     except Exception as e:
@@ -381,7 +434,10 @@ async def api_index_stream(request: Request) -> StreamingResponse:
         cfg = _get_config()
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         proc = await asyncio.create_subprocess_exec(
-            "uv", "run", str(script_path), str(cfg.project_root),
+            "uv",
+            "run",
+            str(script_path),
+            str(cfg.project_root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=str(cfg.project_root),
@@ -434,14 +490,18 @@ async def api_search(request: Request) -> JSONResponse:
 
     q = _get_querier()
     if not q:
-        return JSONResponse({"error": "Graph not found. Run ensure first."}, status_code=503)
+        return JSONResponse(
+            {"error": "Graph not found. Run ensure first."}, status_code=503
+        )
 
     # TF-IDF search
     tfidf_results = q.search_docs(
-        terms, lang=lang if lang != "all" else None,
-        crate=crate, symbol_type=symbol_type if symbol_type != "all" else None,
+        terms,
+        lang=lang if lang != "all" else None,
+        crate=crate,
+        symbol_type=symbol_type if symbol_type != "all" else None,
         exclude_tests=exclude_tests,
-    )[:limit * 2]
+    )[: limit * 2]
 
     # Semantic search if available
     semantic_results = []
@@ -452,7 +512,9 @@ async def api_search(request: Request) -> JSONResponse:
                 searcher = _get_semantic_searcher()
                 if searcher:
                     query = " ".join(terms)
-                    semantic_results = searcher.search(query, limit=limit * 2, min_score=0.25)
+                    semantic_results = searcher.search(
+                        query, limit=limit * 2, min_score=0.25
+                    )
                     search_method = "hybrid"
             except Exception as e:
                 logger.warning(f"Semantic search failed: {e}")
@@ -467,12 +529,14 @@ async def api_search(request: Request) -> JSONResponse:
     else:
         results = []
 
-    return JSONResponse({
-        "results": [_node_to_dict(n) for n in results],
-        "method": search_method,
-        "query": " ".join(terms),
-        "total": len(results),
-    })
+    return JSONResponse(
+        {
+            "results": [_node_to_dict(n) for n in results],
+            "method": search_method,
+            "query": " ".join(terms),
+            "total": len(results),
+        }
+    )
 
 
 async def api_semantic(request: Request) -> JSONResponse:
@@ -493,14 +557,16 @@ async def api_semantic(request: Request) -> JSONResponse:
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-    return JSONResponse({
-        "results": [
-            {**_node_to_dict(node), "score": round(score, 4)}
-            for node, score in results
-        ],
-        "query": query,
-        "total": len(results),
-    })
+    return JSONResponse(
+        {
+            "results": [
+                {**_node_to_dict(node), "score": round(score, 4)}
+                for node, score in results
+            ],
+            "query": query,
+            "total": len(results),
+        }
+    )
 
 
 async def api_callers(request: Request) -> JSONResponse:
@@ -520,12 +586,14 @@ async def api_callers(request: Request) -> JSONResponse:
         fuzzy = bool(all_callers)
 
     callers = sorted(all_callers)[:limit]
-    return JSONResponse({
-        "symbol": name,
-        "fuzzy": fuzzy,
-        "total": len(all_callers),
-        "callers": [_caller_to_dict(c, q) for c in callers],
-    })
+    return JSONResponse(
+        {
+            "symbol": name,
+            "fuzzy": fuzzy,
+            "total": len(all_callers),
+            "callers": [_caller_to_dict(c, q) for c in callers],
+        }
+    )
 
 
 async def api_callees(request: Request) -> JSONResponse:
@@ -547,18 +615,28 @@ async def api_callees(request: Request) -> JSONResponse:
         fuzzy = bool(func_matches)
 
     if not func_matches:
-        return JSONResponse({"symbol": name, "fuzzy": False, "total": 0, "callees": [], "error": "Symbol not found"})
+        return JSONResponse(
+            {
+                "symbol": name,
+                "fuzzy": False,
+                "total": 0,
+                "callees": [],
+                "error": "Symbol not found",
+            }
+        )
 
     node = func_matches[0]
     callees = sorted(q.get_callees(node["id"]))[:limit]
 
-    return JSONResponse({
-        "symbol": node.get("metadata", {}).get("name", name),
-        "node_id": node["id"],
-        "fuzzy": fuzzy,
-        "total": len(callees),
-        "callees": [_caller_to_dict(c, q) for c in callees],
-    })
+    return JSONResponse(
+        {
+            "symbol": node.get("metadata", {}).get("name", name),
+            "node_id": node["id"],
+            "fuzzy": fuzzy,
+            "total": len(callees),
+            "callees": [_caller_to_dict(c, q) for c in callees],
+        }
+    )
 
 
 async def api_context(request: Request) -> JSONResponse:
@@ -577,8 +655,12 @@ async def api_context(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
 
     result = q.get_context_prompt(
-        node_id, depth=depth, max_tokens=max_tokens,
-        full=full, brief=brief, expand_callees=expand_callees,
+        node_id,
+        depth=depth,
+        max_tokens=max_tokens,
+        full=full,
+        brief=brief,
+        expand_callees=expand_callees,
     )
 
     return JSONResponse({"node_id": node_id, "markdown": result})
@@ -609,29 +691,44 @@ async def api_structure(request: Request) -> JSONResponse:
                 defs.append(target)
         elif edge["relation"] == "IMPORTS":
             target = edge["target"]
-            imports.add(target.replace("MODULE:", "") if target.startswith("MODULE:") else target)
+            imports.add(
+                target.replace("MODULE:", "")
+                if target.startswith("MODULE:")
+                else target
+            )
 
     grouped = {}
     for type_name in ["Constant", "Class", "Function", "Configuration"]:
         items = [
-            {"name": d["metadata"]["name"], "lineno": d["metadata"].get("lineno"),
-             "signature": d["metadata"].get("signature", ""), "id": d.get("id", "")}
-            for d in defs if d["type"] == type_name
+            {
+                "name": d["metadata"]["name"],
+                "lineno": d["metadata"].get("lineno"),
+                "signature": d["metadata"].get("signature", ""),
+                "id": d.get("id", ""),
+            }
+            for d in defs
+            if d["type"] == type_name
         ]
         if items:
-            grouped[type_name.lower()] = sorted(items, key=lambda x: x.get("lineno") or 0)
+            grouped[type_name.lower()] = sorted(
+                items, key=lambda x: x.get("lineno") or 0
+            )
 
-    return JSONResponse({
-        "file": node_id,
-        "imports": sorted(imports),
-        "definitions": grouped,
-    })
+    return JSONResponse(
+        {
+            "file": node_id,
+            "imports": sorted(imports),
+            "definitions": grouped,
+        }
+    )
 
 
 async def api_flatten(request: Request) -> JSONResponse:
     class_node_id = request.query_params.get("class_node_id", "")
     if not class_node_id:
-        return JSONResponse({"error": "Missing 'class_node_id' parameter"}, status_code=400)
+        return JSONResponse(
+            {"error": "Missing 'class_node_id' parameter"}, status_code=400
+        )
 
     q = _get_querier()
     if not q:
@@ -658,17 +755,30 @@ async def api_impls(request: Request) -> JSONResponse:
         node_id = node.get("id", "")
         parts = node_id.split("::")
         struct_name = parts[-2] if len(parts) >= 2 else "?"
-        file_path = node_id.split("::")[0].replace("FILE:", "") if node_id.startswith("FILE:") else ""
-        impls.append({
-            "id": node_id,
-            "struct_name": struct_name,
-            "trait_name": meta.get("trait_impl", "unknown"),
-            "file_path": file_path,
-            "lineno": meta.get("lineno"),
-            "signature": meta.get("signature", ""),
-        })
+        file_path = (
+            node_id.split("::")[0].replace("FILE:", "")
+            if node_id.startswith("FILE:")
+            else ""
+        )
+        impls.append(
+            {
+                "id": node_id,
+                "struct_name": struct_name,
+                "trait_name": meta.get("trait_impl", "unknown"),
+                "file_path": file_path,
+                "lineno": meta.get("lineno"),
+                "signature": meta.get("signature", ""),
+            }
+        )
 
-    return JSONResponse({"method": method, "trait_filter": trait_name, "total": len(impls), "implementations": impls})
+    return JSONResponse(
+        {
+            "method": method,
+            "trait_filter": trait_name,
+            "total": len(impls),
+            "implementations": impls,
+        }
+    )
 
 
 async def api_flow(request: Request) -> JSONResponse:
@@ -690,14 +800,20 @@ async def api_flow(request: Request) -> JSONResponse:
 
     if fmt == "tree":
         tree = q.trace_flow_structured(
-            start_name=start, direction=direction, depth=depth,
-            target=target, inline_threshold=inline_threshold,
+            start_name=start,
+            direction=direction,
+            depth=depth,
+            target=target,
+            inline_threshold=inline_threshold,
         )
         return JSONResponse({**base, "tree": tree})
 
     result = q.trace_flow(
-        start_name=start, direction=direction, depth=depth,
-        target=target, inline_threshold=inline_threshold,
+        start_name=start,
+        direction=direction,
+        depth=depth,
+        target=target,
+        inline_threshold=inline_threshold,
     )
     return JSONResponse({**base, "markdown": result})
 
@@ -706,7 +822,9 @@ async def api_path(request: Request) -> JSONResponse:
     start = request.query_params.get("start", "")
     end = request.query_params.get("end", "")
     if not start or not end:
-        return JSONResponse({"error": "Missing 'start' and/or 'end' parameter"}, status_code=400)
+        return JSONResponse(
+            {"error": "Missing 'start' and/or 'end' parameter"}, status_code=400
+        )
 
     max_depth = int(request.query_params.get("max_depth", "10"))
     direction = request.query_params.get("direction", "forward")
@@ -717,21 +835,37 @@ async def api_path(request: Request) -> JSONResponse:
 
     path = q.find_call_path(start, end, max_depth=max_depth, direction=direction)
     if not path:
-        return JSONResponse({"start": start, "end": end, "hops": 0, "path": [], "markdown": f"No path found from '{start}' to '{end}'"})
+        return JSONResponse(
+            {
+                "start": start,
+                "end": end,
+                "hops": 0,
+                "path": [],
+                "markdown": f"No path found from '{start}' to '{end}'",
+            }
+        )
 
     # Build structured path + markdown
     hops = []
-    md_lines = [f"### Call Path: `{start}` -> `{end}` ({len(path)} hop{'s' if len(path) != 1 else ''})\n"]
+    md_lines = [
+        f"### Call Path: `{start}` -> `{end}` ({len(path)} hop{'s' if len(path) != 1 else ''})\n"
+    ]
     for i, hop in enumerate(path, 1):
         caller_name = hop.get("caller_name", "?")
         callee_name = hop.get("callee_name", "?")
         file_path = hop.get("file_path", "")
         call_line = hop.get("call_line")
         snippet = hop.get("call_snippet", "")
-        hops.append({
-            "step": i, "caller": caller_name, "callee": callee_name,
-            "file_path": file_path, "line": call_line, "snippet": snippet,
-        })
+        hops.append(
+            {
+                "step": i,
+                "caller": caller_name,
+                "callee": callee_name,
+                "file_path": file_path,
+                "line": call_line,
+                "snippet": snippet,
+            }
+        )
         md_lines.append(f"**{i}. {caller_name}** -> **{callee_name}**")
         if file_path and call_line:
             md_lines.append(f"   {file_path}:{call_line}")
@@ -742,12 +876,25 @@ async def api_path(request: Request) -> JSONResponse:
             md_lines.append("```")
         md_lines.append("")
 
-    return JSONResponse({"start": start, "end": end, "hops": len(path), "path": hops, "markdown": "\n".join(md_lines)})
+    return JSONResponse(
+        {
+            "start": start,
+            "end": end,
+            "hops": len(path),
+            "path": hops,
+            "markdown": "\n".join(md_lines),
+        }
+    )
 
 
 async def api_cross_lang(request: Request) -> JSONResponse:
     if not CROSS_LANG_AVAILABLE:
-        return JSONResponse({"not_configured": True, "message": "Cross-language tracing module not available. Install the descry cross_lang dependency."})
+        return JSONResponse(
+            {
+                "not_configured": True,
+                "message": "Cross-language tracing module not available. Install the descry cross_lang dependency.",
+            }
+        )
 
     mode = request.query_params.get("mode", "endpoint")
     method = request.query_params.get("method")
@@ -759,7 +906,12 @@ async def api_cross_lang(request: Request) -> JSONResponse:
     if not openapi_path.exists():
         openapi_path = cfg.project_root / "public" / "api" / "openapi.json"
     if not openapi_path.exists():
-        return JSONResponse({"not_configured": True, "message": "No OpenAPI spec found. Place your spec at public/api/openapi.json relative to the project root."})
+        return JSONResponse(
+            {
+                "not_configured": True,
+                "message": "No OpenAPI spec found. Place your spec at public/api/openapi.json relative to the project root.",
+            }
+        )
 
     graph_path = str(cfg.graph_path) if cfg.graph_path.exists() else None
     tracer = CrossLangTracer(str(openapi_path), graph_path)
@@ -768,13 +920,19 @@ async def api_cross_lang(request: Request) -> JSONResponse:
         return JSONResponse(tracer.get_stats())
     elif mode == "list":
         endpoints = tracer.list_endpoints(tag=tag)
-        return JSONResponse({"tag": tag, "total": len(endpoints), "endpoints": endpoints})
+        return JSONResponse(
+            {"tag": tag, "total": len(endpoints), "endpoints": endpoints}
+        )
     elif mode == "endpoint":
         if not method or not path:
-            return JSONResponse({"error": "Endpoint mode requires 'method' and 'path'"}, status_code=400)
+            return JSONResponse(
+                {"error": "Endpoint mode requires 'method' and 'path'"}, status_code=400
+            )
         info = tracer.get_handler_info(method.upper(), path)
         if not info:
-            return JSONResponse({"error": f"No handler for {method.upper()} {path}"}, status_code=404)
+            return JSONResponse(
+                {"error": f"No handler for {method.upper()} {path}"}, status_code=404
+            )
         return JSONResponse(info)
     else:
         return JSONResponse({"error": f"Unknown mode '{mode}'"}, status_code=400)
@@ -788,7 +946,9 @@ async def api_churn(request: Request) -> JSONResponse:
     path_filter = request.query_params.get("path_filter")
     limit = int(request.query_params.get("limit", "20"))
     mode = request.query_params.get("mode", "symbols")
-    exclude_generated = request.query_params.get("exclude_generated", "true").lower() == "true"
+    exclude_generated = (
+        request.query_params.get("exclude_generated", "true").lower() == "true"
+    )
 
     fmt = request.query_params.get("format", "markdown")
 
@@ -796,15 +956,22 @@ async def api_churn(request: Request) -> JSONResponse:
         analyzer = _get_git_analyzer()
         if fmt == "structured":
             result = await asyncio.to_thread(
-                analyzer.get_churn_structured, time_range=time_range,
-                path_filter=path_filter, limit=limit, mode=mode,
+                analyzer.get_churn_structured,
+                time_range=time_range,
+                path_filter=path_filter,
+                limit=limit,
+                mode=mode,
                 exclude_generated=exclude_generated,
             )
             return JSONResponse({"data": result})
         else:
             result = await asyncio.to_thread(
-                analyzer.get_churn, time_range=time_range, path_filter=path_filter,
-                limit=limit, mode=mode, exclude_generated=exclude_generated,
+                analyzer.get_churn,
+                time_range=time_range,
+                path_filter=path_filter,
+                limit=limit,
+                mode=mode,
+                exclude_generated=exclude_generated,
             )
             return JSONResponse({"mode": mode, "markdown": result})
     except Exception as e:
@@ -827,8 +994,12 @@ async def api_evolution(request: Request) -> JSONResponse:
     try:
         analyzer = _get_git_analyzer()
         result = await asyncio.to_thread(
-            analyzer.get_evolution, name=name, time_range=time_range,
-            limit=limit, show_diff=show_diff, crate=crate,
+            analyzer.get_evolution,
+            name=name,
+            time_range=time_range,
+            limit=limit,
+            show_diff=show_diff,
+            crate=crate,
         )
         return JSONResponse({"name": name, "markdown": result})
     except Exception as e:
@@ -851,15 +1022,22 @@ async def api_changes(request: Request) -> JSONResponse:
         analyzer = _get_git_analyzer()
         if fmt == "structured":
             result = await asyncio.to_thread(
-                analyzer.get_changes_structured, commit_range=commit_range,
-                time_range=time_range, path_filter=path_filter,
-                show_callers=show_callers, limit=limit,
+                analyzer.get_changes_structured,
+                commit_range=commit_range,
+                time_range=time_range,
+                path_filter=path_filter,
+                show_callers=show_callers,
+                limit=limit,
             )
             return JSONResponse({"data": result})
         else:
             result = await asyncio.to_thread(
-                analyzer.get_changes, commit_range=commit_range, time_range=time_range,
-                path_filter=path_filter, show_callers=show_callers, limit=limit,
+                analyzer.get_changes,
+                commit_range=commit_range,
+                time_range=time_range,
+                path_filter=path_filter,
+                show_callers=show_callers,
+                limit=limit,
             )
             return JSONResponse({"markdown": result})
     except Exception as e:
@@ -883,11 +1061,13 @@ async def api_docs_search(request: Request) -> JSONResponse:
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-    return JSONResponse({
-        "query": query,
-        "total": len(results),
-        "results": results,
-    })
+    return JSONResponse(
+        {
+            "query": query,
+            "total": len(results),
+            "results": results,
+        }
+    )
 
 
 async def api_quick(request: Request) -> JSONResponse:
@@ -924,11 +1104,13 @@ async def api_quick(request: Request) -> JSONResponse:
     node_id = best["id"]
     context = q.get_context_prompt(node_id, full=full, brief=brief)
 
-    return JSONResponse({
-        "symbol": _node_to_dict(best),
-        "other_matches": len(matches) - 1,
-        "markdown": context,
-    })
+    return JSONResponse(
+        {
+            "symbol": _node_to_dict(best),
+            "other_matches": len(matches) - 1,
+            "markdown": context,
+        }
+    )
 
 
 async def api_source(request: Request) -> JSONResponse:
@@ -958,29 +1140,33 @@ async def api_source(request: Request) -> JSONResponse:
         start = max(0, target_line - context_lines - 1)
         end = min(len(lines), target_line + context_lines)
         visible_lines = lines[start:end]
-        return JSONResponse({
-            "file": file_param,
-            "language": lang,
-            "total_lines": len(lines),
-            "start_line": start + 1,
-            "end_line": end,
-            "target_line": target_line,
-            "content": "\n".join(visible_lines),
-        })
+        return JSONResponse(
+            {
+                "file": file_param,
+                "language": lang,
+                "total_lines": len(lines),
+                "start_line": start + 1,
+                "end_line": end,
+                "target_line": target_line,
+                "content": "\n".join(visible_lines),
+            }
+        )
 
     # Return full file (capped at 2000 lines for safety)
     cap = 2000
     truncated = len(lines) > cap
-    return JSONResponse({
-        "file": file_param,
-        "language": lang,
-        "total_lines": len(lines),
-        "start_line": 1,
-        "end_line": min(len(lines), cap),
-        "target_line": None,
-        "truncated": truncated,
-        "content": "\n".join(lines[:cap]),
-    })
+    return JSONResponse(
+        {
+            "file": file_param,
+            "language": lang,
+            "total_lines": len(lines),
+            "start_line": 1,
+            "end_line": min(len(lines), cap),
+            "target_line": None,
+            "truncated": truncated,
+            "content": "\n".join(lines[:cap]),
+        }
+    )
 
 
 async def api_examples(request: Request) -> JSONResponse:
@@ -1016,7 +1202,9 @@ async def api_examples(request: Request) -> JSONResponse:
             "type": ntype,
             "in_degree": meta.get("in_degree", 0),
             "token_count": meta.get("token_count", 0),
-            "file": n["id"].replace("FILE:", "").split("::")[0] if "::" in n["id"] else "",
+            "file": n["id"].replace("FILE:", "").split("::")[0]
+            if "::" in n["id"]
+            else "",
         }
         if ntype == "Function":
             functions.append(entry)
@@ -1056,7 +1244,11 @@ async def api_examples(request: Request) -> JSONResponse:
         if od >= 2:
             flow_candidates.append({"name": f["name"], "out_degree": od})
     flow_candidates.sort(key=lambda x: x["out_degree"], reverse=True)
-    flow_fwd = flow_candidates[0]["name"] if flow_candidates else (popular_names[0] if popular_names else "")
+    flow_fwd = (
+        flow_candidates[0]["name"]
+        if flow_candidates
+        else (popular_names[0] if popular_names else "")
+    )
     # Backward: pick a popular callee that differs from the forward symbol
     flow_bwd = ""
     for pn in popular_names:
@@ -1093,28 +1285,32 @@ async def api_examples(request: Request) -> JSONResponse:
         seen_names[n] = seen_names.get(n, 0) + 1
     impl_candidates = sorted(
         [(name, count) for name, count in seen_names.items() if count >= 2],
-        key=lambda x: x[1], reverse=True,
+        key=lambda x: x[1],
+        reverse=True,
     )
     impl_examples = [name for name, _ in impl_candidates[:3]]
 
-    return JSONResponse({
-        "available": True,
-        "search": search_examples,
-        "quick": popular_names[:3],
-        "callers": popular_names[:3],
-        "callees": popular_names[:2],
-        "flow_forward": flow_fwd,
-        "flow_backward": flow_bwd,
-        "path_start": path_start,
-        "path_end": path_end,
-        "structure": structure_examples,
-        "flatten": flatten_example,
-        "impls": impl_examples,
-        "evolution": popular_names[:2],
-    })
+    return JSONResponse(
+        {
+            "available": True,
+            "search": search_examples,
+            "quick": popular_names[:3],
+            "callers": popular_names[:3],
+            "callees": popular_names[:2],
+            "flow_forward": flow_fwd,
+            "flow_backward": flow_bwd,
+            "path_start": path_start,
+            "path_end": path_end,
+            "structure": structure_examples,
+            "flatten": flatten_example,
+            "impls": impl_examples,
+            "evolution": popular_names[:2],
+        }
+    )
 
 
 # --- App entrypoint ---
+
 
 async def index_page(request: Request) -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")
@@ -1149,7 +1345,9 @@ routes = [
 ]
 
 middleware = [
-    Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]),
+    Middleware(
+        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    ),
 ]
 
 app = Starlette(routes=routes, middleware=middleware)
@@ -1175,7 +1373,9 @@ def main():
         logger.info("Pre-warming graph...")
         _get_querier()
         _update_graph_meta()
-        logger.info(f"Graph ready: {_graph_meta['nodes']:,}n / {_graph_meta['edges']:,}e")
+        logger.info(
+            f"Graph ready: {_graph_meta['nodes']:,}n / {_graph_meta['edges']:,}e"
+        )
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

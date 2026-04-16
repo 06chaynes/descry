@@ -1,0 +1,130 @@
+{
+  "nodes": [
+    {
+      "id": "FILE:src/main.rs",
+      "type": "File",
+      "metadata": {
+        "name": "main.rs",
+        "lineno": 1,
+        "token_count": 0,
+        "in_degree": 0
+      }
+    },
+    {
+      "id": "FILE:src/main.rs::main",
+      "type": "Function",
+      "metadata": {
+        "name": "main",
+        "lineno": 5,
+        "token_count": 120,
+        "in_degree": 0,
+        "signature": "fn main()",
+        "docstring": "Application entry point",
+        "source": "fn main() {\n    let config = load_config();\n    run_server(config);\n}"
+      }
+    },
+    {
+      "id": "FILE:src/config.rs::load_config",
+      "type": "Function",
+      "metadata": {
+        "name": "load_config",
+        "lineno": 10,
+        "token_count": 80,
+        "in_degree": 1,
+        "signature": "fn load_config() -> Config",
+        "docstring": "Load configuration from file or environment",
+        "source": "fn load_config() -> Config {\n    Config::from_env()\n}"
+      }
+    },
+    {
+      "id": "FILE:src/server.rs::run_server",
+      "type": "Function",
+      "metadata": {
+        "name": "run_server",
+        "lineno": 20,
+        "token_count": 200,
+        "in_degree": 1,
+        "signature": "fn run_server(config: Config)",
+        "docstring": "Start the HTTP server",
+        "source": "fn run_server(config: Config) {\n    let app = Router::new();\n    app.listen(config.port);\n}"
+      }
+    },
+    {
+      "id": "FILE:src/server.rs::handle_request",
+      "type": "Function",
+      "metadata": {
+        "name": "handle_request",
+        "lineno": 35,
+        "token_count": 150,
+        "in_degree": 2,
+        "signature": "fn handle_request(req: Request) -> Response",
+        "source": "fn handle_request(req: Request) -> Response {\n    validate_token(&req);\n    process(&req)\n}"
+      }
+    },
+    {
+      "id": "FILE:src/auth.rs::validate_token",
+      "type": "Function",
+      "metadata": {
+        "name": "validate_token",
+        "lineno": 1,
+        "token_count": 100,
+        "in_degree": 1,
+        "signature": "fn validate_token(req: &Request) -> Result<Claims, Error>",
+        "docstring": "Validate JWT bearer token"
+      }
+    },
+    {
+      "id": "FILE:src/auth.rs::AuthConfig",
+      "type": "Class",
+      "metadata": {
+        "name": "AuthConfig",
+        "lineno": 50,
+        "token_count": 60,
+        "in_degree": 0,
+        "signature": "struct AuthConfig"
+      }
+    },
+    {
+      "id": "FILE:src/constants.rs::MAX_RETRIES",
+      "type": "Constant",
+      "metadata": {
+        "name": "MAX_RETRIES",
+        "lineno": 1,
+        "token_count": 5,
+        "in_degree": 0,
+        "value": "3"
+      }
+    },
+    {
+      "id": "FILE:tests/test_auth.rs::test_validate_token",
+      "type": "Function",
+      "metadata": {
+        "name": "test_validate_token",
+        "lineno": 5,
+        "token_count": 80,
+        "in_degree": 0,
+        "signature": "fn test_validate_token()",
+        "is_test": true
+      }
+    },
+    {
+      "id": "FILE:src/config.rs",
+      "type": "File",
+      "metadata": {
+        "name": "config.rs",
+        "lineno": 1,
+        "token_count": 0,
+        "in_degree": 0
+      }
+    }
+  ],
+  "edges": [
+    {"source": "FILE:src/main.rs", "target": "FILE:src/main.rs::main", "relation": "DEFINES"},
+    {"source": "FILE:src/config.rs", "target": "FILE:src/config.rs::load_config", "relation": "DEFINES"},
+    {"source": "FILE:src/main.rs::main", "target": "FILE:src/config.rs::load_config", "relation": "CALLS"},
+    {"source": "FILE:src/main.rs::main", "target": "FILE:src/server.rs::run_server", "relation": "CALLS"},
+    {"source": "FILE:src/server.rs::run_server", "target": "FILE:src/server.rs::handle_request", "relation": "CALLS"},
+    {"source": "FILE:src/server.rs::handle_request", "target": "FILE:src/auth.rs::validate_token", "relation": "CALLS"},
+    {"source": "FILE:tests/test_auth.rs::test_validate_token", "target": "FILE:src/auth.rs::validate_token", "relation": "CALLS"}
+  ]
+}

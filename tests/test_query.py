@@ -3,7 +3,6 @@
 import json
 import os
 import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -289,7 +288,9 @@ class TestFindCallPath:
     def test_backward_direction(self, call_path_graph):
         """Should find backward path (who calls me)."""
         q = GraphQuerier(call_path_graph)
-        path = q.find_call_path("validate_token", "handle_request", direction="backward")
+        path = q.find_call_path(
+            "validate_token", "handle_request", direction="backward"
+        )
 
         # Backward: validate_token is called by process_data is called by handle_request
         assert len(path) == 2
@@ -371,10 +372,26 @@ class TestFlowDisambiguation:
                 },
             ],
             "edges": [
-                {"source": "FILE:service_a.rs", "target": "FILE:service_a.rs::ServiceA::new", "relation": "DEFINES"},
-                {"source": "FILE:service_a.rs", "target": "FILE:service_a.rs::ServiceA::process", "relation": "DEFINES"},
-                {"source": "FILE:service_b.rs", "target": "FILE:service_b.rs::ServiceB::new", "relation": "DEFINES"},
-                {"source": "FILE:service_b.rs", "target": "FILE:service_b.rs::ServiceB::process", "relation": "DEFINES"},
+                {
+                    "source": "FILE:service_a.rs",
+                    "target": "FILE:service_a.rs::ServiceA::new",
+                    "relation": "DEFINES",
+                },
+                {
+                    "source": "FILE:service_a.rs",
+                    "target": "FILE:service_a.rs::ServiceA::process",
+                    "relation": "DEFINES",
+                },
+                {
+                    "source": "FILE:service_b.rs",
+                    "target": "FILE:service_b.rs::ServiceB::new",
+                    "relation": "DEFINES",
+                },
+                {
+                    "source": "FILE:service_b.rs",
+                    "target": "FILE:service_b.rs::ServiceB::process",
+                    "relation": "DEFINES",
+                },
             ],
         }
 
@@ -385,7 +402,9 @@ class TestFlowDisambiguation:
 
         os.unlink(f.name)
 
-    def test_shows_disambiguation_for_multiple_matches(self, graph_with_duplicate_names):
+    def test_shows_disambiguation_for_multiple_matches(
+        self, graph_with_duplicate_names
+    ):
         """trace_flow should show which start point was selected when multiple exist."""
         q = GraphQuerier(graph_with_duplicate_names)
 
@@ -407,12 +426,16 @@ class TestFlowDisambiguation:
         # Should mention full node ID for disambiguation
         assert "node ID" in result  # "use full node ID to select"
 
-    def test_no_disambiguation_when_using_full_node_id(self, graph_with_duplicate_names):
+    def test_no_disambiguation_when_using_full_node_id(
+        self, graph_with_duplicate_names
+    ):
         """trace_flow should not show disambiguation when full node ID is used."""
         q = GraphQuerier(graph_with_duplicate_names)
 
         # Using full node ID should not trigger disambiguation
-        result = q.trace_flow("FILE:service_a.rs::ServiceA::new", direction="forward", depth=2)
+        result = q.trace_flow(
+            "FILE:service_a.rs::ServiceA::new", direction="forward", depth=2
+        )
 
         # When exact node ID is provided and matches exactly, no disambiguation needed
         # The result should contain the flow but not the alternatives message
@@ -503,12 +526,32 @@ fn fetch_user(user_id: &str) -> Result<User> {
                 },
             ],
             "edges": [
-                {"source": f"FILE:{source_file}", "target": f"FILE:{source_file}::authenticate", "relation": "DEFINES"},
-                {"source": f"FILE:{source_file}", "target": f"FILE:{source_file}::validate_token", "relation": "DEFINES"},
-                {"source": f"FILE:{source_file}", "target": f"FILE:{source_file}::fetch_user", "relation": "DEFINES"},
+                {
+                    "source": f"FILE:{source_file}",
+                    "target": f"FILE:{source_file}::authenticate",
+                    "relation": "DEFINES",
+                },
+                {
+                    "source": f"FILE:{source_file}",
+                    "target": f"FILE:{source_file}::validate_token",
+                    "relation": "DEFINES",
+                },
+                {
+                    "source": f"FILE:{source_file}",
+                    "target": f"FILE:{source_file}::fetch_user",
+                    "relation": "DEFINES",
+                },
                 # authenticate calls validate_token and fetch_user
-                {"source": f"FILE:{source_file}::authenticate", "target": f"FILE:{source_file}::validate_token", "relation": "CALLS"},
-                {"source": f"FILE:{source_file}::authenticate", "target": f"FILE:{source_file}::fetch_user", "relation": "CALLS"},
+                {
+                    "source": f"FILE:{source_file}::authenticate",
+                    "target": f"FILE:{source_file}::validate_token",
+                    "relation": "CALLS",
+                },
+                {
+                    "source": f"FILE:{source_file}::authenticate",
+                    "target": f"FILE:{source_file}::fetch_user",
+                    "relation": "CALLS",
+                },
             ],
         }
 
@@ -555,7 +598,9 @@ fn fetch_user(user_id: &str) -> Result<User> {
         q = GraphQuerier(graph_file)
 
         # With very small budget, should skip callees
-        expanded = q._expand_callees_full(f"FILE:{source_file}::authenticate", budget=10)
+        expanded = q._expand_callees_full(
+            f"FILE:{source_file}::authenticate", budget=10
+        )
 
         # Both callees (80 + 60 = 140 tokens) exceed budget of 10
         assert len(expanded) == 0

@@ -37,6 +37,7 @@ def _estimate_tokens(text: str) -> int:
 # --- File Content LRU Cache ---
 # Reduces I/O from ~150 to ~30 reads for deep context operations
 
+
 @lru_cache(maxsize=128)
 def _read_file_cached(file_path: str) -> tuple[str, ...]:
     """Read file content with LRU caching.
@@ -91,10 +92,10 @@ def _normalize_name(name: str) -> str:
     """
     # Insert underscore before uppercase letters that follow lowercase
     # e.g., getClient -> get_Client
-    s1 = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', name)
+    s1 = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
     # Insert underscore before uppercase letters that precede lowercase (for acronyms)
     # e.g., HTTPServer -> HTTP_Server -> http_server
-    s2 = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', s1)
+    s2 = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", s1)
     return s2.lower()
 
 
@@ -135,7 +136,9 @@ def _clean_ref_name(ref_name: str, max_len: int = 60) -> str:
     # If it's a qualified call like Type::method(args), extract Type::method
     if "::" in first_line:
         # Match Type::method or Type::Variant pattern
-        match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)", first_line)
+        match = re.match(
+            r"^([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)", first_line
+        )
         if match:
             first_line = match.group(1)
 
@@ -176,8 +179,12 @@ class GraphQuerier:
         # Config-driven limits (fall back to module-level constants)
         self._max_depth = config.max_depth if config else MAX_DEPTH
         self._max_nodes = config.max_nodes if config else MAX_NODES_PER_OPERATION
-        self._max_children_per_level = config.max_children_per_level if config else MAX_CHILDREN_PER_LEVEL
-        self._max_callers_shown = config.max_callers_shown if config else MAX_CALLERS_SHOWN
+        self._max_children_per_level = (
+            config.max_children_per_level if config else MAX_CHILDREN_PER_LEVEL
+        )
+        self._max_callers_shown = (
+            config.max_callers_shown if config else MAX_CALLERS_SHOWN
+        )
         self._timeout_ms = config.query_timeout_ms if config else TIMEOUT_MS
         self._test_path_patterns = config.test_path_patterns if config else None
         self._test_file_suffixes = config.test_file_suffixes if config else None
@@ -241,14 +248,26 @@ class GraphQuerier:
 
         # Test detection patterns
         test_path_patterns = self._test_path_patterns or (
-            '/tests/', '/test/', '/_test/', '/spec/',
-            '/testing/', '/fixtures/', '/mocks/', '/__tests__/',
+            "/tests/",
+            "/test/",
+            "/_test/",
+            "/spec/",
+            "/testing/",
+            "/fixtures/",
+            "/mocks/",
+            "/__tests__/",
         )
         test_file_suffixes = self._test_file_suffixes or (
-            '_test.rs', '.test.ts', '.spec.ts', '_test.py',
-            '.test.js', '.spec.js', '.test.tsx', '.spec.tsx',
+            "_test.rs",
+            ".test.ts",
+            ".spec.ts",
+            "_test.py",
+            ".test.js",
+            ".spec.js",
+            ".test.tsx",
+            ".spec.tsx",
         )
-        test_function_pattern = re.compile(r'^(test_|it_|describe_|spec_)')
+        test_function_pattern = re.compile(r"^(test_|it_|describe_|spec_)")
 
         for node in self.data["nodes"]:
             node_id = node["id"]
@@ -275,15 +294,16 @@ class GraphQuerier:
                         break
 
                 # Test detection: check path patterns and file suffixes
-                is_test_file = (
-                    any(p in path for p in test_path_patterns) or
-                    any(path.endswith(s) for s in test_file_suffixes)
+                is_test_file = any(p in path for p in test_path_patterns) or any(
+                    path.endswith(s) for s in test_file_suffixes
                 )
                 if is_test_file:
                     self._index_is_test.add(node_id)
 
             # Test detection: check function/method names
-            if node_type in ("Function", "Method") and test_function_pattern.match(node_name):
+            if node_type in ("Function", "Method") and test_function_pattern.match(
+                node_name
+            ):
                 self._index_is_test.add(node_id)
 
         self._indices_built = True
@@ -338,8 +358,8 @@ class GraphQuerier:
                 head = source_lines[:head_lines_only]
                 remaining = total_lines - head_lines_only
                 return (
-                    "".join(head) +
-                    f"\n    // ... ({remaining} more lines, use full=true to see all) ...\n"
+                    "".join(head)
+                    + f"\n    // ... ({remaining} more lines, use full=true to see all) ...\n"
                 )
 
             # Bypass truncation when full=True
@@ -369,9 +389,9 @@ class GraphQuerier:
             omitted = total_lines - head_lines - tail_lines
 
             return (
-                "".join(head) +
-                f"\n    // ... ({omitted} lines omitted, use full=true to see complete source) ...\n\n" +
-                "".join(tail)
+                "".join(head)
+                + f"\n    // ... ({omitted} lines omitted, use full=true to see complete source) ...\n\n"
+                + "".join(tail)
             )
 
         except Exception as e:
@@ -443,7 +463,9 @@ class GraphQuerier:
             docstring = meta.get("docstring", "")
             doc_preview = ""
             if docstring:
-                doc_lines = [line.strip() for line in docstring.split("\n") if line.strip()]
+                doc_lines = [
+                    line.strip() for line in docstring.split("\n") if line.strip()
+                ]
                 if doc_lines:
                     doc_preview = doc_lines[0][:120]
 
@@ -477,26 +499,37 @@ class GraphQuerier:
                 # Generous default for unknown sizes
                 end = start + 100
 
-        source_code = self.get_smart_source(file_path_rel, start, end, token_count, full=full, head_lines_only=head_lines)
+        source_code = self.get_smart_source(
+            file_path_rel,
+            start,
+            end,
+            token_count,
+            full=full,
+            head_lines_only=head_lines,
+        )
 
         # 2b. For Classes/Structs, include impl block methods
         impl_methods = []
         if node["type"] == "Class":
             # Find all methods that belong to this struct (children in the graph)
             for child_id, child_node in self.nodes.items():
-                if child_node["type"] == "Method" and child_id.startswith(node_id + "::"):
+                if child_node["type"] == "Method" and child_id.startswith(
+                    node_id + "::"
+                ):
                     child_meta = child_node["metadata"]
                     child_sig = child_meta.get("signature", child_meta.get("name", ""))
                     child_doc = child_meta.get("docstring", "").split("\n")[0][:80]
                     child_tokens = child_meta.get("token_count", 0)
-                    impl_methods.append({
-                        "name": child_meta.get("name", ""),
-                        "signature": child_sig,
-                        "docstring": child_doc,
-                        "tokens": child_tokens,
-                        "lineno": child_meta.get("lineno", 0),
-                        "id": child_id,
-                    })
+                    impl_methods.append(
+                        {
+                            "name": child_meta.get("name", ""),
+                            "signature": child_sig,
+                            "docstring": child_doc,
+                            "tokens": child_tokens,
+                            "lineno": child_meta.get("lineno", 0),
+                            "id": child_id,
+                        }
+                    )
             # Sort by line number
             impl_methods.sort(key=lambda m: m["lineno"])
 
@@ -538,7 +571,9 @@ class GraphQuerier:
                         c_end = c_meta.get("end_lineno", c_start)
                         c_code = self.get_source_segment(c_file, c_start, c_end)
                         # Indent code content for proper markdown list nesting
-                        c_code_indented = "\n".join("  " + line for line in c_code.split("\n"))
+                        c_code_indented = "\n".join(
+                            "  " + line for line in c_code.split("\n")
+                        )
                         callee_info.append(
                             f"- **{c_meta.get('name')}** (Inlined, {c_tokens} toks):\n  ```{c_lang}\n{c_code_indented}\n  ```"
                         )
@@ -609,10 +644,18 @@ class GraphQuerier:
             total_callers = len(self.get_callers(meta.get("name", "")))
             output.append(f"#### Callers ({len(callers_summary)} shown):")
             for caller in callers_summary:
-                loc = f"{caller['file']}:{caller['lineno']}" if caller['lineno'] else caller['file']
-                output.append(f"- `{caller['name']}` in {loc} ({caller['tokens']} toks)")
+                loc = (
+                    f"{caller['file']}:{caller['lineno']}"
+                    if caller["lineno"]
+                    else caller["file"]
+                )
+                output.append(
+                    f"- `{caller['name']}` in {loc} ({caller['tokens']} toks)"
+                )
             if total_callers > len(callers_summary):
-                output.append(f"  *({total_callers - len(callers_summary)} more callers)*")
+                output.append(
+                    f"  *({total_callers - len(callers_summary)} more callers)*"
+                )
             output.append("")
 
         if callee_info:
@@ -626,7 +669,9 @@ class GraphQuerier:
             if expanded_callees:
                 output.append("#### Expanded Callees (Full Source):")
                 for exp in expanded_callees:
-                    output.append(f"\n**{exp['name']}** ({exp['file']}:{exp['lineno']}, {exp['tokens']} toks):")
+                    output.append(
+                        f"\n**{exp['name']}** ({exp['file']}:{exp['lineno']}, {exp['tokens']} toks):"
+                    )
                     output.append(f"```{exp['lang']}\n{exp['source']}\n```")
                 output.append("")
 
@@ -639,16 +684,24 @@ class GraphQuerier:
         if related_configs:
             output.append("#### Related Configuration (same file):")
             for cfg in related_configs:
-                cfg_type = f" [{cfg['config_type']}]" if cfg['config_type'] else ""
+                cfg_type = f" [{cfg['config_type']}]" if cfg["config_type"] else ""
                 output.append(f"- L{cfg['lineno']}: `{cfg['signature']}`{cfg_type}")
                 output.append(f"  Node: `{cfg['id']}`")
             output.append("")
 
         # Apply max_output_tokens progressive truncation if specified
         result = "\n".join(output)
-        if max_output_tokens is not None and _estimate_tokens(result) > max_output_tokens:
+        if (
+            max_output_tokens is not None
+            and _estimate_tokens(result) > max_output_tokens
+        ):
             result = self._truncate_output_progressively(
-                result, max_output_tokens, source_code, source_lang, file_path_rel, start
+                result,
+                max_output_tokens,
+                source_code,
+                source_lang,
+                file_path_rel,
+                start,
             )
 
         return result
@@ -728,13 +781,15 @@ class GraphQuerier:
                 target_node = self.nodes.get(target_id)
                 if target_node and target_node.get("type") == "Configuration":
                     meta = target_node.get("metadata", {})
-                    configs.append({
-                        "name": meta.get("name", "?"),
-                        "signature": meta.get("signature", "?"),
-                        "lineno": meta.get("lineno", 0),
-                        "id": target_id,
-                        "config_type": meta.get("config_type", ""),
-                    })
+                    configs.append(
+                        {
+                            "name": meta.get("name", "?"),
+                            "signature": meta.get("signature", "?"),
+                            "lineno": meta.get("lineno", 0),
+                            "id": target_id,
+                            "config_type": meta.get("config_type", ""),
+                        }
+                    )
 
         # Sort by line number
         configs.sort(key=lambda c: c["lineno"])
@@ -775,88 +830,122 @@ class GraphQuerier:
         # Priority 1: Remove Expanded Callees section
         if current_tokens > max_tokens:
             result = re.sub(
-                r'#### Expanded Callees \(Full Source\):.*?(?=####|\Z)',
-                '',
+                r"#### Expanded Callees \(Full Source\):.*?(?=####|\Z)",
+                "",
                 result,
-                flags=re.DOTALL
+                flags=re.DOTALL,
             )
-            result = re.sub(r'\n{3,}', '\n\n', result)
+            result = re.sub(r"\n{3,}", "\n\n", result)
             current_tokens = _estimate_tokens(result)
 
         # Priority 2: Reduce Usage Examples to 2
         if current_tokens > max_tokens:
             # Find and truncate usage examples section
-            match = re.search(r'(#### Usage Examples:.*?)(?=####|\Z)', result, re.DOTALL)
+            match = re.search(
+                r"(#### Usage Examples:.*?)(?=####|\Z)", result, re.DOTALL
+            )
             if match:
                 examples_section = match.group(1)
                 # Keep header and first 2 code blocks
-                code_blocks = list(re.finditer(r'```.*?```', examples_section, re.DOTALL))
+                code_blocks = list(
+                    re.finditer(r"```.*?```", examples_section, re.DOTALL)
+                )
                 if len(code_blocks) > 2:
-                    truncated_examples = examples_section[:code_blocks[1].end()]
-                    truncated_examples += f"\n\n*({len(code_blocks) - 2} more examples omitted)*\n\n"
-                    result = result[:match.start()] + truncated_examples + result[match.end():]
+                    truncated_examples = examples_section[: code_blocks[1].end()]
+                    truncated_examples += (
+                        f"\n\n*({len(code_blocks) - 2} more examples omitted)*\n\n"
+                    )
+                    result = (
+                        result[: match.start()]
+                        + truncated_examples
+                        + result[match.end() :]
+                    )
                     current_tokens = _estimate_tokens(result)
 
         # Priority 3: Remove Related Tests section
         if current_tokens > max_tokens:
             result = re.sub(
-                r'#### Related Tests:.*?(?=####|\Z)',
-                '',
-                result,
-                flags=re.DOTALL
+                r"#### Related Tests:.*?(?=####|\Z)", "", result, flags=re.DOTALL
             )
-            result = re.sub(r'\n{3,}', '\n\n', result)
+            result = re.sub(r"\n{3,}", "\n\n", result)
             current_tokens = _estimate_tokens(result)
 
         # Priority 4: Remove Related Configuration section
         if current_tokens > max_tokens:
             result = re.sub(
-                r'#### Related Configuration.*?(?=####|\Z)',
-                '',
-                result,
-                flags=re.DOTALL
+                r"#### Related Configuration.*?(?=####|\Z)", "", result, flags=re.DOTALL
             )
-            result = re.sub(r'\n{3,}', '\n\n', result)
+            result = re.sub(r"\n{3,}", "\n\n", result)
             current_tokens = _estimate_tokens(result)
 
         # Priority 5: Reduce Callers to 5
         if current_tokens > max_tokens:
-            match = re.search(r'(#### Callers \(\d+ shown\):)(.*?)(?=####|\Z)', result, re.DOTALL)
+            match = re.search(
+                r"(#### Callers \(\d+ shown\):)(.*?)(?=####|\Z)", result, re.DOTALL
+            )
             if match:
                 callers_content = match.group(2)
-                lines = callers_content.strip().split('\n')
-                caller_lines = [line for line in lines if line.startswith('- `')]
+                lines = callers_content.strip().split("\n")
+                caller_lines = [line for line in lines if line.startswith("- `")]
                 if len(caller_lines) > 5:
                     # Keep first 5 callers
-                    new_content = '\n'.join(caller_lines[:5])
-                    new_content += f"\n  *({len(caller_lines) - 5} more callers omitted)*\n"
-                    result = result[:match.start()] + match.group(1) + '\n' + new_content + result[match.end():]
+                    new_content = "\n".join(caller_lines[:5])
+                    new_content += (
+                        f"\n  *({len(caller_lines) - 5} more callers omitted)*\n"
+                    )
+                    result = (
+                        result[: match.start()]
+                        + match.group(1)
+                        + "\n"
+                        + new_content
+                        + result[match.end() :]
+                    )
                     current_tokens = _estimate_tokens(result)
 
         # Priority 6: Reduce Dependencies to 5
         if current_tokens > max_tokens:
-            match = re.search(r'(#### Dependencies \(Callees\):)(.*?)(?=####|\Z)', result, re.DOTALL)
+            match = re.search(
+                r"(#### Dependencies \(Callees\):)(.*?)(?=####|\Z)", result, re.DOTALL
+            )
             if match:
                 deps_content = match.group(2)
-                lines = deps_content.strip().split('\n')
-                dep_lines = [line for line in lines if line.startswith('- ')]
+                lines = deps_content.strip().split("\n")
+                dep_lines = [line for line in lines if line.startswith("- ")]
                 if len(dep_lines) > 5:
-                    new_content = '\n'.join(dep_lines[:5])
-                    new_content += f"\n*({len(dep_lines) - 5} more dependencies omitted)*\n"
-                    result = result[:match.start()] + match.group(1) + '\n' + new_content + result[match.end():]
+                    new_content = "\n".join(dep_lines[:5])
+                    new_content += (
+                        f"\n*({len(dep_lines) - 5} more dependencies omitted)*\n"
+                    )
+                    result = (
+                        result[: match.start()]
+                        + match.group(1)
+                        + "\n"
+                        + new_content
+                        + result[match.end() :]
+                    )
                     current_tokens = _estimate_tokens(result)
 
         # Priority 7: Truncate source code (last resort)
         if current_tokens > max_tokens:
             # Apply aggressive head_lines truncation
-            match = re.search(r'(#### Source Code:\n```' + source_lang + r'\n)(.*?)(```)', result, re.DOTALL)
+            match = re.search(
+                r"(#### Source Code:\n```" + source_lang + r"\n)(.*?)(```)",
+                result,
+                re.DOTALL,
+            )
             if match:
                 source = match.group(2)
-                lines = source.split('\n')
+                lines = source.split("\n")
                 if len(lines) > 30:
-                    truncated = '\n'.join(lines[:30])
+                    truncated = "\n".join(lines[:30])
                     truncated += f"\n// ... ({len(lines) - 30} lines omitted, max_output_tokens limit) ...\n"
-                    result = result[:match.start()] + match.group(1) + truncated + match.group(3) + result[match.end():]
+                    result = (
+                        result[: match.start()]
+                        + match.group(1)
+                        + truncated
+                        + match.group(3)
+                        + result[match.end() :]
+                    )
 
         # Add truncation note if we applied truncation
         if current_tokens > max_tokens:
@@ -908,14 +997,16 @@ class GraphQuerier:
             source = self.get_source_segment(file_path, start_line, end_line)
 
             if source:
-                expanded.append({
-                    "name": meta.get("name", "?"),
-                    "file": file_path,
-                    "lineno": start_line,
-                    "tokens": tokens,
-                    "lang": _get_syntax_lang(file_path, self._syntax_lang_map),
-                    "source": source.rstrip(),
-                })
+                expanded.append(
+                    {
+                        "name": meta.get("name", "?"),
+                        "file": file_path,
+                        "lineno": start_line,
+                        "tokens": tokens,
+                        "lang": _get_syntax_lang(file_path, self._syntax_lang_map),
+                        "source": source.rstrip(),
+                    }
+                )
                 budget_remaining -= tokens
 
             # Stop if budget exhausted
@@ -956,7 +1047,11 @@ class GraphQuerier:
 
             # Extract class/struct name from node_id
             id_parts = node_id.replace("FILE:", "").split("::")
-            node_class = id_parts[-2] if len(id_parts) >= 2 and node["type"] == "Method" else None
+            node_class = (
+                id_parts[-2]
+                if len(id_parts) >= 2 and node["type"] == "Method"
+                else None
+            )
 
             score = 0
 
@@ -967,7 +1062,10 @@ class GraphQuerier:
                 score += 80  # Naming convention variant
 
             # Partial symbol match
-            elif query_normalized in node_name_normalized or node_name_normalized in query_normalized:
+            elif (
+                query_normalized in node_name_normalized
+                or node_name_normalized in query_normalized
+            ):
                 score += 40
 
             # Class::method match
@@ -985,14 +1083,16 @@ class GraphQuerier:
                     score += 30
 
             if score > 0:
-                candidates.append({
-                    "id": node_id,
-                    "name": node_name,
-                    "type": node["type"],
-                    "score": score,
-                    "file": id_parts[0] if id_parts else "",
-                    "lineno": meta.get("lineno", 0),
-                })
+                candidates.append(
+                    {
+                        "id": node_id,
+                        "name": node_name,
+                        "type": node["type"],
+                        "score": score,
+                        "file": id_parts[0] if id_parts else "",
+                        "lineno": meta.get("lineno", 0),
+                    }
+                )
 
         # Sort by score descending, then by name
         candidates.sort(key=lambda x: (-x["score"], x["name"]))
@@ -1023,14 +1123,18 @@ class GraphQuerier:
         best = similar[0]
         second_score = similar[1]["score"] if len(similar) > 1 else 0
 
-        if len(similar) == 1 or (best["score"] >= 80 and best["score"] > second_score + 20):
+        if len(similar) == 1 or (
+            best["score"] >= 80 and best["score"] > second_score + 20
+        ):
             note = f"(Matched '{query}' → `{best['id']}`)"
             return best["id"], note
 
         # Multiple candidates - return suggestions
         suggestions = []
         for s in similar[:5]:
-            suggestions.append(f"  - `{s['id']}` ({s['type']}, {s['file']}:{s['lineno']})")
+            suggestions.append(
+                f"  - `{s['id']}` ({s['type']}, {s['file']}:{s['lineno']})"
+            )
 
         msg = f"Node '{query}' not found. Did you mean:\n" + "\n".join(suggestions)
         return None, msg
@@ -1119,14 +1223,16 @@ class GraphQuerier:
             if caller_node:
                 meta = caller_node.get("metadata", {})
                 file_path = caller_id.split("::")[0].replace("FILE:", "")
-                callers.append({
-                    "id": caller_id,
-                    "name": meta.get("name", "?"),
-                    "file": file_path,
-                    "lineno": meta.get("lineno", 0),
-                    "tokens": meta.get("token_count", 0),
-                    "type": caller_node.get("type", "?"),
-                })
+                callers.append(
+                    {
+                        "id": caller_id,
+                        "name": meta.get("name", "?"),
+                        "file": file_path,
+                        "lineno": meta.get("lineno", 0),
+                        "tokens": meta.get("token_count", 0),
+                        "type": caller_node.get("type", "?"),
+                    }
+                )
 
         # Sort by tokens (simpler callers first), then by name for consistency
         callers.sort(key=lambda c: (c["tokens"], c["name"]))
@@ -1181,7 +1287,7 @@ class GraphQuerier:
 
         results = []
         tokens_used = 0
-        callees = self.get_callees(node_id)[:self._max_children_per_level]
+        callees = self.get_callees(node_id)[: self._max_children_per_level]
 
         for callee_id in callees:
             if callee_id in expanded:
@@ -1207,13 +1313,19 @@ class GraphQuerier:
                 c_lang = _get_syntax_lang(c_file, self._syntax_lang_map)
 
                 # Inline small functions if budget allows
-                if c_tokens <= inline_threshold and c_tokens <= budget and os.path.exists(c_file):
+                if (
+                    c_tokens <= inline_threshold
+                    and c_tokens <= budget
+                    and os.path.exists(c_file)
+                ):
                     c_start = c_meta.get("lineno", 1)
                     c_end = c_meta.get("end_lineno", c_start + 10)
                     code = self.get_source_segment(c_file, c_start, c_end)
                     # Indent code content for proper markdown list nesting
                     code_indent = indent_str + "  "
-                    code_indented = "\n".join(code_indent + line for line in code.rstrip().split("\n"))
+                    code_indented = "\n".join(
+                        code_indent + line for line in code.rstrip().split("\n")
+                    )
                     results.append(f"{indent_str}- **{c_name}** ({c_tokens} toks):")
                     results.append(f"{indent_str}  ```{c_lang}")
                     results.append(code_indented)
@@ -1224,8 +1336,14 @@ class GraphQuerier:
                     # Recurse if depth allows
                     if current_depth < depth and budget > 0:
                         nested, budget = self._expand_callees_recursive(
-                            callee_id, depth, budget, expanded,
-                            current_depth + 1, indent + 1, start_time, inline_threshold
+                            callee_id,
+                            depth,
+                            budget,
+                            expanded,
+                            current_depth + 1,
+                            indent + 1,
+                            start_time,
+                            inline_threshold,
                         )
                         results.extend(nested)
                 else:
@@ -1287,13 +1405,17 @@ class GraphQuerier:
         start_id = start_node["id"]
         start_meta = start_node.get("metadata", {})
 
-        output = [f"### Call Flow: `{start_meta.get('name', start_name)}` ({direction})"]
+        output = [
+            f"### Call Flow: `{start_meta.get('name', start_name)}` ({direction})"
+        ]
         output.append("")
 
         # Show disambiguation info if multiple matches
         if len(func_nodes) > 1:
             start_file = start_id.split("::")[0].replace("FILE:", "")
-            output.append(f"**Note:** Found {len(func_nodes)} matches for `{start_name}`. Using:")
+            output.append(
+                f"**Note:** Found {len(func_nodes)} matches for `{start_name}`. Using:"
+            )
             output.append(f"  `{start_id}`")
             output.append(f"  ({start_file})")
             output.append("")
@@ -1342,9 +1464,9 @@ class GraphQuerier:
 
             # Get next level
             if direction == "forward":
-                next_ids = self.get_callees(node_id)[:self._max_children_per_level]
+                next_ids = self.get_callees(node_id)[: self._max_children_per_level]
             else:
-                next_ids = self.get_callers(name)[:self._max_children_per_level]
+                next_ids = self.get_callers(name)[: self._max_children_per_level]
 
             # Format node
             indent = "  " * (current_depth - 1)
@@ -1418,17 +1540,19 @@ class GraphQuerier:
         if len(func_nodes) > 1:
             start_file = start_id.split("::")[0].replace("FILE:", "")
             note = (
-                f"Found {len(func_nodes)} matches for \"{start_name}\". "
+                f'Found {len(func_nodes)} matches for "{start_name}". '
                 f"Using: {start_id} ({start_file})"
             )
             for alt in func_nodes[1:6]:
                 alt_meta = alt.get("metadata", {})
                 alt_file = alt["id"].split("::")[0].replace("FILE:", "")
-                alternatives.append({
-                    "id": alt["id"],
-                    "name": alt_meta.get("name", "?"),
-                    "file": alt_file,
-                })
+                alternatives.append(
+                    {
+                        "id": alt["id"],
+                        "name": alt_meta.get("name", "?"),
+                        "file": alt_file,
+                    }
+                )
 
         visited = set()
         start_time = time.time()
@@ -1470,9 +1594,9 @@ class GraphQuerier:
 
             # Recurse into children
             if direction == "forward":
-                next_ids = self.get_callees(node_id)[:self._max_children_per_level]
+                next_ids = self.get_callees(node_id)[: self._max_children_per_level]
             else:
-                next_ids = self.get_callers(name)[:self._max_children_per_level]
+                next_ids = self.get_callers(name)[: self._max_children_per_level]
 
             children = []
             for next_id in next_ids:
@@ -1612,7 +1736,9 @@ class GraphQuerier:
             idf[term] = math.log((total_docs + 1) / (df + 1)) + 1
         return idf
 
-    def search_docs(self, query_terms, lang=None, crate=None, symbol_type=None, exclude_tests=False):
+    def search_docs(
+        self, query_terms, lang=None, crate=None, symbol_type=None, exclude_tests=False
+    ):
         """
         Searches docstrings and names for keywords using TF-IDF scoring.
         Returns matches sorted by relevance.
@@ -1809,8 +1935,10 @@ class GraphQuerier:
                 continue
 
             # Naming convention variant match (e.g., getClient matches get_client)
-            if node_name and (node_name_normalized in name_variants or
-                             node_name.lower() in [v.lower() for v in name_variants]):
+            if node_name and (
+                node_name_normalized in name_variants
+                or node_name.lower() in [v.lower() for v in name_variants]
+            ):
                 variant_matches.append(node)
                 continue
 
@@ -1842,7 +1970,9 @@ class GraphQuerier:
                     fuzzy_matches.append(node)
                     continue
                 # Contains match in node ID (for cases like searching "dispatch" finding "dispatch_to_handler")
-                if f"::{name}" in node_id.lower() or node_id.lower().endswith(name.lower()):
+                if f"::{name}" in node_id.lower() or node_id.lower().endswith(
+                    name.lower()
+                ):
                     fuzzy_matches.append(node)
                     continue
 
@@ -1971,9 +2101,13 @@ class GraphQuerier:
                 if ref_name == func_name or ref_name == base_name:
                     target_ids.add(target_id)
                 # Suffix match
-                elif ref_name.endswith(f"::{func_name}") or ref_name.endswith(f".{func_name}"):
+                elif ref_name.endswith(f"::{func_name}") or ref_name.endswith(
+                    f".{func_name}"
+                ):
                     target_ids.add(target_id)
-                elif ref_name.endswith(f"::{base_name}") or ref_name.endswith(f".{base_name}"):
+                elif ref_name.endswith(f"::{base_name}") or ref_name.endswith(
+                    f".{base_name}"
+                ):
                     target_ids.add(target_id)
                 # Fuzzy prefix match
                 elif fuzzy and len(func_name) >= 3:
@@ -2021,7 +2155,7 @@ class GraphQuerier:
         start_name: str,
         end_name: str,
         max_depth: int = 10,
-        direction: str = "forward"
+        direction: str = "forward",
     ) -> list:
         """Find shortest call path between two symbols using BFS.
 
@@ -2071,11 +2205,17 @@ class GraphQuerier:
 
             # Get edges based on direction
             if direction == "forward":
-                edges = [e for e in self.outgoing.get(current_id, [])
-                        if e["relation"] in ("CALLS", "CALLS_RESOLVED")]
+                edges = [
+                    e
+                    for e in self.outgoing.get(current_id, [])
+                    if e["relation"] in ("CALLS", "CALLS_RESOLVED")
+                ]
             else:
-                edges = [e for e in self.incoming.get(current_id, [])
-                        if e["relation"] in ("CALLS", "CALLS_RESOLVED")]
+                edges = [
+                    e
+                    for e in self.incoming.get(current_id, [])
+                    if e["relation"] in ("CALLS", "CALLS_RESOLVED")
+                ]
 
             for edge in edges:
                 next_id = edge["target"] if direction == "forward" else edge["source"]
@@ -2107,7 +2247,9 @@ class GraphQuerier:
 
         return []  # No path found
 
-    def _build_hop_info(self, edge: dict, caller_id: str, callee_id: str, direction: str) -> dict:
+    def _build_hop_info(
+        self, edge: dict, caller_id: str, callee_id: str, direction: str
+    ) -> dict:
         """Build hop info dictionary with code snippet.
 
         Args:
@@ -2164,7 +2306,10 @@ def _find_default_graph() -> str:
         if path == Path.home():
             break
         # Check for project markers
-        if any((path / m).exists() for m in (".git", "Cargo.toml", "package.json", "pyproject.toml")):
+        if any(
+            (path / m).exists()
+            for m in (".git", "Cargo.toml", "package.json", "pyproject.toml")
+        ):
             graph_path = path / ".descry_cache" / "codebase_graph.json"
             return str(graph_path)
 
@@ -2270,7 +2415,9 @@ def _handle_index(graph_file: str, root_path: str) -> None:
         print("\nError: Index timed out after 10 minutes.")
         sys.exit(1)
     except FileNotFoundError:
-        print("Error: 'uv' not found. Install with: curl -LsSf https://astral.sh/uv/install.sh | sh")
+        print(
+            "Error: 'uv' not found. Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        )
         sys.exit(1)
 
 
@@ -2369,7 +2516,8 @@ Run from project root or set DESCRY_CACHE_DIR.
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "-g", "--graph",
+        "-g",
+        "--graph",
         dest="graph_file",
         default=None,
         help="Path to codebase_graph.json (auto-detected if not provided)",
@@ -2379,9 +2527,7 @@ Run from project root or set DESCRY_CACHE_DIR.
     # --- Status commands ---
     subparsers.add_parser("status", help="Check graph status and feature availability")
 
-    p_index = subparsers.add_parser(
-        "index", help="Regenerate the codebase graph"
-    )
+    p_index = subparsers.add_parser("index", help="Regenerate the codebase graph")
     p_index.add_argument(
         "--path", default=".", help="Root path to index (default: current directory)"
     )
@@ -2392,9 +2538,7 @@ Run from project root or set DESCRY_CACHE_DIR.
     )
     p_callers.add_argument("name", help="Name of the function called")
 
-    p_callees = subparsers.add_parser(
-        "callees", help="Find what a function calls"
-    )
+    p_callees = subparsers.add_parser("callees", help="Find what a function calls")
     p_callees.add_argument("name", help="Name of the caller function")
 
     # --- Search commands ---

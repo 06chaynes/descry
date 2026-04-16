@@ -53,12 +53,18 @@ class CrossLangTracer:
         self.graph_path = Path(graph_path) if graph_path else None
         self.backend_handler_patterns = backend_handler_patterns or []
         self.frontend_api_patterns = frontend_api_patterns or []
-        self._API_PREFIXES = tuple(api_prefixes) if api_prefixes else ("/api/v1", "/api/v2", "/api")
+        self._API_PREFIXES = (
+            tuple(api_prefixes) if api_prefixes else ("/api/v1", "/api/v2", "/api")
+        )
 
         # Parsed mappings
-        self.path_to_operation: dict[tuple[str, str], dict] = {}  # (method, path) -> operation info
+        self.path_to_operation: dict[
+            tuple[str, str], dict
+        ] = {}  # (method, path) -> operation info
         self.operation_to_handler: dict[str, str] = {}  # operationId -> handler node_id
-        self.endpoint_patterns: list[tuple[str, str, re.Pattern, dict]] = []  # For path param matching
+        self.endpoint_patterns: list[
+            tuple[str, str, re.Pattern, dict]
+        ] = []  # For path param matching
 
         self._parse_openapi()
         if self.graph_path and self.graph_path.exists():
@@ -101,9 +107,13 @@ class CrossLangTracer:
                 # /api/v1/actions/{id} -> /api/v1/actions/[^/]+
                 pattern_str = re.sub(r"\{[^}]+\}", r"[^/]+", path)
                 pattern = re.compile(f"^{pattern_str}$")
-                self.endpoint_patterns.append((method_upper, path, pattern, operation_info))
+                self.endpoint_patterns.append(
+                    (method_upper, path, pattern, operation_info)
+                )
 
-        logger.info(f"Loaded {len(self.path_to_operation)} API endpoints from OpenAPI spec")
+        logger.info(
+            f"Loaded {len(self.path_to_operation)} API endpoints from OpenAPI spec"
+        )
 
     def _link_to_graph(self):
         """Link operationIds to graph node IDs for backend handlers."""
@@ -138,7 +148,9 @@ class CrossLangTracer:
             if op_id in handler_index:
                 self.operation_to_handler[op_id] = handler_index[op_id]
 
-        logger.info(f"Linked {len(self.operation_to_handler)} operationIds to graph nodes")
+        logger.info(
+            f"Linked {len(self.operation_to_handler)} operationIds to graph nodes"
+        )
 
     def _strip_api_prefix(self, path: str) -> Optional[str]:
         """Strip known API version prefix from a path for matching against OpenAPI spec paths.
@@ -147,7 +159,7 @@ class CrossLangTracer:
         """
         for prefix in self._API_PREFIXES:
             if path.startswith(prefix):
-                stripped = path[len(prefix):]
+                stripped = path[len(prefix) :]
                 return stripped if stripped else "/"
         return None
 
@@ -287,14 +299,16 @@ class CrossLangTracer:
                     handler = self.endpoint_to_handler(method, api_path)
 
                     if handler:
-                        results.append({
-                            "ts_node_id": node_id,
-                            "ts_function": func_name,
-                            "inferred_endpoint": api_path,
-                            "inferred_method": method,
-                            "rust_handler": handler,
-                            "rust_node_id": self.operation_to_handler.get(handler),
-                        })
+                        results.append(
+                            {
+                                "ts_node_id": node_id,
+                                "ts_function": func_name,
+                                "inferred_endpoint": api_path,
+                                "inferred_method": method,
+                                "rust_handler": handler,
+                                "rust_node_id": self.operation_to_handler.get(handler),
+                            }
+                        )
 
         return results
 
@@ -342,16 +356,18 @@ def create_cross_lang_edges(
     edges = []
     for call in api_calls:
         if call.get("rust_node_id"):
-            edges.append({
-                "source": call["ts_node_id"],
-                "target": call["rust_node_id"],
-                "relation": "CALLS_API",
-                "metadata": {
-                    "endpoint": call["inferred_endpoint"],
-                    "method": call["inferred_method"],
-                    "handler": call["rust_handler"],
-                },
-            })
+            edges.append(
+                {
+                    "source": call["ts_node_id"],
+                    "target": call["rust_node_id"],
+                    "relation": "CALLS_API",
+                    "metadata": {
+                        "endpoint": call["inferred_endpoint"],
+                        "method": call["inferred_method"],
+                        "handler": call["rust_handler"],
+                    },
+                }
+            )
 
     return edges
 

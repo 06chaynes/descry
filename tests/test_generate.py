@@ -305,7 +305,7 @@ class TestTypeScriptConfigurationNodes:
     @pytest.fixture
     def ts_config_content(self):
         """TypeScript file with interceptor and event handler patterns."""
-        return '''
+        return """
 import axios from 'axios';
 
 const apiClient = axios.create({ baseURL: '/api/v1' });
@@ -334,7 +334,7 @@ apiClient.interceptors.response.use(
 );
 
 export default apiClient;
-'''
+"""
 
     def test_detects_request_interceptor(self, ts_config_content):
         """Should detect axios request interceptor as Configuration node."""
@@ -348,7 +348,8 @@ export default apiClient;
 
             config_nodes = [n for n in builder.nodes if n["type"] == "Configuration"]
             request_interceptors = [
-                n for n in config_nodes
+                n
+                for n in config_nodes
                 if "request_interceptor" in n["metadata"]["name"]
             ]
 
@@ -369,14 +370,17 @@ export default apiClient;
 
             config_nodes = [n for n in builder.nodes if n["type"] == "Configuration"]
             response_interceptors = [
-                n for n in config_nodes
+                n
+                for n in config_nodes
                 if "response_interceptor" in n["metadata"]["name"]
             ]
 
             assert len(response_interceptors) == 1
             node = response_interceptors[0]
             assert node["metadata"]["config_type"] == "interceptor"
-            assert "apiClient.interceptors.response.use" in node["metadata"]["signature"]
+            assert (
+                "apiClient.interceptors.response.use" in node["metadata"]["signature"]
+            )
 
     def test_interceptor_linked_to_file(self, ts_config_content):
         """Configuration nodes should be linked to file via DEFINES edge."""
@@ -390,13 +394,13 @@ export default apiClient;
 
             file_id = "FILE:client.ts"
             defines_edges = [
-                e for e in builder.edges
+                e
+                for e in builder.edges
                 if e["source"] == file_id and e["relation"] == "DEFINES"
             ]
 
             config_targets = [
-                e["target"] for e in defines_edges
-                if "interceptor" in e["target"]
+                e["target"] for e in defines_edges if "interceptor" in e["target"]
             ]
 
             assert len(config_targets) == 2  # request + response interceptors
@@ -475,6 +479,7 @@ class TestNamingConventionNormalization:
     def test_normalize_camel_to_snake(self):
         """Should convert camelCase to snake_case."""
         from descry.query import _normalize_name
+
         assert _normalize_name("getClient") == "get_client"
         assert _normalize_name("validateToken") == "validate_token"
         assert _normalize_name("createNewUser") == "create_new_user"
@@ -482,6 +487,7 @@ class TestNamingConventionNormalization:
     def test_normalize_pascal_to_snake(self):
         """Should convert PascalCase to snake_case."""
         from descry.query import _normalize_name
+
         assert _normalize_name("GetClient") == "get_client"
         assert _normalize_name("ValidateToken") == "validate_token"
         assert _normalize_name("HTTPServer") == "http_server"
@@ -489,12 +495,14 @@ class TestNamingConventionNormalization:
     def test_normalize_already_snake(self):
         """Should leave snake_case unchanged."""
         from descry.query import _normalize_name
+
         assert _normalize_name("get_client") == "get_client"
         assert _normalize_name("validate_token") == "validate_token"
 
     def test_get_variants(self):
         """Should return all naming convention variants."""
         from descry.query import _get_name_variants
+
         variants = _get_name_variants("getClient")
         assert "getClient" in variants
         assert "get_client" in variants
@@ -512,34 +520,52 @@ class TestCrateFilter:
                 {
                     "id": "FILE:src/descry/handlers.py",
                     "type": "File",
-                    "metadata": {"path": "src/descry/handlers.py", "name": "handlers.py"},
+                    "metadata": {
+                        "path": "src/descry/handlers.py",
+                        "name": "handlers.py",
+                    },
                 },
                 {
                     "id": "FILE:src/descry/handlers.py::DescryService",
                     "type": "Class",
-                    "metadata": {"name": "DescryService", "docstring": "Core service for graph queries"},
+                    "metadata": {
+                        "name": "DescryService",
+                        "docstring": "Core service for graph queries",
+                    },
                 },
                 # src/descry/scip subpackage (Python)
                 {
                     "id": "FILE:src/descry/scip/parser.py",
                     "type": "File",
-                    "metadata": {"path": "src/descry/scip/parser.py", "name": "parser.py"},
+                    "metadata": {
+                        "path": "src/descry/scip/parser.py",
+                        "name": "parser.py",
+                    },
                 },
                 {
                     "id": "FILE:src/descry/scip/parser.py::ScipIndex",
                     "type": "Class",
-                    "metadata": {"name": "ScipIndex", "docstring": "Parses SCIP index for graph queries"},
+                    "metadata": {
+                        "name": "ScipIndex",
+                        "docstring": "Parses SCIP index for graph queries",
+                    },
                 },
                 # tests package (Python)
                 {
                     "id": "FILE:tests/test_generate.py",
                     "type": "File",
-                    "metadata": {"path": "tests/test_generate.py", "name": "test_generate.py"},
+                    "metadata": {
+                        "path": "tests/test_generate.py",
+                        "name": "test_generate.py",
+                    },
                 },
                 {
                     "id": "FILE:tests/test_generate.py::TestStdlibFilter",
                     "type": "Class",
-                    "metadata": {"name": "TestStdlibFilter", "docstring": "Tests for stdlib filter in graph queries"},
+                    "metadata": {
+                        "name": "TestStdlibFilter",
+                        "docstring": "Tests for stdlib filter in graph queries",
+                    },
                 },
             ],
             "edges": [],
@@ -555,6 +581,7 @@ class TestCrateFilter:
     def test_filter_by_package_src(self, multi_package_graph):
         """Should return only results from src/descry package."""
         from descry.query import GraphQuerier
+
         q = GraphQuerier(multi_package_graph)
         results = q.search_docs(["graph", "queries"], crate="src")
 
@@ -565,6 +592,7 @@ class TestCrateFilter:
     def test_filter_by_package_includes_subpackages(self, multi_package_graph):
         """Filtering by top-level package should include subpackages (scip lives under src/)."""
         from descry.query import GraphQuerier
+
         q = GraphQuerier(multi_package_graph)
         results = q.search_docs(["graph", "queries"], crate="src")
 
@@ -576,6 +604,7 @@ class TestCrateFilter:
     def test_filter_by_tests(self, multi_package_graph):
         """Should return only results from tests package."""
         from descry.query import GraphQuerier
+
         q = GraphQuerier(multi_package_graph)
         results = q.search_docs(["graph", "queries"], crate="tests")
 
@@ -586,6 +615,7 @@ class TestCrateFilter:
     def test_no_filter_returns_all_packages(self, multi_package_graph):
         """Should return results from all packages when no filter."""
         from descry.query import GraphQuerier
+
         q = GraphQuerier(multi_package_graph)
         results = q.search_docs(["graph", "queries"])
 
@@ -599,6 +629,7 @@ class TestCrateFilter:
     def test_nonexistent_crate_returns_empty(self, multi_package_graph):
         """Should return empty results for non-existent package."""
         from descry.query import GraphQuerier
+
         q = GraphQuerier(multi_package_graph)
         results = q.search_docs(["graph"], crate="nonexistent")
 
@@ -607,6 +638,7 @@ class TestCrateFilter:
     def test_combine_crate_and_lang_filters(self, multi_package_graph):
         """Should combine package and language filters."""
         from descry.query import GraphQuerier
+
         q = GraphQuerier(multi_package_graph)
 
         # Filter by src package with python lang
@@ -631,7 +663,10 @@ class TestExcludeTestsFilter:
                 {
                     "id": "FILE:src/auth.rs::validate_token",
                     "type": "Function",
-                    "metadata": {"name": "validate_token", "docstring": "Validate auth token"},
+                    "metadata": {
+                        "name": "validate_token",
+                        "docstring": "Validate auth token",
+                    },
                 },
                 # Test files
                 {
@@ -642,7 +677,10 @@ class TestExcludeTestsFilter:
                 {
                     "id": "FILE:tests/auth_test.rs::test_validate_token",
                     "type": "Function",
-                    "metadata": {"name": "test_validate_token", "docstring": "Test validate token"},
+                    "metadata": {
+                        "name": "test_validate_token",
+                        "docstring": "Test validate token",
+                    },
                 },
                 {
                     "id": "FILE:src/utils_test.py",
@@ -652,7 +690,10 @@ class TestExcludeTestsFilter:
                 {
                     "id": "FILE:src/utils_test.py::test_helper",
                     "type": "Function",
-                    "metadata": {"name": "test_helper", "docstring": "Test helper function"},
+                    "metadata": {
+                        "name": "test_helper",
+                        "docstring": "Test helper function",
+                    },
                 },
             ],
             "edges": [],
@@ -668,6 +709,7 @@ class TestExcludeTestsFilter:
     def test_exclude_tests_filters_test_directories(self, graph_with_tests):
         """Should filter out files in tests/ directory."""
         from descry.query import GraphQuerier
+
         q = GraphQuerier(graph_with_tests)
         results = q.search_docs(["validate"], exclude_tests=True)
 
@@ -679,6 +721,7 @@ class TestExcludeTestsFilter:
     def test_exclude_tests_filters_test_suffixes(self, graph_with_tests):
         """Should filter out files with _test.py suffix."""
         from descry.query import GraphQuerier
+
         q = GraphQuerier(graph_with_tests)
         results = q.search_docs(["helper"], exclude_tests=True)
 
@@ -688,6 +731,7 @@ class TestExcludeTestsFilter:
     def test_exclude_tests_filters_test_functions(self, graph_with_tests):
         """Should filter out functions starting with test_."""
         from descry.query import GraphQuerier
+
         q = GraphQuerier(graph_with_tests)
         results = q.search_docs(["token"], exclude_tests=True)
 
@@ -700,6 +744,7 @@ class TestExcludeTestsFilter:
     def test_exclude_tests_false_includes_all(self, graph_with_tests):
         """Should include test code when exclude_tests=False (default)."""
         from descry.query import GraphQuerier
+
         q = GraphQuerier(graph_with_tests)
         results = q.search_docs(["validate"], exclude_tests=False)
 
@@ -751,6 +796,7 @@ class TestRaisedThresholds:
     def test_under_threshold_no_truncation(self, large_function_graph):
         """Functions under 1000 tokens should NOT be truncated regardless of line count."""
         from descry.query import GraphQuerier
+
         graph_file, source_file = large_function_graph
         q = GraphQuerier(graph_file)
 
@@ -764,6 +810,7 @@ class TestRaisedThresholds:
     def test_over_threshold_truncated(self, large_function_graph):
         """Functions over 1000 tokens AND over 100 lines should be truncated."""
         from descry.query import GraphQuerier
+
         graph_file, source_file = large_function_graph
         q = GraphQuerier(graph_file)
 
@@ -778,6 +825,7 @@ class TestRaisedThresholds:
     def test_secondary_threshold_60_15_treatment(self, large_function_graph):
         """Functions between 1000-1800 tokens get 60+15 line treatment."""
         from descry.query import GraphQuerier
+
         graph_file, source_file = large_function_graph
         q = GraphQuerier(graph_file)
 
@@ -794,6 +842,7 @@ class TestRaisedThresholds:
     def test_very_large_threshold_50_15_treatment(self, large_function_graph):
         """Functions over 1800 tokens get 50+15 line treatment."""
         from descry.query import GraphQuerier
+
         graph_file, source_file = large_function_graph
         q = GraphQuerier(graph_file)
 

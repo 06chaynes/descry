@@ -1,9 +1,7 @@
 """Shared fixtures for descry test suite."""
 
 import json
-import tempfile
 import pytest
-from pathlib import Path
 
 
 @pytest.fixture

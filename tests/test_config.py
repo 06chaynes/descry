@@ -2,8 +2,6 @@
 
 import logging
 import os
-import pytest
-from pathlib import Path
 from unittest.mock import patch
 
 from descry.handlers import DescryConfig
@@ -219,7 +217,10 @@ skip_crates = ["mandible", "tarsus"]
         config = DescryConfig(project_root=tmp_path)
         config._apply_toml(DescryConfig._load_toml(tmp_path))
 
-        assert config.scip_extra_args == ["--exclude-vendored-libraries", "--custom-flag"]
+        assert config.scip_extra_args == [
+            "--exclude-vendored-libraries",
+            "--custom-flag",
+        ]
         assert config.scip_skip_crates == ["mandible", "tarsus"]
 
     def test_scip_rust_toolchain_from_toml(self, tmp_path):
@@ -357,7 +358,9 @@ class TestScipCacheManagerConfig:
             (crate_dir / "src" / "lib.rs").write_text("// placeholder")
 
         # Root Cargo.toml for workspace
-        (tmp_path / "Cargo.toml").write_text('[workspace]\nmembers = ["alpha", "beta", "gamma"]')
+        (tmp_path / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["alpha", "beta", "gamma"]'
+        )
 
         mgr = ScipCacheManager(tmp_path, scip_skip_crates=["beta"])
         crates = mgr.get_rust_crates()
