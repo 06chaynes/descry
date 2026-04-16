@@ -90,7 +90,7 @@ class TestSvcAssertion:
         original = mod._service
         try:
             mod._service = None
-            with pytest.raises(AssertionError, match="Server not initialized"):
+            with pytest.raises(RuntimeError, match="Server not initialized"):
                 _svc()
         finally:
             mod._service = original

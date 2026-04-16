@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "nodes": [
     {
       "id": "FILE:src/main.rs",

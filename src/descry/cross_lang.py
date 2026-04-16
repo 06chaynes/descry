@@ -121,9 +121,10 @@ class CrossLangTracer:
             return
 
         try:
-            with open(self.graph_path) as f:
-                graph = json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
+            from descry._graph import load_graph_with_schema
+
+            graph = load_graph_with_schema(self.graph_path)
+        except Exception as e:
             logger.error(f"Failed to load graph: {e}")
             return
 
@@ -294,9 +295,19 @@ class CrossLangTracer:
                     func_name = node.get("metadata", {}).get("name", "")
                     method = self._infer_http_method(func_name)
 
-                    # Try to find matching Rust handler
-                    api_path = f"/api/v1/{endpoint_name}"
-                    handler = self.endpoint_to_handler(method, api_path)
+                    # Try to find matching backend handler under any configured
+                    # API prefix (E.3: previous hardcoded /api/v1/ removed).
+                    handler = None
+                    api_path = None
+                    for prefix in self._API_PREFIXES:
+                        candidate = f"{prefix}/{endpoint_name}".replace("//", "/")
+                        h = self.endpoint_to_handler(method, candidate)
+                        if h:
+                            handler = h
+                            api_path = candidate
+                            break
+                    if handler is None:
+                        api_path = f"{self._API_PREFIXES[0] if self._API_PREFIXES else '/api'}/{endpoint_name}"
 
                     if handler:
                         results.append(
@@ -335,7 +346,7 @@ class CrossLangTracer:
         }
 
 
-def create_cross_lang_edges(
+def _create_cross_lang_edges(
     graph_data: dict,
     openapi_path: str,
 ) -> list[dict]:
@@ -373,34 +384,18 @@ def create_cross_lang_edges(
 
 
 if __name__ == "__main__":
-    # Test the module
+    # Generic stats-only smoke test. Prints OpenAPI + graph linkage stats.
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python cross_lang.py <openapi_path> [graph_path]")
+        print("Usage: python -m descry.cross_lang <openapi_path> [graph_path]")
         sys.exit(1)
 
     openapi_path = sys.argv[1]
     graph_path = sys.argv[2] if len(sys.argv) > 2 else None
 
     tracer = CrossLangTracer(openapi_path, graph_path)
-
-    print(f"Stats: {tracer.get_stats()}")
-    print()
-
-    # Test endpoint lookup
-    test_endpoints = [
-        ("GET", "/api/v1/actions"),
-        ("POST", "/api/v1/actions"),
-        ("GET", "/api/v1/actions/abc123"),
-        ("GET", "/api/v1/deployments"),
-        ("POST", "/api/v1/deployments/abc123/cancel"),
-    ]
-
-    print("Endpoint -> Handler mapping:")
-    for method, path in test_endpoints:
-        handler = tracer.endpoint_to_handler(method, path)
-        node_id = tracer.endpoint_to_node_id(method, path)
-        print(f"  {method:6s} {path:40s} -> {handler or 'NOT FOUND'}")
-        if node_id:
-            print(f"         Node: {node_id[:70]}...")
+    stats = tracer.get_stats()
+    print("CrossLangTracer stats:")
+    for key, value in stats.items():
+        print(f"  {key}: {value}")

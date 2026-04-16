@@ -14,6 +14,8 @@ import json
 import subprocess
 from typing import Iterator
 
+from descry._env import safe_env
+
 
 def extract_calls_rust(file_path: str) -> Iterator[dict]:
     """Extract function calls from a Rust file using ast-grep.
@@ -44,6 +46,7 @@ def extract_calls_rust(file_path: str) -> Iterator[dict]:
                 capture_output=True,
                 text=True,
                 timeout=30,
+                env=safe_env(),
             )
 
             if result.returncode != 0:
@@ -136,6 +139,7 @@ def extract_calls_typescript(file_path: str) -> Iterator[dict]:
                 capture_output=True,
                 text=True,
                 timeout=30,
+                env=safe_env(),
             )
 
             if result.returncode != 0:
@@ -190,7 +194,9 @@ def extract_calls_typescript(file_path: str) -> Iterator[dict]:
 def is_ast_grep_available() -> bool:
     """Check if ast-grep (sg) is available on the system."""
     try:
-        result = subprocess.run(["sg", "--version"], capture_output=True, timeout=5)
+        result = subprocess.run(
+            ["sg", "--version"], capture_output=True, timeout=5, env=safe_env()
+        )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
@@ -247,6 +253,7 @@ def extract_imports_typescript(file_path: str) -> dict:
                 capture_output=True,
                 text=True,
                 timeout=30,
+                env=safe_env(),
             )
 
             if proc_result.returncode != 0:

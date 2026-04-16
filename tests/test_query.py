@@ -16,6 +16,7 @@ class TestGraphQuerier:
     def sample_graph(self):
         """Create a sample graph for testing."""
         graph = {
+            "schema_version": 1,
             "nodes": [
                 {
                     "id": "FILE:test.py",
@@ -96,6 +97,7 @@ class TestFindTraitImpls:
     def trait_impl_graph(self):
         """Create a graph with trait implementations."""
         graph = {
+            "schema_version": 1,
             "nodes": [
                 {
                     "id": "FILE:auth.rs::JwtAuth::from_request_parts",
@@ -197,6 +199,7 @@ class TestFindCallPath:
     def call_path_graph(self):
         """Create a graph with call relationships."""
         graph = {
+            "schema_version": 1,
             "nodes": [
                 {
                     "id": "FILE:api.rs::handle_request",
@@ -315,6 +318,7 @@ class TestFlowDisambiguation:
         """Create a graph with multiple functions named 'new'."""
         # Create graph with two structs that each have a "new" method
         graph = {
+            "schema_version": 1,
             "nodes": [
                 {
                     "id": "FILE:service_a.rs",
@@ -483,6 +487,7 @@ fn fetch_user(user_id: &str) -> Result<User> {
         source_file.write_text(source_content)
 
         graph = {
+            "schema_version": 1,
             "nodes": [
                 {
                     "id": f"FILE:{source_file}",
@@ -628,6 +633,7 @@ fn validate_token_format(token: &str) -> bool {
         source_file.write_text(source_content)
 
         graph = {
+            "schema_version": 1,
             "nodes": [
                 {
                     "id": f"FILE:{source_file}",
@@ -743,6 +749,7 @@ class TestFullSourceBypass:
         source_file.write_text("".join(lines))
 
         graph = {
+            "schema_version": 1,
             "nodes": [
                 {
                     "id": f"FILE:{source_file}::large_function",

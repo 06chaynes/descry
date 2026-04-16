@@ -19,6 +19,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
+from descry._env import safe_env
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,6 +28,79 @@ class GitError(Exception):
     """Raised for git-specific errors (not installed, not a repo, etc.)."""
 
     pass
+
+
+# --- Git argument validators (A.1) ---
+# Accepts: HEAD, HEAD^, HEAD^^, HEAD~N, HEAD^{tree}, @, @{-1},
+#          branch@{upstream}, master@{yesterday}, branch names, sha prefixes.
+# Rejects: leading '-', '--' anywhere, empty peel, shell metacharacters.
+_REF_REGEX = re.compile(
+    r"^(?:HEAD|@)(?:[~^]\d*)*(?:\^\{[a-z]+\})?(?:@\{(?:-\d+|[^}\-]+)\})?$"
+    r"|^[A-Za-z0-9][A-Za-z0-9._\-/]*(?:@\{(?:-\d+|[^}\-]+)\})?$"
+)
+_SYMBOL_REGEX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_git_ref(ref: str) -> str:
+    """Validate a single git ref. Raises GitError on invalid input."""
+    if not ref or "--" in ref or not _REF_REGEX.match(ref):
+        raise GitError(f"Invalid git ref: {ref!r}")
+    return ref
+
+
+def _validate_git_range(range_str: str) -> str:
+    """Validate a git range (ref, ref..ref, or ref...ref).
+
+    Raises GitError on invalid input.
+    """
+    if not range_str or "--" in range_str:
+        raise GitError(f"Invalid git range: {range_str!r}")
+    # Try triple-dot first, then double-dot, then single ref
+    for sep in ("...", ".."):
+        if sep in range_str:
+            parts = range_str.split(sep)
+            if len(parts) != 2:
+                raise GitError(f"Invalid git range: {range_str!r}")
+            _validate_git_ref(parts[0])
+            _validate_git_ref(parts[1])
+            return range_str
+    _validate_git_ref(range_str)
+    return range_str
+
+
+def _validate_git_symbol(name: str) -> str:
+    """Validate a symbol name for `git log -L:<symbol>:<file>`."""
+    if not name or not _SYMBOL_REGEX.match(name):
+        raise GitError(f"Invalid git symbol: {name!r}")
+    return name
+
+
+def _validate_git_file(path: str) -> str:
+    """Validate a file path for git (-L, pathspec).
+
+    Rejects: absolute paths, '..' traversal, leading '-', pathspec magic
+    prefix ':', shell metacharacters.
+    """
+    if not path:
+        raise GitError("Empty git file path")
+    if path.startswith("-") or path.startswith(":") or path.startswith("/"):
+        raise GitError(f"Invalid git file: {path!r}")
+    if ".." in path.split("/"):
+        raise GitError(f"Invalid git file: {path!r}")
+    if any(c in path for c in "\x00;|&`$\n\r\t"):
+        raise GitError(f"Invalid git file: {path!r}")
+    return path
+
+
+def _validate_pathspec(spec: str) -> str:
+    """Validate a pathspec entry (no magic prefixes)."""
+    if not spec:
+        raise GitError("Empty pathspec")
+    if spec.startswith(":") or spec.startswith("-"):
+        raise GitError(f"Invalid pathspec (magic prefix): {spec!r}")
+    if ".." in spec.split("/"):
+        raise GitError(f"Invalid pathspec: {spec!r}")
+    return spec
 
 
 DEFAULT_CHURN_EXCLUSIONS = [
@@ -111,6 +186,7 @@ class GitHistoryAnalyzer:
                 text=True,
                 cwd=str(self.project_root),
                 timeout=timeout,
+                env=safe_env(),
             )
             if result.returncode != 0:
                 stderr = result.stderr.strip()
@@ -171,6 +247,7 @@ class GitHistoryAnalyzer:
         match = re.match(r"since\s+(.+)", time_range, re.IGNORECASE)
         if match:
             ref = match.group(1).strip()
+            _validate_git_ref(ref)
             return [f"{ref}..HEAD"]
 
         # Treat as a direct git --since value
@@ -319,6 +396,9 @@ class GitHistoryAnalyzer:
         """
         self._verify_git()
 
+        if path_filter:
+            _validate_pathspec(path_filter)
+
         # Build git log command for file-level commit counts
         git_args = [
             "log",
@@ -330,7 +410,11 @@ class GitHistoryAnalyzer:
         if path_filter:
             git_args.extend(["--", path_filter])
         elif exclude_generated:
-            exclusions = [f":!{p}" for p in self.churn_exclusions]
+            # Validate each exclusion entry before ':!' prefixing
+            exclusions = []
+            for p in self.churn_exclusions:
+                _validate_pathspec(p)
+                exclusions.append(f":!{p}")
             git_args.extend(["--", "."] + exclusions)
 
         output = self._run_git(git_args, timeout=60)
@@ -500,12 +584,18 @@ class GitHistoryAnalyzer:
         """
         self._verify_git()
 
+        if path_filter:
+            _validate_pathspec(path_filter)
+
         git_args = ["log", "--format=%H", "--name-only", "--no-merges"]
         git_args.extend(self._parse_time_range(time_range))
         if path_filter:
             git_args.extend(["--", path_filter])
         elif exclude_generated:
-            exclusions = [f":!{p}" for p in self.churn_exclusions]
+            exclusions = []
+            for p in self.churn_exclusions:
+                _validate_pathspec(p)
+                exclusions.append(f":!{p}")
             git_args.extend(["--", "."] + exclusions)
 
         output = self._run_git(git_args, timeout=60)
@@ -932,6 +1022,10 @@ class GitHistoryAnalyzer:
 
         # Try git log -L :name:file (git's native function tracking)
         # This works for top-level functions but fails for methods/nested fns
+        # Note: '--' separator does NOT protect -L (it's a flag with inline value);
+        # symbol and file must be strictly validated before interpolation.
+        _validate_git_symbol(symbol_name)
+        _validate_git_file(file_path)
         git_args = [
             "log",
             f"-L:{symbol_name}:{file_path}",
@@ -954,9 +1048,12 @@ class GitHistoryAnalyzer:
                 start_line = meta.get("lineno")
                 end_line = meta.get("end_lineno")
                 if start_line and end_line:
+                    # file_path already validated above; line numbers from
+                    # metadata are trusted ints.
+                    _validate_git_file(file_path)
                     git_args = [
                         "log",
-                        f"-L{start_line},{end_line}:{file_path}",
+                        f"-L{int(start_line)},{int(end_line)}:{file_path}",
                         "--format=%H %ad %an%n%s",
                         "--date=short",
                         "--no-merges",
@@ -1179,7 +1276,14 @@ class GitHistoryAnalyzer:
         """
         self._verify_git()
 
-        # Determine effective commit range
+        # Determine effective commit range. User-supplied commit_range is
+        # validated; internally-built ranges use trusted sha output from
+        # `git log --format=%H`.
+        if commit_range:
+            try:
+                _validate_git_range(commit_range)
+            except GitError as e:
+                return f"Invalid commit range '{commit_range}': {e}"
         effective_range = commit_range
         if not effective_range:
             if time_range:
@@ -1196,6 +1300,12 @@ class GitHistoryAnalyzer:
                 effective_range = f"{commit_hashes[-1]}~1..{commit_hashes[0]}"
             else:
                 effective_range = "HEAD~1..HEAD"
+
+        if path_filter:
+            try:
+                _validate_pathspec(path_filter)
+            except GitError as e:
+                return f"Invalid path filter '{path_filter}': {e}"
 
         # Get changed files with stats
         diff_stat_args = ["diff", "--numstat", effective_range]
@@ -1355,6 +1465,11 @@ class GitHistoryAnalyzer:
         """
         self._verify_git()
 
+        if commit_range:
+            try:
+                _validate_git_range(commit_range)
+            except GitError as e:
+                return {"error": f"Invalid commit range '{commit_range}': {e}"}
         effective_range = commit_range
         if not effective_range:
             if time_range:
@@ -1369,6 +1484,12 @@ class GitHistoryAnalyzer:
                 effective_range = f"{commit_hashes[-1]}~1..{commit_hashes[0]}"
             else:
                 effective_range = "HEAD~1..HEAD"
+
+        if path_filter:
+            try:
+                _validate_pathspec(path_filter)
+            except GitError as e:
+                return {"error": f"Invalid path filter '{path_filter}': {e}"}
 
         diff_stat_args = ["diff", "--numstat", effective_range]
         if path_filter:

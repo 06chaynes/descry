@@ -8,12 +8,15 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from descry._env import safe_env
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +116,55 @@ def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
 
 
+_TOOLCHAIN_REGEX = re.compile(r"^[A-Za-z0-9._\-]+$")
+_MODEL_HF_REGEX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]*$")
+_SHELL_METACHARS = set("\x00;|&`$\n\r\t<>")
+
+
+def _validate_toolchain(value: str) -> str:
+    """Validate scip_rust_toolchain TOML value. Raises ValueError on bad input."""
+    if not value or value.startswith("-") or not _TOOLCHAIN_REGEX.match(value):
+        raise ValueError(f"Invalid scip.rust.toolchain: {value!r}")
+    return value
+
+
+def _validate_scip_extra_arg(arg: str) -> str:
+    """Validate a scip_extra_args entry.
+
+    Accepts bare positional args; flags must start with '--' (blocks short-flag
+    smuggling). Rejects shell metacharacters.
+    """
+    if not arg:
+        raise ValueError("Empty scip extra_args entry")
+    if arg.startswith("-") and not arg.startswith("--"):
+        raise ValueError(f"scip_extra_args short flag not allowed: {arg!r}")
+    if any(c in _SHELL_METACHARS for c in arg):
+        raise ValueError(f"scip_extra_args contains shell metacharacters: {arg!r}")
+    return arg
+
+
+def _validate_embedding_model(value: str, project_root: Path) -> str:
+    """Validate [embeddings] model TOML value.
+
+    - If looks like a local path (starts with '/' or contains '..'), must
+      resolve inside project_root.
+    - Otherwise must match HuggingFace repo-id regex.
+    """
+    if not value:
+        raise ValueError("Empty embeddings.model")
+    if value.startswith("/") or ".." in value.split("/"):
+        resolved = Path(value).resolve()
+        root = project_root.resolve()
+        if not (resolved == root or root in resolved.parents):
+            raise ValueError(
+                f"embeddings.model local path {value!r} outside project root"
+            )
+        return value
+    if not _MODEL_HF_REGEX.match(value):
+        raise ValueError(f"Invalid embeddings.model repo id: {value!r}")
+    return value
+
+
 @dataclass
 class DescryConfig:
     """Configuration for a Descry project."""
@@ -190,6 +242,16 @@ class DescryConfig:
     def graph_path(self) -> Path:
         return self.cache_dir / "codebase_graph.json"
 
+    @property
+    def resolved_project_root(self) -> Path:
+        """Project root with all symlinks resolved.
+
+        Use for containment checks (api_source, api_index, descry_index).
+        Kept as a property instead of mutating project_root so existing test
+        equality assertions against tmp_path continue to work.
+        """
+        return self.project_root.resolve()
+
     @classmethod
     def auto_detect(cls, cwd: Path | None = None) -> "DescryConfig":
         """Auto-detect project root from cwd and build config."""
@@ -209,6 +271,8 @@ class DescryConfig:
     def _load_toml(project_root: Path) -> dict:
         """Load .descry.toml from project root if it exists.
 
+        Rejects files > 1 MiB (TOML-parse DoS guard per A.4).
+
         Returns:
             Parsed TOML data as dict, or empty dict if not found/invalid.
         """
@@ -218,6 +282,9 @@ class DescryConfig:
         if not toml_path.exists():
             return {}
         try:
+            if toml_path.stat().st_size > 1 * 1024 * 1024:
+                logger.warning(f".descry.toml exceeds 1 MiB cap; ignoring: {toml_path}")
+                return {}
             with open(toml_path, "rb") as f:
                 return tomllib.load(f)
         except Exception as e:
@@ -249,7 +316,15 @@ class DescryConfig:
         # [embeddings]
         embeddings = data.get("embeddings", {})
         if "model" in embeddings:
-            self.embedding_model = embeddings["model"]
+            try:
+                self.embedding_model = _validate_embedding_model(
+                    embeddings["model"], self.project_root
+                )
+            except ValueError as e:
+                logger.warning(
+                    f"Invalid [embeddings] model in .descry.toml: {e}; "
+                    f"falling back to default {self.embedding_model!r}"
+                )
 
         # [test_detection]
         test_detection = data.get("test_detection", {})
@@ -295,14 +370,27 @@ class DescryConfig:
         # [scip]
         scip = data.get("scip", {})
         if "extra_args" in scip:
-            self.scip_extra_args = scip["extra_args"]
+            try:
+                self.scip_extra_args = [
+                    _validate_scip_extra_arg(a) for a in scip["extra_args"]
+                ]
+            except ValueError as e:
+                logger.warning(
+                    f"Invalid [scip] extra_args in .descry.toml: {e}; "
+                    f"keeping default {self.scip_extra_args!r}"
+                )
         if "skip_crates" in scip:
             self.scip_skip_crates = scip["skip_crates"]
 
         # [scip.rust]
         scip_rust = scip.get("rust", {})
         if "toolchain" in scip_rust:
-            self.scip_rust_toolchain = scip_rust["toolchain"]
+            try:
+                self.scip_rust_toolchain = _validate_toolchain(scip_rust["toolchain"])
+            except ValueError as e:
+                logger.warning(
+                    f"Invalid [scip.rust] toolchain in .descry.toml: {e}; ignoring"
+                )
 
         # [syntax.lang_map] — merges with defaults (additive)
         syntax = data.get("syntax", {})
@@ -596,14 +684,15 @@ class DescryService:
                 mtime = gp.stat().st_mtime
                 if mtime != self._graph_cache["mtime"]:
                     try:
-                        with open(gp) as f:
-                            data = json.load(f)
+                        from descry._graph import load_graph_with_schema
+
+                        data = load_graph_with_schema(gp)
                         self._graph_cache = {
                             "mtime": mtime,
                             "nodes": len(data.get("nodes", [])),
                             "edges": len(data.get("edges", [])),
                         }
-                    except (json.JSONDecodeError, KeyError) as e:
+                    except Exception as e:
                         logger.warning(f"Failed to update graph cache: {e}")
 
     async def _get_querier(self):
@@ -732,6 +821,68 @@ class DescryService:
             async with self._semantic_cache_lock:
                 self._semantic_cache["error"] = str(e)
             logger.warning(f"Pre-warm: embeddings failed: {e}")
+        finally:
+            async with self._semantic_cache_lock:
+                self._semantic_cache["loading"] = False
+
+    async def _get_semantic_searcher(self):
+        """Single-flight accessor for the semantic searcher (E.1).
+
+        Returns the cached SemanticSearcher, rebuilding if
+        codebase_graph.json mtime changed. Returns None if embeddings are
+        unavailable (module missing or disabled) or if the graph file does
+        not exist.
+
+        Uses _semantic_cache_lock; construction runs in asyncio.to_thread so
+        the event loop is not blocked by model load. Callers that want to
+        surface an "embeddings loading" UX string should check
+        _semantic_cache["loading"] / ["error"] before calling this helper.
+        """
+        if not self._semantic_available or self._SemanticSearcher is None:
+            return None
+        gp = self.config.graph_path
+        if not gp.exists():
+            return None
+        mtime = gp.stat().st_mtime
+
+        async with self._semantic_cache_lock:
+            if (
+                self._semantic_cache["instance"] is not None
+                and self._semantic_cache["mtime"] == mtime
+            ):
+                return self._semantic_cache["instance"]
+            if self._semantic_cache["loading"]:
+                return None
+            self._semantic_cache["loading"] = True
+            self._semantic_cache["error"] = None
+
+        try:
+
+            def load_sync():
+                return self._SemanticSearcher(
+                    str(gp), model_name=self.config.embedding_model
+                )
+
+            searcher = await asyncio.wait_for(
+                asyncio.to_thread(load_sync), timeout=self.config.embedding_timeout
+            )
+            async with self._semantic_cache_lock:
+                self._semantic_cache["mtime"] = mtime
+                self._semantic_cache["instance"] = searcher
+                self._semantic_cache["error"] = None
+            return searcher
+        except asyncio.TimeoutError:
+            async with self._semantic_cache_lock:
+                self._semantic_cache["error"] = (
+                    f"Timeout loading embeddings ({self.config.embedding_timeout}s)"
+                )
+            logger.warning("Embeddings load timed out")
+            return None
+        except Exception as e:
+            async with self._semantic_cache_lock:
+                self._semantic_cache["error"] = str(e)
+            logger.warning(f"Embeddings load failed: {e}")
+            return None
         finally:
             async with self._semantic_cache_lock:
                 self._semantic_cache["loading"] = False
@@ -870,8 +1021,24 @@ class DescryService:
         return f"Graph ready: {self._graph_cache['nodes']:,}n/{self._graph_cache['edges']:,}e, {age_str}"
 
     async def index(self, path: str = ".") -> str:
-        """Regenerate the codebase graph."""
-        index_path = str(self.config.project_root) if path == "." else path
+        """Regenerate the codebase graph.
+
+        A.9: `path` must resolve inside project_root. Prevents prompt-injected
+        MCP clients from forcing indexing of arbitrary directories.
+        """
+        if path == ".":
+            index_path = str(self.config.project_root)
+        else:
+            try:
+                resolved = Path(path).resolve(strict=False)
+                if not resolved.is_relative_to(self.config.resolved_project_root):
+                    return (
+                        f"Index path {path!r} outside project root; "
+                        f"must be relative to {self.config.project_root}."
+                    )
+                index_path = str(resolved)
+            except (OSError, ValueError) as e:
+                return f"Invalid index path {path!r}: {e}"
 
         try:
             timeout = (
@@ -879,12 +1046,14 @@ class DescryService:
                 if self.config.index_timeout_minutes
                 else None
             )
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 [sys.executable, "-m", "descry.generate", index_path],
                 capture_output=True,
                 text=True,
                 cwd=str(self.config.project_root),
                 timeout=timeout,
+                env=safe_env(),
             )
 
             if result.returncode == 0:
@@ -912,6 +1081,8 @@ class DescryService:
                     and self.config.graph_path.exists()
                 ):
                     try:
+                        # Force-rebuild: reset cache then construct in a thread
+                        # so model load doesn't block the event loop (C.1).
                         async with self._semantic_cache_lock:
                             self._semantic_cache = {
                                 "mtime": 0,
@@ -920,11 +1091,22 @@ class DescryService:
                                 "error": None,
                             }
                         logger.info("Generating embeddings for semantic search...")
-                        searcher = self._SemanticSearcher(
-                            str(self.config.graph_path),
-                            force_rebuild=True,
-                            model_name=self.config.embedding_model,
-                        )
+
+                        def _build_searcher():
+                            return self._SemanticSearcher(
+                                str(self.config.graph_path),
+                                force_rebuild=True,
+                                model_name=self.config.embedding_model,
+                            )
+
+                        searcher = await asyncio.to_thread(_build_searcher)
+                        # Seed the cache with the freshly-built instance so
+                        # the next search() call reuses it.
+                        async with self._semantic_cache_lock:
+                            gp = self.config.graph_path
+                            mtime = gp.stat().st_mtime if gp.exists() else 0
+                            self._semantic_cache["mtime"] = mtime
+                            self._semantic_cache["instance"] = searcher
                         embeddings_status = (
                             f"\nEmbeddings: {len(searcher.nodes):,} nodes indexed"
                         )
@@ -1160,28 +1342,16 @@ class DescryService:
             use_semantic = is_natural_language_query(terms) or len(tfidf_results) < 3
             if use_semantic:
                 try:
-                    async with self._semantic_cache_lock:
-                        mtime = self.config.graph_path.stat().st_mtime
-                        if (
-                            mtime != self._semantic_cache["mtime"]
-                            or self._semantic_cache["instance"] is None
-                        ):
-                            self._semantic_cache = {
-                                "mtime": mtime,
-                                "instance": self._SemanticSearcher(
-                                    str(self.config.graph_path),
-                                    model_name=self.config.embedding_model,
-                                ),
-                                "loading": False,
-                                "error": None,
-                            }
-                        searcher = self._semantic_cache["instance"]
-
-                    query = " ".join(terms)
-                    semantic_results = searcher.search(
-                        query, limit=limit * 2, min_score=0.25
-                    )
-                    search_method = "hybrid"
+                    # E.1/C.1: use the single-flight async helper (runs in
+                    # asyncio.to_thread and respects the cache lock).
+                    searcher = await self._get_semantic_searcher()
+                    if searcher is not None:
+                        query = " ".join(terms)
+                        # searcher.search is CPU-bound; wrap in to_thread.
+                        semantic_results = await asyncio.to_thread(
+                            searcher.search, query, limit=limit * 2, min_score=0.25
+                        )
+                        search_method = "hybrid"
                 except Exception as e:
                     logger.warning(f"Semantic search failed, using keyword only: {e}")
 
@@ -1297,37 +1467,21 @@ class DescryService:
         if not gp.exists():
             return "ERROR: Graph not found. Run descry ensure first."
 
+        # Show a friendly message if a background pre-warm is in flight.
         async with self._semantic_cache_lock:
             if self._semantic_cache["loading"]:
                 return "Embeddings loading in background (~2-3s). Try again shortly."
 
-            if self._semantic_cache["error"]:
-                logger.info(
-                    f"Clearing previous embedding error: {self._semantic_cache['error']}"
-                )
-                self._semantic_cache["error"] = None
-
-        async with self._semantic_cache_lock:
-            mtime = gp.stat().st_mtime
-            if (
-                mtime != self._semantic_cache["mtime"]
-                or self._semantic_cache["instance"] is None
-            ):
-                try:
-                    self._semantic_cache["mtime"] = mtime
-                    self._semantic_cache["instance"] = self._SemanticSearcher(
-                        str(gp), model_name=self.config.embedding_model
-                    )
-                    self._semantic_cache["loading"] = False
-                    self._semantic_cache["error"] = None
-                except Exception as e:
-                    self._semantic_cache["error"] = str(e)
-                    return f"Failed to initialize semantic search: {e}"
-
-            searcher = self._semantic_cache["instance"]
+        # E.1/C.1: single-flight helper wraps the model load in asyncio.to_thread.
+        searcher = await self._get_semantic_searcher()
+        if searcher is None:
+            err = self._semantic_cache.get("error")
+            if err:
+                return f"Failed to initialize semantic search: {err}"
+            return "Semantic search unavailable."
 
         try:
-            results = searcher.search(query, limit=limit)
+            results = await asyncio.to_thread(searcher.search, query, limit=limit)
         except Exception as e:
             return f"Semantic search error: {e}"
 

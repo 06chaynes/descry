@@ -11,10 +11,13 @@ Usage:
 
 import argparse
 import asyncio
+import errno
 import json
 import logging
 import os
 import re
+import stat
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -28,6 +31,9 @@ from starlette.responses import JSONResponse, FileResponse, StreamingResponse
 from starlette.routing import Route, Mount
 from starlette.staticfiles import StaticFiles
 
+from descry._env import safe_env
+from descry import __version__
+
 # Configure logging
 _log_level = os.environ.get("DESCRY_LOG_LEVEL", "INFO")
 logging.basicConfig(
@@ -36,7 +42,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("descry_web")
 
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = __version__
 
 # --- Import shared modules ---
 
@@ -76,12 +82,6 @@ except ImportError:
     def get_scip_status():
         return {"available": False}
 
-
-# docs_search is not ported (project-specific)
-DOCS_SEARCH_LOADED = False
-DocsSearcher = None
-DOC_COLLECTIONS = {}
-DOCS_EMBEDDINGS_AVAILABLE = False
 
 try:
     from descry.git_history import GitHistoryAnalyzer, GitError
@@ -172,72 +172,19 @@ def reciprocal_rank_fusion(
 _graph_meta = {"mtime": 0, "nodes": 0, "edges": 0}
 
 
-def _get_querier() -> GraphQuerier | None:
-    """Get GraphQuerier, delegating caching to DescryService."""
-    cfg = _get_config()
-    if not cfg.graph_path.exists():
-        return None
-    svc = _get_service()
-    # Use sync wrapper since web handlers call this synchronously
-    mtime = cfg.graph_path.stat().st_mtime
-    if mtime != svc._querier_cache["mtime"]:
-        svc._querier_cache = {
-            "mtime": mtime,
-            "instance": GraphQuerier(str(cfg.graph_path), config=cfg),
-        }
-    return svc._querier_cache["instance"]
+async def _get_querier() -> GraphQuerier | None:
+    """Get GraphQuerier via DescryService (lock-disciplined, async)."""
+    return await _get_service()._get_querier()
 
 
-def _get_semantic_searcher() -> "SemanticSearcher | None":
-    cfg = _get_config()
-    if not SEMANTIC_AVAILABLE or not cfg.graph_path.exists():
-        return None
-    svc = _get_service()
-    mtime = cfg.graph_path.stat().st_mtime
-    if mtime != svc._semantic_cache["mtime"] or svc._semantic_cache["instance"] is None:
-        svc._semantic_cache = {
-            "mtime": mtime,
-            "instance": SemanticSearcher(
-                str(cfg.graph_path), model_name=cfg.embedding_model
-            ),
-            "loading": False,
-            "error": None,
-        }
-    return svc._semantic_cache["instance"]
+async def _get_semantic_searcher() -> "SemanticSearcher | None":
+    return await _get_service()._get_semantic_searcher()
 
 
-def _get_git_analyzer() -> "GitHistoryAnalyzer | None":
+async def _get_git_analyzer() -> "GitHistoryAnalyzer | None":
     if not GIT_HISTORY_AVAILABLE:
         return None
-    cfg = _get_config()
-    svc = _get_service()
-    current_mtime = cfg.graph_path.stat().st_mtime if cfg.graph_path.exists() else None
-    if (
-        svc._git_cache["graph_mtime"] != current_mtime
-        or svc._git_cache["analyzer"] is None
-    ):
-        q = _get_querier()
-        svc._git_cache["analyzer"] = GitHistoryAnalyzer(
-            str(cfg.project_root),
-            graph_querier=q,
-            churn_exclusions=cfg.churn_exclusions,
-            code_extensions=cfg.code_extensions,
-            git_timeout=cfg.git_timeout,
-        )
-        svc._git_cache["graph_mtime"] = current_mtime
-    return svc._git_cache["analyzer"]
-
-
-def _get_docs_searcher() -> "DocsSearcher | None":
-    if not DOCS_SEARCH_LOADED or not DOCS_EMBEDDINGS_AVAILABLE:
-        return None
-    svc = _get_service()
-    cfg = _get_config()
-    if not hasattr(svc, "_docs_cache_web") or svc._docs_cache_web is None:
-        searcher = DocsSearcher(cfg.project_root, cfg.cache_dir / "docs")
-        searcher.index()
-        svc._docs_cache_web = searcher
-    return svc._docs_cache_web
+    return await _get_service()._get_git_analyzer()
 
 
 def _update_graph_meta():
@@ -247,14 +194,15 @@ def _update_graph_meta():
         mtime = cfg.graph_path.stat().st_mtime
         if mtime != _graph_meta["mtime"]:
             try:
-                with open(cfg.graph_path) as f:
-                    data = json.load(f)
+                from descry._graph import load_graph_with_schema
+
+                data = load_graph_with_schema(cfg.graph_path)
                 _graph_meta = {
                     "mtime": mtime,
                     "nodes": len(data.get("nodes", [])),
                     "edges": len(data.get("edges", [])),
                 }
-            except (json.JSONDecodeError, KeyError):
+            except Exception:
                 pass
 
 
@@ -355,7 +303,6 @@ async def api_health(request: Request) -> JSONResponse:
                 "embeddings": SEMANTIC_AVAILABLE,
                 "git_history": GIT_HISTORY_AVAILABLE,
                 "cross_lang": CROSS_LANG_AVAILABLE and _openapi_path_exists(),
-                "docs_search": DOCS_SEARCH_LOADED and DOCS_EMBEDDINGS_AVAILABLE,
             },
         }
     )
@@ -372,13 +319,13 @@ async def api_ensure(request: Request) -> JSONResponse:
     status = _graph_status()
 
     if not status["exists"]:
-        result = await _run_index(".")
+        result = await _run_index()
         return JSONResponse(
             {"action": "generated", "result": result, "graph": _graph_status()}
         )
 
     if status["age_hours"] and status["age_hours"] > max_age:
-        result = await _run_index(".")
+        result = await _run_index()
         return JSONResponse(
             {"action": "refreshed", "result": result, "graph": _graph_status()}
         )
@@ -386,19 +333,25 @@ async def api_ensure(request: Request) -> JSONResponse:
     return JSONResponse({"action": "ready", "graph": status})
 
 
-async def _run_index(path: str) -> str:
+async def _run_index() -> str:
+    """Run the indexer on the configured project root (H.2: no caller input).
+
+    Uses sys.executable -m descry.generate so it works without `uv` on PATH (B.1).
+    Wrapped in asyncio.to_thread so the event loop stays responsive (C.1).
+    Subprocess env is sanitized (A.5).
+    """
     import subprocess
 
-    script_path = Path(__file__).parent.parent / "generate.py"
     cfg = _get_config()
-    index_path = str(cfg.project_root) if path == "." else path
     try:
-        result = subprocess.run(
-            ["uv", "run", str(script_path), index_path],
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "-m", "descry.generate", str(cfg.project_root)],
             capture_output=True,
             text=True,
             cwd=str(cfg.project_root),
             timeout=600,
+            env=safe_env(),
         )
         return (
             result.stdout.strip()
@@ -417,26 +370,24 @@ def _reset_caches():
 
 
 async def api_index(request: Request) -> JSONResponse:
-    body = await request.json() if request.method == "POST" else {}
-    path = body.get("path", ".")
-    result = await _run_index(path)
+    # H.2: path body param removed; always index cfg.project_root.
+    result = await _run_index()
     _reset_caches()
     return JSONResponse({"result": result, "graph": _graph_status()})
 
 
 async def api_index_stream(request: Request) -> StreamingResponse:
     """Streaming reindex endpoint using Server-Sent Events for live output."""
-    script_path = Path(__file__).parent.parent / "generate.py"
 
     async def event_stream():
         yield f"data: {json.dumps({'type': 'start', 'message': 'Starting reindex...'})}\n\n"
 
         cfg = _get_config()
-        env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        env = {**safe_env(), "PYTHONUNBUFFERED": "1"}
         proc = await asyncio.create_subprocess_exec(
-            "uv",
-            "run",
-            str(script_path),
+            sys.executable,
+            "-m",
+            "descry.generate",
             str(cfg.project_root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -488,7 +439,7 @@ async def api_search(request: Request) -> JSONResponse:
     symbol_type = request.query_params.get("type")
     exclude_tests = request.query_params.get("exclude_tests", "").lower() == "true"
 
-    q = _get_querier()
+    q = await _get_querier()
     if not q:
         return JSONResponse(
             {"error": "Graph not found. Run ensure first."}, status_code=503
@@ -509,11 +460,15 @@ async def api_search(request: Request) -> JSONResponse:
     if SEMANTIC_AVAILABLE and _get_config().graph_path.exists():
         if is_natural_language_query(terms) or len(tfidf_results) < 3:
             try:
-                searcher = _get_semantic_searcher()
+                searcher = await _get_semantic_searcher()
                 if searcher:
                     query = " ".join(terms)
-                    semantic_results = searcher.search(
-                        query, limit=limit * 2, min_score=0.25
+                    # CPU-bound numpy/encode; run off the event loop.
+                    semantic_results = await asyncio.to_thread(
+                        searcher.search,
+                        query,
+                        limit=limit * 2,
+                        min_score=0.25,
                     )
                     search_method = "hybrid"
             except Exception as e:
@@ -548,12 +503,12 @@ async def api_semantic(request: Request) -> JSONResponse:
     if not SEMANTIC_AVAILABLE:
         return JSONResponse({"error": "Semantic search not available"}, status_code=503)
 
-    searcher = _get_semantic_searcher()
+    searcher = await _get_semantic_searcher()
     if not searcher:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
 
     try:
-        results = searcher.search(query, limit=limit)
+        results = await asyncio.to_thread(searcher.search, query, limit=limit)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -575,7 +530,7 @@ async def api_callers(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Missing 'name' parameter"}, status_code=400)
     limit = int(request.query_params.get("limit", "20"))
 
-    q = _get_querier()
+    q = await _get_querier()
     if not q:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
 
@@ -602,7 +557,7 @@ async def api_callees(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Missing 'name' parameter"}, status_code=400)
     limit = int(request.query_params.get("limit", "20"))
 
-    q = _get_querier()
+    q = await _get_querier()
     if not q:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
 
@@ -650,7 +605,7 @@ async def api_context(request: Request) -> JSONResponse:
     depth = int(request.query_params.get("depth", "1"))
     max_tokens = int(request.query_params.get("max_tokens", "2000"))
 
-    q = _get_querier()
+    q = await _get_querier()
     if not q:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
 
@@ -671,7 +626,7 @@ async def api_structure(request: Request) -> JSONResponse:
     if not filename:
         return JSONResponse({"error": "Missing 'filename' parameter"}, status_code=400)
 
-    q = _get_querier()
+    q = await _get_querier()
     if not q:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
 
@@ -730,7 +685,7 @@ async def api_flatten(request: Request) -> JSONResponse:
             {"error": "Missing 'class_node_id' parameter"}, status_code=400
         )
 
-    q = _get_querier()
+    q = await _get_querier()
     if not q:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
 
@@ -744,7 +699,7 @@ async def api_impls(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Missing 'method' parameter"}, status_code=400)
     trait_name = request.query_params.get("trait_name") or None
 
-    q = _get_querier()
+    q = await _get_querier()
     if not q:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
 
@@ -792,7 +747,7 @@ async def api_flow(request: Request) -> JSONResponse:
     inline_threshold = int(request.query_params.get("inline_threshold", "100"))
     fmt = request.query_params.get("format", "markdown")
 
-    q = _get_querier()
+    q = await _get_querier()
     if not q:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
 
@@ -829,7 +784,7 @@ async def api_path(request: Request) -> JSONResponse:
     max_depth = int(request.query_params.get("max_depth", "10"))
     direction = request.query_params.get("direction", "forward")
 
-    q = _get_querier()
+    q = await _get_querier()
     if not q:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
 
@@ -953,7 +908,7 @@ async def api_churn(request: Request) -> JSONResponse:
     fmt = request.query_params.get("format", "markdown")
 
     try:
-        analyzer = _get_git_analyzer()
+        analyzer = await _get_git_analyzer()
         if fmt == "structured":
             result = await asyncio.to_thread(
                 analyzer.get_churn_structured,
@@ -992,7 +947,7 @@ async def api_evolution(request: Request) -> JSONResponse:
     crate = request.query_params.get("crate")
 
     try:
-        analyzer = _get_git_analyzer()
+        analyzer = await _get_git_analyzer()
         result = await asyncio.to_thread(
             analyzer.get_evolution,
             name=name,
@@ -1019,7 +974,7 @@ async def api_changes(request: Request) -> JSONResponse:
     fmt = request.query_params.get("format", "markdown")
 
     try:
-        analyzer = _get_git_analyzer()
+        analyzer = await _get_git_analyzer()
         if fmt == "structured":
             result = await asyncio.to_thread(
                 analyzer.get_changes_structured,
@@ -1044,32 +999,6 @@ async def api_changes(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-async def api_docs_search(request: Request) -> JSONResponse:
-    query = request.query_params.get("query", "")
-    if not query:
-        return JSONResponse({"error": "Missing 'query' parameter"}, status_code=400)
-
-    limit = int(request.query_params.get("limit", "5"))
-    collection = request.query_params.get("collection")
-
-    searcher = _get_docs_searcher()
-    if not searcher:
-        return JSONResponse({"error": "Docs search not available"}, status_code=503)
-
-    try:
-        results = searcher.search(query, limit=limit, collection=collection)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-    return JSONResponse(
-        {
-            "query": query,
-            "total": len(results),
-            "results": results,
-        }
-    )
-
-
 async def api_quick(request: Request) -> JSONResponse:
     name = request.query_params.get("name", "")
     if not name:
@@ -1078,7 +1007,7 @@ async def api_quick(request: Request) -> JSONResponse:
     full = request.query_params.get("full", "").lower() == "true"
     brief = request.query_params.get("brief", "").lower() == "true"
 
-    q = _get_querier()
+    q = await _get_querier()
     if not q:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
 
@@ -1113,6 +1042,37 @@ async def api_quick(request: Request) -> JSONResponse:
     )
 
 
+_MAX_SOURCE_BYTES = 10 * 1024 * 1024  # 10 MiB
+
+
+def _is_text_sample(sample: bytes) -> bool:
+    """Heuristic check: first N bytes look like text (UTF-8 or UTF-16, low NUL ratio)."""
+    if not sample:
+        return True
+    # Strip BOM if present.
+    if sample.startswith(b"\xef\xbb\xbf"):
+        sample = sample[3:]
+    elif sample.startswith(b"\xff\xfe") or sample.startswith(b"\xfe\xff"):
+        # UTF-16 BOM; try decode before NUL check.
+        try:
+            sample.decode("utf-16")
+            return True
+        except UnicodeDecodeError:
+            return False
+    nul_count = sample.count(b"\x00")
+    if nul_count > len(sample) * 0.01:  # > 1% NUL
+        return False
+    try:
+        sample.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        try:
+            sample.decode("utf-16")
+            return True
+        except UnicodeDecodeError:
+            return False
+
+
 async def api_source(request: Request) -> JSONResponse:
     file_param = request.query_params.get("file", "")
     if not file_param:
@@ -1121,13 +1081,46 @@ async def api_source(request: Request) -> JSONResponse:
     line = request.query_params.get("line")
     target_line = int(line) if line else None
 
-    # Resolve the file path relative to project root
-    file_path = _get_config().project_root / file_param
+    # A.6 / H.1 pipeline: resolve → containment → S_ISREG → size → text-check → read
+    cfg = _get_config()
+    try:
+        file_path = (cfg.project_root / file_param).resolve(strict=False)
+    except (OSError, RuntimeError) as e:
+        return JSONResponse({"error": f"Invalid path: {e}"}, status_code=400)
+
+    try:
+        if not file_path.is_relative_to(cfg.resolved_project_root):
+            return JSONResponse({"error": "Path outside project root"}, status_code=400)
+    except ValueError:
+        return JSONResponse({"error": "Path outside project root"}, status_code=400)
+
     if not file_path.exists():
         return JSONResponse({"error": f"File not found: {file_param}"}, status_code=404)
 
     try:
-        content = file_path.read_text(errors="replace")
+        st = file_path.stat()
+    except OSError as e:
+        return JSONResponse({"error": f"Cannot stat file: {e}"}, status_code=400)
+
+    if not stat.S_ISREG(st.st_mode):
+        return JSONResponse({"error": "Not a regular file"}, status_code=400)
+    if st.st_size > _MAX_SOURCE_BYTES:
+        return JSONResponse({"error": "File too large"}, status_code=413)
+
+    # Use O_NOFOLLOW on the final open so a symlink swap between the earlier
+    # containment check and this read cannot redirect us outside the project.
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(file_path), flags)
+    except OSError as e:
+        return JSONResponse({"error": f"Cannot open file: {e}"}, status_code=400)
+    try:
+        with os.fdopen(fd, "rb") as f:
+            sample = f.read(8192)
+            if not _is_text_sample(sample):
+                return JSONResponse({"error": "Not a text file"}, status_code=415)
+            f.seek(0)
+            content = f.read().decode("utf-8", errors="replace")
     except Exception as e:
         return JSONResponse({"error": f"Cannot read file: {e}"}, status_code=500)
 
@@ -1175,7 +1168,7 @@ async def api_examples(request: Request) -> JSONResponse:
     Picks interesting symbols (high in-degree, classes, good flow candidates)
     so the UI "Try:" links always work with the current project.
     """
-    q = _get_querier()
+    q = await _get_querier()
     if not q:
         return JSONResponse({"available": False})
 
@@ -1339,7 +1332,6 @@ routes = [
     Route("/api/churn", api_churn),
     Route("/api/evolution", api_evolution),
     Route("/api/changes", api_changes),
-    Route("/api/docs/search", api_docs_search),
     Route("/api/source", api_source),
     Mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static"),
 ]
@@ -1368,16 +1360,30 @@ def main():
     # run from the project root (same as the MCP server does).
     os.chdir(cfg.project_root)
 
-    # Pre-warm the graph
+    # Pre-warm the graph via a one-off event loop (main() is sync; uvicorn
+    # starts its own loop afterwards).
     if cfg.graph_path.exists():
         logger.info("Pre-warming graph...")
-        _get_querier()
+
+        async def _prewarm():
+            await _get_querier()
+
+        asyncio.run(_prewarm())
         _update_graph_meta()
         logger.info(
             f"Graph ready: {_graph_meta['nodes']:,}n / {_graph_meta['edges']:,}e"
         )
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    try:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    except OSError as e:
+        if e.errno == errno.EADDRINUSE:
+            print(
+                f"Port {args.port} already in use — pass --port N to override.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        raise
 
 
 if __name__ == "__main__":

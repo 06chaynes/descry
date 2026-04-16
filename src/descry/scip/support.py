@@ -19,6 +19,8 @@ import shutil
 import subprocess
 from typing import TYPE_CHECKING
 
+from descry._env import safe_env
+
 if TYPE_CHECKING:
     from typing import Dict
 
@@ -49,6 +51,7 @@ def _check_indexer(name: str, command: str, version_flag: str = "--version") -> 
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env=safe_env(),
             )
             if proc.returncode == 0:
                 result["available"] = True

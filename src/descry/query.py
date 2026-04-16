@@ -1,7 +1,4 @@
-import json
 import logging
-import sys
-import argparse
 import os
 import math
 import time
@@ -163,8 +160,9 @@ def _clean_ref_name(ref_name: str, max_len: int = 60) -> str:
 
 class GraphQuerier:
     def __init__(self, graph_file, config=None):
-        with open(graph_file, "r", encoding="utf-8") as f:
-            self.data = json.load(f)
+        from descry._graph import load_graph_with_schema
+
+        self.data = load_graph_with_schema(graph_file)
 
         self.nodes = {n["id"]: n for n in self.data["nodes"]}
         self.edges = self.data["edges"]
@@ -1026,6 +1024,9 @@ class GraphQuerier:
 
         Returns list of candidate nodes with match quality scores.
         """
+        # D.3: skip when query is empty/whitespace (would "match" all nodes).
+        if not query or not query.strip():
+            return []
         candidates = []
 
         # Extract the symbol part from the query (last component after ::)
@@ -1061,8 +1062,9 @@ class GraphQuerier:
             elif node_name_normalized == query_normalized:
                 score += 80  # Naming convention variant
 
-            # Partial symbol match
-            elif (
+            # Partial symbol match (D.3: require >= 2 chars to avoid
+            # `"" in anything` being always True)
+            elif len(query_normalized) >= 2 and (
                 query_normalized in node_name_normalized
                 or node_name_normalized in query_normalized
             ):
@@ -1278,8 +1280,10 @@ class GraphQuerier:
         if current_depth > depth or budget <= 0:
             return [], budget
 
-        # Check memoization cache
-        cache_key = (node_id, depth - current_depth + 1)  # Remaining depth
+        # Check memoization cache. Key includes indent because rendered
+        # output lines contain indentation prefixes; caching without the
+        # indent would produce wrong-depth whitespace on re-use.
+        cache_key = (node_id, depth - current_depth + 1, indent)
         if cache_key in self._expansion_cache:
             cached_results, cached_cost = self._expansion_cache[cache_key]
             if cached_cost <= budget:
@@ -1725,7 +1729,7 @@ class GraphQuerier:
             # Tokenize name and docstring
             text = f"{meta.get('name', '')} {meta.get('docstring', '')}"
             # Simple tokenization: split on non-alphanumeric, lowercase
-            tokens = set(re.findall(r"[a-z_][a-z0-9_]*", text.lower()))
+            tokens = set(re.findall(r"[^\W\d]\w*", text.lower(), flags=re.UNICODE))
             for token in tokens:
                 doc_freq[token] += 1
 
@@ -1758,8 +1762,12 @@ class GraphQuerier:
         - Adjacent terms (phrase proximity): +20 bonus
         """
         results = []
-        terms = [t.lower() for t in query_terms]
+        # D.3: drop empty/whitespace-only terms before scoring — `"" in s` is
+        # always True and would match every node.
+        terms = [t.lower() for t in query_terms if t and t.strip()]
         num_terms = len(terms)
+        if num_terms == 0:
+            return []
 
         # Apply filters if any specified
         if lang or crate or symbol_type or exclude_tests:
@@ -1804,9 +1812,9 @@ class GraphQuerier:
             full_text = f"{name} {doc} {sig}"
 
             # Tokenize for TF calculation
-            name_tokens = re.findall(r"[a-z_][a-z0-9_]*", name)
-            doc_tokens = re.findall(r"[a-z_][a-z0-9_]*", doc)
-            full_tokens = re.findall(r"[a-z_][a-z0-9_]*", full_text)
+            name_tokens = re.findall(r"[^\W\d]\w*", name, flags=re.UNICODE)
+            doc_tokens = re.findall(r"[^\W\d]\w*", doc, flags=re.UNICODE)
+            full_tokens = re.findall(r"[^\W\d]\w*", full_text, flags=re.UNICODE)
 
             terms_found = 0
             for term in terms:
@@ -1916,6 +1924,9 @@ class GraphQuerier:
             name: Name or pattern to search for
             fuzzy: If True, also matches names that start with or contain the search term
         """
+        # D.3: empty/whitespace name would match every node (`"" in s` is True).
+        if not name or not name.strip():
+            return []
         exact_matches = []
         variant_matches = []
         fuzzy_matches = []
@@ -2288,428 +2299,3 @@ class GraphQuerier:
             "call_snippet": snippet.strip() if snippet else "",
             "file_path": file_path,
         }
-
-
-def _find_default_graph() -> str:
-    """Find the default graph file by searching for project markers."""
-    from pathlib import Path
-
-    cache_dir_env = os.environ.get("DESCRY_CACHE_DIR")
-    if cache_dir_env:
-        graph_path = Path(cache_dir_env) / "codebase_graph.json"
-        if graph_path.exists():
-            return str(graph_path)
-
-    # Search for project root markers
-    candidates = [Path.cwd()] + list(Path.cwd().parents)
-    for path in candidates:
-        if path == Path.home():
-            break
-        # Check for project markers
-        if any(
-            (path / m).exists()
-            for m in (".git", "Cargo.toml", "package.json", "pyproject.toml")
-        ):
-            graph_path = path / ".descry_cache" / "codebase_graph.json"
-            return str(graph_path)
-
-    # Fall back to current directory
-    return str(Path.cwd() / ".descry_cache" / "codebase_graph.json")
-
-
-def _handle_status(graph_file: str) -> None:
-    """Handle the status command - show graph and feature status."""
-    from pathlib import Path
-    import time
-
-    graph_path = Path(graph_file)
-    cache_dir = graph_path.parent
-
-    print("Descry Status")
-    print("=" * 50)
-
-    # Graph status
-    if graph_path.exists():
-        mtime = graph_path.stat().st_mtime
-        age_hours = (time.time() - mtime) / 3600
-
-        with open(graph_path) as f:
-            data = json.load(f)
-        nodes = len(data.get("nodes", []))
-        edges = len(data.get("edges", []))
-
-        stale = " (STALE)" if age_hours > 24 else ""
-        print(f"Graph: {nodes:,} nodes, {edges:,} edges")
-        print(f"Updated: {age_hours:.1f} hours ago{stale}")
-        print(f"Size: {graph_path.stat().st_size / 1024 / 1024:.1f} MB")
-    else:
-        print(f"Graph: NOT FOUND at {graph_path}")
-        print("Run 'query_graph.py index' to generate.")
-        return
-
-    # SCIP status
-    print()
-    scip_dir = cache_dir / "scip"
-    if os.environ.get("DESCRY_NO_SCIP", "").lower() in ("1", "true"):
-        print("SCIP: Disabled (DESCRY_NO_SCIP=1)")
-    elif scip_dir.exists():
-        scip_files = list(scip_dir.glob("*.scip"))
-        if scip_files:
-            print(f"SCIP: Enabled ({len(scip_files)} project(s) indexed)")
-            for sf in scip_files[:5]:
-                print(f"  - {sf.name}")
-            if len(scip_files) > 5:
-                print(f"  ... and {len(scip_files) - 5} more")
-        else:
-            print("SCIP: Directory exists but no .scip files")
-    else:
-        print("SCIP: Not available (no scip/ directory)")
-
-    # Embeddings status
-    print()
-    if os.environ.get("DESCRY_NO_EMBEDDINGS", "").lower() in ("1", "true"):
-        print("Embeddings: Disabled (DESCRY_NO_EMBEDDINGS=1)")
-    else:
-        emb_files = list(cache_dir.glob("embeddings_*.npz"))
-        if emb_files:
-            emb_file = emb_files[0]
-            emb_age = (time.time() - emb_file.stat().st_mtime) / 3600
-            print(f"Embeddings: Ready ({emb_file.stat().st_size / 1024 / 1024:.1f} MB)")
-            print(f"  Updated: {emb_age:.1f} hours ago")
-        else:
-            print("Embeddings: Not generated")
-            print("  Will build on first semantic search")
-
-    print()
-    print(f"Cache dir: {cache_dir}")
-
-
-def _handle_index(graph_file: str, root_path: str) -> None:
-    """Handle the index command - regenerate the graph."""
-    import subprocess
-    from pathlib import Path
-
-    script_dir = Path(__file__).parent
-    generate_script = script_dir / "generate.py"
-
-    if not generate_script.exists():
-        print(f"Error: generate.py not found at {generate_script}")
-        sys.exit(1)
-
-    print(f"Regenerating codebase graph from {root_path}...")
-    print("This may take a few minutes for large codebases.")
-    print()
-
-    try:
-        result = subprocess.run(
-            ["uv", "run", str(generate_script), root_path],
-            cwd=root_path if root_path != "." else None,
-            timeout=600,  # 10 minute timeout
-        )
-        if result.returncode == 0:
-            print("\nIndex complete. Run 'status' to see details.")
-        else:
-            print(f"\nIndex failed with exit code {result.returncode}")
-            sys.exit(result.returncode)
-    except subprocess.TimeoutExpired:
-        print("\nError: Index timed out after 10 minutes.")
-        sys.exit(1)
-    except FileNotFoundError:
-        print(
-            "Error: 'uv' not found. Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
-        )
-        sys.exit(1)
-
-
-def _handle_semantic(graph_file: str, query: str, limit: int) -> None:
-    """Handle the semantic command - search using embeddings."""
-    from pathlib import Path
-
-    # Try to import embeddings
-    if os.environ.get("DESCRY_NO_EMBEDDINGS", "").lower() in ("1", "true"):
-        print("Semantic search disabled (DESCRY_NO_EMBEDDINGS=1)")
-        print("Falling back to keyword search...")
-        # Fall back to keyword search
-        q = GraphQuerier(graph_file)
-        results = q.search_docs(query.split())
-        for node in results[:limit]:
-            meta = node["metadata"]
-            print(f"\n[{node['type']}] {meta.get('name')}")
-            print(f"  ID: {node['id']}")
-        return
-
-    try:
-        from descry.embeddings import embeddings_available, SemanticSearcher
-
-        if not embeddings_available():
-            print("Embeddings not available (sentence-transformers not installed)")
-            print("Install with: pip install sentence-transformers numpy")
-            sys.exit(1)
-    except ImportError:
-        print("Embeddings module not found.")
-        print("Install with: pip install sentence-transformers numpy")
-        sys.exit(1)
-
-    graph_path = Path(graph_file)
-    if not graph_path.exists():
-        print(f"Graph not found at {graph_path}")
-        print("Run 'query_graph.py index' first.")
-        sys.exit(1)
-
-    print(f"Searching for: {query}")
-    print("(First search may take a moment to load embeddings...)")
-    print()
-
-    try:
-        searcher = SemanticSearcher(str(graph_path))
-        results = searcher.search(query, limit=limit)
-
-        if not results:
-            print("No semantic matches found.")
-            return
-
-        print(f"Found {len(results)} semantic matches:\n")
-        for node, score in results:
-            meta = node.get("metadata", {})
-            print(f"[{score:.3f}] [{node['type'][:3]}] {meta.get('name', 'unknown')}")
-            print(f"        {node['id']}")
-            if meta.get("docstring"):
-                doc_line = meta["docstring"].split("\n")[0][:60]
-                print(f"        {doc_line}...")
-            print()
-    except Exception as e:
-        print(f"Semantic search error: {e}")
-        sys.exit(1)
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Query the codebase knowledge graph",
-        epilog="""
-Examples:
-  # Check status and feature availability
-  %(prog)s status
-
-  # Find callers of a function (with SCIP resolution + fuzzy matching)
-  %(prog)s callers run_migrations
-
-  # Find what a function calls
-  %(prog)s callees "AppState::new"
-
-  # Keyword search (TF-IDF)
-  %(prog)s search dispatch queue
-
-  # Semantic search (requires embeddings)
-  %(prog)s semantic "authentication flow"
-
-  # Regenerate the graph
-  %(prog)s index
-
-Environment variables:
-  DESCRY_CACHE_DIR       Override cache location (default: .descry_cache)
-  DESCRY_LOG_LEVEL       Logging verbosity (DEBUG/INFO/WARNING/ERROR)
-  DESCRY_NO_SCIP         Set to 1 to disable SCIP resolution
-  DESCRY_NO_EMBEDDINGS   Set to 1 to disable semantic search
-
-Run from project root or set DESCRY_CACHE_DIR.
-""",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "-g",
-        "--graph",
-        dest="graph_file",
-        default=None,
-        help="Path to codebase_graph.json (auto-detected if not provided)",
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    # --- Status commands ---
-    subparsers.add_parser("status", help="Check graph status and feature availability")
-
-    p_index = subparsers.add_parser("index", help="Regenerate the codebase graph")
-    p_index.add_argument(
-        "--path", default=".", help="Root path to index (default: current directory)"
-    )
-
-    # --- Query commands ---
-    p_callers = subparsers.add_parser(
-        "callers", help="Find who calls a function (uses SCIP + fuzzy matching)"
-    )
-    p_callers.add_argument("name", help="Name of the function called")
-
-    p_callees = subparsers.add_parser("callees", help="Find what a function calls")
-    p_callees.add_argument("name", help="Name of the caller function")
-
-    # --- Search commands ---
-    p_search = subparsers.add_parser(
-        "search", help="Search names and docstrings (TF-IDF keyword search)"
-    )
-    p_search.add_argument("terms", nargs="+", help="Keywords to search")
-
-    p_semantic = subparsers.add_parser(
-        "semantic", help="Semantic search using embeddings (natural language)"
-    )
-    p_semantic.add_argument("query", help="Natural language query")
-    p_semantic.add_argument(
-        "--limit", type=int, default=10, help="Max results (default: 10)"
-    )
-
-    # --- Info commands ---
-    p_info = subparsers.add_parser("info", help="Get detailed info about a node")
-    p_info.add_argument("node_id", help="Exact Node ID")
-
-    p_struct = subparsers.add_parser("structure", help="Show structure of a file")
-    p_struct.add_argument("file", help="Filename (e.g., server.rs)")
-
-    p_context = subparsers.add_parser(
-        "context", help="Get full context (source + dependencies) for a node"
-    )
-    p_context.add_argument("node_id", help="Exact Node ID")
-
-    p_flatten = subparsers.add_parser("flatten", help="Flatten class hierarchy")
-    p_flatten.add_argument("node_id", help="Class Node ID")
-
-    args = parser.parse_args()
-
-    # Determine graph file path
-    graph_file = args.graph_file or _find_default_graph()
-
-    # Handle commands that don't need the graph loaded
-    if args.command == "status":
-        _handle_status(graph_file)
-        return
-
-    if args.command == "index":
-        _handle_index(graph_file, args.path)
-        return
-
-    # Load graph for other commands
-    try:
-        q = GraphQuerier(graph_file)
-    except FileNotFoundError:
-        print(f"Error: Could not find {graph_file}")
-        print("Run 'query_graph.py index' to generate the graph.")
-        sys.exit(1)
-
-    if args.command == "semantic":
-        _handle_semantic(graph_file, args.query, args.limit)
-        return
-
-    if args.command == "callers":
-        results = q.get_callers(args.name)
-        fuzzy_note = ""
-        # Try fuzzy matching if no exact matches
-        if not results:
-            results = q.get_callers(args.name, fuzzy=True)
-            if results:
-                fuzzy_note = " (fuzzy match)"
-        if not results:
-            print(f"No callers found for '{args.name}'")
-        else:
-            print(f"Callers of '{args.name}'{fuzzy_note}:")
-            for r in sorted(results):
-                # Get line number from node metadata
-                node_info = q.get_node_info(r)
-                if node_info:
-                    lineno = node_info.get("metadata", {}).get("lineno")
-                    if lineno:
-                        file_path = r.split("::")[0].replace("FILE:", "")
-                        print(f"  - {r} ({file_path}:{lineno})")
-                    else:
-                        print(f"  - {r}")
-                else:
-                    print(f"  - {r}")
-
-    elif args.command == "structure":
-        # Find file node
-        matches = q.find_nodes_by_name(args.file)
-        file_matches = [m for m in matches if m["type"] == "File"]
-
-        if not file_matches:
-            print(f"File '{args.file}' not found in graph.")
-        else:
-            node_id = file_matches[0]["id"]
-            print(f"Structure of {node_id}:")
-
-            # Imports
-            imports = []
-            for edge in q.outgoing[node_id]:
-                if edge["relation"] == "IMPORTS":
-                    imports.append(edge["target"].replace("MODULE:", ""))
-
-            if imports:
-                print("  Imports:")
-                for i in sorted(imports):
-                    print(f"    {i}")
-
-            # Definitions (Classes/Functions/Constants)
-            defs = []
-            for edge in q.outgoing[node_id]:
-                if edge["relation"] == "DEFINES":
-                    defs.append(q.nodes[edge["target"]])
-
-            classes = [d["metadata"]["name"] for d in defs if d["type"] == "Class"]
-            functions = [d["metadata"]["name"] for d in defs if d["type"] == "Function"]
-            constants = [d["metadata"]["name"] for d in defs if d["type"] == "Constant"]
-
-            if constants:
-                print("  Constants:")
-                for c in sorted(constants):
-                    print(f"    {c}")
-            if classes:
-                print("  Classes:")
-                for c in sorted(classes):
-                    print(f"    {c}")
-            if functions:
-                print("  Functions:")
-                for f in sorted(functions):
-                    print(f"    {f}")
-
-    elif args.command == "callees":
-        matches = q.find_nodes_by_name(args.name)
-        func_matches = [m for m in matches if m["type"] in ("Function", "Method")]
-        if not func_matches:
-            print(f"No function found for '{args.name}'")
-        else:
-            node = func_matches[0]
-            print(f"'{node['id']}' calls:")
-            callees = q.get_callees(node["id"])
-            for c in sorted(callees):
-                # Clean up unresolved refs for better readability
-                if c.startswith("REF:"):
-                    clean_name = _clean_ref_name(c.replace("REF:", ""))
-                    print(f"  - {clean_name} (External)")
-                else:
-                    print(f"  - {c}")
-
-    elif args.command == "search":
-        results = q.search_docs(args.terms)
-        print(f"Found {len(results)} matches for '{' '.join(args.terms)}':")
-        for node in results[:10]:  # Top 10
-            meta = node["metadata"]
-            print(f"\n[{node['type']}] {meta.get('name')}")
-            print(f"  ID: {node['id']}")
-            if meta.get("signature"):
-                print(f"  Sig: {meta['signature']}")
-            if meta.get("docstring"):
-                print(f"  Doc: {meta['docstring'].splitlines()[0]}...")
-            if node["type"] == "Constant":
-                print(f"  Val: {meta.get('value')}")
-
-    elif args.command == "info":
-        node = q.get_node_info(args.node_id)
-        if node:
-            print(json.dumps(node, indent=2))
-        else:
-            print("Node not found.")
-
-    elif args.command == "context":
-        print(q.get_context_prompt(args.node_id))
-
-    elif args.command == "flatten":
-        print(q.flatten_class(args.node_id))
-
-
-if __name__ == "__main__":
-    main()

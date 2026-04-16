@@ -24,6 +24,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from descry._env import safe_env
+
 if TYPE_CHECKING:
     from typing import Dict, List, Tuple
 
@@ -370,6 +372,7 @@ class ScipCacheManager:
                 text=True,
                 timeout=timeout_seconds,
                 cwd=str(self.project_root),
+                env=safe_env(),
             )
 
             if result.returncode == 0 and output_path.exists():
@@ -449,6 +452,7 @@ class ScipCacheManager:
                 text=True,
                 timeout=timeout_seconds,
                 cwd=str(package_path),
+                env=safe_env(),
             )
 
             if result.returncode == 0 and output_path.exists():
@@ -541,7 +545,7 @@ class ScipCacheManager:
                 text=True,
                 timeout=600,  # 10 minute timeout for cache priming
                 cwd=str(self.project_root),
-                env={**os.environ, "RUST_ANALYZER_THREADS": str(num_threads)},
+                env={**safe_env(), "RUST_ANALYZER_THREADS": str(num_threads)},
             )
             # analysis-stats returns non-zero for warnings (like cyclic deps)
             # but still warms the cache, so we consider it a success
@@ -598,25 +602,31 @@ class ScipCacheManager:
             raise ValueError(f"Unknown project type: {project_type}")
 
     def _hash_rust_crate(self, crate: str) -> str:
-        """Hash Rust crate sources for change detection.
+        """Hash Rust crate sources + toolchain for change detection.
 
         Hashes:
         - Cargo.toml (dependencies affect types)
+        - Workspace Cargo.lock (if present) — resolved dep versions affect types
         - All .rs files in the crate
-
-        Args:
-            crate: Name of the crate to hash
-
-        Returns:
-            16-character hex hash string
+        - Pinned rust toolchain and scip extra args (so cache invalidates when
+          the user changes either)
         """
         crate_path = self.project_root / crate
         hasher = hashlib.sha256()
+
+        # Hash pinned toolchain + extra args (cache-key component).
+        hasher.update(f"toolchain:{self._scip_toolchain or ''}".encode())
+        hasher.update(f"extra_args:{'|'.join(self._scip_extra_args)}".encode())
 
         # Hash Cargo.toml
         cargo_toml = crate_path / "Cargo.toml"
         if cargo_toml.exists():
             hasher.update(cargo_toml.read_bytes())
+
+        # Hash workspace Cargo.lock (resolved dependency versions affect types).
+        cargo_lock = self.project_root / "Cargo.lock"
+        if cargo_lock.exists():
+            hasher.update(cargo_lock.read_bytes())
 
         # Hash all .rs files (sorted for determinism)
         rs_files = sorted(crate_path.rglob("*.rs"))

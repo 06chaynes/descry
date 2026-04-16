@@ -48,8 +48,11 @@ class ScipIndex:
         # symbol_id -> (file_path, line_number)
         self.definitions: Dict[str, Tuple[str, int]] = {}
 
-        # (file_path, line) -> symbol_id
-        self.references: Dict[Tuple[str, int], str] = {}
+        # (file_path, line) -> list of symbol_ids (may be multiple if several
+        # crates contribute the same relative file). At resolve time we prefer
+        # a candidate whose extracted name matches ref_name, then fall back to
+        # the first.
+        self.references: Dict[Tuple[str, int], List[str]] = {}
 
         # symbol_id -> parsed symbol metadata
         self.symbols: Dict[str, dict] = {}
@@ -111,8 +114,15 @@ class ScipIndex:
                 if occ.symbol_roles & SYMBOL_ROLE_DEFINITION:
                     self.definitions[symbol_id] = (file_path, line)
 
-                # Store all occurrences for reverse lookup
-                self.references[(file_path, line)] = symbol_id
+                # Store all occurrences for reverse lookup. Append to a list
+                # so multi-crate workspaces that share relative filenames
+                # don't silently overwrite each other.
+                key = (file_path, line)
+                bucket = self.references.get(key)
+                if bucket is None:
+                    self.references[key] = [symbol_id]
+                elif symbol_id not in bucket:
+                    bucket.append(symbol_id)
 
             # Process symbol information
             for sym in doc.symbols:
@@ -200,23 +210,37 @@ class ScipIndex:
             self._resolution_stats[lang]["attempted"] += 1
 
         # Strategy 1: Try exact location lookup with full path
-        symbol_id = self.references.get((source_file, line))
+        candidates = self.references.get((source_file, line)) or []
 
         # Strategy 1b: Try with package-relative path
         # Descry uses: webapp/src/lib/stores/auth.ts
         # SCIP indexes:   src/lib/stores/auth.ts
-        if not symbol_id and "/" in source_file:
+        if not candidates and "/" in source_file:
             # Try stripping the first path component (package name)
             parts = source_file.split("/", 1)
             if len(parts) == 2:
                 relative_path = parts[1]
-                symbol_id = self.references.get((relative_path, line))
+                candidates = self.references.get((relative_path, line)) or []
 
-        if symbol_id and symbol_id in self.definitions:
-            def_file, def_line = self.definitions[symbol_id]
-            if lang in self._resolution_stats:
-                self._resolution_stats[lang]["resolved"] += 1
-            return self._to_node_id(symbol_id, def_file)
+        if candidates:
+            # Prefer a candidate whose extracted name matches ref_name (helps
+            # disambiguate multi-crate overlaps where several crates contribute
+            # the same (file, line) tuple).
+            chosen = None
+            for cid in candidates:
+                if cid in self.definitions and self._extract_name(cid) == ref_name:
+                    chosen = cid
+                    break
+            if chosen is None:
+                for cid in candidates:
+                    if cid in self.definitions:
+                        chosen = cid
+                        break
+            if chosen is not None:
+                def_file, def_line = self.definitions[chosen]
+                if lang in self._resolution_stats:
+                    self._resolution_stats[lang]["resolved"] += 1
+                return self._to_node_id(chosen, def_file)
 
         # Strategy 2: Try symbol name matching
         result = self._fuzzy_resolve(ref_name)

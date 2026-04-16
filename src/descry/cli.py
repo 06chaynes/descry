@@ -362,7 +362,7 @@ def main():
     sub.add_argument(
         "--mode",
         default="symbols",
-        choices=["symbols", "files"],
+        choices=["symbols", "files", "co-change"],
         help="Churn mode (default: symbols)",
     )
     sub.set_defaults(func=cmd_churn)

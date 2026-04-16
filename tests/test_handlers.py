@@ -189,6 +189,7 @@ class TestDescryServiceHealth:
     async def test_health_with_graph(self, tmp_path):
         config = DescryConfig(project_root=tmp_path, enable_embeddings=False)
         graph = {
+            "schema_version": 1,
             "nodes": [{"id": "n1", "type": "Function", "metadata": {"name": "f"}}],
             "edges": [],
         }

@@ -17,7 +17,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Topic :: Software Development :: Quality Assurance",
 ]
-dependencies = ["protobuf>=4.0.0"]
+dependencies = ["protobuf>=6.33.4"]
 
 [project.urls]
 Homepage = "https://github.com/06chaynes/descry"
@@ -25,11 +25,24 @@ Repository = "https://github.com/06chaynes/descry"
 Issues = "https://github.com/06chaynes/descry/issues"
 
 [project.optional-dependencies]
-mcp = ["mcp>=1.0.0"]
-web = ["starlette>=0.40.0", "uvicorn>=0.30.0"]
-embeddings = ["sentence-transformers>=2.2.0", "numpy>=1.24.0"]
+mcp = [
+    "mcp>=1.6.0",
+    # CVE floors on mcp transitive deps (constraints carry to users).
+    "pyjwt>=2.12.0",
+    "python-multipart>=0.0.26",
+]
+web = ["starlette>=0.47.2", "uvicorn>=0.32.0"]
+embeddings = ["sentence-transformers>=3.0.0", "numpy>=1.24.0"]
 all = ["descry[mcp,web,embeddings]"]
-dev = ["descry[all]", "pytest>=7.0.0", "pytest-asyncio>=0.21.0", "ruff>=0.1.0"]
+dev = [
+    "descry[all]",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+    "httpx>=0.27.0",
+    "pip-audit>=2.9.0",
+    "pygments>=2.20.0",
+]
 
 [project.scripts]
 descry = "descry.cli:main"

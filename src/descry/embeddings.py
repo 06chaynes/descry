@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.11"
-# dependencies = [
-#     "sentence-transformers>=2.2.0",
-#     "numpy>=1.24.0",
-# ]
-# ///
-"""
-Optional semantic search with embeddings for descry.
+"""Optional semantic search with embeddings for descry.
 
 Uses sentence-transformers for embedding generation and numpy for similarity.
 Falls back to TF-IDF search if dependencies are not available.
@@ -19,11 +11,64 @@ Usage:
         results = searcher.search("authentication logic", limit=10)
 """
 
+import contextlib
+import hashlib
 import json
 import logging
+import os
 import threading
+import time
 from pathlib import Path
 from typing import Optional
+
+
+try:
+    import fcntl as _fcntl  # Unix only
+except ImportError:
+    _fcntl = None
+
+
+@contextlib.contextmanager
+def _file_lock(lock_path: Path, timeout: float = 600.0):
+    """Cross-process advisory lock.
+
+    Uses fcntl.flock on Unix; falls back to atomic-create sentinel on
+    platforms without fcntl (Windows).
+    """
+    if _fcntl is not None:
+        with open(lock_path, "w") as f:
+            _fcntl.flock(f, _fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                _fcntl.flock(f, _fcntl.LOCK_UN)
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+        return
+
+    # Windows fallback: exclusive-create a sentinel file.
+    start = time.monotonic()
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            break
+        except FileExistsError:
+            if time.monotonic() - start > timeout:
+                raise TimeoutError(
+                    f"Timed out waiting for embeddings lock at {lock_path}"
+                )
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +89,35 @@ def embeddings_available() -> bool:
     return EMBEDDINGS_AVAILABLE
 
 
+def _load_sentence_transformer(
+    model_name: str,
+    revision: str | None = None,
+    trust_remote_code: bool | None = None,
+):
+    """Construct a SentenceTransformer with explicit trust/revision semantics.
+
+    The default model (Jina code embeddings) requires remote-code loading; its
+    revision is pinned for supply-chain integrity. User-supplied models (from
+    `.descry.toml` [embeddings] model) default to trust_remote_code=False.
+
+    Args:
+        model_name: Model repo id or local path.
+        revision: Pinned git sha for HF downloads; defaults to the pinned
+            DEFAULT_MODEL_REVISION when model_name matches MODEL_NAME.
+        trust_remote_code: Whether to allow model-provided Python code.
+            Defaults to True only for the bundled default model; False for
+            all user-supplied models.
+    """
+    if trust_remote_code is None:
+        trust_remote_code = model_name == SemanticSearcher.MODEL_NAME
+    if revision is None and model_name == SemanticSearcher.MODEL_NAME:
+        revision = SemanticSearcher.DEFAULT_MODEL_REVISION
+    kwargs: dict = {"trust_remote_code": trust_remote_code}
+    if revision:
+        kwargs["revision"] = revision
+    return SentenceTransformer(model_name, **kwargs)
+
+
 class SemanticSearcher:
     """Semantic search using sentence embeddings.
 
@@ -52,8 +126,13 @@ class SemanticSearcher:
     """
 
     # Code-optimized embedding model (896-dim, 494M params)
-    # Significantly better code search quality than general-purpose models
+    # Significantly better code search quality than general-purpose models.
+    # This model requires `trust_remote_code=True`; revision is pinned for
+    # supply-chain integrity (A.3 Option B).
     MODEL_NAME = "jinaai/jina-code-embeddings-0.5b"
+    # Pinned HF revision (git sha) for the default model. Update intentionally
+    # when upgrading; cache auto-invalidates via model-name hash in cache key.
+    DEFAULT_MODEL_REVISION = "4db235132dafbe56a8b9c5f59b59795ecf58a4a7"
 
     def __init__(
         self,
@@ -74,7 +153,7 @@ class SemanticSearcher:
         if not EMBEDDINGS_AVAILABLE:
             raise ImportError(
                 "Embeddings require sentence-transformers and numpy. "
-                "Install with: just descry-install-embeddings"
+                "Install with: pip install descry[embeddings]"
             )
 
         # Resolve to absolute path to avoid nested directory issues when CWD is inside cache
@@ -87,9 +166,10 @@ class SemanticSearcher:
         else:
             self.cache_dir = self.graph_path.parent / ".descry_cache"
 
-        # Load graph
-        with open(self.graph_path) as f:
-            self.data = json.load(f)
+        # Load graph (B.6: schema-checked)
+        from descry._graph import load_graph_with_schema
+
+        self.data = load_graph_with_schema(self.graph_path)
         self.nodes = self.data["nodes"]
 
         # Load or create embeddings
@@ -98,23 +178,32 @@ class SemanticSearcher:
         self.node_texts = None
         self._load_or_create_embeddings(force_rebuild=force_rebuild)
 
-    def _get_cache_path(self) -> Path:
-        """Get path for cached embeddings."""
-        graph_mtime = int(self.graph_path.stat().st_mtime)
-        return self.cache_dir / f"embeddings_{graph_mtime}.npz"
+    def _cache_key(self) -> str:
+        """Compute content-addressed cache key.
 
-    def _cleanup_old_embeddings(self, current_cache_path: Path):
-        """Remove old embedding cache files, keeping only the current one.
-
-        Args:
-            current_cache_path: The current/valid cache file to keep
+        Composition: int(mtime) + sha256[:16] of graph bytes + sha256[:8] of
+        model name. Model-hash component ensures A.3 model swap auto-invalidates
+        old caches.
         """
+        graph_mtime = int(self.graph_path.stat().st_mtime)
+        graph_hash = hashlib.sha256(self.graph_path.read_bytes()).hexdigest()[:16]
+        model_hash = hashlib.sha256(self.model_name.encode("utf-8")).hexdigest()[:8]
+        return f"{graph_mtime}_{graph_hash}_{model_hash}"
+
+    def _cache_paths(self) -> tuple[Path, Path]:
+        """Return (npz_path, json_sidecar_path) for the current cache key."""
+        key = self._cache_key()
+        return (
+            self.cache_dir / f"embeddings_{key}.npz",
+            self.cache_dir / f"embeddings_{key}.json",
+        )
+
+    def _cleanup_old_embeddings(self, keep: set[Path]):
+        """Remove embedding cache files not in the keep set."""
         try:
             old_files = [
-                f
-                for f in self.cache_dir.glob("embeddings_*.npz")
-                if f != current_cache_path
-            ]
+                f for f in self.cache_dir.glob("embeddings_*.npz") if f not in keep
+            ] + [f for f in self.cache_dir.glob("embeddings_*.json") if f not in keep]
             for old_file in old_files:
                 logger.info(f"Removing stale embedding cache: {old_file.name}")
                 old_file.unlink()
@@ -123,41 +212,80 @@ class SemanticSearcher:
         except Exception as e:
             logger.warning(f"Failed to cleanup old embeddings: {e}")
 
+    def _atomic_save(self, npz_path: Path, json_path: Path) -> None:
+        """Write .npz + JSON sidecar atomically (tmp then rename).
+
+        Note: np.savez appends '.npz' to paths that don't end in '.npz'.
+        We write to '<final>.tmp.npz' (which numpy preserves because the
+        suffix is already .npz) and then rename to the final path.
+        """
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        npz_tmp = npz_path.with_suffix(".tmp.npz")
+        json_tmp = json_path.with_suffix(".tmp.json")
+        cleanup = [npz_tmp, json_tmp]
+        try:
+            np.savez(npz_tmp, embeddings=self.embeddings)
+            with open(json_tmp, "w") as f:
+                json.dump({"texts": self.node_texts}, f)
+            os.replace(npz_tmp, npz_path)
+            os.replace(json_tmp, json_path)
+        finally:
+            for p in cleanup:
+                if p.exists():
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+
     def _load_or_create_embeddings(self, force_rebuild: bool = False):
         """Load embeddings from cache or create new ones.
 
-        Args:
-            force_rebuild: Skip cache and regenerate embeddings
+        Serialized via a cache-dir lockfile so concurrent processes (e.g.
+        descry-mcp + descry-web both starting on a cold cache) don't each
+        load the model and write to the same files.
         """
-        cache_path = self._get_cache_path()
+        npz_path, json_path = self._cache_paths()
 
-        if not force_rebuild and cache_path.exists():
-            # Load from cache
-            try:
-                data = np.load(cache_path, allow_pickle=True)
-                self.embeddings = data["embeddings"]
-                self.node_texts = data["texts"].tolist()
-                logger.info(f"Loaded {len(self.node_texts)} embeddings from cache")
-                # Cleanup old files on successful load
-                self._cleanup_old_embeddings(cache_path)
-                return
-            except Exception as e:
-                logger.warning(f"Cache load failed: {e}, regenerating...")
+        # Fast path: cache is hot, no lock needed.
+        if (
+            not force_rebuild
+            and npz_path.exists()
+            and json_path.exists()
+            and self._try_load_cache(npz_path, json_path)
+        ):
+            return
 
-        # Generate new embeddings
-        self._generate_embeddings()
-
-        # Save to cache
+        # Cold path: acquire a cross-process lock, recheck, then generate.
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        np.savez(
-            cache_path,
-            embeddings=self.embeddings,
-            texts=np.array(self.node_texts, dtype=object),
-        )
-        logger.info(f"Cached {len(self.node_texts)} embeddings to {cache_path}")
+        lock_path = self.cache_dir / "embeddings.lock"
+        with _file_lock(lock_path):
+            if (
+                not force_rebuild
+                and npz_path.exists()
+                and json_path.exists()
+                and self._try_load_cache(npz_path, json_path)
+            ):
+                return
 
-        # Cleanup old embedding files after creating new one
-        self._cleanup_old_embeddings(cache_path)
+            self._generate_embeddings()
+            self._atomic_save(npz_path, json_path)
+            logger.info(f"Cached {len(self.node_texts)} embeddings to {npz_path}")
+            self._cleanup_old_embeddings(keep={npz_path, json_path})
+
+    def _try_load_cache(self, npz_path: Path, json_path: Path) -> bool:
+        """Attempt to load embeddings from cache. Returns True on success."""
+        try:
+            data = np.load(npz_path, allow_pickle=False)
+            self.embeddings = data["embeddings"]
+            with open(json_path) as f:
+                sidecar = json.load(f)
+            self.node_texts = sidecar["texts"]
+            logger.info(f"Loaded {len(self.node_texts)} embeddings from cache")
+            self._cleanup_old_embeddings(keep={npz_path, json_path})
+            return True
+        except Exception as e:
+            logger.warning(f"Cache load failed: {e}, regenerating...")
+            return False
 
     def _generate_embeddings(self):
         """Generate weighted composite embeddings for all nodes.
@@ -171,7 +299,7 @@ class SemanticSearcher:
         Weights: name=0.2, signature=0.3, docstring=0.5
         """
         logger.info("Loading embedding model...")
-        self.model = SentenceTransformer(self.model_name)
+        self.model = _load_sentence_transformer(self.model_name)
 
         # Collect texts for each component
         names = []
@@ -185,20 +313,6 @@ class SemanticSearcher:
             name = meta.get("name", "") or node["id"].split("::")[-1]
             sig = meta.get("signature", "")
             doc = meta.get("docstring", "")[:500]
-
-            # Add caller context to help disambiguation
-            # e.g., "Token" used in auth context vs lexer context
-            in_degree = meta.get("in_degree", 0)
-            if in_degree > 0 and doc:
-                # Note: We can't get actual caller names without loading the graph edges
-                # So we'll use the node type and path for context
-                node_id = node.get("id", "")
-                if "auth" in node_id.lower():
-                    doc += " Used in authentication context."
-                elif "token" in node_id.lower() and "lex" in node_id.lower():
-                    doc += " Used in lexer/tokenizer context."
-                elif "deploy" in node_id.lower():
-                    doc += " Used in deployment context."
 
             names.append(name)
             signatures.append(sig if sig else name)  # Fall back to name if no signature
@@ -262,7 +376,7 @@ class SemanticSearcher:
         import math
 
         if self.model is None:
-            self.model = SentenceTransformer(self.model_name)
+            self.model = _load_sentence_transformer(self.model_name)
 
         # Encode query
         query_embedding = self.model.encode([query], convert_to_numpy=True)[0]
@@ -314,7 +428,7 @@ class SemanticSearcher:
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:limit]
 
-    def find_similar(self, node_id: str, limit: int = 5) -> list:
+    def _find_similar(self, node_id: str, limit: int = 5) -> list:
         """Find nodes semantically similar to a given node.
 
         Args:
@@ -361,7 +475,7 @@ _cached_searcher = None
 _searcher_lock = threading.Lock()
 
 
-def semantic_search(
+def _semantic_search(
     query: str,
     graph_path: str = ".descry_cache/codebase_graph.json",
     limit: int = 10,
@@ -395,11 +509,8 @@ def get_embeddings_status(
 ) -> dict:
     """Get embeddings status for diagnostics.
 
-    Args:
-        graph_path: Path to the graph file
-
-    Returns:
-        Dictionary with status information
+    Reports whether a cache exists for the current graph and counts node
+    texts via the JSON sidecar (no np.load of user-controlled .npz).
     """
     graph_path = Path(graph_path).resolve()
     cache_dir = graph_path.parent
@@ -412,31 +523,33 @@ def get_embeddings_status(
         "cache_path": None,
     }
 
-    if not EMBEDDINGS_AVAILABLE:
+    if not EMBEDDINGS_AVAILABLE or not graph_path.exists():
         return status
 
-    if not graph_path.exists():
-        return status
+    # Any embedding file (npz + matching json sidecar) counts; report the
+    # most recent pair. No np.load — just read the JSON sidecar for count.
+    npz_files = sorted(
+        cache_dir.glob("embeddings_*.npz"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for npz_file in npz_files:
+        sidecar = npz_file.with_suffix(".json")
+        if sidecar.exists():
+            status["cached"] = True
+            status["cache_path"] = str(npz_file)
+            try:
+                with open(sidecar) as f:
+                    texts = json.load(f).get("texts", [])
+                status["node_count"] = len(texts)
+            except Exception:
+                pass
+            return status
 
-    # Find embedding cache file
-    graph_mtime = int(graph_path.stat().st_mtime)
-    cache_path = cache_dir / f"embeddings_{graph_mtime}.npz"
-
-    if cache_path.exists():
-        status["cached"] = True
-        status["cache_path"] = str(cache_path)
-        try:
-            data = np.load(cache_path, allow_pickle=True)
-            status["node_count"] = len(data["texts"])
-        except Exception:
-            pass
-    else:
-        # Check for any embedding files (might be stale)
-        embedding_files = list(cache_dir.glob("embeddings_*.npz"))
-        if embedding_files:
-            status["stale"] = True
-            latest = max(embedding_files, key=lambda p: p.stat().st_mtime)
-            status["cache_path"] = str(latest)
+    # Fallback: orphan npz (no sidecar) is stale
+    if npz_files:
+        status["stale"] = True
+        status["cache_path"] = str(npz_files[0])
 
     return status
 
@@ -447,7 +560,7 @@ if __name__ == "__main__":
 
     if not EMBEDDINGS_AVAILABLE:
         print("Embeddings not available. Install with:")
-        print("  just descry-install-embeddings")
+        print("  pip install descry[embeddings]")
         sys.exit(1)
 
     if len(sys.argv) < 2:
@@ -455,7 +568,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     query = " ".join(sys.argv[1:])
-    results = semantic_search(query)
+    results = _semantic_search(query)
 
     print(f"\nSemantic search results for: '{query}'")
     print("-" * 50)

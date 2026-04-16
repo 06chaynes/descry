@@ -8,6 +8,7 @@ import pytest
 def sample_graph(tmp_path):
     """Create a minimal graph for testing."""
     graph = {
+        "schema_version": 1,
         "nodes": [
             {
                 "id": "FILE:test.py::add",

@@ -101,6 +101,7 @@ class TestGitHistoryBuildFileLineMap:
     def test_maps_lines_to_symbols(self):
         # Create a mock querier with graph data
         graph_data = {
+            "schema_version": 1,
             "nodes": [
                 {
                     "id": "FILE:src/auth.rs::validate_token",

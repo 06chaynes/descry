@@ -515,6 +515,7 @@ class TestCrateFilter:
     def multi_package_graph(self):
         """Create a graph with nodes from multiple packages (mirrors descry's own structure)."""
         graph = {
+            "schema_version": 1,
             "nodes": [
                 # src/descry package (Python)
                 {
@@ -653,6 +654,7 @@ class TestExcludeTestsFilter:
     def graph_with_tests(self):
         """Create a graph with both production and test nodes."""
         graph = {
+            "schema_version": 1,
             "nodes": [
                 # Production files
                 {
@@ -774,6 +776,7 @@ class TestRaisedThresholds:
         source_file.write_text("".join(lines))
 
         graph = {
+            "schema_version": 1,
             "nodes": [
                 {
                     "id": f"FILE:{source_file}::large_function",

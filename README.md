@@ -223,6 +223,29 @@ Requires [uv](https://github.com/astral-sh/uv) and [just](https://github.com/cas
 
 4. **Freshness** — `ensure` checks graph age against `max_stale_hours` and regenerates if needed. The MCP server pre-warms the graph on startup.
 
+## Design Notes
+
+### Web UI is local-only (CORS + auth)
+
+`descry-web` is designed as a single-user local development tool. It binds to `127.0.0.1` by default, allows cross-origin requests (`allow_origins=["*"]`), and does not require authentication. This is deliberate:
+
+- The UI is served by the same process that reads your repository; any authentication layer would be a shared-secret between your browser and your own terminal.
+- Path traversal and file-serving endpoints are hardened independently of CORS: `/api/source` enforces project-root containment, rejects non-regular files, caps size at 10 MiB, and refuses non-text content (with `O_NOFOLLOW` on the final open to defeat symlink swaps).
+- The reindex endpoints accept no path parameter; they always index the configured project root.
+
+**Do not expose `descry-web` to an untrusted network.** If you need remote access, put it behind your own authenticated reverse proxy.
+
+## Versioning
+
+Descry is pre-1.0. Minor version bumps (`0.1.x` → `0.2.x`) may include breaking changes to the library API, graph schema, CLI, or MCP tool signatures. Patch releases (`0.1.0` → `0.1.1`) will not introduce breaking changes. Once we reach `1.0.0`, the project will follow [semver](https://semver.org/) strictly.
+
+The public library API in v0.1 is limited to `descry.__version__`. Submodules (`descry.handlers`, `descry.query`, etc.) are not considered stable API yet.
+
+## Further Reading
+
+- [CHANGELOG](CHANGELOG.md) — release notes.
+- [SECURITY](SECURITY.md) — security policy and disclosure.
+
 ## License
 
 MIT

@@ -1196,7 +1196,13 @@ class PythonParser(BaseParser):
 
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             func_id = f"{parent_id}::{node.name}"
-            is_method = "::" in parent_id.split("FILE:")[1]
+            # D.1: a function is a method iff its enclosing parent node is a Class.
+            # Previous logic used string matching on parent_id which incorrectly
+            # classified nested functions inside other functions as Methods.
+            parent_node = next(
+                (n for n in self.builder.nodes if n["id"] == parent_id), None
+            )
+            is_method = parent_node is not None and parent_node["type"] == "Class"
             node_type = "Method" if is_method else "Function"
 
             args = self._get_args_info(node.args)
@@ -1999,8 +2005,11 @@ class TSParser(BaseParser):
         re_getter_setter = re.compile(
             r"^\s*(?:private|public|protected)?\s*(?:static\s+)?(get|set)\s+([a-zA-Z0-9_]+)\s*[(]"
         )
+        # D.4: merged alternation to avoid ReDoS. Previous pattern
+        # (?:[^)]*|[^=]*) had overlapping unbounded alternatives which could
+        # produce catastrophic backtracking on pathological long lines.
         re_const_arrow = re.compile(
-            r"^\s*(?:export\s+)?const\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?(?:[^)]*|[^=]*)\s*=>"
+            r"^\s*(?:export\s+)?const\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?[^)=]*\s*=>"
         )
         re_enum = re.compile(r"^\s*(?:export\s+)?enum\s+([a-zA-Z0-9_]+)")
         re_const = re.compile(
@@ -2537,23 +2546,62 @@ class CodeGraphBuilder:
         self.edges.append(edge)
 
     def get_rel_path(self, path):
+        # Always use forward-slash separators in node IDs so the graph is
+        # cross-platform (node IDs generated on Windows remain readable and
+        # queryable on Linux/macOS, and vice versa).
         try:
-            return str(path.relative_to(self.root_dir))
+            return path.relative_to(self.root_dir).as_posix()
         except ValueError:
-            return str(path)
+            return Path(path).as_posix()
 
     def process_directory(self):
-        for root, dirs, files in os.walk(self.root_dir):
+        # Resolve root once; reject entering any child directory whose resolved
+        # path escapes the project root (defends against malicious symlinks).
+        root_real = Path(self.root_dir).resolve()
+        for root, dirs, files in os.walk(self.root_dir, followlinks=False):
             dirs.sort()
             files.sort()
+            # Filter by name first (excluded dirs, dotfiles).
             dirs[:] = [
                 d for d in dirs if not d.startswith(".") and d not in self.excluded_dirs
             ]
+            # Then filter by realpath containment — drop directories that are
+            # symlinks pointing outside the project root.
+            safe_dirs = []
+            for d in dirs:
+                try:
+                    child_real = (Path(root) / d).resolve(strict=False)
+                    if child_real == root_real or root_real in child_real.parents:
+                        safe_dirs.append(d)
+                    else:
+                        logger.warning(
+                            "Skipping %s — escapes project root via symlink",
+                            child_real,
+                        )
+                except OSError:
+                    continue
+            dirs[:] = safe_dirs
             for file in files:
                 file_path = Path(root) / file
-                rel_path = self.get_rel_path(file_path)
+                # Same containment check for files (catches symlink files).
                 try:
-                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    file_real = file_path.resolve(strict=False)
+                    if not (file_real == root_real or root_real in file_real.parents):
+                        logger.warning(
+                            "Skipping %s — escapes project root via symlink",
+                            file_real,
+                        )
+                        continue
+                except OSError:
+                    continue
+                rel_path = self.get_rel_path(file_path)
+                # O_NOFOLLOW on the final open so a post-check symlink swap
+                # can't redirect us outside the project root. Mirrors the
+                # api_source hardening in web/server.py.
+                try:
+                    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                    fd = os.open(str(file_path), flags)
+                    with os.fdopen(fd, "r", encoding="utf-8", errors="ignore") as f:
                         content = f.read()
                 except OSError as e:
                     logger.warning(f"Cannot read {rel_path}: {e.strerror}")
@@ -2574,16 +2622,32 @@ class CodeGraphBuilder:
                 ):
                     TSParser(self).parse(file_path, rel_path, content)
                 elif file.endswith(".svelte"):
-                    if "<script" in content:
-                        parts = content.split("<script")
-                        if len(parts) > 1:
-                            idx = parts[1].find(">")
-                            if idx != -1:
-                                TSParser(self).parse(
-                                    file_path,
-                                    rel_path,
-                                    parts[1][idx + 1 :].split("</script>")[0],
-                                )
+                    # D.2: iterate all <script> blocks and shift each block's
+                    # parsed linenos by its offset within the .svelte file.
+                    pos = 0
+                    while True:
+                        start_tag = content.find("<script", pos)
+                        if start_tag == -1:
+                            break
+                        gt = content.find(">", start_tag)
+                        if gt == -1:
+                            break
+                        close = content.find("</script>", gt)
+                        if close == -1:
+                            break
+                        body = content[gt + 1 : close]
+                        # Lines before the script body (the character after '>').
+                        line_offset = content.count("\n", 0, gt + 1)
+                        before = len(self.nodes)
+                        TSParser(self).parse(file_path, rel_path, body)
+                        # Shift newly-added node linenos by the offset.
+                        for node in self.nodes[before:]:
+                            meta = node.get("metadata", {})
+                            for k in ("lineno", "end_lineno"):
+                                v = meta.get(k)
+                                if isinstance(v, int):
+                                    meta[k] = v + line_offset
+                        pos = close + len("</script>")
 
     def _get_language(self, node_id: str) -> str:
         """Extract language from node ID based on file extension."""
@@ -2863,6 +2927,8 @@ class CodeGraphBuilder:
             output_path: Path to write the graph JSON
             scip_index: Optional ScipIndex for type-aware resolution
         """
+        from descry._graph import CURRENT_SCHEMA
+
         self.resolve_references(scip_index=scip_index)
         in_degree = {}
         for edge in self.edges:
@@ -2872,7 +2938,15 @@ class CodeGraphBuilder:
         for node in self.nodes:
             node["metadata"]["in_degree"] = in_degree.get(node["id"], 0)
         with open(output_path, "w", encoding="utf-8") as f:
-            json.dump({"nodes": self.nodes, "edges": self.edges}, f, indent=2)
+            json.dump(
+                {
+                    "schema_version": CURRENT_SCHEMA,
+                    "nodes": self.nodes,
+                    "edges": self.edges,
+                },
+                f,
+                indent=2,
+            )
         logger.info(
             "Graph exported to %s. Stats: %d nodes, %d edges",
             output_path,
@@ -2904,29 +2978,44 @@ def main():
 
     target = args.path
 
-    # Load config from .descry.toml if present
-    from descry.handlers import DescryConfig
+    # Load config: auto-detect from target dir, apply .descry.toml, then
+    # apply env vars (DESCRY_CACHE_DIR, DESCRY_NO_SCIP, DESCRY_NO_EMBEDDINGS,
+    # etc.). Calling from_env() directly would use Path.cwd() which may
+    # differ from the target directory, so we replicate its logic explicitly.
+    from descry.handlers import DescryConfig, _env
+
+    # Handle SCIP opt-out CLI flag before from_env reads the env.
+    if args.no_scip:
+        os.environ["DESCRY_NO_SCIP"] = "1"
 
     config = DescryConfig(project_root=Path(target).resolve())
     toml_data = DescryConfig._load_toml(config.project_root)
     config._apply_toml(toml_data)
-    config_excluded_dirs = config.excluded_dirs if toml_data else None
 
-    # Handle SCIP opt-out
-    if args.no_scip:
-        os.environ["DESCRY_NO_SCIP"] = "1"
+    # Apply env var overrides (mirrors DescryConfig.from_env).
+    cache_dir_str = _env("DESCRY_CACHE_DIR")
+    if cache_dir_str:
+        config.cache_dir = Path(cache_dir_str)
+    if _env("DESCRY_NO_SCIP").lower() in ("1", "true", "yes"):
+        config.enable_scip = False
+    if _env("DESCRY_NO_EMBEDDINGS").lower() in ("1", "true", "yes"):
+        config.enable_embeddings = False
 
-    # Create cache directory if it doesn't exist
-    cache_dir = Path(".descry_cache")
-    cache_dir.mkdir(exist_ok=True)
+    # B.3: always pass config.excluded_dirs so non-TOML projects still get
+    # the full default exclusion set.
+    config_excluded_dirs = config.excluded_dirs
+
+    # B.3: respect config.cache_dir instead of hardcoded ".descry_cache"
+    cache_dir = config.cache_dir
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Build the graph
     builder = CodeGraphBuilder(target, excluded_dirs=config_excluded_dirs)
     builder.process_directory()
 
-    # Generate SCIP indices if available
+    # Generate SCIP indices if available and enabled
     scip_index = None
-    if SCIP_SUPPORT_LOADED and scip_available():
+    if config.enable_scip and SCIP_SUPPORT_LOADED and scip_available():
         try:
             scip_status = get_scip_status()
             indexers = scip_status.get("indexers", {})
@@ -2940,6 +3029,7 @@ def main():
                 scip_extra_args=config.scip_extra_args,
                 scip_skip_crates=config.scip_skip_crates,
                 scip_toolchain=config.scip_rust_toolchain,
+                scip_timeout_minutes=config.scip_timeout_minutes,
             )
             # Generate SCIP for all supported languages (Rust and TypeScript)
             scip_files = list(cache_manager.update_all().values())
@@ -2966,15 +3056,19 @@ def main():
     graph_path = cache_dir / "codebase_graph.json"
     builder.export(str(graph_path), scip_index=scip_index)
 
-    # Generate embeddings for semantic search (if dependencies available)
-    no_embeddings = os.environ.get("DESCRY_NO_EMBEDDINGS", "")
-    if no_embeddings.lower() not in ("1", "true", "yes"):
+    # Generate embeddings for semantic search (if dependencies available and enabled)
+    if config.enable_embeddings:
         try:
             from descry.embeddings import embeddings_available, SemanticSearcher
 
             if embeddings_available():
                 logger.info("Generating embeddings for semantic search...")
-                searcher = SemanticSearcher(str(graph_path), force_rebuild=True)
+                # B.3: respect config.embedding_model
+                searcher = SemanticSearcher(
+                    str(graph_path),
+                    force_rebuild=True,
+                    model_name=config.embedding_model,
+                )
                 logger.info(
                     f"Embeddings generated: {len(searcher.nodes)} nodes indexed"
                 )
