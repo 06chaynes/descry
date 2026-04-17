@@ -88,7 +88,13 @@ jobs:
           name: dist
           path: dist/
       - name: Publish to TestPyPI via OIDC
-        uses: pypa/gh-action-pypi-publish@6733eb7d741f0b11ec6a39b58540dab7590f9b7d # v1.14.0
+        # NOTE: this is a Docker container action — its GHCR image is only
+        # tagged with release refs, never commit SHAs. Pinning to a commit
+        # SHA here fails with "manifest unknown" because no image at that
+        # digest exists. Pinning to the version tag is the documented
+        # approach; PyPA controls this tag and tag mutation would be a
+        # notable event we'd catch via the trusted-publisher audit log.
+        uses: pypa/gh-action-pypi-publish@v1.14.0
         with:
           repository-url: https://test.pypi.org/legacy/
 
@@ -108,4 +114,10 @@ jobs:
           name: dist
           path: dist/
       - name: Publish to PyPI via OIDC
-        uses: pypa/gh-action-pypi-publish@6733eb7d741f0b11ec6a39b58540dab7590f9b7d # v1.14.0
+        # NOTE: this is a Docker container action — its GHCR image is only
+        # tagged with release refs, never commit SHAs. Pinning to a commit
+        # SHA here fails with "manifest unknown" because no image at that
+        # digest exists. Pinning to the version tag is the documented
+        # approach; PyPA controls this tag and tag mutation would be a
+        # notable event we'd catch via the trusted-publisher audit log.
+        uses: pypa/gh-action-pypi-publish@v1.14.0
