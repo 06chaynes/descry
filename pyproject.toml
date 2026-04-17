@@ -1,5 +1,5 @@
 [project]
-name = "descry"
+name = "descry-codegraph"
 version = "0.1.0"
 description = "Codebase knowledge graph: polyglot indexer, semantic search, call-graph analysis"
 requires-python = ">=3.11"
@@ -33,9 +33,9 @@ mcp = [
 ]
 web = ["starlette>=0.47.2", "uvicorn>=0.32.0"]
 embeddings = ["sentence-transformers>=3.0.0", "numpy>=1.24.0"]
-all = ["descry[mcp,web,embeddings]"]
+all = ["descry-codegraph[mcp,web,embeddings]"]
 dev = [
-    "descry[all]",
+    "descry-codegraph[all]",
     "pytest>=9.0.3",
     "pytest-asyncio>=0.21.0",
     "ruff>=0.1.0",

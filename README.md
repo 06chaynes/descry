@@ -35,7 +35,7 @@ Descry indexes your codebase into a knowledge graph of symbols (functions, class
 
 ```bash
 # Install with all optional features
-pip install descry[all]
+pip install descry-codegraph[all]
 
 # Index your project
 cd your-project
@@ -200,31 +200,31 @@ SCIP provides precise call-graph resolution (resolving which specific function i
 ### Minimal (graph + CLI only)
 
 ```bash
-pip install descry
+pip install descry-codegraph
 ```
 
 ### With MCP server
 
 ```bash
-pip install descry[mcp]
+pip install descry-codegraph[mcp]
 ```
 
 ### With Web UI
 
 ```bash
-pip install descry[web]
+pip install descry-codegraph[web]
 ```
 
 ### With semantic search
 
 ```bash
-pip install descry[embeddings]
+pip install descry-codegraph[embeddings]
 ```
 
 ### Everything
 
 ```bash
-pip install descry[all]
+pip install descry-codegraph[all]
 ```
 
 ### Development

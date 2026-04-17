@@ -153,7 +153,7 @@ class SemanticSearcher:
         if not EMBEDDINGS_AVAILABLE:
             raise ImportError(
                 "Embeddings require sentence-transformers and numpy. "
-                "Install with: pip install descry[embeddings]"
+                "Install with: pip install descry-codegraph[embeddings]"
             )
 
         # Resolve to absolute path to avoid nested directory issues when CWD is inside cache
@@ -560,7 +560,7 @@ if __name__ == "__main__":
 
     if not EMBEDDINGS_AVAILABLE:
         print("Embeddings not available. Install with:")
-        print("  pip install descry[embeddings]")
+        print("  pip install descry-codegraph[embeddings]")
         sys.exit(1)
 
     if len(sys.argv) < 2:
