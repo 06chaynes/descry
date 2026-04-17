@@ -1399,7 +1399,6 @@ class TypeScriptSymbolTable:
             project_root: Root directory of the project
         """
         self.file_path = file_path
-        self.file_dir = os.path.dirname(file_path)
         self.project_root = project_root
 
         # local_name -> (module_path, import_type)

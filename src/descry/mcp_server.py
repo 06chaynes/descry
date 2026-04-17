@@ -94,8 +94,13 @@ _service: DescryService | None = None
 
 
 @asynccontextmanager
-async def server_lifespan(server: FastMCP):
-    """Pre-warm graph and embeddings on startup."""
+async def server_lifespan(_server: FastMCP):
+    """Pre-warm graph and embeddings on startup.
+
+    ``_server`` is the required lifespan-hook parameter injected by
+    FastMCP; the hook only mutates module-level state, so the arg is
+    intentionally unused.
+    """
     global _service
     config = DescryConfig.from_env()
     _service = DescryService(config)

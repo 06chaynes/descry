@@ -354,29 +354,3 @@ def extract_imports_typescript(file_path: str) -> dict:
             continue
 
     return result
-
-
-def extract_imports_typescript_batch(file_paths: list) -> dict:
-    """Extract imports from multiple TypeScript files efficiently.
-
-    Processes files individually but caches results for repeated calls.
-
-    Args:
-        file_paths: List of file paths to process
-
-    Returns:
-        Dict mapping file paths to their import data:
-        {
-            "path/to/file.ts": {
-                "imports": {"name": ("module", "type")},
-                "namespaces": {"alias": "module"},
-            }
-        }
-    """
-    results = {}
-    for file_path in file_paths:
-        try:
-            results[file_path] = extract_imports_typescript(file_path)
-        except Exception:
-            results[file_path] = {"imports": {}, "namespaces": {}}
-    return results

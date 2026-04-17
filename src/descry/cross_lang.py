@@ -185,7 +185,7 @@ class CrossLangTracer:
             return self.path_to_operation[key]["operationId"]
 
         # Try pattern matching for paths with IDs
-        for pattern_method, template_path, pattern, info in self.endpoint_patterns:
+        for pattern_method, _, pattern, info in self.endpoint_patterns:
             if pattern_method == method_upper and pattern.match(path):
                 return info["operationId"]
 
@@ -195,21 +195,6 @@ class CrossLangTracer:
         if stripped is not None:
             return self.endpoint_to_handler(method, stripped)
 
-        return None
-
-    def endpoint_to_node_id(self, method: str, path: str) -> Optional[str]:
-        """Find the graph node ID for a backend handler.
-
-        Args:
-            method: HTTP method
-            path: API path
-
-        Returns:
-            Full node ID (e.g., "FILE:backend/src/routes/actions/handlers.rs::list_actions")
-        """
-        op_id = self.endpoint_to_handler(method, path)
-        if op_id:
-            return self.operation_to_handler.get(op_id)
         return None
 
     def get_handler_info(self, method: str, path: str) -> Optional[dict]:
@@ -227,7 +212,7 @@ class CrossLangTracer:
             return info
 
         # Try pattern matching
-        for pattern_method, template_path, pattern, info in self.endpoint_patterns:
+        for pattern_method, _, pattern, info in self.endpoint_patterns:
             if pattern_method == method_upper and pattern.match(path):
                 result = info.copy()
                 result["node_id"] = self.operation_to_handler.get(info["operationId"])
@@ -347,43 +332,6 @@ class CrossLangTracer:
             "openapi_path": str(self.openapi_path),
             "graph_path": str(self.graph_path) if self.graph_path else None,
         }
-
-
-def _create_cross_lang_edges(
-    graph_data: dict,
-    openapi_path: str,
-) -> list[dict]:
-    """Create CALLS_API edges linking frontend to backend handlers.
-
-    This can be used during graph generation to add cross-language edges.
-
-    Args:
-        graph_data: Current graph data (nodes and edges)
-        openapi_path: Path to OpenAPI spec
-
-    Returns:
-        List of new edges to add
-    """
-    tracer = CrossLangTracer(openapi_path)
-    api_calls = tracer.find_ts_api_calls(graph_data)
-
-    edges = []
-    for call in api_calls:
-        if call.get("rust_node_id"):
-            edges.append(
-                {
-                    "source": call["ts_node_id"],
-                    "target": call["rust_node_id"],
-                    "relation": "CALLS_API",
-                    "metadata": {
-                        "endpoint": call["inferred_endpoint"],
-                        "method": call["inferred_method"],
-                        "handler": call["rust_handler"],
-                    },
-                }
-            )
-
-    return edges
 
 
 if __name__ == "__main__":

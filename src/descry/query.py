@@ -19,7 +19,6 @@ MAX_CHILDREN_PER_LEVEL = 10  # Branching limit per level
 # Token budgets and thresholds
 DEFAULT_TOKEN_BUDGET = 2000  # Default token budget for expanded callees
 CALLEE_INLINE_THRESHOLD = 150  # Inline callees smaller than this (was 100)
-MAX_INLINE_THRESHOLD = 300  # Maximum allowed inline threshold
 MAX_CALLERS_SHOWN = 15  # Maximum callers to show in context
 
 # Timeout (milliseconds)

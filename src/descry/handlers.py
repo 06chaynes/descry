@@ -174,14 +174,7 @@ class DescryConfig:
     max_stale_hours: float = 24
     enable_scip: bool = True
     enable_embeddings: bool = True
-    # Opt-in: use tree-sitter for TS/TSX/JS first-pass parsing. Requires
-    # descry-codegraph[ast]. Falls back to regex per-file when the grammar
-    # hits errors or the extra isn't installed.
-    use_tree_sitter_ts: bool = False
     openapi_path: Path | None = None
-    project_markers: list[str] = field(
-        default_factory=lambda: list(_DEFAULT_PROJECT_MARKERS)
-    )
     backend_handler_patterns: list[str] = field(default_factory=list)
     frontend_api_patterns: list[str] = field(default_factory=list)
     api_prefixes: list[str] = field(default_factory=lambda: list(_DEFAULT_API_PREFIXES))
@@ -316,8 +309,6 @@ class DescryConfig:
             self.enable_scip = features["enable_scip"]
         if "enable_embeddings" in features:
             self.enable_embeddings = features["enable_embeddings"]
-        if "use_tree_sitter_ts" in features:
-            self.use_tree_sitter_ts = features["use_tree_sitter_ts"]
 
         # [embeddings]
         embeddings = data.get("embeddings", {})
@@ -387,6 +378,41 @@ class DescryConfig:
                 )
         if "skip_crates" in scip:
             self.scip_skip_crates = scip["skip_crates"]
+
+        # [cross_lang]
+        cross_lang = data.get("cross_lang", {})
+        if "backend_handler_patterns" in cross_lang:
+            patterns = cross_lang["backend_handler_patterns"]
+            if isinstance(patterns, list):
+                self.backend_handler_patterns = [str(p) for p in patterns]
+        if "frontend_api_patterns" in cross_lang:
+            patterns = cross_lang["frontend_api_patterns"]
+            if isinstance(patterns, list):
+                self.frontend_api_patterns = [str(p) for p in patterns]
+        if "api_prefixes" in cross_lang:
+            prefixes = cross_lang["api_prefixes"]
+            if isinstance(prefixes, list):
+                self.api_prefixes = [str(p) for p in prefixes]
+        if "openapi_path" in cross_lang:
+            raw = cross_lang["openapi_path"]
+            if isinstance(raw, str) and raw:
+                candidate = Path(raw)
+                if not candidate.is_absolute():
+                    candidate = self.project_root / candidate
+                # Containment check: keep the spec inside project_root so a
+                # crafted .descry.toml can't point descry at arbitrary files.
+                try:
+                    resolved = candidate.resolve(strict=False)
+                    root = self.project_root.resolve()
+                    if resolved == root or root in resolved.parents:
+                        self.openapi_path = resolved
+                    else:
+                        logger.warning(
+                            f"[cross_lang] openapi_path {raw!r} resolves outside "
+                            f"project root; ignoring"
+                        )
+                except (OSError, RuntimeError) as e:
+                    logger.warning(f"Invalid [cross_lang] openapi_path: {e}")
 
         # [scip.rust]
         scip_rust = scip.get("rust", {})
@@ -751,9 +777,6 @@ class DescryService:
                 for key in keys_to_remove:
                     del self._dedup_cache[key]
             self._dedup_cache[content_hash] = (graph_mtime, node_id)
-
-    def _clear_dedup_cache(self):
-        self._dedup_cache = {}
 
     def reset_caches(self):
         """Reset all cached instances. Call after reindex."""
@@ -1712,7 +1735,13 @@ class DescryService:
         graph_path = (
             str(self.config.graph_path) if self.config.graph_path.exists() else None
         )
-        tracer = self._CrossLangTracer(str(openapi_path), graph_path)
+        tracer = self._CrossLangTracer(
+            str(openapi_path),
+            graph_path,
+            backend_handler_patterns=self.config.backend_handler_patterns or None,
+            frontend_api_patterns=self.config.frontend_api_patterns or None,
+            api_prefixes=self.config.api_prefixes or None,
+        )
 
         if mode == "stats":
             stats = tracer.get_stats()

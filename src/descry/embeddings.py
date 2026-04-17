@@ -441,47 +441,6 @@ class SemanticSearcher:
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:limit]
 
-    def _find_similar(self, node_id: str, limit: int = 5) -> list:
-        """Find nodes semantically similar to a given node.
-
-        Args:
-            node_id: The node ID to find similar nodes for
-            limit: Maximum number of results
-
-        Returns:
-            List of (node, score) tuples sorted by similarity
-        """
-        # Find the node index
-        node_idx = None
-        for i, node in enumerate(self.nodes):
-            if node["id"] == node_id:
-                node_idx = i
-                break
-
-        if node_idx is None:
-            return []
-
-        # Use that node's embedding as query
-        node_embedding = self.embeddings[node_idx]
-
-        # Compute similarities
-        similarities = np.dot(self.embeddings, node_embedding) / (
-            np.linalg.norm(self.embeddings, axis=1) * np.linalg.norm(node_embedding)
-        )
-
-        # Get top results (excluding the query node itself)
-        top_indices = np.argsort(similarities)[::-1]
-        results = []
-        for idx in top_indices:
-            if idx == node_idx:
-                continue
-            score = float(similarities[idx])
-            results.append((self.nodes[idx], score))
-            if len(results) >= limit:
-                break
-
-        return results
-
 
 # Convenience function for one-off searches (with thread safety)
 _cached_searcher = None

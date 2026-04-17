@@ -23,7 +23,6 @@ class TestDescryConfig:
         assert config.max_stale_hours == 24
         assert config.enable_scip is True
         assert config.enable_embeddings is True
-        assert ".git" in config.project_markers
 
     def test_from_env(self):
         config = DescryConfig.from_env()

@@ -276,13 +276,28 @@ def _caller_to_dict(caller_id: str, q: GraphQuerier) -> dict:
     return result
 
 
+def _resolve_openapi_path() -> Path | None:
+    """Locate the project's OpenAPI spec, if any.
+
+    Order of precedence:
+    1. `[cross_lang] openapi_path` in .descry.toml (absolute or project-
+       relative; resolved by DescryConfig with a containment check).
+    2. `public/api/latest.json` under the project root.
+    3. `public/api/openapi.json` under the project root.
+    """
+    cfg = _get_config()
+    if cfg.openapi_path and cfg.openapi_path.exists():
+        return cfg.openapi_path
+    for name in ("latest.json", "openapi.json"):
+        candidate = cfg.project_root / "public" / "api" / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _openapi_path_exists() -> bool:
     """Check if an OpenAPI spec file exists in the project."""
-    cfg = _get_config()
-    for name in ("latest.json", "openapi.json"):
-        if (cfg.project_root / "public" / "api" / name).exists():
-            return True
-    return False
+    return _resolve_openapi_path() is not None
 
 
 # --- API Endpoint Handlers ---
@@ -857,19 +872,27 @@ async def api_cross_lang(request: Request) -> JSONResponse:
     tag = request.query_params.get("tag")
 
     cfg = _get_config()
-    openapi_path = cfg.project_root / "public" / "api" / "latest.json"
-    if not openapi_path.exists():
-        openapi_path = cfg.project_root / "public" / "api" / "openapi.json"
-    if not openapi_path.exists():
+    openapi_path = _resolve_openapi_path()
+    if openapi_path is None:
         return JSONResponse(
             {
                 "not_configured": True,
-                "message": "No OpenAPI spec found. Place your spec at public/api/openapi.json relative to the project root.",
+                "message": (
+                    "No OpenAPI spec found. Set [cross_lang] openapi_path in "
+                    ".descry.toml, or place a spec at public/api/openapi.json "
+                    "or public/api/latest.json relative to the project root."
+                ),
             }
         )
 
     graph_path = str(cfg.graph_path) if cfg.graph_path.exists() else None
-    tracer = CrossLangTracer(str(openapi_path), graph_path)
+    tracer = CrossLangTracer(
+        str(openapi_path),
+        graph_path,
+        backend_handler_patterns=cfg.backend_handler_patterns or None,
+        frontend_api_patterns=cfg.frontend_api_patterns or None,
+        api_prefixes=cfg.api_prefixes or None,
+    )
 
     if mode == "stats":
         return JSONResponse(tracer.get_stats())

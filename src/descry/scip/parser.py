@@ -481,28 +481,6 @@ class ScipIndex:
 
         return names
 
-    def get_definition_location(self, symbol_id: str) -> Optional[Tuple[str, int]]:
-        """Get the definition location for a symbol.
-
-        Args:
-            symbol_id: SCIP symbol identifier
-
-        Returns:
-            Tuple of (file_path, line_number) or None if not found
-        """
-        return self.definitions.get(symbol_id)
-
-    def get_symbol_info(self, symbol_id: str) -> Optional[dict]:
-        """Get metadata for a symbol.
-
-        Args:
-            symbol_id: SCIP symbol identifier
-
-        Returns:
-            Dictionary with kind, display_name, documentation, or None
-        """
-        return self.symbols.get(symbol_id)
-
     def get_stats(self) -> dict:
         """Get statistics about the loaded index.
 

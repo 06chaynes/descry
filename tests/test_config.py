@@ -268,6 +268,50 @@ extra_args = []
         assert config.syntax_lang_map[".rs"] == "rust"
         assert config.syntax_lang_map[".py"] == "python"
 
+    def test_cross_lang_section(self, tmp_path):
+        """[cross_lang] openapi_path + patterns reach DescryConfig."""
+        (tmp_path / "spec.json").write_text('{"openapi": "3.0.0"}')
+        (tmp_path / ".descry.toml").write_text(
+            'openapi_path = "spec.json"\n'
+            'backend_handler_patterns = ["handlers/"]\n'
+            'frontend_api_patterns = ["src/api/"]\n'
+            'api_prefixes = ["/api/v1", "/api/v2"]\n'.replace(
+                "openapi_path", "[cross_lang]\nopenapi_path"
+            )
+        )
+        config = DescryConfig(project_root=tmp_path)
+        config._apply_toml(DescryConfig._load_toml(tmp_path))
+
+        assert config.openapi_path == (tmp_path / "spec.json").resolve()
+        assert config.backend_handler_patterns == ["handlers/"]
+        assert config.frontend_api_patterns == ["src/api/"]
+        assert config.api_prefixes == ["/api/v1", "/api/v2"]
+
+    def test_cross_lang_openapi_path_outside_root_rejected(self, tmp_path, caplog):
+        """Paths resolving outside project_root are ignored with a warning."""
+        import logging
+
+        (tmp_path / ".descry.toml").write_text(
+            '[cross_lang]\nopenapi_path = "/etc/passwd"\n'
+        )
+        config = DescryConfig(project_root=tmp_path)
+        with caplog.at_level(logging.WARNING):
+            config._apply_toml(DescryConfig._load_toml(tmp_path))
+        assert config.openapi_path is None
+        assert any("outside project root" in r.message for r in caplog.records)
+
+    def test_cross_lang_openapi_path_absolute_inside_root(self, tmp_path):
+        """Absolute paths that resolve inside project_root are accepted."""
+        (tmp_path / "public").mkdir()
+        spec = tmp_path / "public" / "openapi.json"
+        spec.write_text('{"openapi":"3.0.0"}')
+        (tmp_path / ".descry.toml").write_text(
+            f'[cross_lang]\nopenapi_path = "{spec}"\n'
+        )
+        config = DescryConfig(project_root=tmp_path)
+        config._apply_toml(DescryConfig._load_toml(tmp_path))
+        assert config.openapi_path == spec.resolve()
+
 
 # --- Precedence ---
 

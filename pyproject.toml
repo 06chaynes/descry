@@ -1,6 +1,6 @@
 [project]
 name = "descry-codegraph"
-version = "0.1.0"
+version = "0.1.1"
 description = "Codebase knowledge graph: polyglot indexer, semantic search, call-graph analysis"
 requires-python = ">=3.11"
 authors = [{name = "Christian Haynes"}]
