@@ -254,6 +254,52 @@ class TestPythonSCIPDiscovery:
         assert manager.needs_update(tmp_path.name, "python") is True
 
 
+class TestPythonSCIPSymbolExtraction:
+    """End-to-end name extraction for scip-python symbols.
+
+    scip-python emits symbols in the same backtick-wrapped format as
+    scip-typescript (``<scheme> <manager> <pkg> <ver> `module.path`/name().``),
+    so the parser routes both through ``_parse_typescript_descriptors``.
+    These tests pin that behaviour so a future refactor can't silently
+    regress Python call resolution to 0%.
+    """
+
+    def test_extract_module_level_function(self):
+        idx = ScipIndex([])
+        sym = "scip-python python descry 0.1.0 `pi-extension.descry-cli`/main()."
+        assert idx._extract_name(sym) == "main"
+
+    def test_extract_class_method(self):
+        idx = ScipIndex([])
+        sym = "scip-python python descry 0.1.0 `descry.handlers`/DescryService#flow()."
+        assert idx._extract_name(sym) == "flow"
+
+    def test_extract_nested_qualified_module(self):
+        idx = ScipIndex([])
+        sym = "scip-python python descry 0.1.0 `src.descry.query`/GraphQuerier#find_call_path()."
+        assert idx._extract_name(sym) == "find_call_path"
+
+    def test_extract_init_method(self):
+        idx = ScipIndex([])
+        sym = "scip-python python descry 0.1.0 `descry.handlers`/DescryService#__init__()."
+        assert idx._extract_name(sym) == "__init__"
+
+    def test_local_symbol_returns_none(self):
+        idx = ScipIndex([])
+        assert idx._extract_name("local 42") is None
+
+    def test_generic_parser_not_used_for_scip_python(self):
+        """Regression: the generic parser tokenizes hyphens/dots in module
+        paths into a jumble. Make sure we never accidentally route Python
+        symbols through it.
+        """
+        idx = ScipIndex([])
+        # If this regressed, _extract_name would return something like
+        # 'cli' (last piece of the module path) instead of 'main'.
+        sym = "scip-python python pkg 0.1.0 `pi-extension.descry-cli`/main()."
+        assert idx._extract_name(sym) == "main"
+
+
 class TestPythonSCIPAvailability:
     """support.py exposes scip_python_available and includes it in status."""
 

@@ -2743,8 +2743,9 @@ class CodeGraphBuilder:
                     edges_to_remove.add(idx)
                     continue
 
-                # Strategy 0: SCIP lookup (highest accuracy, supports Rust and TypeScript)
-                if scip_index and source_lang in ("rust", "typescript"):
+                # Strategy 0: SCIP lookup (highest accuracy; supports Rust,
+                # TypeScript, and Python when the corresponding indexer ran).
+                if scip_index and source_lang in ("rust", "typescript", "python"):
                     # Get source file and line for SCIP lookup
                     source_file = source_id.split("::")[0].replace("FILE:", "")
                     lineno = edge.get("metadata", {}).get("lineno", 0)

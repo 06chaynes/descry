@@ -64,6 +64,7 @@ class ScipIndex:
         self._resolution_stats: Dict[str, Dict[str, int]] = {
             "rust": {"attempted": 0, "resolved": 0},
             "typescript": {"attempted": 0, "resolved": 0},
+            "python": {"attempted": 0, "resolved": 0},
         }
 
         for scip_file in scip_files:
@@ -176,8 +177,11 @@ class ScipIndex:
         if not descriptors:
             return None
 
-        # Use language-specific parsing
-        if scheme == "scip-typescript":
+        # Use language-specific parsing. scip-python uses the same
+        # backtick-wrapped file-path format as scip-typescript (the path
+        # before the last backtick is module info baked into the file_path
+        # we already track), so route it through the same extractor.
+        if scheme in ("scip-typescript", "scip-python"):
             name_parts = self._parse_typescript_descriptors(descriptors)
         else:
             name_parts = self._parse_descriptors(descriptors)
@@ -201,11 +205,12 @@ class ScipIndex:
             Descry node ID if resolved, None otherwise
         """
         # Determine language for statistics tracking
-        lang = (
-            "typescript"
-            if source_file.endswith((".ts", ".tsx", ".js", ".jsx", ".svelte"))
-            else "rust"
-        )
+        if source_file.endswith((".ts", ".tsx", ".js", ".jsx", ".svelte")):
+            lang = "typescript"
+        elif source_file.endswith(".py"):
+            lang = "python"
+        else:
+            lang = "rust"
         if lang in self._resolution_stats:
             self._resolution_stats[lang]["attempted"] += 1
 
