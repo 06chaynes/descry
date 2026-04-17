@@ -4,6 +4,33 @@ Polyglot codebase knowledge graph with call-graph analysis, semantic search, and
 
 Descry indexes your codebase into a knowledge graph of symbols (functions, classes, constants) and their relationships (calls, imports, defines). It supports Rust, Python, TypeScript, JavaScript, Svelte, Go, Java, and more — with type-aware resolution via SCIP for Rust and TypeScript.
 
+> ### ⚠️ Disclaimer — please read
+>
+> **Descry was built with heavy assistance from AI coding agents.** While
+> the codebase has been through an internal security and correctness
+> review, AI-authored code can still contain subtle defects, missed edge
+> cases, or security assumptions that weren't obvious to the reviewer.
+> Treat this tool as experimental pre-1.0 software: **do not rely on it
+> for safety-critical analysis, and do not point it at code or
+> repositories you don't trust.**
+>
+> **This tool is designed to run locally on your own machine.** The web
+> UI (`descry-web`) binds to `127.0.0.1` and is unauthenticated by design —
+> the threat model assumes a single trusted user on the host.
+>
+> - **Do not expose `descry-web` to a network.** No reverse proxy, no
+>   public tunnel, no `--host 0.0.0.0`. If you need remote access, put
+>   it behind your own authenticated reverse proxy and understand that
+>   any browser tab on the host machine can still reach it via
+>   `localhost`.
+> - **Do not run Descry on untrusted repositories.** Indexing a
+>   repository executes configuration from its `.descry.toml`, walks
+>   its file tree, and feeds its docstrings/source to your LLM (if you
+>   use the MCP server). The same trust boundary that applies to
+>   `cargo build`, `npm install`, and opening the repo in your IDE
+>   applies here.
+> - **Report security issues privately** — see [SECURITY.md](SECURITY.md).
+
 ## Quick Start
 
 ```bash
