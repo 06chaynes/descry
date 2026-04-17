@@ -186,12 +186,14 @@ Configuration precedence: defaults < `.descry.toml` < environment variables.
 | Language | Parsing | SCIP (Type-Aware) | Requirements |
 |----------|---------|-------------------|--------------|
 | Rust | Regex + AST | Yes | `rust-analyzer` via rustup |
-| TypeScript | Regex | Yes | `scip-typescript` via npm |
-| Python | Regex + AST | Planned | — |
-| JavaScript | Regex | — | — |
+| TypeScript | Regex (+ Tree-sitter opt-in) | Yes | `scip-typescript` via npm; `descry-codegraph[ast]` for tree-sitter |
+| Python | Regex + AST | Yes | `scip-python` via npm |
+| JavaScript | Regex (+ Tree-sitter opt-in) | — | `descry-codegraph[ast]` for tree-sitter |
 | Svelte | Regex | — | — |
 | Go | Regex | — | — |
 | Java | Regex | — | — |
+
+The tree-sitter TS/TSX/JS parser is currently extractor-only (symbol discovery) and ships behind the `ast` extra + `[features] use_tree_sitter_ts = true` in `.descry.toml`. It runs alongside the regex parser and is a stepping stone toward full AST-driven extraction in a future release.
 
 SCIP provides precise call-graph resolution (resolving which specific function is called through traits, generics, etc.). Without SCIP, Descry falls back to regex-based name matching which handles most cases but may produce false positives on overloaded names.
 

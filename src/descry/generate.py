@@ -11,6 +11,10 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# Refuse to index individual source files above this size. Matches the
+# /api/source cap in web/server.py so the indexer and viewer share a budget.
+_MAX_SOURCE_FILE_BYTES = 10 * 1024 * 1024  # 10 MiB
+
 # Try to import ast-grep integration for improved CALLS detection
 try:
     from descry.ast_grep import (
@@ -2595,6 +2599,19 @@ class CodeGraphBuilder:
                 except OSError:
                     continue
                 rel_path = self.get_rel_path(file_path)
+                # Skip pathologically large files before opening. A hostile
+                # repo with a multi-GB `.py` would otherwise OOM the
+                # generator by pulling the whole buffer into memory.
+                try:
+                    if file_path.stat().st_size > _MAX_SOURCE_FILE_BYTES:
+                        logger.warning(
+                            "Skipping %s — %.1f MiB exceeds source cap",
+                            rel_path,
+                            file_path.stat().st_size / (1024 * 1024),
+                        )
+                        continue
+                except OSError:
+                    continue
                 # O_NOFOLLOW on the final open so a post-check symlink swap
                 # can't redirect us outside the project root. Mirrors the
                 # api_source hardening in web/server.py.
@@ -2937,16 +2954,34 @@ class CodeGraphBuilder:
                 in_degree[t] = in_degree.get(t, 0) + 1
         for node in self.nodes:
             node["metadata"]["in_degree"] = in_degree.get(node["id"], 0)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "schema_version": CURRENT_SCHEMA,
-                    "nodes": self.nodes,
-                    "edges": self.edges,
-                },
-                f,
-                indent=2,
-            )
+        # Atomic write: stream to a sibling tmp file then os.replace. A
+        # concurrent reader (MCP prewarm, web `/api/health`, another CLI
+        # invocation) that stats the destination mid-write would otherwise
+        # observe a partial JSON file and raise `json.JSONDecodeError`.
+        # os.replace is atomic on POSIX and on Windows >=3.3.
+        output_path = (
+            Path(output_path) if not isinstance(output_path, Path) else output_path
+        )
+        tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "schema_version": CURRENT_SCHEMA,
+                        "nodes": self.nodes,
+                        "edges": self.edges,
+                    },
+                    f,
+                    indent=2,
+                )
+            os.replace(tmp_path, output_path)
+        except Exception:
+            # Leave the previous good graph in place if anything fails mid-write.
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         logger.info(
             "Graph exported to %s. Stats: %d nodes, %d edges",
             output_path,

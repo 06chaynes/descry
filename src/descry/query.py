@@ -36,10 +36,11 @@ def _estimate_tokens(text: str) -> int:
 
 
 @lru_cache(maxsize=128)
-def _read_file_cached(file_path: str) -> tuple[str, ...]:
-    """Read file content with LRU caching.
+def _read_file_cached_inner(file_path: str, mtime_ns: int) -> tuple[str, ...]:
+    """Inner cache keyed on (path, mtime_ns) so edits invalidate the entry.
 
-    Returns tuple of lines (tuple for hashability in cache).
+    The mtime is read once by the outer wrapper and threaded through as a
+    cache key — callers get tuple-of-lines without worrying about staleness.
     """
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -48,9 +49,23 @@ def _read_file_cached(file_path: str) -> tuple[str, ...]:
         return ()
 
 
+def _read_file_cached(file_path: str) -> tuple[str, ...]:
+    """Read file content with mtime-aware LRU caching.
+
+    Returns tuple of lines (tuple for hashability in cache). Stats the file
+    to capture mtime_ns and uses (path, mtime_ns) as the cache key, so an
+    edit on disk invalidates the cached content automatically.
+    """
+    try:
+        mtime_ns = os.stat(file_path).st_mtime_ns
+    except OSError:
+        return ()
+    return _read_file_cached_inner(file_path, mtime_ns)
+
+
 def _clear_file_cache():
     """Clear the file content cache (useful after indexing)."""
-    _read_file_cached.cache_clear()
+    _read_file_cached_inner.cache_clear()
 
 
 def _get_syntax_lang(file_path: str, lang_map: dict[str, str] | None = None) -> str:
@@ -1276,9 +1291,14 @@ class GraphQuerier:
         if elapsed_ms > self._timeout_ms:
             return [f"{'  ' * indent}*(timeout reached)*"], 0
 
-        # Check depth limit
+        # Check depth / budget / visited-node ceiling. `expanded` accumulates
+        # every callee visited across the entire expansion; capping on
+        # `_max_nodes` prevents a wide+deep graph from running the caller
+        # out of budget even though each branch respected its own limits.
         if current_depth > depth or budget <= 0:
             return [], budget
+        if self._max_nodes and len(expanded) >= self._max_nodes:
+            return [f"{'  ' * indent}*(node budget reached)*"], budget
 
         # Check memoization cache. Key includes indent because rendered
         # output lines contain indentation prefixes; caching without the
@@ -1390,7 +1410,11 @@ class GraphQuerier:
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
-        depth = min(depth, 5)  # Hard limit
+        # Respect the project's configured `[query] max_depth` ceiling, with
+        # a fallback of 5 for the legacy hard limit. Previously this method
+        # hardcoded `min(depth, 5)` and silently ignored `.descry.toml`.
+        effective_max = self._max_depth if self._max_depth else 5
+        depth = min(depth, effective_max)
 
         # Resolve start node
         start_nodes = self.find_nodes_by_name(start_name)
@@ -1521,7 +1545,8 @@ class GraphQuerier:
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
-        depth = min(depth, 5)
+        effective_max = self._max_depth if self._max_depth else 5
+        depth = min(depth, effective_max)
 
         # Resolve start node
         start_nodes = self.find_nodes_by_name(start_name)
@@ -2195,6 +2220,15 @@ class GraphQuerier:
         """
         from collections import deque
 
+        # Respect configured depth ceiling, and cap visited-node expansion
+        # and wall time so a pathological graph shape cannot stall the
+        # service. Previously this BFS had only `max_depth` and could chew
+        # through the entire call graph with no budget.
+        effective_max_depth = self._max_depth if self._max_depth else 10
+        max_depth = min(max_depth, effective_max_depth)
+        node_budget = self._max_nodes if self._max_nodes else 2000
+        deadline = time.time() + (self._timeout_ms / 1000.0)
+
         # Resolve start and end to node IDs
         start_nodes = self.find_nodes_by_name(start_name)
         end_nodes = self.find_nodes_by_name(end_name)
@@ -2210,8 +2244,15 @@ class GraphQuerier:
         # BFS with path tracking
         queue = deque([(start_id, [])])  # (node_id, path_so_far)
         visited = {start_id}
+        # Pre-index REF: name resolution once per call to avoid O(N) scans
+        # inside the inner loop — noticeably faster on large graphs and
+        # cheaper against the node_budget.
+        ref_cache: dict[str, str | None] = {}
 
         while queue:
+            if time.time() > deadline or len(visited) >= node_budget:
+                return []  # Budget exhausted — caller treats as "no path"
+
             current_id, path = queue.popleft()
 
             # Get edges based on direction
@@ -2231,15 +2272,18 @@ class GraphQuerier:
             for edge in edges:
                 next_id = edge["target"] if direction == "forward" else edge["source"]
 
-                # Try to resolve REF: nodes to actual nodes
+                # Try to resolve REF: nodes to actual nodes (memoized per call).
                 if next_id.startswith("REF:"):
                     ref_name = next_id.replace("REF:", "")
-                    # Try to find matching node
-                    resolved = self.find_nodes_by_name(ref_name)
-                    if resolved:
-                        next_id = resolved[0]["id"]
+                    if ref_name in ref_cache:
+                        resolved_id = ref_cache[ref_name]
                     else:
-                        continue  # Skip unresolved references
+                        resolved = self.find_nodes_by_name(ref_name)
+                        resolved_id = resolved[0]["id"] if resolved else None
+                        ref_cache[ref_name] = resolved_id
+                    if resolved_id is None:
+                        continue
+                    next_id = resolved_id
 
                 if next_id in visited:
                     continue

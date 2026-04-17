@@ -276,10 +276,23 @@ class SemanticSearcher:
         """Attempt to load embeddings from cache. Returns True on success."""
         try:
             data = np.load(npz_path, allow_pickle=False)
-            self.embeddings = data["embeddings"]
+            embeddings = data["embeddings"]
             with open(json_path) as f:
                 sidecar = json.load(f)
-            self.node_texts = sidecar["texts"]
+            texts = sidecar["texts"]
+            # Consistency check: an interrupted _atomic_save (or two racing
+            # writers) could leave a mismatched pair on disk. Refuse to load
+            # it — the cache will regenerate and overwrite with a consistent
+            # pair. Cheaper than silently serving wrong embeddings.
+            if len(texts) != embeddings.shape[0]:
+                logger.warning(
+                    "Embedding cache mismatch (%d texts vs %d embeddings); regenerating",
+                    len(texts),
+                    embeddings.shape[0],
+                )
+                return False
+            self.embeddings = embeddings
+            self.node_texts = texts
             logger.info(f"Loaded {len(self.node_texts)} embeddings from cache")
             self._cleanup_old_embeddings(keep={npz_path, json_path})
             return True

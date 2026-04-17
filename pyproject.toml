@@ -33,7 +33,14 @@ mcp = [
 ]
 web = ["starlette>=0.47.2", "uvicorn>=0.32.0"]
 embeddings = ["sentence-transformers>=3.0.0", "numpy>=1.24.0"]
-all = ["descry-codegraph[mcp,web,embeddings]"]
+ast = [
+    # Opt-in tree-sitter parsing for TS/TSX/JS. Falls back to regex when
+    # missing, so users never pay this dep unless they install the extra.
+    "tree-sitter>=0.25.0",
+    "tree-sitter-typescript>=0.23.0",
+    "tree-sitter-javascript>=0.25.0",
+]
+all = ["descry-codegraph[mcp,web,embeddings,ast]"]
 dev = [
     "descry-codegraph[all]",
     "pytest>=9.0.3",

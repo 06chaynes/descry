@@ -249,7 +249,10 @@ async def descry_flatten(class_node_id: str) -> str:
 @mcp.tool()
 async def descry_index(path: str = ".") -> str:
     """Regenerate the codebase graph, SCIP indices, and semantic embeddings. Run after significant code changes (new files, refactoring, renamed symbols). Automatically generates SCIP for type-aware resolution and embeddings for semantic search."""
-    return await _svc().index(path)
+    # Fence so any subprocess stderr (paths, stack traces) that a hostile
+    # repo could influence cannot bleed out as unframed content into the
+    # model context.
+    return _fenced(await _svc().index(path))
 
 
 @mcp.tool()

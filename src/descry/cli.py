@@ -25,8 +25,14 @@ def _run(coro) -> str:
 
 
 def _print_result(coro):
+    """Run a service coroutine, print the result, and translate service-side
+    errors to a nonzero exit code so shell chains like `descry callers X &&
+    next_step` don't silently advance on "ERROR: Graph not found".
+    """
     result = _run(coro)
     print(result)
+    if isinstance(result, str) and result.lstrip().upper().startswith("ERROR:"):
+        sys.exit(2)
 
 
 def cmd_health(args):
@@ -71,6 +77,9 @@ def cmd_context(args):
             deduplicate=args.deduplicate,
             depth=args.depth,
             max_tokens=args.max_tokens,
+            callee_budget=args.callee_budget,
+            head_lines=args.head_lines,
+            max_output_tokens=args.max_output_tokens,
         )
     )
 
@@ -83,6 +92,7 @@ def cmd_flow(args):
             direction=args.direction,
             depth=args.depth,
             target=args.target,
+            inline_threshold=args.inline_threshold,
         )
     )
 
@@ -159,6 +169,7 @@ def cmd_churn(args):
             path_filter=args.path_filter,
             limit=args.limit,
             mode=args.mode,
+            exclude_generated=args.exclude_generated,
         )
     )
 
@@ -252,6 +263,24 @@ def main():
     sub.add_argument(
         "--max-tokens", type=int, default=2000, help="Max token budget (default: 2000)"
     )
+    sub.add_argument(
+        "--callee-budget",
+        type=int,
+        default=2000,
+        help="Token budget for expanded callees (default: 2000)",
+    )
+    sub.add_argument(
+        "--head-lines",
+        type=int,
+        default=None,
+        help="Truncate source head to N lines (default: full)",
+    )
+    sub.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=None,
+        help="Overall output token cap (default: unlimited)",
+    )
     sub.set_defaults(func=cmd_context)
 
     # flow
@@ -265,6 +294,12 @@ def main():
     )
     sub.add_argument("--depth", type=int, default=3, help="Trace depth (default: 3)")
     sub.add_argument("--target", default=None, help="Target symbol to reach")
+    sub.add_argument(
+        "--inline-threshold",
+        type=int,
+        default=100,
+        help="Inline callee source below this token count (default: 100)",
+    )
     sub.set_defaults(func=cmd_flow)
 
     # search
@@ -364,6 +399,13 @@ def main():
         default="symbols",
         choices=["symbols", "files", "co-change"],
         help="Churn mode (default: symbols)",
+    )
+    sub.add_argument(
+        "--include-generated",
+        dest="exclude_generated",
+        action="store_false",
+        default=True,
+        help="Include generated/lockfiles (default: excluded)",
     )
     sub.set_defaults(func=cmd_churn)
 

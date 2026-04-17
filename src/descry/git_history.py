@@ -250,7 +250,11 @@ class GitHistoryAnalyzer:
             _validate_git_ref(ref)
             return [f"{ref}..HEAD"]
 
-        # Treat as a direct git --since value
+        # Treat as a direct git --since value. Limit to characters git would
+        # plausibly accept as a date expression so we don't pass crafted
+        # user input straight through as a single argv token.
+        if not re.match(r"^[A-Za-z0-9 :,.\-/+]{1,64}$", time_range):
+            raise GitError(f"Invalid time_range: {time_range!r}")
         return [f"--since={time_range}"]
 
     def _build_file_line_map(self, file_path: str) -> dict[int, str]:

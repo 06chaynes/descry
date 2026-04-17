@@ -42,7 +42,10 @@ def extract_calls_rust(file_path: str) -> Iterator[dict]:
     for pattern in patterns:
         try:
             result = subprocess.run(
-                ["sg", "run", "-p", pattern, "-l", "rust", file_path, "--json"],
+                # `--json` first so `--` terminates options cleanly and the
+                # following `file_path` cannot be mis-parsed as a flag even
+                # if a local source file literally begins with `-`.
+                ["sg", "run", "-p", pattern, "-l", "rust", "--json", "--", file_path],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -135,7 +138,18 @@ def extract_calls_typescript(file_path: str) -> Iterator[dict]:
     for pattern in patterns:
         try:
             result = subprocess.run(
-                ["sg", "run", "-p", pattern, "-l", "typescript", file_path, "--json"],
+                # See note in Rust branch re: `--` separator for safety.
+                [
+                    "sg",
+                    "run",
+                    "-p",
+                    pattern,
+                    "-l",
+                    "typescript",
+                    "--json",
+                    "--",
+                    file_path,
+                ],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -249,7 +263,18 @@ def extract_imports_typescript(file_path: str) -> dict:
     for pattern, import_type in patterns:
         try:
             proc_result = subprocess.run(
-                ["sg", "run", "-p", pattern, "-l", "typescript", file_path, "--json"],
+                # See note in Rust branch re: `--` separator for safety.
+                [
+                    "sg",
+                    "run",
+                    "-p",
+                    pattern,
+                    "-l",
+                    "typescript",
+                    "--json",
+                    "--",
+                    file_path,
+                ],
                 capture_output=True,
                 text=True,
                 timeout=30,

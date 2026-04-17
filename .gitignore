@@ -20,3 +20,4 @@ node_modules/
 .ruff_cache/
 .mypy_cache/
 uv.lock
+.playwright-mcp/

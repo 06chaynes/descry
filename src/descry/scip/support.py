@@ -9,6 +9,7 @@ provides type-aware symbol information from language servers.
 Supported indexers:
 - rust-analyzer: Rust
 - scip-typescript: TypeScript, JavaScript
+- scip-python: Python
 """
 
 from __future__ import annotations
@@ -94,6 +95,22 @@ def scip_typescript_available() -> bool:
     return _indexer_cache["scip-typescript"]["available"]
 
 
+def scip_python_available() -> bool:
+    """Check if scip-python is available for Python SCIP generation.
+
+    scip-python is a Sourcegraph-maintained indexer distributed via npm
+    (@sourcegraph/scip-python) that installs a `scip-python` binary.
+    """
+    if os.environ.get("DESCRY_NO_SCIP"):
+        return False
+
+    if "scip-python" not in _indexer_cache:
+        _indexer_cache["scip-python"] = _check_indexer(
+            "scip-python", "scip-python", "--version"
+        )
+    return _indexer_cache["scip-python"]["available"]
+
+
 def scip_available() -> bool:
     """Check if any SCIP indexer is available (for backwards compatibility).
 
@@ -103,7 +120,11 @@ def scip_available() -> bool:
     if os.environ.get("DESCRY_NO_SCIP"):
         return False
 
-    return rust_analyzer_available() or scip_typescript_available()
+    return (
+        rust_analyzer_available()
+        or scip_typescript_available()
+        or scip_python_available()
+    )
 
 
 def get_scip_status() -> dict:
@@ -115,9 +136,11 @@ def get_scip_status() -> dict:
     # Force availability checks
     _ = rust_analyzer_available()
     _ = scip_typescript_available()
+    _ = scip_python_available()
 
     rust_info = _indexer_cache.get("rust-analyzer", {})
     ts_info = _indexer_cache.get("scip-typescript", {})
+    py_info = _indexer_cache.get("scip-python", {})
 
     return {
         "available": scip_available(),
@@ -132,6 +155,11 @@ def get_scip_status() -> dict:
                 "available": ts_info.get("available", False),
                 "path": ts_info.get("path"),
                 "version": ts_info.get("version"),
+            },
+            "scip-python": {
+                "available": py_info.get("available", False),
+                "path": py_info.get("path"),
+                "version": py_info.get("version"),
             },
         },
         # Backwards compatibility

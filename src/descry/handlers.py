@@ -174,6 +174,10 @@ class DescryConfig:
     max_stale_hours: float = 24
     enable_scip: bool = True
     enable_embeddings: bool = True
+    # Opt-in: use tree-sitter for TS/TSX/JS first-pass parsing. Requires
+    # descry-codegraph[ast]. Falls back to regex per-file when the grammar
+    # hits errors or the extra isn't installed.
+    use_tree_sitter_ts: bool = False
     openapi_path: Path | None = None
     project_markers: list[str] = field(
         default_factory=lambda: list(_DEFAULT_PROJECT_MARKERS)
@@ -312,6 +316,8 @@ class DescryConfig:
             self.enable_scip = features["enable_scip"]
         if "enable_embeddings" in features:
             self.enable_embeddings = features["enable_embeddings"]
+        if "use_tree_sitter_ts" in features:
+            self.use_tree_sitter_ts = features["use_tree_sitter_ts"]
 
         # [embeddings]
         embeddings = data.get("embeddings", {})
@@ -761,6 +767,14 @@ class DescryService:
         }
         self._git_cache = {"analyzer": None, "graph_mtime": None}
         self._dedup_cache = {}
+        # The module-level file-content cache in query.py is keyed on mtime,
+        # so it self-invalidates after an edit; but a reindex can shift file
+        # contents even without an mtime bump (copies, git checkouts). Clear
+        # it explicitly so long-running MCP/web processes never serve stale
+        # source lines after `descry index`.
+        from descry.query import _clear_file_cache
+
+        _clear_file_cache()
 
     async def _format_response(
         self, content: str, include_header: bool = True, max_lines: int = 500
@@ -1058,7 +1072,13 @@ class DescryService:
 
             if result.returncode == 0:
                 output = result.stdout.strip() or result.stderr.strip()
-                self._clear_dedup_cache()
+                # Full cache flush post-reindex. Previously only the dedup
+                # cache was cleared here and the CLI/MCP paths relied on
+                # mtime-triggered rebuilds for querier/semantic/git caches;
+                # the web path called `reset_caches()` explicitly. Align the
+                # three interfaces so a reindex via any entry point leaves
+                # the service in the same state.
+                self.reset_caches()
 
                 scip_status = ""
                 if (
@@ -1227,9 +1247,23 @@ class DescryService:
             return "ERROR: Graph not found. Run descry ensure first."
 
         gp = self.config.graph_path
+        # Capture mtime + hash once so the check and record use the same
+        # (graph_mtime, content_hash) pair. Previously the mtime was stat'd
+        # twice — if the graph rewrote between the two stats, the dedup
+        # record could claim content from graph_A belongs to graph_B.
+        graph_mtime: float | None = None
+        content_hash: str | None = None
         if deduplicate and gp.exists():
-            graph_mtime = gp.stat().st_mtime
-            content_hash = hashlib.md5(node_id.encode()).hexdigest()
+            try:
+                graph_mtime = gp.stat().st_mtime
+            except OSError:
+                graph_mtime = None
+        if deduplicate and graph_mtime is not None:
+            # usedforsecurity=False: this hash is only a dedup key for the
+            # in-memory context cache, never a trust anchor.
+            content_hash = hashlib.md5(
+                node_id.encode(), usedforsecurity=False
+            ).hexdigest()
             dedup_ref = await self._check_dedup(content_hash, graph_mtime)
             if dedup_ref:
                 brief_result = q.get_context_prompt(node_id, brief=True)
@@ -1249,9 +1283,7 @@ class DescryService:
             max_output_tokens=max_output_tokens,
         )
 
-        if deduplicate and gp.exists():
-            graph_mtime = gp.stat().st_mtime
-            content_hash = hashlib.md5(node_id.encode()).hexdigest()
+        if deduplicate and graph_mtime is not None and content_hash is not None:
             await self._record_dedup(content_hash, graph_mtime, node_id)
 
         if brief:

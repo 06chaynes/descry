@@ -25,7 +25,7 @@ from pathlib import Path
 import uvicorn
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
-from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, FileResponse, StreamingResponse
 from starlette.routing import Route, Mount
@@ -1044,6 +1044,31 @@ async def api_quick(request: Request) -> JSONResponse:
 
 _MAX_SOURCE_BYTES = 10 * 1024 * 1024  # 10 MiB
 
+# Defense-in-depth: even with project-root containment, refuse to serve files
+# that commonly hold credentials or private keys. Matches path segments case-
+# insensitively. The web UI is local-only, but DNS-rebinding / cross-origin
+# bugs in browsers have historically exposed localhost services; make the
+# worst-case blast radius smaller than "every text file in the repo".
+_SENSITIVE_NAME_RE = re.compile(
+    r"(?ix)"
+    r"(^|/)\.env(\.|$)"
+    r"|(^|/)\.envrc$"
+    r"|(^|/)\.git/"
+    r"|(^|/)\.ssh/"
+    r"|(^|/)\.aws/"
+    r"|(^|/)\.gnupg/"
+    r"|(^|/)\.netrc$"
+    r"|(^|/)\.npmrc$"
+    r"|(^|/)\.pypirc$"
+    r"|(^|/)id_(rsa|dsa|ecdsa|ed25519)(\.|$)"
+    r"|\.(pem|key|p12|pfx|jks|keystore|asc|gpg)$"
+)
+
+
+def _is_sensitive_path(rel: str) -> bool:
+    """True if `rel` (project-root-relative POSIX path) matches a known secret pattern."""
+    return bool(_SENSITIVE_NAME_RE.search(rel))
+
 
 def _is_text_sample(sample: bytes) -> bool:
     """Heuristic check: first N bytes look like text (UTF-8 or UTF-16, low NUL ratio)."""
@@ -1093,6 +1118,18 @@ async def api_source(request: Request) -> JSONResponse:
             return JSONResponse({"error": "Path outside project root"}, status_code=400)
     except ValueError:
         return JSONResponse({"error": "Path outside project root"}, status_code=400)
+
+    # Defense-in-depth secret blocklist. Check both the requested path and the
+    # resolved path so a file symlinked to a sensitive target is still refused.
+    try:
+        rel_requested = file_param.replace("\\", "/")
+        rel_resolved = file_path.relative_to(cfg.resolved_project_root).as_posix()
+    except ValueError:
+        rel_resolved = rel_requested
+    if _is_sensitive_path(rel_requested) or _is_sensitive_path(rel_resolved):
+        return JSONResponse(
+            {"error": "Refusing to serve sensitive file"}, status_code=403
+        )
 
     if not file_path.exists():
         return JSONResponse({"error": f"File not found: {file_param}"}, status_code=404)
@@ -1336,19 +1373,49 @@ routes = [
     Mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static"),
 ]
 
+# The UI is same-origin with its API — no CORS headers are needed. Omitting
+# CORSMiddleware means browsers enforce same-origin by default, so a tab on
+# evil.com cannot read /api/source or trigger /api/index. TrustedHostMiddleware
+# rejects requests whose Host header isn't loopback, defeating DNS-rebinding
+# attacks that would otherwise bypass the 127.0.0.1 bind.
+_ALLOWED_HOSTS = ["127.0.0.1", "localhost", "[::1]"]
+
 middleware = [
-    Middleware(
-        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-    ),
+    Middleware(TrustedHostMiddleware, allowed_hosts=_ALLOWED_HOSTS),
 ]
 
 app = Starlette(routes=routes, middleware=middleware)
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _loopback_host(value: str) -> str:
+    """argparse type: only accept loopback addresses for --host.
+
+    The web UI has no authentication and is designed for single-user local
+    use. Binding to a non-loopback address (e.g. `0.0.0.0`) would expose every
+    endpoint — including /api/source — to the LAN. See SECURITY.md and the
+    'Web UI is local-only' section of the README.
+    """
+    if value not in _LOOPBACK_HOSTS:
+        raise argparse.ArgumentTypeError(
+            f"--host must be a loopback address ({', '.join(sorted(_LOOPBACK_HOSTS))}); "
+            f"got {value!r}. The web UI is unauthenticated by design; use a reverse "
+            f"proxy if you need remote access."
+        )
+    return value
+
+
 def main():
     parser = argparse.ArgumentParser(description="Descry Web UI")
     parser.add_argument("--port", type=int, default=8787, help="Port (default: 8787)")
-    parser.add_argument("--host", default="127.0.0.1", help="Host (default: 127.0.0.1)")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        type=_loopback_host,
+        help="Host (default: 127.0.0.1; only loopback addresses accepted)",
+    )
     args = parser.parse_args()
 
     cfg = _get_config()

@@ -103,9 +103,12 @@ class CrossLangTracer:
 
                 self.path_to_operation[(method_upper, path)] = operation_info
 
-                # Create regex pattern for path with parameters
-                # /api/v1/actions/{id} -> /api/v1/actions/[^/]+
-                pattern_str = re.sub(r"\{[^}]+\}", r"[^/]+", path)
+                # Create regex pattern for path with parameters.
+                # Escape the path first so literal `.`, `+`, `(` in routes are
+                # matched literally, then replace OpenAPI `{param}` markers
+                # (which escape to `\{param\}`) with the `[^/]+` capture.
+                escaped = re.escape(path)
+                pattern_str = re.sub(r"\\\{[^}]+\\\}", r"[^/]+", escaped)
                 pattern = re.compile(f"^{pattern_str}$")
                 self.endpoint_patterns.append(
                     (method_upper, path, pattern, operation_info)

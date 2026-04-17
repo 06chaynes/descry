@@ -177,3 +177,97 @@ class TestScipCachePerformance:
         finally:
             if original is not None:
                 os.environ["DESCRY_PRIME_THREADS"] = original
+
+
+class TestPythonSCIPDiscovery:
+    """get_python_packages covers monorepo and single-package layouts."""
+
+    def test_monorepo_layout_with_pyproject(self, tmp_path):
+        for name in ("backend", "workers"):
+            pkg = tmp_path / name
+            pkg.mkdir()
+            (pkg / "pyproject.toml").write_text('[project]\nname = "' + name + '"\n')
+            (pkg / "app.py").write_text("def main(): pass\n")
+        # A frontend sibling with only JS should be excluded.
+        (tmp_path / "frontend").mkdir()
+        (tmp_path / "frontend" / "index.js").write_text("")
+
+        manager = ScipCacheManager(tmp_path)
+        assert manager.get_python_packages() == ["backend", "workers"]
+
+    def test_monorepo_respects_excluded_dirs(self, tmp_path):
+        node_modules = tmp_path / "node_modules" / "some-pkg"
+        node_modules.mkdir(parents=True)
+        (node_modules / "pyproject.toml").write_text("[project]\nname='x'\n")
+        (node_modules / "a.py").write_text("")
+
+        manager = ScipCacheManager(tmp_path)
+        assert manager.get_python_packages() == []
+
+    def test_single_package_layout_uses_root_name(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "standalone"\n')
+        src = tmp_path / "src" / "standalone"
+        src.mkdir(parents=True)
+        (src / "__init__.py").write_text("")
+        (src / "app.py").write_text("def main(): pass\n")
+
+        manager = ScipCacheManager(tmp_path)
+        assert manager.get_python_packages() == [tmp_path.name]
+
+    def test_setup_py_recognized(self, tmp_path):
+        (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup()\n")
+        (tmp_path / "mod.py").write_text("x = 1\n")
+        manager = ScipCacheManager(tmp_path)
+        assert manager.get_python_packages() == [tmp_path.name]
+
+    def test_get_projects_includes_python(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text('[project]\nname="x"\n')
+        (tmp_path / "m.py").write_text("")
+        manager = ScipCacheManager(tmp_path)
+        types = {t for _, t in manager.get_projects()}
+        assert "python" in types
+
+    def test_hash_python_changes_on_source_edit(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text('[project]\nname="x"\n')
+        src = tmp_path / "a.py"
+        src.write_text("x = 1\n")
+
+        manager = ScipCacheManager(tmp_path)
+        first = manager._hash_python_package(tmp_path.name)
+        src.write_text("x = 2\n")
+        second = manager._hash_python_package(tmp_path.name)
+        assert first != second
+
+    def test_hash_python_stable_without_edits(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text('[project]\nname="x"\n')
+        (tmp_path / "a.py").write_text("x = 1\n")
+        manager = ScipCacheManager(tmp_path)
+        assert manager._hash_python_package(
+            tmp_path.name
+        ) == manager._hash_python_package(tmp_path.name)
+
+    def test_needs_update_python(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text('[project]\nname="x"\n')
+        (tmp_path / "a.py").write_text("x = 1\n")
+        manager = ScipCacheManager(tmp_path)
+        # No cached .scip → needs update.
+        assert manager.needs_update(tmp_path.name, "python") is True
+
+
+class TestPythonSCIPAvailability:
+    """support.py exposes scip_python_available and includes it in status."""
+
+    def test_scip_python_disabled_by_env(self, monkeypatch):
+        from descry.scip import support
+
+        support.reset_scip_state()
+        monkeypatch.setenv("DESCRY_NO_SCIP", "1")
+        assert support.scip_python_available() is False
+
+    def test_get_scip_status_reports_python_key(self, monkeypatch):
+        from descry.scip import support
+
+        support.reset_scip_state()
+        monkeypatch.delenv("DESCRY_NO_SCIP", raising=False)
+        status = support.get_scip_status()
+        assert "scip-python" in status["indexers"]

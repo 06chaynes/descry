@@ -6,6 +6,7 @@ to avoid regenerating indices for unchanged projects.
 Supported:
 - Rust crates (via rust-analyzer)
 - TypeScript/JavaScript packages (via scip-typescript)
+- Python packages (via scip-python)
 
 Performance optimizations:
 - Pre-warm rust-analyzer cache with parallel workers
@@ -99,11 +100,12 @@ class ScipCacheManager:
 
         Returns:
             List of (project_name, project_type) tuples.
-            project_type is one of: "rust", "typescript"
+            project_type is one of: "rust", "typescript", "python"
         """
         projects = []
         projects.extend((name, "rust") for name in self.get_rust_crates())
         projects.extend((name, "typescript") for name in self.get_typescript_packages())
+        projects.extend((name, "python") for name in self.get_python_packages())
         return sorted(projects)
 
     def get_crates(self) -> List[str]:
@@ -164,6 +166,76 @@ class ScipCacheManager:
                 packages.append(pkg_dir.name)
 
         return sorted(packages)
+
+    def get_python_packages(self) -> List[str]:
+        """Auto-discover Python packages for scip-python.
+
+        Two discovery modes:
+
+        1. **Monorepo layout**: directories directly under project_root that
+           carry their own `pyproject.toml` (or `setup.py`/`setup.cfg`) and
+           contain `.py` files. This mirrors get_rust_crates / get_typescript
+           _packages.
+        2. **Single-package layout**: project_root itself carries a
+           `pyproject.toml` and `src/`-layout or top-level `.py` files. In
+           that case we return a single synthetic package named after the
+           project_root directory.
+
+        Returns:
+            List of package directory names to index (e.g. ``['backend',
+            'workers']`` or ``['descry']``).
+        """
+        packages: list[str] = []
+
+        # Case 1: monorepo with per-subdir pyproject.toml.
+        for marker in self.project_root.glob("*/pyproject.toml"):
+            pkg_dir = marker.parent
+            if pkg_dir.name.startswith(".") or pkg_dir.name in self.excluded_dirs:
+                continue
+            if not any(pkg_dir.rglob("*.py")):
+                continue
+            packages.append(pkg_dir.name)
+        for marker in self.project_root.glob("*/setup.py"):
+            pkg_dir = marker.parent
+            if pkg_dir.name.startswith(".") or pkg_dir.name in self.excluded_dirs:
+                continue
+            if pkg_dir.name in packages:
+                continue  # already picked up via pyproject
+            if not any(pkg_dir.rglob("*.py")):
+                continue
+            packages.append(pkg_dir.name)
+
+        # Case 2: single-package root. Only treat as such when we did not
+        # already find per-subdir packages — otherwise the root project
+        # would shadow the monorepo children.
+        if not packages:
+            root_marker_exists = (
+                (self.project_root / "pyproject.toml").exists()
+                or (self.project_root / "setup.py").exists()
+                or (self.project_root / "setup.cfg").exists()
+            )
+            if root_marker_exists and any(
+                p for p in self.project_root.rglob("*.py") if self._py_in_scope(p)
+            ):
+                # Synthetic: use the project_root name so .scip filenames
+                # don't collide across projects.
+                packages.append(self.project_root.name)
+
+        return sorted(packages)
+
+    def _py_in_scope(self, path: Path) -> bool:
+        """True if `path` is a Python source file inside project_root and
+        not under a hidden or excluded directory.
+        """
+        try:
+            rel = path.relative_to(self.project_root)
+        except ValueError:
+            return False
+        parts = rel.parts
+        for part in parts[:-1]:
+            if part.startswith(".") or part in self.excluded_dirs:
+                return False
+        return True
 
     def needs_update(self, project: str, project_type: str = "rust") -> bool:
         """Check if project SCIP needs regeneration.
@@ -293,11 +365,51 @@ class ScipCacheManager:
 
         return self._get_scip_paths(packages)
 
-    def update_all(self, parallel: bool = False) -> Dict[str, Path]:
-        """Update SCIP for all changed projects (Rust and TypeScript).
+    def update_changed_python(self, parallel: bool = False) -> Dict[str, Path]:
+        """Update SCIP for changed Python packages.
 
-        Runs Rust and TypeScript generation concurrently since they
-        use different tools with no shared resources.
+        Args:
+            parallel: Whether to generate SCIP for multiple packages in parallel
+
+        Returns:
+            Dictionary mapping package names to their SCIP file paths
+        """
+        packages = self.get_python_packages()
+        if not packages:
+            logger.info("No Python packages found in project")
+            return {}
+
+        changed = [p for p in packages if self.needs_update(p, "python")]
+
+        if changed:
+            logger.info(
+                f"SCIP: Regenerating for {len(changed)} changed Python package(s): {changed}"
+            )
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+            if parallel and len(changed) > 1:
+                max_workers = self._get_max_workers(len(changed))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    results = list(executor.map(self._generate_python_scip, changed))
+            else:
+                results = [self._generate_python_scip(p) for p in changed]
+
+            # Update checksums for successfully generated packages
+            checksums = self._load_checksums()
+            for pkg, success in zip(changed, results):
+                if success:
+                    checksums[pkg] = self._hash_project(pkg, "python")
+            self._save_checksums(checksums)
+        else:
+            logger.debug("SCIP: All Python packages up-to-date")
+
+        return self._get_scip_paths(packages)
+
+    def update_all(self, parallel: bool = False) -> Dict[str, Path]:
+        """Update SCIP for all changed projects (Rust, TypeScript, Python).
+
+        Runs each language's generation concurrently since they use
+        independent tools with no shared resources.
 
         Args:
             parallel: Whether to generate SCIP in parallel within each language
@@ -307,11 +419,12 @@ class ScipCacheManager:
         """
         results = {}
 
-        # Run Rust and TypeScript generation concurrently
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        # Run all three languages concurrently
+        with ThreadPoolExecutor(max_workers=3) as executor:
             futures = {
                 executor.submit(self.update_changed_rust, parallel): "rust",
                 executor.submit(self.update_changed_typescript, parallel): "typescript",
+                executor.submit(self.update_changed_python, parallel): "python",
             }
 
             for future in as_completed(futures):
@@ -472,6 +585,94 @@ class ScipCacheManager:
             logger.warning(f"SCIP: Error generating for {package}: {e}")
             return False
 
+    def _generate_python_scip(self, package: str) -> bool:
+        """Generate SCIP for a single Python package.
+
+        Uses scip-python to generate the index. scip-python resolves a
+        project via its nearest `pyproject.toml` / `setup.py`, so we run
+        the binary from the package directory. For the single-package
+        root case (where the synthetic package name equals the project
+        root's basename), we run directly in project_root.
+
+        Args:
+            package: Name of the package directory to index (or the project
+                root's basename for the single-package layout).
+
+        Returns:
+            True if generation succeeded, False otherwise.
+        """
+        # Resolve the working directory: prefer a matching subdirectory,
+        # fall back to project_root for the synthetic single-package case.
+        candidate = self.project_root / package
+        if candidate.is_dir() and (
+            (candidate / "pyproject.toml").exists()
+            or (candidate / "setup.py").exists()
+            or (candidate / "setup.cfg").exists()
+        ):
+            work_dir = candidate
+        else:
+            work_dir = self.project_root
+
+        output_path = self.cache_dir / f"{package}.scip"
+
+        existing_scip = (
+            list(self.cache_dir.glob("*.scip")) if self.cache_dir.exists() else []
+        )
+        is_first_run = len(existing_scip) == 0
+        timeout_seconds = self._get_timeout(is_first_run)
+        timeout_str = (
+            "unlimited" if timeout_seconds is None else f"{timeout_seconds // 60}min"
+        )
+        logger.info(
+            f"SCIP: Generating Python index for {package}... (timeout: {timeout_str})"
+        )
+
+        # scip-python accepts --project-name + --output, plus a positional
+        # project-root. The project-root is absolute so a leading-dash
+        # filename attack via ``os.chdir`` cannot forge a flag. No shell.
+        cmd = [
+            "scip-python",
+            "index",
+            "--project-name",
+            package,
+            "--output",
+            str(output_path),
+            "--cwd",
+            str(work_dir),
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=str(work_dir),
+                env=safe_env(),
+            )
+            if result.returncode == 0 and output_path.exists():
+                size_kb = output_path.stat().st_size / 1024
+                logger.info(f"SCIP: Generated {package}.scip ({size_kb:.1f} KB)")
+                return True
+            stderr_tail = (
+                result.stderr[-500:] if len(result.stderr) > 500 else result.stderr
+            )
+            logger.warning(
+                f"SCIP: Failed to generate Python index for {package} "
+                f"(exit={result.returncode}, output_exists={output_path.exists()}): "
+                f"{stderr_tail}"
+            )
+            return False
+        except subprocess.TimeoutExpired:
+            logger.warning(f"SCIP: Python generation timed out for {package}")
+            return False
+        except FileNotFoundError:
+            logger.debug("SCIP: scip-python binary not on PATH")
+            return False
+        except Exception as e:
+            logger.warning(f"SCIP: Error generating Python index for {package}: {e}")
+            return False
+
     def _get_max_workers(self, num_items: int) -> int:
         """Get number of parallel workers based on memory constraints.
 
@@ -598,6 +799,8 @@ class ScipCacheManager:
             return self._hash_rust_crate(project)
         elif project_type == "typescript":
             return self._hash_typescript_package(project)
+        elif project_type == "python":
+            return self._hash_python_package(project)
         else:
             raise ValueError(f"Unknown project type: {project_type}")
 
@@ -687,6 +890,72 @@ class ScipCacheManager:
                 rel_path = src_file.relative_to(pkg_path)
                 hasher.update(str(rel_path).encode())
                 hasher.update(src_file.read_bytes())
+            except (OSError, ValueError):
+                pass
+
+        return hasher.hexdigest()[:16]
+
+    def _hash_python_package(self, package: str) -> str:
+        """Hash Python package sources for change detection.
+
+        Hashes:
+        - pyproject.toml / setup.py / setup.cfg / requirements*.txt
+          (dep/version changes affect type resolution)
+        - All .py files recursively under the package (excluding hidden /
+          excluded dirs)
+
+        Args:
+            package: Name of the package to hash. May be a subdir name or
+                the project_root basename (single-package layout).
+
+        Returns:
+            16-character hex hash string.
+        """
+        candidate = self.project_root / package
+        if candidate.is_dir() and (
+            (candidate / "pyproject.toml").exists()
+            or (candidate / "setup.py").exists()
+            or (candidate / "setup.cfg").exists()
+        ):
+            pkg_path = candidate
+        else:
+            pkg_path = self.project_root
+
+        hasher = hashlib.sha256()
+
+        for name in (
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "requirements.txt",
+            "requirements-dev.txt",
+            "uv.lock",
+            "poetry.lock",
+            "Pipfile.lock",
+        ):
+            marker = pkg_path / name
+            if marker.exists():
+                hasher.update(f"{name}:".encode())
+                hasher.update(marker.read_bytes())
+
+        # Hash every in-scope .py file, sorted for determinism.
+        py_files = []
+        for candidate_path in pkg_path.rglob("*.py"):
+            rel = candidate_path.relative_to(pkg_path)
+            parts = rel.parts
+            skip = False
+            for part in parts[:-1]:
+                if part.startswith(".") or part in self.excluded_dirs:
+                    skip = True
+                    break
+            if not skip:
+                py_files.append(candidate_path)
+        py_files.sort()
+        for py_file in py_files:
+            try:
+                rel_path = py_file.relative_to(pkg_path)
+                hasher.update(str(rel_path).encode())
+                hasher.update(py_file.read_bytes())
             except (OSError, ValueError):
                 pass
 
