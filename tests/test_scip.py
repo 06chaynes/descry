@@ -317,3 +317,107 @@ class TestPythonSCIPAvailability:
         monkeypatch.delenv("DESCRY_NO_SCIP", raising=False)
         status = support.get_scip_status()
         assert "scip-python" in status["indexers"]
+
+
+class TestGenerateScipRenameMode:
+    """_generate_scip handles CommandSpec(output_mode='rename') correctly.
+
+    Exercises the scip-go contingency path: an indexer that writes to a
+    fixed default filename (`index.scip`) in its working directory rather
+    than accepting an --output flag. The shared runner should move the
+    default output into the cache-dir location after success.
+    """
+
+    def _stub_adapter(self, tmp_path, mode):
+        """Build a stub adapter that runs `true` and optionally pre-seeds
+        the default-output file before the subprocess runs.
+        """
+        from descry.scip.adapter import CommandSpec, DiscoveredProject
+
+        class _StubAdapter:
+            name = "stublang"
+            scheme = "scip-stub"
+            binary = "true"
+            extensions = (".stub",)
+
+            def discover(self, root, excluded_dirs):
+                return [
+                    DiscoveredProject(name="stubproj", root=root, language=self.name)
+                ]
+
+            def build_command(self, project, out_path, config):
+                # Simulate the indexer by pre-creating index.scip in cwd
+                # before the subprocess runs — a shell one-liner keeps the
+                # test hermetic without needing a real SCIP binary.
+                default_output = project.root / "index.scip"
+                payload = b"stub-scip-payload"
+                argv = [
+                    "/bin/sh",
+                    "-c",
+                    f"printf '%s' {payload.decode()} > {default_output}",
+                ]
+                return CommandSpec(argv=argv, cwd=project.root, output_mode=mode)
+
+            def parse_descriptors(self, raw):
+                return []
+
+        return _StubAdapter()
+
+    def test_rename_mode_moves_default_output_into_cache(self, tmp_path):
+        from descry.scip.adapter import DiscoveredProject
+
+        mgr = ScipCacheManager(tmp_path)
+        mgr.cache_dir.mkdir(parents=True, exist_ok=True)
+        adapter = self._stub_adapter(tmp_path, mode="rename")
+        project = DiscoveredProject(name="stubproj", root=tmp_path, language="stublang")
+
+        ok = mgr._generate_scip(adapter, project)
+
+        assert ok is True
+        expected = mgr.cache_dir / "stubproj.scip"
+        assert expected.exists()
+        assert expected.read_bytes() == b"stub-scip-payload"
+        assert not (tmp_path / "index.scip").exists()
+
+    def test_direct_mode_leaves_no_stray_output(self, tmp_path):
+        """Regression guard: output_mode='direct' must NOT move a stray
+        index.scip sitting in cwd. Only 'rename' mode should do the move.
+        """
+        from descry.scip.adapter import CommandSpec, DiscoveredProject
+
+        # Pre-seed a stray file so we can verify it's left in place.
+        stray = tmp_path / "index.scip"
+        stray.write_bytes(b"pre-existing stray file")
+
+        class _DirectStubAdapter:
+            name = "directlang"
+            scheme = "scip-direct"
+            binary = "true"
+            extensions = (".direct",)
+
+            def discover(self, root, excluded_dirs):
+                return []
+
+            def build_command(self, project, out_path, config):
+                argv = [
+                    "/bin/sh",
+                    "-c",
+                    f"printf 'payload' > {out_path}",
+                ]
+                return CommandSpec(argv=argv, cwd=project.root, output_mode="direct")
+
+            def parse_descriptors(self, raw):
+                return []
+
+        mgr = ScipCacheManager(tmp_path)
+        mgr.cache_dir.mkdir(parents=True, exist_ok=True)
+        project = DiscoveredProject(
+            name="directproj", root=tmp_path, language="directlang"
+        )
+
+        ok = mgr._generate_scip(_DirectStubAdapter(), project)
+
+        assert ok is True
+        assert (mgr.cache_dir / "directproj.scip").read_bytes() == b"payload"
+        # Stray index.scip untouched by direct mode.
+        assert stray.read_bytes() == b"pre-existing stray file"

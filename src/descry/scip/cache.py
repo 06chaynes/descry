@@ -1,16 +1,19 @@
 """Per-project SCIP generation with incremental caching.
 
-This module manages SCIP index generation for multiple languages with smart caching
-to avoid regenerating indices for unchanged projects.
+This module manages SCIP index generation across multiple languages with smart
+caching to avoid regenerating indices for unchanged projects. Language support
+is registry-driven: each adapter in `descry.scip.adapter.ADAPTERS` contributes
+its own discovery + command-building logic, and this module loops over the
+registry rather than hardcoding per-language branches.
 
-Supported:
+Currently registered adapters (see `descry.scip.adapters`):
 - Rust crates (via rust-analyzer)
 - TypeScript/JavaScript packages (via scip-typescript)
 - Python packages (via scip-python)
 
 Performance optimizations:
-- Pre-warm rust-analyzer cache with parallel workers
-- Run Rust and TypeScript generation concurrently
+- Pre-warm rust-analyzer cache with parallel workers (Rust-specific)
+- Run all adapters concurrently
 - Dynamic worker count based on available memory
 """
 
@@ -25,7 +28,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import descry.scip.adapters  # noqa: F401 — side-effect: populate ADAPTERS registry
 from descry._env import safe_env
+from descry.scip.adapter import (
+    ADAPTERS,
+    AdapterConfig,
+    DiscoveredProject,
+    LanguageAdapter,
+)
 
 if TYPE_CHECKING:
     from typing import Dict, List, Tuple
@@ -95,147 +105,56 @@ class ScipCacheManager:
         self._scip_skip_crates = set(scip_skip_crates) if scip_skip_crates else set()
         self._scip_toolchain = scip_toolchain
 
+    def _discover_all(self) -> Dict[str, List[DiscoveredProject]]:
+        """Run discovery for every registered adapter.
+
+        Returns a mapping from adapter.name to the list of projects it found.
+        """
+        out: Dict[str, List[DiscoveredProject]] = {}
+        for adapter in ADAPTERS.values():
+            out[adapter.name] = adapter.discover(self.project_root, self.excluded_dirs)
+        return out
+
+    def _discover_for(self, lang: str) -> List[DiscoveredProject]:
+        """Run discovery for one adapter by `lang` name; empty list if unknown."""
+        adapter = ADAPTERS.get(lang)
+        if adapter is None:
+            return []
+        return adapter.discover(self.project_root, self.excluded_dirs)
+
     def get_projects(self) -> List[Tuple[str, str]]:
-        """Auto-discover all indexable projects.
+        """Auto-discover all indexable projects across every registered adapter.
 
         Returns:
-            List of (project_name, project_type) tuples.
-            project_type is one of: "rust", "typescript", "python"
+            Sorted list of (project_name, project_type) tuples where
+            project_type is the adapter's `name` (e.g. "rust", "typescript",
+            "python", and any future SCIP language additions).
         """
-        projects = []
-        projects.extend((name, "rust") for name in self.get_rust_crates())
-        projects.extend((name, "typescript") for name in self.get_typescript_packages())
-        projects.extend((name, "python") for name in self.get_python_packages())
-        return sorted(projects)
+        out: list[tuple[str, str]] = []
+        for adapter in ADAPTERS.values():
+            for project in adapter.discover(self.project_root, self.excluded_dirs):
+                out.append((project.name, adapter.name))
+        return sorted(out)
 
     def get_crates(self) -> List[str]:
         """Auto-discover Rust crates (backwards compatibility alias)."""
         return self.get_rust_crates()
 
     def get_rust_crates(self) -> List[str]:
-        """Auto-discover Rust crates in workspace.
-
-        Finds directories containing Cargo.toml with a src/ subdirectory.
+        """Auto-discover Rust crates (names only) via RustAdapter.
 
         Returns:
-            List of crate directory names (e.g., ['backend', 'database', 'api'])
+            Sorted list of crate directory names.
         """
-        crates = []
-
-        # Check for workspace members in root Cargo.toml
-        root_cargo = self.project_root / "Cargo.toml"
-        if root_cargo.exists():
-            for cargo_toml in self.project_root.glob("*/Cargo.toml"):
-                crate_dir = cargo_toml.parent
-                # Skip hidden directories and common non-crate directories
-                if crate_dir.name.startswith("."):
-                    continue
-                if crate_dir.name in self.excluded_dirs:
-                    continue
-                if (crate_dir / "src").exists():
-                    crates.append(crate_dir.name)
-
-        return sorted(crates)
+        return [p.name for p in self._discover_for("rust")]
 
     def get_typescript_packages(self) -> List[str]:
-        """Auto-discover TypeScript/JavaScript packages.
-
-        Finds directories containing package.json with TypeScript/JavaScript source files.
-
-        Returns:
-            List of package directory names (e.g., ['webapp', 'dashboard'])
-        """
-        packages = []
-
-        for package_json in self.project_root.glob("*/package.json"):
-            pkg_dir = package_json.parent
-            # Skip hidden directories
-            if pkg_dir.name.startswith("."):
-                continue
-            # Skip excluded directories
-            if pkg_dir.name in self.excluded_dirs:
-                continue
-            # Check for TypeScript/JavaScript source files
-            has_ts = list(pkg_dir.glob("src/**/*.ts")) or list(
-                pkg_dir.glob("src/**/*.tsx")
-            )
-            has_js = list(pkg_dir.glob("src/**/*.js")) or list(
-                pkg_dir.glob("src/**/*.jsx")
-            )
-            if has_ts or has_js:
-                packages.append(pkg_dir.name)
-
-        return sorted(packages)
+        """Auto-discover TypeScript/JavaScript packages (names only) via TypeScriptAdapter."""
+        return [p.name for p in self._discover_for("typescript")]
 
     def get_python_packages(self) -> List[str]:
-        """Auto-discover Python packages for scip-python.
-
-        Two discovery modes:
-
-        1. **Monorepo layout**: directories directly under project_root that
-           carry their own `pyproject.toml` (or `setup.py`/`setup.cfg`) and
-           contain `.py` files. This mirrors get_rust_crates / get_typescript
-           _packages.
-        2. **Single-package layout**: project_root itself carries a
-           `pyproject.toml` and `src/`-layout or top-level `.py` files. In
-           that case we return a single synthetic package named after the
-           project_root directory.
-
-        Returns:
-            List of package directory names to index (e.g. ``['backend',
-            'workers']`` or ``['descry']``).
-        """
-        packages: list[str] = []
-
-        # Case 1: monorepo with per-subdir pyproject.toml.
-        for marker in self.project_root.glob("*/pyproject.toml"):
-            pkg_dir = marker.parent
-            if pkg_dir.name.startswith(".") or pkg_dir.name in self.excluded_dirs:
-                continue
-            if not any(pkg_dir.rglob("*.py")):
-                continue
-            packages.append(pkg_dir.name)
-        for marker in self.project_root.glob("*/setup.py"):
-            pkg_dir = marker.parent
-            if pkg_dir.name.startswith(".") or pkg_dir.name in self.excluded_dirs:
-                continue
-            if pkg_dir.name in packages:
-                continue  # already picked up via pyproject
-            if not any(pkg_dir.rglob("*.py")):
-                continue
-            packages.append(pkg_dir.name)
-
-        # Case 2: single-package root. Only treat as such when we did not
-        # already find per-subdir packages — otherwise the root project
-        # would shadow the monorepo children.
-        if not packages:
-            root_marker_exists = (
-                (self.project_root / "pyproject.toml").exists()
-                or (self.project_root / "setup.py").exists()
-                or (self.project_root / "setup.cfg").exists()
-            )
-            if root_marker_exists and any(
-                p for p in self.project_root.rglob("*.py") if self._py_in_scope(p)
-            ):
-                # Synthetic: use the project_root name so .scip filenames
-                # don't collide across projects.
-                packages.append(self.project_root.name)
-
-        return sorted(packages)
-
-    def _py_in_scope(self, path: Path) -> bool:
-        """True if `path` is a Python source file inside project_root and
-        not under a hidden or excluded directory.
-        """
-        try:
-            rel = path.relative_to(self.project_root)
-        except ValueError:
-            return False
-        parts = rel.parts
-        for part in parts[:-1]:
-            if part.startswith(".") or part in self.excluded_dirs:
-                return False
-        return True
+        """Auto-discover Python packages (names only) via PythonAdapter."""
+        return [p.name for p in self._discover_for("python")]
 
     def needs_update(self, project: str, project_type: str = "rust") -> bool:
         """Check if project SCIP needs regeneration.
@@ -270,163 +189,111 @@ class ScipCacheManager:
         """
         return self.update_changed_rust(parallel)
 
-    def update_changed_rust(self, parallel: bool = True) -> Dict[str, Path]:
-        """Update SCIP for changed Rust crates only.
+    def _update_changed_for_adapter(
+        self, adapter: LanguageAdapter, parallel: bool
+    ) -> Dict[str, Path]:
+        """Shared body of `update_changed_<lang>` — runs one adapter.
 
-        Pre-warms rust-analyzer cache before generation for better performance.
-
-        Args:
-            parallel: Whether to generate SCIP for multiple crates in parallel
-
-        Returns:
-            Dictionary mapping crate names to their SCIP file paths
+        Discovers projects via the adapter, applies language-specific skip
+        lists (currently only Rust's `scip_skip_crates`), filters by
+        checksum, pre-warms where the adapter wants it (currently only
+        rust-analyzer), and dispatches `_generate_scip` either serially or
+        through a bounded ThreadPoolExecutor.
         """
-        crates = self.get_rust_crates()
-        if not crates:
-            logger.info("No Rust crates found in project")
-            return {}
+        projects = adapter.discover(self.project_root, self.excluded_dirs)
 
-        # Filter out crates configured to be skipped
-        if self._scip_skip_crates:
-            skipped = [c for c in crates if c in self._scip_skip_crates]
+        # Apply Rust-scoped skip list.
+        if adapter.name == "rust" and self._scip_skip_crates:
+            skipped = [p.name for p in projects if p.name in self._scip_skip_crates]
             if skipped:
                 logger.info(f"SCIP: Skipping configured crates: {skipped}")
-            crates = [c for c in crates if c not in self._scip_skip_crates]
+            projects = [p for p in projects if p.name not in self._scip_skip_crates]
 
-        changed = [c for c in crates if self.needs_update(c, "rust")]
+        names = [p.name for p in projects]
+        if not projects:
+            logger.info(f"No {adapter.name} projects found in project")
+            return {}
+
+        changed = [p for p in projects if self.needs_update(p.name, adapter.name)]
 
         if changed:
             logger.info(
-                f"SCIP: Regenerating for {len(changed)} changed Rust crate(s): {changed}"
+                f"SCIP: Regenerating for {len(changed)} changed "
+                f"{adapter.name} project(s): {[p.name for p in changed]}"
             )
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-            # Pre-warm cache if generating multiple crates (amortizes the cost)
-            if len(changed) > 1:
+            # Rust-specific: pre-warm rust-analyzer cache when we have
+            # multiple crates to amortize the workspace analysis cost.
+            if adapter.name == "rust" and len(changed) > 1:
                 self._prime_rust_analyzer_cache()
 
             if parallel and len(changed) > 1:
                 max_workers = self._get_max_workers(len(changed))
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    results = list(executor.map(self._generate_rust_scip, changed))
-            else:
-                results = [self._generate_rust_scip(c) for c in changed]
-
-            # Update checksums for successfully generated crates
-            checksums = self._load_checksums()
-            for crate, success in zip(changed, results):
-                if success:
-                    checksums[crate] = self._hash_project(crate, "rust")
-            self._save_checksums(checksums)
-        else:
-            logger.debug("SCIP: All Rust crates up-to-date")
-
-        return self._get_scip_paths(crates)
-
-    def update_changed_typescript(self, parallel: bool = False) -> Dict[str, Path]:
-        """Update SCIP for changed TypeScript packages.
-
-        Args:
-            parallel: Whether to generate SCIP for multiple packages in parallel
-
-        Returns:
-            Dictionary mapping package names to their SCIP file paths
-        """
-        packages = self.get_typescript_packages()
-        if not packages:
-            logger.info("No TypeScript packages found in project")
-            return {}
-
-        changed = [p for p in packages if self.needs_update(p, "typescript")]
-
-        if changed:
-            logger.info(
-                f"SCIP: Regenerating for {len(changed)} changed TypeScript package(s): {changed}"
-            )
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-            if parallel and len(changed) > 1:
-                max_workers = self._get_max_workers(len(changed))
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     results = list(
-                        executor.map(self._generate_typescript_scip, changed)
+                        executor.map(
+                            lambda project: self._generate_scip(adapter, project),
+                            changed,
+                        )
                     )
             else:
-                results = [self._generate_typescript_scip(p) for p in changed]
+                results = [self._generate_scip(adapter, p) for p in changed]
 
-            # Update checksums for successfully generated packages
             checksums = self._load_checksums()
-            for pkg, success in zip(changed, results):
+            for project, success in zip(changed, results):
                 if success:
-                    checksums[pkg] = self._hash_project(pkg, "typescript")
+                    checksums[project.name] = self._hash_project(
+                        project.name, adapter.name
+                    )
             self._save_checksums(checksums)
         else:
-            logger.debug("SCIP: All TypeScript packages up-to-date")
+            logger.debug(f"SCIP: All {adapter.name} projects up-to-date")
 
-        return self._get_scip_paths(packages)
+        return self._get_scip_paths(names)
+
+    def update_changed_rust(self, parallel: bool = True) -> Dict[str, Path]:
+        """Update SCIP for changed Rust crates only (back-compat shim).
+
+        Pre-warms rust-analyzer cache before generation for better performance.
+        """
+        adapter = ADAPTERS.get("rust")
+        if adapter is None:
+            return {}
+        return self._update_changed_for_adapter(adapter, parallel)
+
+    def update_changed_typescript(self, parallel: bool = False) -> Dict[str, Path]:
+        """Update SCIP for changed TypeScript packages (back-compat shim)."""
+        adapter = ADAPTERS.get("typescript")
+        if adapter is None:
+            return {}
+        return self._update_changed_for_adapter(adapter, parallel)
 
     def update_changed_python(self, parallel: bool = False) -> Dict[str, Path]:
-        """Update SCIP for changed Python packages.
-
-        Args:
-            parallel: Whether to generate SCIP for multiple packages in parallel
-
-        Returns:
-            Dictionary mapping package names to their SCIP file paths
-        """
-        packages = self.get_python_packages()
-        if not packages:
-            logger.info("No Python packages found in project")
+        """Update SCIP for changed Python packages (back-compat shim)."""
+        adapter = ADAPTERS.get("python")
+        if adapter is None:
             return {}
-
-        changed = [p for p in packages if self.needs_update(p, "python")]
-
-        if changed:
-            logger.info(
-                f"SCIP: Regenerating for {len(changed)} changed Python package(s): {changed}"
-            )
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-            if parallel and len(changed) > 1:
-                max_workers = self._get_max_workers(len(changed))
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    results = list(executor.map(self._generate_python_scip, changed))
-            else:
-                results = [self._generate_python_scip(p) for p in changed]
-
-            # Update checksums for successfully generated packages
-            checksums = self._load_checksums()
-            for pkg, success in zip(changed, results):
-                if success:
-                    checksums[pkg] = self._hash_project(pkg, "python")
-            self._save_checksums(checksums)
-        else:
-            logger.debug("SCIP: All Python packages up-to-date")
-
-        return self._get_scip_paths(packages)
+        return self._update_changed_for_adapter(adapter, parallel)
 
     def update_all(self, parallel: bool = False) -> Dict[str, Path]:
-        """Update SCIP for all changed projects (Rust, TypeScript, Python).
+        """Update SCIP for every registered adapter concurrently.
 
-        Runs each language's generation concurrently since they use
+        Each adapter's generation runs in its own worker since adapters use
         independent tools with no shared resources.
-
-        Args:
-            parallel: Whether to generate SCIP in parallel within each language
-
-        Returns:
-            Dictionary mapping project names to their SCIP file paths
         """
-        results = {}
+        results: Dict[str, Path] = {}
 
-        # Run all three languages concurrently
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        if not ADAPTERS:
+            return results
+
+        with ThreadPoolExecutor(max_workers=max(1, len(ADAPTERS))) as executor:
             futures = {
-                executor.submit(self.update_changed_rust, parallel): "rust",
-                executor.submit(self.update_changed_typescript, parallel): "typescript",
-                executor.submit(self.update_changed_python, parallel): "python",
+                executor.submit(
+                    self._update_changed_for_adapter, adapter, parallel
+                ): adapter.name
+                for adapter in ADAPTERS.values()
             }
-
             for future in as_completed(futures):
                 lang = futures[future]
                 try:
@@ -437,95 +304,31 @@ class ScipCacheManager:
 
         return results
 
-    def _generate_rust_scip(self, crate: str) -> bool:
-        """Generate SCIP for a single Rust crate.
+    def _adapter_config_for(self, adapter: LanguageAdapter) -> AdapterConfig:
+        """Build an AdapterConfig for `adapter` from this manager's state.
 
-        Uses rust-analyzer's scip command to generate the index.
-
-        Args:
-            crate: Name of the crate to generate SCIP for
-
-        Returns:
-            True if generation succeeded, False otherwise
+        For now only Rust has per-language state (`toolchain`, `extra_args`);
+        Java/Go adapters added later get their own state here.
         """
-        crate_path = self.project_root / crate
-        output_path = self.cache_dir / f"{crate}.scip"
-
-        # First-time generation is much slower as rust-analyzer builds workspace analysis
-        # Check if any SCIP files exist to determine if this is likely a first run
-        existing_scip = (
-            list(self.cache_dir.glob("*.scip")) if self.cache_dir.exists() else []
-        )
-        is_first_run = len(existing_scip) == 0
-
-        timeout_seconds = self._get_timeout(is_first_run)
-        timeout_str = (
-            "unlimited" if timeout_seconds is None else f"{timeout_seconds // 60}min"
-        )
-        logger.info(f"SCIP: Generating index for {crate}... (timeout: {timeout_str})")
-
-        try:
-            # rust-analyzer scip runs from workspace root to share analysis cache
-            cmd = []
-            if self._scip_toolchain:
-                cmd.extend(["rustup", "run", self._scip_toolchain])
-            cmd.extend(
-                [
-                    "rust-analyzer",
-                    "scip",
-                    str(crate_path),
-                    "--output",
-                    str(output_path),
-                ]
-                + self._scip_extra_args
+        if adapter.name == "rust":
+            return AdapterConfig(
+                toolchain=self._scip_toolchain,
+                extra_args=tuple(self._scip_extra_args),
             )
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                cwd=str(self.project_root),
-                env=safe_env(),
-            )
+        return AdapterConfig()
 
-            if result.returncode == 0 and output_path.exists():
-                size_kb = output_path.stat().st_size / 1024
-                logger.info(f"SCIP: Generated {crate}.scip ({size_kb:.1f} KB)")
-                return True
-            else:
-                stderr_tail = (
-                    result.stderr[-500:] if len(result.stderr) > 500 else result.stderr
-                )
-                logger.warning(
-                    f"SCIP: Failed to generate for {crate} "
-                    f"(exit={result.returncode}, "
-                    f"output_exists={output_path.exists()}, "
-                    f"stderr_len={len(result.stderr)}): {stderr_tail}"
-                )
-                return False
+    def _generate_scip(
+        self, adapter: LanguageAdapter, project: DiscoveredProject
+    ) -> bool:
+        """Run one adapter's SCIP generation for one project.
 
-        except subprocess.TimeoutExpired:
-            logger.warning(f"SCIP: Generation timed out for {crate}")
-            return False
-        except Exception as e:
-            logger.warning(f"SCIP: Error generating for {crate}: {e}")
-            return False
-
-    def _generate_typescript_scip(self, package: str) -> bool:
-        """Generate SCIP for a single TypeScript/JavaScript package.
-
-        Uses scip-typescript to generate the index.
-
-        Args:
-            package: Name of the package to generate SCIP for
-
-        Returns:
-            True if generation succeeded, False otherwise
+        Shared across every registered adapter. Timing, first-run detection,
+        timeout resolution, safe_env() application, and post-hoc file rename
+        (for adapters whose indexer lacks an --output flag) all live here so
+        each adapter only has to describe *what* to run via `build_command`.
         """
-        package_path = self.project_root / package
-        output_path = self.cache_dir / f"{package}.scip"
+        output_path = self.cache_dir / f"{project.name}.scip"
 
-        # Check if this is a first run for timeout calculation
         existing_scip = (
             list(self.cache_dir.glob("*.scip")) if self.cache_dir.exists() else []
         )
@@ -536,142 +339,77 @@ class ScipCacheManager:
             "unlimited" if timeout_seconds is None else f"{timeout_seconds // 60}min"
         )
         logger.info(
-            f"SCIP: Generating TypeScript index for {package}... (timeout: {timeout_str})"
+            f"SCIP: Generating {adapter.name} index for {project.name}... "
+            f"(timeout: {timeout_str})"
         )
 
-        # Build command with optional flags
-        cmd = [
-            "scip-typescript",
-            "index",
-            "--output",
-            str(output_path),
-        ]
-
-        # Add --infer-tsconfig for SvelteKit projects that may not have
-        # a standard tsconfig.json at root, or have complex extends chains
-        svelte_config = package_path / "svelte.config.js"
-        vite_config = package_path / "vite.config.ts"
-        if svelte_config.exists() or vite_config.exists():
-            cmd.append("--infer-tsconfig")
-            logger.debug(
-                f"SCIP: Using --infer-tsconfig for SvelteKit project {package}"
-            )
-
+        config = self._adapter_config_for(adapter)
         try:
-            # scip-typescript needs to be run from the package directory
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                cwd=str(package_path),
-                env=safe_env(),
-            )
-
-            if result.returncode == 0 and output_path.exists():
-                size_kb = output_path.stat().st_size / 1024
-                logger.info(f"SCIP: Generated {package}.scip ({size_kb:.1f} KB)")
-                return True
-            else:
-                logger.warning(
-                    f"SCIP: Failed to generate for {package}: {result.stderr[:200]}"
-                )
-                return False
-
-        except subprocess.TimeoutExpired:
-            logger.warning(f"SCIP: Generation timed out for {package}")
-            return False
+            spec = adapter.build_command(project, output_path, config)
         except Exception as e:
-            logger.warning(f"SCIP: Error generating for {package}: {e}")
-            return False
-
-    def _generate_python_scip(self, package: str) -> bool:
-        """Generate SCIP for a single Python package.
-
-        Uses scip-python to generate the index. scip-python resolves a
-        project via its nearest `pyproject.toml` / `setup.py`, so we run
-        the binary from the package directory. For the single-package
-        root case (where the synthetic package name equals the project
-        root's basename), we run directly in project_root.
-
-        Args:
-            package: Name of the package directory to index (or the project
-                root's basename for the single-package layout).
-
-        Returns:
-            True if generation succeeded, False otherwise.
-        """
-        # Resolve the working directory: prefer a matching subdirectory,
-        # fall back to project_root for the synthetic single-package case.
-        candidate = self.project_root / package
-        if candidate.is_dir() and (
-            (candidate / "pyproject.toml").exists()
-            or (candidate / "setup.py").exists()
-            or (candidate / "setup.cfg").exists()
-        ):
-            work_dir = candidate
-        else:
-            work_dir = self.project_root
-
-        output_path = self.cache_dir / f"{package}.scip"
-
-        existing_scip = (
-            list(self.cache_dir.glob("*.scip")) if self.cache_dir.exists() else []
-        )
-        is_first_run = len(existing_scip) == 0
-        timeout_seconds = self._get_timeout(is_first_run)
-        timeout_str = (
-            "unlimited" if timeout_seconds is None else f"{timeout_seconds // 60}min"
-        )
-        logger.info(
-            f"SCIP: Generating Python index for {package}... (timeout: {timeout_str})"
-        )
-
-        # scip-python accepts --project-name + --output, plus a positional
-        # project-root. The project-root is absolute so a leading-dash
-        # filename attack via ``os.chdir`` cannot forge a flag. No shell.
-        cmd = [
-            "scip-python",
-            "index",
-            "--project-name",
-            package,
-            "--output",
-            str(output_path),
-            "--cwd",
-            str(work_dir),
-        ]
-
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                cwd=str(work_dir),
-                env=safe_env(),
-            )
-            if result.returncode == 0 and output_path.exists():
-                size_kb = output_path.stat().st_size / 1024
-                logger.info(f"SCIP: Generated {package}.scip ({size_kb:.1f} KB)")
-                return True
-            stderr_tail = (
-                result.stderr[-500:] if len(result.stderr) > 500 else result.stderr
-            )
             logger.warning(
-                f"SCIP: Failed to generate Python index for {package} "
-                f"(exit={result.returncode}, output_exists={output_path.exists()}): "
-                f"{stderr_tail}"
+                f"SCIP: {adapter.name} failed to build command for {project.name}: {e}"
             )
             return False
+
+        env = safe_env()
+        if spec.env_extras:
+            env = {**env, **spec.env_extras}
+
+        try:
+            result = subprocess.run(
+                spec.argv,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=str(spec.cwd),
+                env=env,
+            )
         except subprocess.TimeoutExpired:
-            logger.warning(f"SCIP: Python generation timed out for {package}")
+            logger.warning(
+                f"SCIP: {adapter.name} generation timed out for {project.name}"
+            )
             return False
         except FileNotFoundError:
-            logger.debug("SCIP: scip-python binary not on PATH")
+            logger.debug(f"SCIP: {adapter.binary} binary not on PATH")
             return False
         except Exception as e:
-            logger.warning(f"SCIP: Error generating Python index for {package}: {e}")
+            logger.warning(
+                f"SCIP: Error generating {adapter.name} index for {project.name}: {e}"
+            )
             return False
+
+        # Post-hoc rename for adapters whose indexer lacks an --output flag
+        # (scip-go contingency). The indexer is assumed to have written
+        # `index.scip` in `cwd`; move it into the expected location.
+        if spec.output_mode == "rename" and result.returncode == 0:
+            default_output = spec.cwd / "index.scip"
+            if (
+                default_output.exists()
+                and default_output.resolve() != output_path.resolve()
+            ):
+                try:
+                    default_output.replace(output_path)
+                except OSError as e:
+                    logger.warning(
+                        f"SCIP: Failed to move {default_output} to {output_path}: {e}"
+                    )
+                    return False
+
+        if result.returncode == 0 and output_path.exists():
+            size_kb = output_path.stat().st_size / 1024
+            logger.info(f"SCIP: Generated {project.name}.scip ({size_kb:.1f} KB)")
+            return True
+
+        stderr_tail = (
+            result.stderr[-500:] if len(result.stderr) > 500 else result.stderr
+        )
+        logger.warning(
+            f"SCIP: Failed to generate {adapter.name} index for {project.name} "
+            f"(exit={result.returncode}, output_exists={output_path.exists()}, "
+            f"stderr_len={len(result.stderr)}): {stderr_tail}"
+        )
+        return False
 
     def _get_max_workers(self, num_items: int) -> int:
         """Get number of parallel workers based on memory constraints.

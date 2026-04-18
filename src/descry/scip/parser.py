@@ -18,6 +18,13 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import descry.scip.adapters  # noqa: F401 — side-effect: populate ADAPTERS registry
+from descry.scip.adapter import (
+    ADAPTERS,
+    adapter_for_extension,
+    adapter_for_scheme,
+)
+
 if TYPE_CHECKING:
     from typing import Dict, List, Optional, Tuple
 
@@ -60,11 +67,11 @@ class ScipIndex:
         # Simple name -> list of symbol_ids (for fuzzy matching)
         self.name_to_symbols: Dict[str, List[str]] = {}
 
-        # Resolution statistics by language
+        # Resolution statistics by language, driven by the adapter registry
+        # so new SCIP languages automatically get a stats bucket.
         self._resolution_stats: Dict[str, Dict[str, int]] = {
-            "rust": {"attempted": 0, "resolved": 0},
-            "typescript": {"attempted": 0, "resolved": 0},
-            "python": {"attempted": 0, "resolved": 0},
+            adapter.name: {"attempted": 0, "resolved": 0}
+            for adapter in ADAPTERS.values()
         }
 
         for scip_file in scip_files:
@@ -177,12 +184,12 @@ class ScipIndex:
         if not descriptors:
             return None
 
-        # Use language-specific parsing. scip-python uses the same
-        # backtick-wrapped file-path format as scip-typescript (the path
-        # before the last backtick is module info baked into the file_path
-        # we already track), so route it through the same extractor.
-        if scheme in ("scip-typescript", "scip-python"):
-            name_parts = self._parse_typescript_descriptors(descriptors)
+        # Delegate descriptor parsing to the adapter that owns this scheme.
+        # Falls back to the Rust-style parser if no adapter claims the
+        # scheme (keeps behavior safe for unknown/future schemes).
+        adapter = adapter_for_scheme(scheme)
+        if adapter is not None:
+            name_parts = adapter.parse_descriptors(descriptors)
         else:
             name_parts = self._parse_descriptors(descriptors)
 
@@ -204,13 +211,15 @@ class ScipIndex:
         Returns:
             Descry node ID if resolved, None otherwise
         """
-        # Determine language for statistics tracking
-        if source_file.endswith((".ts", ".tsx", ".js", ".jsx", ".svelte")):
-            lang = "typescript"
-        elif source_file.endswith(".py"):
-            lang = "python"
-        else:
-            lang = "rust"
+        # Determine language for stats tracking via the adapter registry.
+        # Extension → adapter.name; unknown extensions fall back to "rust" to
+        # preserve the pre-refactor behavior (rust-analyzer is the broadest
+        # resolver in practice).
+        ext_adapter = None
+        dot_idx = source_file.rfind(".")
+        if dot_idx >= 0:
+            ext_adapter = adapter_for_extension(source_file[dot_idx:])
+        lang = ext_adapter.name if ext_adapter is not None else "rust"
         if lang in self._resolution_stats:
             self._resolution_stats[lang]["attempted"] += 1
 
@@ -326,9 +335,10 @@ class ScipIndex:
         # Extract descriptors (everything after scheme, manager, package, version)
         descriptors = " ".join(parts[4:]) if len(parts) > 4 else ""
 
-        # Parse descriptors using language-specific parser
-        if scheme == "scip-typescript":
-            name_parts = self._parse_typescript_descriptors(descriptors)
+        # Delegate descriptor parsing to the adapter that owns this scheme.
+        adapter = adapter_for_scheme(scheme)
+        if adapter is not None:
+            name_parts = adapter.parse_descriptors(descriptors)
         else:
             name_parts = self._parse_descriptors(descriptors)
 
