@@ -59,6 +59,7 @@ descry quick handle_request
 | **MCP Server** | `descry-mcp` | AI coding agents (Claude Code, etc.) |
 | **Web UI** | `descry-web` | Visual exploration at `http://127.0.0.1:8787` |
 | **Pi Extension** | See `pi-extension/` | Pi coding agent integration |
+| **Claude Code Skill** | See `claude-skill/` | Teaches Claude when/how to reach for descry |
 
 ## MCP Setup
 
