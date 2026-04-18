@@ -195,6 +195,7 @@ Configuration precedence: defaults < `.descry.toml` < environment variables.
 | PHP | Regex | Yes | `scip-php` via `composer require --dev davidrjenni/scip-php` (third-party indexer) |
 | C# / VB.NET | Regex (C# only) | Yes | `scip-dotnet` via `dotnet tool install --global scip-dotnet` |
 | C / C++ | Regex | Yes | `scip-clang` binary + `compile_commands.json` (CMake `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, Meson+Ninja, or `bear -- make`) |
+| Dart / Flutter | Regex | Yes | `scip-dart` via `dart pub global activate scip_dart`; requires `dart pub get` at project root |
 | JavaScript | Regex (+ Tree-sitter opt-in) | — | `descry-codegraph[ast]` for tree-sitter |
 | Svelte | Regex | — | — |
 

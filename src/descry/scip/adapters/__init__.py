@@ -11,6 +11,7 @@ from __future__ import annotations
 # Side-effect imports: each module registers its adapter at load time.
 from descry.scip.adapters import (  # noqa: F401
     clang,
+    dart,
     dotnet,
     go,
     java,

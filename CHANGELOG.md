@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Dart / Flutter support** via `scip-dart` (Milestone D). DartAdapter
+  discovers projects by `pubspec.yaml` at the root or under
+  `packages/*` (melos / workspace layout); runs `scip-dart ./` from the
+  package root and uses `output_mode="rename"` to move the emitted
+  `index.scip` into the cache. DartParser handles imports
+  (`package:` / `dart:` / relative), classes (including `abstract`,
+  `base`, `sealed`, `final`, `interface class`, `mixin class`), mixins,
+  extensions, enums, typedefs, top-level constants, class inheritance
+  (`extends` → INHERITS edge), and call sites with null-safe receiver
+  chains (`?.method()`). Dart has heavy top-level code (top-level
+  functions, top-level variable initializers), so the parser emits
+  calls at file scope too — unlike Java/C# parsers which gate calls on
+  non-file context. pub smoke test hit **71%** resolution
+  (10,279 / 14,490 CALLS edges) — below the 91.2% Rust bar, accepted
+  as the Dart ceiling for test-heavy codebases where pub's internal
+  test-helper DSL (`servePackages`, `d.file`, `runPub`, etc.) contributes
+  the bulk of unresolved calls.
 - **Java / Kotlin / Scala support** via `scip-java` (Milestone J of Wave 2).
   JavaParser extracts classes, interfaces, enums, records, methods,
   constructors, fields, imports, and call sites. JavaAdapter ships a
@@ -53,9 +70,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   for adapters outside rust / typescript / python. `_hash_project` now
   falls back to `_hash_generic_adapter` (walks the adapter's declared
   extensions + hashes paths + bytes) for java / go / ruby / php /
-  dotnet / clang, instead of raising `ValueError: Unknown project type`.
-  Before this fix, every second+ index produced a `.scip`-less graph
-  that looked successful in logs but had no SCIP-resolved CALLS edges.
+  dotnet / clang / dart, instead of raising `ValueError: Unknown project
+  type`. Before this fix, every second+ index produced a `.scip`-less
+  graph that looked successful in logs but had no SCIP-resolved CALLS
+  edges.
+- **SCIP Strategy 1 name match.** `ScipIndex.resolve`'s exact
+  (file, line) lookup used to fall back to the first candidate in the
+  definitions map when no name matched. Downstream, the cross-crate
+  name check in `generate.py` would reject those mismatched targets,
+  but by then Strategy 2 (fuzzy resolve by name) had already been
+  skipped. Tighten Strategy 1 to require a name match; non-matching
+  line lookups now fall through to fuzzy. Measured: pub Dart 52% →
+  71%, Redis C 79.2% → 80.4%.
 
 ## [0.1.1] — 2026-04-17
 
