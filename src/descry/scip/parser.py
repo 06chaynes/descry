@@ -237,19 +237,20 @@ class ScipIndex:
                 candidates = self.references.get((relative_path, line)) or []
 
         if candidates:
-            # Prefer a candidate whose extracted name matches ref_name (helps
-            # disambiguate multi-crate overlaps where several crates contribute
-            # the same (file, line) tuple).
+            # Require an extracted-name match on the candidate — the
+            # (file, line) tuple can contain multiple occurrences (type
+            # prefix, method call, closing punctuation), and the
+            # no-name-match fallback used to pick the first candidate in
+            # `definitions`, which routinely yielded wrong targets that
+            # later got rejected by the cross-crate name check in
+            # generate.py without ever trying Strategy 2. Require name
+            # match here so non-matching line lookups fall through to
+            # Strategy 2's fuzzy resolve.
             chosen = None
             for cid in candidates:
                 if cid in self.definitions and self._extract_name(cid) == ref_name:
                     chosen = cid
                     break
-            if chosen is None:
-                for cid in candidates:
-                    if cid in self.definitions:
-                        chosen = cid
-                        break
             if chosen is not None:
                 def_file, def_line = self.definitions[chosen]
                 if lang in self._resolution_stats:
