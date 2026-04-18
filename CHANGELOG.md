@@ -4,6 +4,59 @@ All notable changes to Descry will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to pre-1.0 semver (minor-version bumps may include breaking changes; see README versioning stance).
 
+## [Unreleased]
+
+### Added
+
+- **Java / Kotlin / Scala support** via `scip-java` (Milestone J of Wave 2).
+  JavaParser extracts classes, interfaces, enums, records, methods,
+  constructors, fields, imports, and call sites. JavaAdapter ships a
+  Gradle init-script that strips `-Werror` so scip-java works out of the
+  box on Apache projects (Kafka, etc.) whose builds treat warnings as
+  fatal. Kafka smoke test hit **92.7%** CALLS resolution.
+- **Go support** via `scip-go` (Milestone G). GoParser covers packages,
+  grouped imports, type declarations, free functions, methods with
+  receivers, const/var blocks, and call sites. Kubernetes smoke test
+  hit **98.3%** resolution.
+- **Ruby support** via `scip-ruby` (Milestone R). RubyParser uses
+  indent-based context tracking (Ruby uses `end` not `}`); extracts
+  classes with INHERITS edges, modules, methods (including `self.foo`,
+  `foo?`, `foo!`), `attr_reader/writer/accessor`, `require` /
+  `require_relative`, and top-level constants. Rails smoke test hit
+  **87.8%** — below the 91.2% Rust bar, accepted as the Ruby-without-
+  Sorbet ceiling (scip-ruby falls back to `# typed: false` heuristics
+  when Sorbet annotations are absent).
+- **PHP support** via `scip-php` (Milestone P, third-party indexer by
+  davidrjenni). PhpParser handles namespaces, classes / interfaces /
+  traits / enums, `public/protected/private function`, properties,
+  constants, and method / static / instance calls; Allman-brace lookahead
+  (scan up to 10 lines for the opening `{`) was needed for Laravel's
+  style. Laravel smoke test hit **88.6%**.
+- **C# / VB.NET support** via `scip-dotnet` (Milestone N). DotnetAdapter
+  sets `DOTNET_ROLL_FORWARD=LatestMajor` so scip-dotnet's net9 target
+  runs on systems with only net10 installed. Serilog smoke test hit
+  **83.7%**.
+- **C / C++ support** via `scip-clang` (Milestone C). ClangAdapter emits
+  scheme `cxx` (verified from real indexes; not `scip-clang` as a name
+  might suggest). Discovery gives top priority to root-level
+  `compile_commands.json` so Bear-backed Makefile builds and top-level
+  CMake projects work as a single unit. ClangParser avoids regex
+  catastrophic backtracking (which hit >20s on Redis `src/dict.c` in
+  an early draft) via a hand-rolled `_extract_function_name` that scans
+  right-to-left through the argument list. Redis smoke test hit
+  **79.2%**; headers lag .c files (63.3% vs 81.2%) due to scip-clang
+  compdb-coverage limits on transitively-included headers.
+
+### Fixed
+
+- **SCIP incremental re-indexing** no longer silently degrades to zero
+  for adapters outside rust / typescript / python. `_hash_project` now
+  falls back to `_hash_generic_adapter` (walks the adapter's declared
+  extensions + hashes paths + bytes) for java / go / ruby / php /
+  dotnet / clang, instead of raising `ValueError: Unknown project type`.
+  Before this fix, every second+ index produced a `.scip`-less graph
+  that looked successful in logs but had no SCIP-resolved CALLS edges.
+
 ## [0.1.1] — 2026-04-17
 
 Patch release focused on making cross-language tracing actually configurable,

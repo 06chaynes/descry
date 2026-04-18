@@ -189,10 +189,14 @@ Configuration precedence: defaults < `.descry.toml` < environment variables.
 | Rust | Regex + AST | Yes | `rust-analyzer` via rustup |
 | TypeScript | Regex (+ Tree-sitter opt-in) | Yes | `scip-typescript` via npm; `descry-codegraph[ast]` for tree-sitter |
 | Python | Regex + AST | Yes | `scip-python` via npm |
+| Java / Kotlin / Scala | Regex (Java) | Yes | `scip-java` (`coursier install scip-java`) |
+| Go | Regex | Yes | `scip-go` (`go install github.com/sourcegraph/scip-go/cmd/scip-go@latest`) |
+| Ruby | Regex | Yes | `scip-ruby` gem or direct binary |
+| PHP | Regex | Yes | `scip-php` via `composer require --dev davidrjenni/scip-php` (third-party indexer) |
+| C# / VB.NET | Regex (C# only) | Yes | `scip-dotnet` via `dotnet tool install --global scip-dotnet` |
+| C / C++ | Regex | Yes | `scip-clang` binary + `compile_commands.json` (CMake `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, Meson+Ninja, or `bear -- make`) |
 | JavaScript | Regex (+ Tree-sitter opt-in) | — | `descry-codegraph[ast]` for tree-sitter |
 | Svelte | Regex | — | — |
-| Go | Regex | — | — |
-| Java | Regex | — | — |
 
 The tree-sitter TS/TSX/JS parser is currently extractor-only (symbol discovery) and ships behind the `ast` extra + `[features] use_tree_sitter_ts = true` in `.descry.toml`. It runs alongside the regex parser and is a stepping stone toward full AST-driven extraction in a future release.
 
