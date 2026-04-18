@@ -526,12 +526,11 @@ class ScipCacheManager:
     def _hash_project(self, project: str, project_type: str = "rust") -> str:
         """Hash project sources for change detection.
 
-        Args:
-            project: Name of the project to hash
-            project_type: Type of project ("rust" or "typescript")
-
-        Returns:
-            16-character hex hash string
+        Rust/TS/Python have bespoke hashers that include dep manifests so
+        cross-crate type info invalidates correctly. Other adapters fall
+        back to a generic source-tree hash keyed on the adapter's declared
+        extensions — dep-change invalidation is weaker but still catches
+        source edits.
         """
         if project_type == "rust":
             return self._hash_rust_crate(project)
@@ -540,7 +539,48 @@ class ScipCacheManager:
         elif project_type == "python":
             return self._hash_python_package(project)
         else:
-            raise ValueError(f"Unknown project type: {project_type}")
+            return self._hash_generic_adapter(project, project_type)
+
+    def _hash_generic_adapter(self, project: str, adapter_name: str) -> str:
+        """Fallback hasher for adapters without bespoke logic.
+
+        Hashes every source file (by the adapter's declared extensions)
+        under ``project_root/project`` — or the root itself when project
+        equals the root basename. Dep-manifest changes without a source
+        edit won't invalidate the cache; accepted trade-off until each
+        adapter gets its own hasher.
+        """
+        adapter = ADAPTERS.get(adapter_name)
+        if adapter is None:
+            raise ValueError(f"Unknown project type: {adapter_name}")
+
+        candidate = self.project_root / project
+        pkg_path = candidate if candidate.is_dir() else self.project_root
+
+        hasher = hashlib.sha256()
+        hasher.update(f"adapter:{adapter_name}".encode())
+
+        source_files: list[Path] = []
+        for ext in adapter.extensions:
+            source_files.extend(pkg_path.rglob(f"*{ext}"))
+        source_files.sort()
+
+        for src_file in source_files:
+            rel_parts = src_file.relative_to(pkg_path).parts
+            skip = False
+            for part in rel_parts[:-1]:
+                if part.startswith(".") or part in self.excluded_dirs:
+                    skip = True
+                    break
+            if skip:
+                continue
+            try:
+                hasher.update(str(Path(*rel_parts)).encode())
+                hasher.update(src_file.read_bytes())
+            except (OSError, ValueError):
+                pass
+
+        return hasher.hexdigest()[:16]
 
     def _hash_rust_crate(self, crate: str) -> str:
         """Hash Rust crate sources + toolchain for change detection.
