@@ -22,7 +22,6 @@ Examples:
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 
 from descry.scip.adapter import (
@@ -31,11 +30,9 @@ from descry.scip.adapter import (
     DiscoveredProject,
     register,
 )
+from descry.scip.adapters.typescript import parse_backtick_descriptors
 
 logger = logging.getLogger(__name__)
-
-
-_GO_DESCRIPTOR_PATTERN = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)(\([^)]*\)|[#./\[\]])?")
 
 
 def _has_go_sources(pkg_dir: Path) -> bool:
@@ -130,30 +127,23 @@ class GoAdapter:
         return CommandSpec(argv=argv, cwd=project.root, output_mode="direct")
 
     def parse_descriptors(self, raw: str) -> list[str]:
-        """Parse scip-go path-descriptor strings into name components.
+        """Parse scip-go descriptor strings into name components.
 
-        scip-go uses the same suffix conventions as Rust and Java:
-            ``/``   package separator — skip (already in file path)
-            ``#``   type (struct, interface) — include
-            ``.``   term (var, const, field) — include
-            ``()``  method/function — include
-            ``[]``  generic type parameters — harmless pass-through
+        scip-go wraps domain-style package paths in backticks (same wire
+        format as scip-typescript and scip-python):
+
+            `k8s.io/kubernetes/pkg/kubelet`/Kubelet#Run().
+            `github.com/example/svc/internal/http`/Server#Handle().
+
+        The path components inside backticks are redundant (already in
+        the file path); we skip to the symbol portion after the final
+        closing backtick.
 
         Examples:
-            ``pkg/http/Server#Handle().`` -> ``["Server", "Handle"]``
-            ``pkg/config/Config#Load().`` -> ``["Config", "Load"]``
-            ``pkg/types/Color#Red.`` -> ``["Color", "Red"]``
+            ``\\`k8s.io/.../kubelet\\`/Kubelet#Run().`` -> ``["Kubelet", "Run"]``
+            ``pkg/http/Server#Handle().`` (no backticks) -> ``["Server", "Handle"]``
         """
-        names: list[str] = []
-        for match in _GO_DESCRIPTOR_PATTERN.finditer(raw):
-            name = match.group(1)
-            suffix = match.group(2) or ""
-            if not name:
-                continue
-            if suffix == "/":
-                continue
-            names.append(name)
-        return names
+        return parse_backtick_descriptors(raw)
 
 
 register(GoAdapter())

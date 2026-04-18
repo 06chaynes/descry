@@ -106,6 +106,30 @@ _GO_CONTROL_KEYWORDS = frozenset(
 )
 
 
+def _strip_line_comment(line: str) -> str:
+    """Return `line` with any trailing ``//...`` comment removed.
+
+    Tracks simple string state so ``"http://"`` is preserved. Does NOT
+    handle block comments (``/* ... */``) — those spans are suppressed
+    by a separate in-block flag tracked in the main loop.
+    """
+    in_string = False
+    escape = False
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if escape:
+            escape = False
+        elif c == "\\" and in_string:
+            escape = True
+        elif c == '"':
+            in_string = not in_string
+        elif not in_string and c == "/" and i + 1 < len(line) and line[i + 1] == "/":
+            return line[:i]
+        i += 1
+    return line
+
+
 class GoParser(BaseParser):
     """Regex-driven Go source parser."""
 
@@ -143,9 +167,28 @@ class GoParser(BaseParser):
 
         i = 0
         n = len(lines)
+        in_block_comment = False
         while i < n:
-            line = lines[i]
+            raw_line = lines[i]
             lineno = i + 1
+
+            # Handle block comments (/* ... */). Spans longer than one line
+            # are completely suppressed.
+            stripped = raw_line.lstrip()
+            if in_block_comment:
+                if "*/" in raw_line:
+                    in_block_comment = False
+                i += 1
+                continue
+            if stripped.startswith("/*") and "*/" not in raw_line:
+                in_block_comment = True
+                i += 1
+                continue
+
+            # Strip any trailing `// comment` to keep the call regex honest
+            # on lines like `// +k8s:alpha(since:"1.36")` where `alpha(`
+            # would otherwise look like a method invocation.
+            line = _strip_line_comment(raw_line)
 
             # Import block state machine
             if _RE_IMPORT_BLOCK_START.match(line):

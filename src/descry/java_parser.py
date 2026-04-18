@@ -102,6 +102,30 @@ def _is_record_definition(line: str) -> bool:
     return bool(re.match(r"^\s*(?:public\s+)?(?:static\s+)?record\s+", line))
 
 
+def _strip_line_comment(line: str) -> str:
+    """Return `line` with any trailing ``//...`` comment removed.
+
+    Tracks simple string state so ``"http://"`` is preserved. Block
+    comments (``/* ... */``) are tracked by a separate in-block flag in
+    the main parse loop.
+    """
+    in_string = False
+    escape = False
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if escape:
+            escape = False
+        elif c == "\\" and in_string:
+            escape = True
+        elif c == '"':
+            in_string = not in_string
+        elif not in_string and c == "/" and i + 1 < len(line) and line[i + 1] == "/":
+            return line[:i]
+        i += 1
+    return line
+
+
 class JavaParser(BaseParser):
     """Regex-driven Java source parser.
 
@@ -157,9 +181,31 @@ class JavaParser(BaseParser):
 
         i = 0
         n = len(lines)
+        in_block_comment = False
         while i < n:
-            line = lines[i]
+            raw_line = lines[i]
             lineno = i + 1
+
+            # Block comments (/* ... */ or /** ... */). Spans longer than
+            # one line are suppressed wholesale so annotations / method
+            # signatures inside Javadoc don't leak into the graph.
+            stripped = raw_line.lstrip()
+            if in_block_comment:
+                if "*/" in raw_line:
+                    in_block_comment = False
+                i += 1
+                continue
+            if stripped.startswith(("/*", "/**")) and "*/" not in raw_line:
+                in_block_comment = True
+                i += 1
+                continue
+            # Lines starting with ``*`` inside a Javadoc block are caught
+            # by the in_block_comment flag; continuation lines with
+            # leading ``*`` outside of a block are rare enough to skip.
+
+            # Strip trailing `// comment` so patterns like `+string(x)` in
+            # an inline comment don't look like a call.
+            line = _strip_line_comment(raw_line)
 
             # 1. Type declarations (class/interface/enum/record/@interface)
             m_type = _RE_TYPE_DECL.match(line)
