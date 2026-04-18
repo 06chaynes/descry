@@ -1,0 +1,21 @@
+/*
+ * Descry compatibility init-script for scip-java Gradle builds.
+ *
+ * This file ships inside descry and is passed to scip-java's Gradle
+ * invocation via `--init-script=<path>`. It removes known hard-fail
+ * flags from JavaCompile tasks that would otherwise abort the indexing
+ * build but don't affect symbol extraction.
+ *
+ * Currently handles:
+ *   -Werror: conservative Java projects (e.g. Apache Kafka) set this
+ *     unconditionally. scip-java's Gradle build fails when a transitive
+ *     dependency warning fires even though the warning is irrelevant to
+ *     SCIP symbol extraction.
+ */
+allprojects {
+    tasks.withType(JavaCompile).configureEach {
+        doFirst {
+            options.compilerArgs.removeAll { it == '-Werror' }
+        }
+    }
+}

@@ -297,15 +297,21 @@ class ScipIndex:
     def _to_node_id(self, symbol_id: str, file_path: str) -> str:
         """Convert SCIP symbol to descry node ID.
 
-        SCIP symbol formats:
+        SCIP symbol formats (first token = scheme, third token = package):
         - Rust: "rust-analyzer cargo backend 0.1.0 state/AppState#new()."
         - TypeScript: "scip-typescript npm webapp 0.1.0 src/lib/api/`client.ts`/getAuthToken()."
+        - Java/scip-java: "semanticdb maven maven/org.apache.kafka/kafka-clients 3.6 org/apache/kafka/common/Uuid#randomUuid()."
 
         Descry node ID format:
         "FILE:backend/src/state.rs::AppState::new"
 
         The key transformations:
-        1. Prepend crate/package name to file path (src/state.rs -> backend/src/state.rs)
+        1. Prepend package name to file path when scip emits module-relative
+           paths (Rust, TypeScript): "src/state.rs" -> "backend/src/state.rs".
+           Skip the prepend when the package token looks like a Maven/workspace
+           coordinate (contains "/"): scip-java emits workspace-relative paths
+           already, so prepending the maven coord produces a non-matching
+           node id like "FILE:maven/org.apache.kafka/kafka-clients/clients/..."
         2. Extract only type/method names, not module paths
            (state/AppState#new -> AppState::new)
 
@@ -325,9 +331,13 @@ class ScipIndex:
         # Extract crate/package name (e.g., "backend", "mydb", "webapp")
         package_name = parts[2]
 
-        # Build full file path with package prefix
-        # SCIP gives: src/state.rs, descry expects: backend/src/state.rs
-        if not file_path.startswith(package_name + "/"):
+        # Build full file path with package prefix. Skip the prepend when the
+        # package token contains a "/" (Maven coord, workspace path) — those
+        # schemes emit file_path already relative to the workspace root, so
+        # the prefix would produce a mismatched node id.
+        if "/" in package_name:
+            full_path = file_path
+        elif not file_path.startswith(package_name + "/"):
             full_path = f"{package_name}/{file_path}"
         else:
             full_path = file_path

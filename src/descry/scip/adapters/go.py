@@ -1,0 +1,159 @@
+"""Go adapter backed by scip-go (Sourcegraph).
+
+scip-go is a Go-toolchain-based indexer installed via::
+
+    go install github.com/sourcegraph/scip-go/cmd/scip-go@latest
+
+It uses the Go ``go list`` tooling to walk the module's package graph and
+emits a single ``.scip`` index file. The ``--output`` flag is supported
+(verified via ``scip-go --help`` as of 0.1.26), so descry uses
+``output_mode="direct"``.
+
+SCIP symbol format (path-descriptor style, same as Rust and Java):
+
+    scip-go gomod <module> <version> <descriptors>
+
+Examples:
+    scip-go gomod github.com/example/mylib v0.1.0 pkg/http/Server#Handle().
+    scip-go gomod k8s.io/kubernetes v1.29.0
+        pkg/kubelet/Kubelet#Run().
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from pathlib import Path
+
+from descry.scip.adapter import (
+    AdapterConfig,
+    CommandSpec,
+    DiscoveredProject,
+    register,
+)
+
+logger = logging.getLogger(__name__)
+
+
+_GO_DESCRIPTOR_PATTERN = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)(\([^)]*\)|[#./\[\]])?")
+
+
+def _has_go_sources(pkg_dir: Path) -> bool:
+    """True if `pkg_dir` contains any ``.go`` file outside ``vendor/``."""
+    for go_file in pkg_dir.rglob("*.go"):
+        if "vendor" in go_file.parts:
+            continue
+        return True
+    return False
+
+
+class GoAdapter:
+    """scip-go — Go module symbols via the Go toolchain."""
+
+    name = "go"
+    scheme = "scip-go"
+    binary = "scip-go"
+    extensions = (".go",)
+
+    def discover(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
+        """Return one DiscoveredProject per top-level Go module.
+
+        A module is any directory containing ``go.mod``. Multi-module
+        monorepos (one ``go.mod`` per subdirectory) are supported; the
+        root itself becomes a single project if no subdirectory modules
+        are present and ``root/go.mod`` exists. ``go.work`` multi-module
+        workspaces are out of scope for Phase 3 — each ``go.mod`` is
+        indexed independently.
+        """
+        seen: set[str] = set()
+        projects: list[DiscoveredProject] = []
+
+        for marker in root.glob("*/go.mod"):
+            pkg_dir = marker.parent
+            if pkg_dir.name.startswith("."):
+                continue
+            if pkg_dir.name in excluded_dirs:
+                continue
+            if pkg_dir.name in seen:
+                continue
+            if not _has_go_sources(pkg_dir):
+                continue
+            seen.add(pkg_dir.name)
+            projects.append(
+                DiscoveredProject(
+                    name=pkg_dir.name,
+                    root=pkg_dir,
+                    language=self.name,
+                )
+            )
+
+        if not projects:
+            if (root / "go.mod").exists() and _has_go_sources(root):
+                projects.append(
+                    DiscoveredProject(
+                        name=root.name,
+                        root=root,
+                        language=self.name,
+                    )
+                )
+
+        projects.sort(key=lambda p: p.name)
+        return projects
+
+    def build_command(
+        self,
+        project: DiscoveredProject,
+        out_path: Path,
+        config: AdapterConfig,
+    ) -> CommandSpec:
+        """Build the ``scip-go --output <out>`` command.
+
+        scip-go is invoked from the module root and discovers packages via
+        ``go list``. Optional overrides are surfaced via
+        ``config.options``: ``module_name``, ``module_version``,
+        ``go_version`` — each maps to the corresponding ``scip-go``
+        flag. ``config.extra_args`` are appended verbatim after any
+        validated options.
+        """
+        argv: list[str] = [self.binary, "--output", str(out_path)]
+
+        opts = config.options or {}
+        if "module_name" in opts:
+            argv.extend(["--module-name", opts["module_name"]])
+        if "module_version" in opts:
+            argv.extend(["--module-version", opts["module_version"]])
+        if "go_version" in opts:
+            argv.extend(["--go-version", opts["go_version"]])
+
+        argv.extend(config.extra_args)
+
+        return CommandSpec(argv=argv, cwd=project.root, output_mode="direct")
+
+    def parse_descriptors(self, raw: str) -> list[str]:
+        """Parse scip-go path-descriptor strings into name components.
+
+        scip-go uses the same suffix conventions as Rust and Java:
+            ``/``   package separator — skip (already in file path)
+            ``#``   type (struct, interface) — include
+            ``.``   term (var, const, field) — include
+            ``()``  method/function — include
+            ``[]``  generic type parameters — harmless pass-through
+
+        Examples:
+            ``pkg/http/Server#Handle().`` -> ``["Server", "Handle"]``
+            ``pkg/config/Config#Load().`` -> ``["Config", "Load"]``
+            ``pkg/types/Color#Red.`` -> ``["Color", "Red"]``
+        """
+        names: list[str] = []
+        for match in _GO_DESCRIPTOR_PATTERN.finditer(raw):
+            name = match.group(1)
+            suffix = match.group(2) or ""
+            if not name:
+                continue
+            if suffix == "/":
+                continue
+            names.append(name)
+        return names
+
+
+register(GoAdapter())
