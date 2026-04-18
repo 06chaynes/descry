@@ -331,11 +331,13 @@ class ScipIndex:
         # Extract crate/package name (e.g., "backend", "mydb", "webapp")
         package_name = parts[2]
 
-        # Build full file path with package prefix. Skip the prepend when the
-        # package token contains a "/" (Maven coord, workspace path) — those
-        # schemes emit file_path already relative to the workspace root, so
-        # the prefix would produce a mismatched node id.
-        if "/" in package_name:
+        # Build full file path with package prefix. Skip the prepend when:
+        # - the package token contains a "/" (Maven / workspace coord),
+        # - the package token is "." (scip-dotnet's "no package name"
+        #   sentinel — emits the .scip with workspace-relative paths).
+        # Both classes of indexer emit file_path already workspace-relative,
+        # so prepending would produce a mismatched node id.
+        if "/" in package_name or package_name == ".":
             full_path = file_path
         elif not file_path.startswith(package_name + "/"):
             full_path = f"{package_name}/{file_path}"
