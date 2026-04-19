@@ -5714,8 +5714,11 @@ def is_non_project_call(callee: str) -> bool:
     if callee in STDLIB_FILTER:
         return True
 
-    # Extract last component for method calls like "foo.bar.unwrap"
-    last_part = callee.split(".")[-1].split("::")[-1]
+    # Extract last component for method calls. Split on `.` (most langs),
+    # `::` (Rust/C++/Ruby), and `->` (PHP / C struct pointer). We want
+    # the trailing bare method name regardless of how the language
+    # qualifies it, so `headers->set` matches `set` in the filter.
+    last_part = callee.split(".")[-1].split("::")[-1].split("->")[-1]
 
     # Diesel DSL column access pattern: table_name::column.method (e.g., targets::id.eq)
     # These are ORM DSL calls that never resolve to project functions

@@ -122,14 +122,16 @@ void run() {
         assert "REF:doStuff" in targets
 
     def test_method_call(self, builder):
+        # Use a name that's not in STDLIB_FILTER ('start' matches Python's
+        # re.Match.start() and is intentionally filtered cross-language).
         src = """
 void run(Server* srv) {
-    srv->start();
+    srv->launchWorker();
 }
 """.strip()
         _parse(builder, src)
         targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
-        assert any("start" in t for t in targets)
+        assert any("launchWorker" in t for t in targets)
 
     def test_line_comment_stripped(self, builder):
         src = """
