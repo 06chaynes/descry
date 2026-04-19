@@ -2,7 +2,7 @@
 
 Polyglot codebase knowledge graph with call-graph analysis, semantic search, and SCIP integration. Built for AI coding agents (MCP), with CLI and Web UI interfaces.
 
-Descry indexes your codebase into a knowledge graph of symbols (functions, classes, constants) and their relationships (calls, imports, defines). It supports Rust, Python, TypeScript, JavaScript, Svelte, Go, Java, and more — with type-aware resolution via SCIP for Rust and TypeScript.
+Descry indexes your codebase into a knowledge graph of symbols (functions, classes, constants) and their relationships (calls, imports, defines). SCIP-backed type-aware resolution is available for Rust, TypeScript, Python, Java (+ Kotlin / Scala), Go, Ruby, PHP, C# (+ VB.NET), C / C++, and Dart. JavaScript and Svelte fall back to regex-only parsing.
 
 > ### ⚠️ Disclaimer — please read
 >
@@ -97,7 +97,7 @@ Descry uses the standard MCP stdio transport. Any MCP-compatible host can spawn 
 
 ## Tools
 
-Descry provides 18 tools, available through all interfaces:
+Descry provides 19 tools, available through all interfaces:
 
 | Tool | Description |
 |------|-------------|
@@ -128,7 +128,7 @@ Descry works zero-config by auto-detecting your project root (looks for `.git`, 
 ```toml
 [project]
 excluded_dirs = ["target", "node_modules", "dist", ".git", "__pycache__", "build", "vendor"]
-max_stale_hours = 48
+max_stale_hours = 24
 
 [features]
 enable_scip = true        # Type-aware resolution (requires rust-analyzer or scip-typescript)
@@ -199,7 +199,7 @@ Configuration precedence: defaults < `.descry.toml` < environment variables.
 | JavaScript | Regex (+ Tree-sitter opt-in) | — | `descry-codegraph[ast]` for tree-sitter |
 | Svelte | Regex | — | — |
 
-The tree-sitter TS/TSX/JS parser is currently extractor-only (symbol discovery) and ships behind the `ast` extra + `[features] use_tree_sitter_ts = true` in `.descry.toml`. It runs alongside the regex parser and is a stepping stone toward full AST-driven extraction in a future release.
+TypeScript / JavaScript parsing uses regex + ast-grep (when the `ast` extra is installed). The tree-sitter module at `src/descry/tree_sitter_parser.py` is experimental scaffolding and is not currently wired into the active parser; it exists as a stepping stone for future AST-driven extraction.
 
 SCIP provides precise call-graph resolution (resolving which specific function is called through traits, generics, etc.). Without SCIP, Descry falls back to regex-based name matching which handles most cases but may produce false positives on overloaded names.
 

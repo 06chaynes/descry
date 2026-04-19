@@ -130,7 +130,7 @@ Initial public PyPI release. Descry is a polyglot codebase knowledge graph toolk
 - **Indexer**: Parses Rust, Python, TypeScript, JavaScript, and Svelte into a cached knowledge graph of symbols (functions, classes, constants) and edges (calls, imports, defines).
 - **SCIP integration**: Optional type-aware call resolution via `rust-analyzer` and `scip-typescript`; regex fallback otherwise.
 - **Semantic search**: Optional embeddings via sentence-transformers (Jina code embeddings by default; model pinned by revision).
-- **18 MCP tools**: search, callers, callees, context, flow, path, impls, structure, flatten, cross-lang (preview), churn, evolution, changes, semantic, quick, index, status, ensure, health.
+- **19 MCP tools**: search, callers, callees, context, flow, path, impls, structure, flatten, cross-lang (preview), churn, evolution, changes, semantic, quick, index, status, ensure, health.
 - **Web UI**: Starlette + Alpine.js; 20+ UI panels for browsing the graph visually.
 - **Configuration**: `.descry.toml` + env-var overrides for cache dir, timeouts, embedding model, SCIP toolchain, excluded dirs.
 
