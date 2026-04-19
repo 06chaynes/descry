@@ -1674,6 +1674,14 @@ _LIBRARY_NAMES = frozenset(
         "Fatalf",
         "Logf",
         "Skipf",
+        # Go testing.B / testing.F benchmark helpers. Skipping `Add`
+        # and `Fuzz` (too generic — over-filters project code).
+        "Loop",
+        "ReportAllocs",
+        "ResetTimer",
+        "StartTimer",
+        "StopTimer",
+        "ReportMetric",
         # ── Rust clap (de-facto CLI parser, used by cargo, coreutils,
         # ripgrep, rustup — every serious Rust CLI). ArgMatches receiver
         # methods don't resolve via scip-clang because clap is an
