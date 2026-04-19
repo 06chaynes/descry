@@ -109,10 +109,12 @@ class RubyAdapter:
 
         ``-q`` / ``--no-error-count`` / ``--silence-dev-message`` let
         scip-ruby tolerate Sorbet non-critical errors that would
-        otherwise exit non-zero before writing any index. Rails,
-        jekyll, and puma all hit this — the index is still usable for
-        the files Sorbet *could* parse, but scip-ruby v1 aborts at the
-        first typecheck error without this flag combination.
+        otherwise exit non-zero before writing any index — on
+        Sorbet-unannotated Ruby code (the common case), scip-ruby v1
+        aborts at the first typecheck error without this flag
+        combination. Combined with the partial-output tolerance in
+        ``cache.py``, a non-zero scip-ruby exit that still produced
+        an index file is now kept as partial SCIP data.
         """
         argv: list[str] = [
             self.binary,

@@ -264,18 +264,31 @@ class TypeScriptAdapter:
     ) -> CommandSpec:
         """Build the `scip-typescript index` command.
 
-        Runs from the package directory. Adds `--infer-tsconfig` for
-        SvelteKit/Vite packages where tsconfig.json may not be at the
-        package root.
+        Runs from the package directory. Adds ``--infer-tsconfig`` in
+        two cases:
+
+        1. SvelteKit / Vite apps where ``tsconfig.json`` isn't at the
+           package root (Vite packages configure TypeScript via
+           ``vite.config.ts``).
+        2. **Any package missing ``tsconfig.json`` entirely** — common
+           in monorepo workspace fixtures (vite's ``packages/*/src/
+           __tests__/fixtures/``, next.js playground apps). Without
+           this fallback, scip-typescript exits non-zero immediately
+           with "missing tsconfig.json" and produces no index.
         """
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
 
         svelte_config = project.root / "svelte.config.js"
         vite_config = project.root / "vite.config.ts"
-        if svelte_config.exists() or vite_config.exists():
+        tsconfig = project.root / "tsconfig.json"
+        if (
+            svelte_config.exists()
+            or vite_config.exists()
+            or not tsconfig.exists()
+        ):
             argv.append("--infer-tsconfig")
             logger.debug(
-                f"SCIP: Using --infer-tsconfig for SvelteKit project {project.name}"
+                f"SCIP: Using --infer-tsconfig for {project.name}"
             )
 
         argv.extend(config.extra_args)
