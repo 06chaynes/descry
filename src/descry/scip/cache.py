@@ -382,8 +382,14 @@ class ScipCacheManager:
 
         # Post-hoc rename for adapters whose indexer lacks an --output flag
         # (scip-go contingency). The indexer is assumed to have written
-        # `index.scip` in `cwd`; move it into the expected location.
-        if spec.output_mode == "rename" and result.returncode == 0:
+        # `index.scip` in `cwd`; move it into the expected location. We
+        # accept non-zero exit codes here so long as an index file was
+        # actually produced — scip-ruby, scip-dotnet, and some
+        # scip-typescript sub-project runs exit non-zero on typecheck
+        # errors but the index is still usable for the subset of files
+        # that parsed cleanly. Treating partial output as failure
+        # forfeits hundreds of thousands of resolvable references.
+        if spec.output_mode == "rename":
             default_output = spec.cwd / "index.scip"
             if (
                 default_output.exists()
@@ -397,9 +403,18 @@ class ScipCacheManager:
                     )
                     return False
 
-        if result.returncode == 0 and output_path.exists():
+        if output_path.exists() and output_path.stat().st_size > 0:
             size_kb = output_path.stat().st_size / 1024
-            logger.info(f"SCIP: Generated {project.name}.scip ({size_kb:.1f} KB)")
+            if result.returncode == 0:
+                logger.info(
+                    f"SCIP: Generated {project.name}.scip ({size_kb:.1f} KB)"
+                )
+            else:
+                logger.warning(
+                    f"SCIP: {adapter.name} exited non-zero ({result.returncode}) "
+                    f"for {project.name} but wrote {size_kb:.1f} KB; keeping "
+                    f"partial index."
+                )
             return True
 
         stderr_tail = (

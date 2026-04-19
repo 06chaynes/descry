@@ -44,7 +44,14 @@ class TestRubyAdapterBuildCommand:
         spec = RubyAdapter().build_command(
             project, tmp_path / "svc.scip", AdapterConfig()
         )
-        assert spec.argv == ["scip-ruby", "."]
+        # scip-ruby is invoked with error-tolerance flags (-q /
+        # --no-error-count / --silence-dev-message) so Sorbet
+        # non-critical errors don't abort the index write. The scoped
+        # walk target is still "." (last positional arg).
+        assert spec.argv[0] == "scip-ruby"
+        assert spec.argv[-1] == "."
+        assert "-q" in spec.argv
+        assert "--no-error-count" in spec.argv
         assert spec.cwd == tmp_path
         assert spec.output_mode == "rename"
 

@@ -56,6 +56,30 @@ def _has_dotnet_sources(pkg_dir: Path) -> bool:
     return False
 
 
+def _find_net9_dotnet_root() -> str | None:
+    """Return the path of a DOTNET_ROOT that has a net9.0 runtime, or None.
+
+    scip-dotnet 0.2.13 targets net9.0 and won't roll forward to net10+.
+    When the system default SDK is net10 we need to point the tool at a
+    side-installed net9 runtime. Check the conventional locations in
+    priority order — Homebrew's ``dotnet@9`` keg-only formula, the
+    official ``dotnet-install.sh`` path, then a user-scoped install.
+    """
+    candidates = [
+        "/opt/homebrew/opt/dotnet@9/libexec",
+        "/usr/local/opt/dotnet@9/libexec",
+        str(Path.home() / ".dotnet"),
+        str(Path.home() / ".dotnet-9"),
+    ]
+    for candidate in candidates:
+        shared = Path(candidate) / "shared" / "Microsoft.NETCore.App"
+        if shared.is_dir() and any(
+            p.name.startswith("9.") for p in shared.iterdir() if p.is_dir()
+        ):
+            return candidate
+    return None
+
+
 class DotnetAdapter:
     """scip-dotnet — C#/VB symbols via Roslyn."""
 
@@ -119,17 +143,30 @@ class DotnetAdapter:
     ) -> CommandSpec:
         """Build the ``scip-dotnet index --output <out>`` command.
 
-        Always sets ``DOTNET_ROLL_FORWARD=LatestMajor`` so the tool
-        runs against whatever SDK is installed (scip-dotnet 0.2.13
-        targets net9.0 but descry users may have net10+ installed).
+        scip-dotnet 0.2.13 targets ``net9.0``. On a system with only
+        .NET 10+ installed the tool crashes at startup (exit 131)
+        because ``LatestMajor`` roll-forward doesn't cover the net9 →
+        net10 major-version gap. To make the adapter self-healing on
+        systems with net10+ as the default SDK, we look for a
+        side-installed net9 runtime in common locations (Homebrew's
+        ``dotnet@9``, the official dotnet-install.sh path, or an
+        explicit ``DOTNET_ROOT``) and point scip-dotnet at it when
+        found.
         """
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
         argv.extend(config.extra_args)
 
         env_extras: dict[str, str] = {"DOTNET_ROLL_FORWARD": "LatestMajor"}
-        dotnet_root = os.environ.get("DOTNET_ROOT")
+
+        dotnet_root = os.environ.get("DOTNET_ROOT") or _find_net9_dotnet_root()
         if dotnet_root:
             env_extras["DOTNET_ROOT"] = dotnet_root
+            # Prepend its bin dir to PATH so the `dotnet` binary used by
+            # scip-dotnet resolves to the net9-capable SDK.
+            dotnet_bin = Path(dotnet_root) / "bin"
+            if dotnet_bin.exists():
+                existing_path = os.environ.get("PATH", "")
+                env_extras["PATH"] = f"{dotnet_bin}:{existing_path}"
 
         return CommandSpec(
             argv=argv,

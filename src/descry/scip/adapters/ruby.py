@@ -106,8 +106,21 @@ class RubyAdapter:
         The trailing ``"."`` explicitly scopes the walk to the project
         root so scip-ruby behaves consistently whether or not
         ``sorbet/config`` is present.
+
+        ``-q`` / ``--no-error-count`` / ``--silence-dev-message`` let
+        scip-ruby tolerate Sorbet non-critical errors that would
+        otherwise exit non-zero before writing any index. Rails,
+        jekyll, and puma all hit this — the index is still usable for
+        the files Sorbet *could* parse, but scip-ruby v1 aborts at the
+        first typecheck error without this flag combination.
         """
-        argv: list[str] = [self.binary, "."]
+        argv: list[str] = [
+            self.binary,
+            "-q",
+            "--no-error-count",
+            "--silence-dev-message",
+            ".",
+        ]
         argv.extend(config.extra_args)
         return CommandSpec(argv=argv, cwd=project.root, output_mode="rename")
 
