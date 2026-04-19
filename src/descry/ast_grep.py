@@ -186,6 +186,15 @@ def extract_calls_typescript(file_path: str) -> Iterator[dict]:
                 ):
                     continue
 
+                # $FUNC can match a whole call expression when the outer
+                # syntax is `foo(args)(args)` (curried / conditional-test
+                # patterns like `test.runIf(isBuild)(...)` common in
+                # Vitest/Jest). Reject anything that's clearly not a
+                # plain identifier chain — no parens, braces, newlines,
+                # template literals.
+                if any(ch in func_name for ch in "(){}[]\n`\"'<>!=&|+*/%?:,;"):
+                    continue
+
                 # ast-grep uses 0-based line numbers, convert to 1-based
                 lineno = match.get("range", {}).get("start", {}).get("line", 0) + 1
 
