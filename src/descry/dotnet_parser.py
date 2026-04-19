@@ -14,7 +14,7 @@ import logging
 import re
 from pathlib import Path
 
-from descry.generate import BaseParser, is_non_project_call
+from descry.generate import BaseParser, is_generated_source, is_non_project_call
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +189,7 @@ class DotnetParser(BaseParser):
             return
 
         lines = content.splitlines()
+        skip_calls = is_generated_source(content)
 
         # Namespace + using pass
         namespace = None
@@ -337,7 +338,7 @@ class DotnetParser(BaseParser):
                         break
 
             # Calls
-            if current_context[-1] != file_id:
+            if not skip_calls and current_context[-1] != file_id:
                 parent_id = current_context[-1]
                 for call_match in _RE_CALL.finditer(line):
                     callee = call_match.group(1)

@@ -20,7 +20,7 @@ import logging
 import re
 from pathlib import Path
 
-from descry.generate import BaseParser, is_non_project_call
+from descry.generate import BaseParser, is_generated_source, is_non_project_call
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +145,7 @@ class JavaParser(BaseParser):
         )
 
         lines = content.splitlines()
+        skip_calls = is_generated_source(content)
 
         # Package declaration (informational only; Java resolution is
         # fully-qualified and SCIP handles cross-package resolution).
@@ -314,7 +315,7 @@ class JavaParser(BaseParser):
             # 4. Calls. ast-grep has no Java backend today, so we always
             #    run the regex extractor (rather than gating on
             #    ``not USE_AST_GREP`` like RustParser/TSParser do).
-            if current_context[-1] != file_id:
+            if not skip_calls and current_context[-1] != file_id:
                 parent_id = current_context[-1]
                 for call_match in _RE_CALL.finditer(line):
                     callee = call_match.group(1)

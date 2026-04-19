@@ -13,7 +13,7 @@ import logging
 import re
 from pathlib import Path
 
-from descry.generate import BaseParser, is_non_project_call
+from descry.generate import BaseParser, is_generated_source, is_non_project_call
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +160,7 @@ class PhpParser(BaseParser):
         )
 
         lines = content.splitlines()
+        skip_calls = is_generated_source(content)
 
         # One-pass namespace + use
         namespace = None
@@ -344,7 +345,7 @@ class PhpParser(BaseParser):
                     self.builder.add_edge(file_id, func_id, "DEFINES")
 
             # Calls (inside any context — methods, functions, etc.)
-            if current_context[-1] != file_id:
+            if not skip_calls and current_context[-1] != file_id:
                 parent_id = current_context[-1]
                 for call_match in _RE_CALL.finditer(line):
                     callee = call_match.group(1)
