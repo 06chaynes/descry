@@ -19,6 +19,47 @@ logger = logging.getLogger(__name__)
 _RUST_DESCRIPTOR_PATTERN = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)(\([^)]*\)|[#./\[\]])?")
 
 
+def _parse_workspace_members(root_cargo: Path) -> list[Path]:
+    """Parse ``[workspace] members = [...]`` entries from ``root_cargo``.
+
+    Glob patterns like ``"crates/*"`` are expanded against the workspace
+    root. Returns absolute paths; invalid/missing entries are silently
+    dropped. Uses ``tomllib`` (3.11+); on parse error returns an empty
+    list so discovery falls through to the single-level glob fallback.
+    """
+    try:
+        import tomllib
+        with open(root_cargo, "rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        return []
+
+    workspace = data.get("workspace") or {}
+    raw_members = workspace.get("members") or []
+    if not isinstance(raw_members, list):
+        return []
+
+    root = root_cargo.parent
+    result: list[Path] = []
+    for member in raw_members:
+        if not isinstance(member, str) or not member:
+            continue
+        if "*" in member or "?" in member or "[" in member:
+            try:
+                result.extend(p for p in root.glob(member) if p.is_dir())
+            except (OSError, ValueError):
+                pass
+        else:
+            candidate = (root / member).resolve()
+            try:
+                candidate.relative_to(root.resolve())
+            except ValueError:
+                continue
+            if candidate.is_dir():
+                result.append(candidate)
+    return result
+
+
 class RustAdapter:
     """rust-analyzer scip — Rust symbols via Cargo workspace analysis."""
 
@@ -30,31 +71,83 @@ class RustAdapter:
     def discover(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
         """Return one DiscoveredProject per workspace-level Rust crate.
 
-        A crate is a top-level subdirectory containing `Cargo.toml` plus a
-        `src/` directory. The workspace root is reported as each project's
-        `root` (rust-analyzer shares analysis cache across crates under one
-        workspace), and the crate directory name is the project's `name`.
+        A crate is any directory containing ``Cargo.toml`` plus a ``src/``
+        directory. The workspace root is reported as each project's
+        ``root`` (rust-analyzer shares analysis cache across crates in one
+        workspace), and the crate's relative path from root is the
+        project's ``name`` (e.g. ``"crates/cargo-util"``).
+
+        Discovery:
+
+        1. Parses ``[workspace] members = [...]`` from root ``Cargo.toml``
+           (canonical Cargo workspace layout — used by cargo, coreutils,
+           most serious multi-crate repos). Glob patterns like
+           ``"crates/*"`` are expanded.
+        2. Falls back to top-level ``*/Cargo.toml`` globbing for simple
+           workspaces (tokio, mantis).
+        3. If neither matches but root has ``src/``, index root as a
+           single-crate project (small libraries).
         """
         root_cargo = root / "Cargo.toml"
         if not root_cargo.exists():
             return []
 
         projects: list[DiscoveredProject] = []
-        for cargo_toml in root.glob("*/Cargo.toml"):
-            crate_dir = cargo_toml.parent
-            if crate_dir.name.startswith("."):
+        seen_paths: set[Path] = set()
+
+        for member_dir in _parse_workspace_members(root_cargo):
+            if member_dir.name.startswith("."):
                 continue
-            if crate_dir.name in excluded_dirs:
+            if any(
+                part in excluded_dirs
+                for part in member_dir.relative_to(root).parts
+            ):
                 continue
-            if not (crate_dir / "src").exists():
+            if not (member_dir / "Cargo.toml").exists():
                 continue
+            if not (member_dir / "src").exists():
+                continue
+            if member_dir in seen_paths:
+                continue
+            seen_paths.add(member_dir)
+            rel = member_dir.relative_to(root)
             projects.append(
                 DiscoveredProject(
-                    name=crate_dir.name,
+                    name=str(rel),
                     root=root,
                     language=self.name,
                 )
             )
+
+        if not projects:
+            for cargo_toml in root.glob("*/Cargo.toml"):
+                crate_dir = cargo_toml.parent
+                if crate_dir.name.startswith("."):
+                    continue
+                if crate_dir.name in excluded_dirs:
+                    continue
+                if not (crate_dir / "src").exists():
+                    continue
+                if crate_dir in seen_paths:
+                    continue
+                seen_paths.add(crate_dir)
+                projects.append(
+                    DiscoveredProject(
+                        name=crate_dir.name,
+                        root=root,
+                        language=self.name,
+                    )
+                )
+
+        if not projects and (root / "src").exists():
+            projects.append(
+                DiscoveredProject(
+                    name=root.name,
+                    root=root,
+                    language=self.name,
+                )
+            )
+
         projects.sort(key=lambda p: p.name)
         return projects
 

@@ -53,17 +53,30 @@ class GoAdapter:
     extensions = (".go",)
 
     def discover(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
-        """Return one DiscoveredProject per top-level Go module.
+        """Return one DiscoveredProject per Go module.
 
         A module is any directory containing ``go.mod``. Multi-module
-        monorepos (one ``go.mod`` per subdirectory) are supported; the
-        root itself becomes a single project if no subdirectory modules
-        are present and ``root/go.mod`` exists. ``go.work`` multi-module
-        workspaces are out of scope for Phase 3 — each ``go.mod`` is
-        indexed independently.
+        monorepos (one ``go.mod`` per subdirectory) are supported.
+        **Root is always included as a project if it has a ``go.mod``**
+        — many repos (prometheus, etc.) have a large root-level module
+        plus small helper modules under subdirs; the prior "only
+        include root when no subdir modules exist" rule silently
+        skipped those root modules, killing resolution rates on the
+        largest codebases. ``go.work`` multi-module workspaces are out
+        of scope; each ``go.mod`` is indexed independently.
         """
         seen: set[str] = set()
         projects: list[DiscoveredProject] = []
+
+        if (root / "go.mod").exists() and _has_go_sources(root):
+            seen.add(root.name)
+            projects.append(
+                DiscoveredProject(
+                    name=root.name,
+                    root=root,
+                    language=self.name,
+                )
+            )
 
         for marker in root.glob("*/go.mod"):
             pkg_dir = marker.parent
@@ -83,16 +96,6 @@ class GoAdapter:
                     language=self.name,
                 )
             )
-
-        if not projects:
-            if (root / "go.mod").exists() and _has_go_sources(root):
-                projects.append(
-                    DiscoveredProject(
-                        name=root.name,
-                        root=root,
-                        language=self.name,
-                    )
-                )
 
         projects.sort(key=lambda p: p.name)
         return projects

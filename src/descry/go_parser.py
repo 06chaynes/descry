@@ -291,13 +291,13 @@ class GoParser(BaseParser):
                 self.builder.add_edge(
                     f"{file_id}::{receiver_type}", method_id, "DEFINES"
                 )
-                # Track as context for nested call extraction.
+                # Push the method body as call-attribution context. Without
+                # this, calls inside method bodies attribute to the file and
+                # get dropped by the `current_context[-1] != file_id` gate
+                # — so the parser used to emit only ~1-2 calls per Go file.
                 if "{" in line:
-                    # We don't push into current_context for methods (methods
-                    # aren't containers for other declarations in Go syntax).
-                    # But we do want calls inside the method body attributed
-                    # to this method_id.
-                    pass
+                    current_context.append(method_id)
+                    type_name_stack.append(method_name)
                 i += 1
                 continue
 
@@ -322,6 +322,9 @@ class GoParser(BaseParser):
                     docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, func_id, "DEFINES")
+                if "{" in line:
+                    current_context.append(func_id)
+                    type_name_stack.append(name)
                 i += 1
                 continue
 

@@ -328,9 +328,10 @@ class ScipCacheManager:
         each adapter only has to describe *what* to run via `build_command`.
         """
         output_path = self.cache_dir / f"{project.name}.scip"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
         existing_scip = (
-            list(self.cache_dir.glob("*.scip")) if self.cache_dir.exists() else []
+            list(self.cache_dir.glob("**/*.scip")) if self.cache_dir.exists() else []
         )
         is_first_run = len(existing_scip) == 0
 
@@ -779,7 +780,7 @@ class ScipCacheManager:
         """
         if not self.cache_dir.exists():
             return []
-        return sorted(self.cache_dir.glob("*.scip"))
+        return sorted(self.cache_dir.glob("**/*.scip"))
 
     def clear_cache(self):
         """Clear all cached SCIP files and checksums."""

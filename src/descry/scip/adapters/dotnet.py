@@ -33,19 +33,19 @@ from descry.scip.adapters.typescript import parse_backtick_descriptors
 logger = logging.getLogger(__name__)
 
 
-_DOTNET_MARKERS = (".sln", ".csproj", ".vbproj", ".fsproj")
+_DOTNET_MARKERS = (".sln", ".slnx", ".csproj", ".vbproj", ".fsproj")
 
 
 def _find_solution_or_project(pkg_dir: Path) -> Path | None:
-    """Prefer .sln at the directory; else first .csproj / .vbproj."""
-    for name in pkg_dir.glob("*.sln"):
-        return name
-    for name in pkg_dir.glob("*.csproj"):
-        return name
-    for name in pkg_dir.glob("*.vbproj"):
-        return name
-    for name in pkg_dir.glob("*.fsproj"):
-        return name
+    """Prefer a solution file, then a project file.
+
+    Checks ``.sln`` first (legacy MSBuild), then ``.slnx`` (modern XML
+    solution format used by dotnet/aspnetcore and other newer repos),
+    then per-language project files.
+    """
+    for ext in (".sln", ".slnx", ".csproj", ".vbproj", ".fsproj"):
+        for name in pkg_dir.glob(f"*{ext}"):
+            return name
     return None
 
 
