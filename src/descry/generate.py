@@ -4714,7 +4714,7 @@ class RustParser(BaseParser):
                 self.builder.add_edge(file_id, f"MODULE:{path}", "IMPORTS")
 
             # 6. Calls (regex fallback - only used if ast-grep unavailable)
-            if not USE_AST_GREP and parent_id != file_id:
+            if not self.builder.use_ast_grep and parent_id != file_id:
                 for call_match in re_call.finditer(line):
                     callee = call_match.group(1)
                     if not is_non_project_call(callee):
@@ -4729,7 +4729,7 @@ class RustParser(BaseParser):
             i += 1
 
         # Use ast-grep for more accurate CALLS detection
-        if USE_AST_GREP:
+        if self.builder.use_ast_grep:
             self._extract_calls_with_ast_grep(str(file_path), file_id, lines)
 
     def _extract_calls_with_ast_grep(self, file_path: str, file_id: str, lines: list):
@@ -5137,7 +5137,7 @@ class TSParser(BaseParser):
         )
 
         # Extract imports using ast-grep if available
-        if USE_AST_GREP and extract_imports_typescript is not None:
+        if self.builder.use_ast_grep and extract_imports_typescript is not None:
             try:
                 import_data = extract_imports_typescript(str(file_path))
                 self.symbol_table.load_imports(import_data)
@@ -5497,7 +5497,7 @@ class TSParser(BaseParser):
                 self.builder.add_edge(file_id, config_id, "DEFINES")
 
             # Calls (regex fallback - only used if ast-grep unavailable)
-            if not USE_AST_GREP and parent_id != file_id:
+            if not self.builder.use_ast_grep and parent_id != file_id:
                 for match in re_call_candidate.finditer(line):
                     callee = match.group(1)
                     if is_non_project_call(callee):
@@ -5529,7 +5529,7 @@ class TSParser(BaseParser):
             i += 1
 
         # Use ast-grep for more accurate CALLS detection
-        if USE_AST_GREP:
+        if self.builder.use_ast_grep:
             self._extract_calls_with_ast_grep(str(file_path), file_id, lines)
 
     def _extract_ts_types(self, full_sig: str) -> tuple:
@@ -5669,6 +5669,15 @@ class TSParser(BaseParser):
 
 
 class CodeGraphBuilder:
+    # ast-grep is invoked as a subprocess **per file** for TS/JS parsing
+    # (imports + calls). On macOS each `fork+exec` costs ~10ms, so a
+    # 20k-file monorepo (next.js, TypeScript compiler) spends 10+
+    # minutes in fork overhead alone before any real work happens. On
+    # corpora above this threshold we fall back to the regex parser
+    # only — accuracy is slightly lower for TS imports but the index
+    # actually completes. Overridable via ``DESCRY_AST_GREP_MAX_FILES``.
+    _AST_GREP_MAX_FILES_DEFAULT = 5000
+
     def __init__(self, root_dir, excluded_dirs=None):
         self.root_dir = Path(root_dir).resolve()
         self.excluded_dirs = excluded_dirs or {
@@ -5686,6 +5695,35 @@ class CodeGraphBuilder:
         self.node_registry = set()
         self.current_file_id = None
         self.current_scope = SymbolTable()
+        # Per-run ast-grep enablement. Checked by parsers instead of
+        # the module-level USE_AST_GREP so project size can gate it.
+        self.use_ast_grep = USE_AST_GREP
+
+    def _decide_ast_grep(self, ts_js_file_count: int) -> None:
+        """Disable per-file ast-grep on very large corpora.
+
+        Exposed as a method (not done in __init__) so callers can
+        decide after they know the file count. Respects
+        ``DESCRY_AST_GREP_MAX_FILES`` env override.
+        """
+        if not self.use_ast_grep:
+            return
+        try:
+            threshold = int(
+                os.environ.get(
+                    "DESCRY_AST_GREP_MAX_FILES",
+                    self._AST_GREP_MAX_FILES_DEFAULT,
+                )
+            )
+        except ValueError:
+            threshold = self._AST_GREP_MAX_FILES_DEFAULT
+        if threshold > 0 and ts_js_file_count > threshold:
+            logger.info(
+                f"ast-grep disabled: {ts_js_file_count} TS/JS files exceeds "
+                f"threshold of {threshold} (per-file subprocess overhead "
+                f"would dominate). Override with DESCRY_AST_GREP_MAX_FILES."
+            )
+            self.use_ast_grep = False
 
     def add_node(self, node_id, node_type, **metadata):
         if node_id not in self.node_registry:
@@ -5711,6 +5749,26 @@ class CodeGraphBuilder:
         # Resolve root once; reject entering any child directory whose resolved
         # path escapes the project root (defends against malicious symlinks).
         root_real = Path(self.root_dir).resolve()
+
+        # First pass: count TS/JS files to decide ast-grep opt-out for
+        # large corpora. Cheap walk — stats filenames only.
+        if self.use_ast_grep:
+            ts_js_count = 0
+            for _r, _d, _f in os.walk(self.root_dir, followlinks=False):
+                _d[:] = [
+                    d
+                    for d in _d
+                    if not d.startswith(".") and d not in self.excluded_dirs
+                ]
+                for fn in _f:
+                    if fn.endswith((".ts", ".tsx", ".js", ".jsx")):
+                        ts_js_count += 1
+                        if ts_js_count > self._AST_GREP_MAX_FILES_DEFAULT * 10:
+                            break
+                if ts_js_count > self._AST_GREP_MAX_FILES_DEFAULT * 10:
+                    break
+            self._decide_ast_grep(ts_js_count)
+
         for root, dirs, files in os.walk(self.root_dir, followlinks=False):
             dirs.sort()
             files.sort()
