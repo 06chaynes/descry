@@ -298,8 +298,7 @@ class PhpParser(BaseParser):
                         name = m_prop.group(1)
                         parent_id = current_context[-1]
                         prop_id = f"{parent_id}::{name}"
-                        existing = {nd["id"] for nd in self.builder.nodes}
-                        if prop_id not in existing:
+                        if prop_id not in self.builder.node_registry:
                             self.builder.add_node(
                                 prop_id,
                                 "Constant",
@@ -313,8 +312,7 @@ class PhpParser(BaseParser):
                         name = m_const.group(1)
                         parent_id = current_context[-1]
                         const_id = f"{parent_id}::{name}"
-                        existing = {nd["id"] for nd in self.builder.nodes}
-                        if const_id not in existing:
+                        if const_id not in self.builder.node_registry:
                             self.builder.add_node(
                                 const_id,
                                 "Constant",

@@ -236,8 +236,7 @@ class ClangParser(BaseParser):
             if m_def:
                 name = m_def.group(1)
                 macro_id = f"{file_id}::{name}"
-                existing = {nd["id"] for nd in self.builder.nodes}
-                if macro_id not in existing:
+                if macro_id not in self.builder.node_registry:
                     self.builder.add_node(
                         macro_id,
                         "Constant",
@@ -370,15 +369,14 @@ class ClangParser(BaseParser):
                 # Use the containing type as parent if we're inside one,
                 # else attach to the file.
                 fn_id = f"{parent_id}::{fn_name}"
-                existing = {nd["id"] for nd in self.builder.nodes}
-                if fn_id not in existing:
+                if fn_id not in self.builder.node_registry:
                     # Handle out-of-class member def: `Type Class::method(...) {`
                     # Split the name on :: if present.
                     if "::" in fn_name:
                         head, _, tail = fn_name.rpartition("::")
                         class_name = head.split("::")[-1]
                         class_id = f"{parent_id}::{class_name}"
-                        if class_id not in existing:
+                        if class_id not in self.builder.node_registry:
                             self.builder.add_node(
                                 class_id,
                                 "Class",

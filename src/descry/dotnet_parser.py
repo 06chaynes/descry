@@ -325,8 +325,7 @@ class DotnetParser(BaseParser):
                         name = match_obj.group(1)
                         parent_id = current_context[-1]
                         sym_id = f"{parent_id}::{name}"
-                        existing = {nd["id"] for nd in self.builder.nodes}
-                        if sym_id not in existing:
+                        if sym_id not in self.builder.node_registry:
                             self.builder.add_node(
                                 sym_id,
                                 "Constant",
