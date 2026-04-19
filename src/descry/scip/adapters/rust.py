@@ -29,6 +29,7 @@ def _parse_workspace_members(root_cargo: Path) -> list[Path]:
     """
     try:
         import tomllib
+
         with open(root_cargo, "rb") as f:
             data = tomllib.load(f)
     except Exception:
@@ -99,8 +100,7 @@ class RustAdapter:
             if member_dir.name.startswith("."):
                 continue
             if any(
-                part in excluded_dirs
-                for part in member_dir.relative_to(root).parts
+                part in excluded_dirs for part in member_dir.relative_to(root).parts
             ):
                 continue
             if not (member_dir / "Cargo.toml").exists():

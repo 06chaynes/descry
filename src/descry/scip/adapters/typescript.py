@@ -114,6 +114,8 @@ def _parse_ts_workspace_packages(root: Path) -> list[Path]:
             _expand(entries)
 
     return result
+
+
 _TS_SKIP_KEYWORDS = frozenset(
     {
         "export",
@@ -206,10 +208,7 @@ class TypeScriptAdapter:
                 continue
             if pkg_dir.name.startswith("."):
                 continue
-            if any(
-                part in excluded_dirs
-                for part in pkg_dir.relative_to(root).parts
-            ):
+            if any(part in excluded_dirs for part in pkg_dir.relative_to(root).parts):
                 continue
             if not (pkg_dir / "package.json").exists():
                 continue

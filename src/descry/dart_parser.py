@@ -67,6 +67,44 @@ _RE_TOP_CONST = re.compile(
     r"([A-Z_][A-Za-z0-9_]*)\s*="
 )
 
+# Top-level function / method declaration. Captures the name after the
+# return type. Handles: `void main()`, `Future<int> load()`, `Map<K,V>
+# parse()`, `T foo<T>(...)`, `static void bar()`, `@override Widget
+# build(...)`. The heuristic: skip optional modifiers and annotations,
+# match a type expression (identifier optionally with generics / `?`),
+# then a bareword name followed by `(`. We deliberately don't try to
+# distinguish top-level from class-body method here; the caller's
+# indent-depth context already scopes them correctly.
+_RE_FUNC_OR_METHOD = re.compile(
+    r"^\s*"
+    r"(?:@[A-Za-z_][A-Za-z0-9_]*(?:\([^)]*\))?\s+)*"
+    r"(?:static\s+|external\s+|abstract\s+|final\s+|const\s+)*"
+    r"(?:(?:Future|Stream|Iterable|List|Map|Set|FutureOr)"
+    r"\s*<[^>]*>\s+|"
+    r"[A-Z_][A-Za-z0-9_]*(?:\s*<[^>]*>)?\s+|"
+    r"void\s+|"
+    r"int\s+|"
+    r"double\s+|"
+    r"num\s+|"
+    r"bool\s+|"
+    r"String\s+|"
+    r"dynamic\s+|"
+    r"Object\s+\??\s*|"
+    r"var\s+)"
+    r"(?P<name>[a-z_][A-Za-z0-9_]*)"
+    r"\s*(?:<[^>]*>)?\s*\("
+)
+
+# Constructor declaration: `ClassName(...)` or `ClassName.named(...)`.
+# Caller must already be inside a class context for this to fire.
+_RE_CTOR = re.compile(
+    r"^\s*"
+    r"(?:const\s+|factory\s+)*"
+    r"([A-Z][A-Za-z0-9_]*)"
+    r"(?:\.([a-z_][A-Za-z0-9_]*))?"
+    r"\s*\("
+)
+
 # Call site: identifier(, or receiver.method(, or a?.method(
 # Lookbehind guards against numeric literals, ., and the call-chain dot.
 _RE_CALL = re.compile(
@@ -313,6 +351,76 @@ class DartParser(BaseParser):
                             docstring="",
                         )
                         self.builder.add_edge(parent_id, const_id, "DEFINES")
+
+            # Function / method declarations. Match at both file scope
+            # (top-level fn) and inside a class / mixin / extension
+            # (method). Push the body as a call-attribution context so
+            # calls inside the body get attributed correctly instead of
+            # bubbling up to the enclosing class/file node.
+            m_fn = _RE_FUNC_OR_METHOD.match(line)
+            ctor_name: str | None = None
+            if not m_fn and current_context[-1] != file_id:
+                m_ctor = _RE_CTOR.match(line)
+                if m_ctor:
+                    # Only match a constructor if its leading identifier
+                    # matches the enclosing type name. Avoids treating
+                    # `SomeType(...)` construction calls as declarations.
+                    parent_short = current_context[-1].split("::")[-1]
+                    if m_ctor.group(1) == parent_short:
+                        ctor_name = (
+                            f"{parent_short}.{m_ctor.group(2)}"
+                            if m_ctor.group(2)
+                            else parent_short
+                        )
+
+            if m_fn or ctor_name:
+                name = ctor_name or m_fn.group("name")
+                parent_id = current_context[-1]
+                kind = "Method" if parent_id != file_id else "Function"
+                fn_id = f"{parent_id}::{name}"
+
+                # Handle Allman-style bodies where `{` is on the next
+                # non-blank line — scan up to 10 lines ahead.
+                has_open_brace = "{" in line or line.rstrip().endswith("=>")
+                if not has_open_brace:
+                    for la in lines[i + 1 : i + 10]:
+                        las = la.strip()
+                        if not las:
+                            continue
+                        if las.startswith("{") or las.startswith("=>"):
+                            has_open_brace = True
+                            break
+                        if "{" in las:
+                            has_open_brace = True
+                            break
+                        break
+
+                # Skip if this is likely an abstract / interface method
+                # signature (ends with `;` and has no body). Those are
+                # real Methods but shouldn't be pushed as call contexts.
+                is_abstract = line.rstrip().endswith(";") and not has_open_brace
+
+                end_lineno = (
+                    self._find_block_end(lines, i) if has_open_brace else lineno
+                )
+                docstring = self.get_leading_docstring(lines, i)
+
+                existing = {nd["id"] for nd in self.builder.nodes}
+                if fn_id not in existing:
+                    self.builder.add_node(
+                        fn_id,
+                        kind,
+                        name=name,
+                        lineno=lineno,
+                        end_lineno=end_lineno,
+                        token_count=(end_lineno - lineno + 1) * 10,
+                        docstring=docstring,
+                    )
+                    self.builder.add_edge(parent_id, fn_id, "DEFINES")
+
+                if has_open_brace and not is_abstract:
+                    current_context.append(fn_id)
+                    context_enter_depth.append(brace_depth + 1)
 
             # Call extraction — emit for every context, including file
             # scope. Dart uses top-level functions and top-level variable
