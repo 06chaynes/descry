@@ -406,9 +406,7 @@ class ScipCacheManager:
         if output_path.exists() and output_path.stat().st_size > 0:
             size_kb = output_path.stat().st_size / 1024
             if result.returncode == 0:
-                logger.info(
-                    f"SCIP: Generated {project.name}.scip ({size_kb:.1f} KB)"
-                )
+                logger.info(f"SCIP: Generated {project.name}.scip ({size_kb:.1f} KB)")
             else:
                 logger.warning(
                     f"SCIP: {adapter.name} exited non-zero ({result.returncode}) "

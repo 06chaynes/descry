@@ -110,7 +110,12 @@ def _global_json_satisfiable(project_root: Path, dotnet_root: str | None) -> str
     # Same major.minor band?
     pin_prefix = ".".join(pin.split(".")[:2])
     matching_band = [v for v in installed if v.startswith(pin_prefix + ".")]
-    if matching_band and roll_forward in ("latestfeature", "latestpatch", "latestminor", "latestmajor"):
+    if matching_band and roll_forward in (
+        "latestfeature",
+        "latestpatch",
+        "latestminor",
+        "latestmajor",
+    ):
         return None
     # Any version with allowPrerelease + latestMajor
     if roll_forward == "latestmajor" and allow_prerelease and installed:

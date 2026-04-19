@@ -281,15 +281,9 @@ class TypeScriptAdapter:
         svelte_config = project.root / "svelte.config.js"
         vite_config = project.root / "vite.config.ts"
         tsconfig = project.root / "tsconfig.json"
-        if (
-            svelte_config.exists()
-            or vite_config.exists()
-            or not tsconfig.exists()
-        ):
+        if svelte_config.exists() or vite_config.exists() or not tsconfig.exists():
             argv.append("--infer-tsconfig")
-            logger.debug(
-                f"SCIP: Using --infer-tsconfig for {project.name}"
-            )
+            logger.debug(f"SCIP: Using --infer-tsconfig for {project.name}")
 
         argv.extend(config.extra_args)
         return CommandSpec(argv=argv, cwd=project.root)
