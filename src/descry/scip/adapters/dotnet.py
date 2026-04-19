@@ -56,6 +56,74 @@ def _has_dotnet_sources(pkg_dir: Path) -> bool:
     return False
 
 
+def _list_installed_sdks(dotnet_root: str) -> list[str]:
+    """Return SDK versions discovered under ``dotnet_root/sdk``."""
+    sdk_dir = Path(dotnet_root) / "sdk"
+    if not sdk_dir.is_dir():
+        return []
+    return [p.name for p in sdk_dir.iterdir() if p.is_dir()]
+
+
+def _global_json_satisfiable(project_root: Path, dotnet_root: str | None) -> str | None:
+    """Check whether ``project_root/global.json`` pins an SDK that the
+    resolved ``dotnet_root`` actually ships.
+
+    Returns a human-readable reason string if the pin is **not**
+    satisfiable (so the caller can skip scip-dotnet cleanly), or None
+    if either there's no global.json, no pin, or the pin resolves.
+
+    scip-dotnet runs ``dotnet restore`` under the hood; when the
+    pinned SDK is missing and ``rollForward`` disallows moves, every
+    project fails to restore and the scip index is useless.
+    """
+    gj = project_root / "global.json"
+    if not gj.exists():
+        return None
+    try:
+        import json as _json
+
+        data = _json.loads(gj.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, ValueError):
+        return None
+    sdk = data.get("sdk") if isinstance(data, dict) else None
+    if not isinstance(sdk, dict):
+        return None
+    pin = sdk.get("version")
+    if not isinstance(pin, str) or not pin:
+        return None
+
+    # rollForward "latestFeature" / "latestMajor" / "latestMinor" /
+    # "latestPatch" all allow graceful fallback; only disable≈"disable"
+    # or default behavior with a missing SDK is a hard block.
+    roll_forward = (sdk.get("rollForward") or "").lower()
+    allow_prerelease = bool(sdk.get("allowPrerelease", False))
+
+    installed = _list_installed_sdks(dotnet_root) if dotnet_root else []
+    if not installed:
+        # Nothing to compare against; let scip-dotnet surface the real
+        # error at runtime.
+        return None
+
+    if pin in installed:
+        return None
+
+    # Same major.minor band?
+    pin_prefix = ".".join(pin.split(".")[:2])
+    matching_band = [v for v in installed if v.startswith(pin_prefix + ".")]
+    if matching_band and roll_forward in ("latestfeature", "latestpatch", "latestminor", "latestmajor"):
+        return None
+    # Any version with allowPrerelease + latestMajor
+    if roll_forward == "latestmajor" and allow_prerelease and installed:
+        return None
+
+    return (
+        f"global.json pins SDK {pin!r} (rollForward={roll_forward or 'default'}, "
+        f"allowPrerelease={allow_prerelease}); installed SDKs at {dotnet_root} "
+        f"are {sorted(installed)!r}. scip-dotnet's 'dotnet restore' will fail "
+        f"for every project under this pin."
+    )
+
+
 def _find_net9_dotnet_root() -> str | None:
     """Return the path of a DOTNET_ROOT that has a net9.0 runtime, or None.
 
@@ -65,11 +133,18 @@ def _find_net9_dotnet_root() -> str | None:
     priority order — Homebrew's ``dotnet@9`` keg-only formula, the
     official ``dotnet-install.sh`` path, then a user-scoped install.
     """
+    # ``~/.dotnet`` comes first: when users have both net9 and net10
+    # side-by-side there (the dotnet-install.sh default layout), scip-
+    # dotnet gets access to BOTH the net9 runtime it needs AND the
+    # net10+ SDK modern projects pin via ``global.json``. The keg-only
+    # Homebrew ``dotnet@9`` path is a fallback — it carries only net9,
+    # so projects with ``global.json`` pinning net10 fail there with
+    # "compatible SDK was not found".
     candidates = [
-        "/opt/homebrew/opt/dotnet@9/libexec",
-        "/usr/local/opt/dotnet@9/libexec",
         str(Path.home() / ".dotnet"),
         str(Path.home() / ".dotnet-9"),
+        "/opt/homebrew/opt/dotnet@9/libexec",
+        "/usr/local/opt/dotnet@9/libexec",
     ]
     for candidate in candidates:
         shared = Path(candidate) / "shared" / "Microsoft.NETCore.App"
@@ -153,12 +228,24 @@ class DotnetAdapter:
         explicit ``DOTNET_ROOT``) and point scip-dotnet at it when
         found.
         """
+        dotnet_root = os.environ.get("DOTNET_ROOT") or _find_net9_dotnet_root()
+
+        # Pre-check: if global.json pins an SDK we don't have installed
+        # and rollForward won't bail us out, skip with a clear reason.
+        # This prevents confusing scip-dotnet error spew and avoids
+        # wasting a `dotnet restore` round-trip that will fail anyway.
+        reason = _global_json_satisfiable(project.root, dotnet_root)
+        if reason is not None:
+            logger.warning(
+                f"SCIP: skipping scip-dotnet for {project.name}: {reason}. "
+                f"Falling back to regex-only resolution for this project."
+            )
+            raise RuntimeError(f"scip-dotnet incompatibility: {reason}")
+
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
         argv.extend(config.extra_args)
 
         env_extras: dict[str, str] = {"DOTNET_ROLL_FORWARD": "LatestMajor"}
-
-        dotnet_root = os.environ.get("DOTNET_ROOT") or _find_net9_dotnet_root()
         if dotnet_root:
             env_extras["DOTNET_ROOT"] = dotnet_root
             # Prepend its bin dir to PATH so the `dotnet` binary used by
