@@ -5349,6 +5349,16 @@ _LIBRARY_PREFIXES = (
     "github.com/gorilla/mux",
     "github.com/gin-gonic/gin",
     "github.com/labstack/echo",
+    # ── klog (canonical Kubernetes/K8s-ecosystem logger) ──
+    "klog.",
+    # ── Ginkgo BDD (widely-used Go testing framework) ──
+    "ginkgo.",
+    "Gomega.",
+    # ── testify (widely-used Go testing helpers) ──
+    "assert.",
+    "require.",
+    "suite.",
+    "mock.",
     # ── Ruby stdlib & ecosystem prefixes ──
     "FileUtils.",
     "Process.",
