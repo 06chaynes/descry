@@ -169,6 +169,13 @@ toolchain = "1.92.0"     # Pin rust-analyzer version via rustup
 [syntax.lang_map]
 ".svelte" = "svelte"
 ".proto" = "protobuf"
+
+[cross_lang]
+# Frontend -> backend handler tracing via OpenAPI spec.
+openapi_path = "public/api/openapi.json"   # must resolve inside project_root
+backend_handler_patterns = ["backend/src/routes"]  # path substrings; empty = no filter
+frontend_api_patterns = ["webapp/src/lib/api"]     # same
+api_prefixes = ["/api/v1", "/api/v2", "/api"]      # stripped when matching spec paths
 ```
 
 ### Environment Variables
@@ -179,6 +186,10 @@ toolchain = "1.92.0"     # Pin rust-analyzer version via rustup
 | `DESCRY_CACHE_DIR` | `.descry_cache/` | Override cache directory location |
 | `DESCRY_NO_SCIP` | `false` | Disable SCIP indexing |
 | `DESCRY_NO_EMBEDDINGS` | `false` | Disable semantic search |
+| `DESCRY_SCIP_WORKERS` | auto | Max parallel SCIP indexer workers (overrides the memory-based default) |
+| `DESCRY_SCIP_TIMEOUT` | auto | Per-project SCIP indexer timeout in minutes (`0` / `none` disables) |
+| `DESCRY_PRIME_THREADS` | auto | Threads used when pre-warming `rust-analyzer` cache |
+| `DESCRY_AST_GREP_MAX_FILES` | `5000` | Skip ast-grep per-file invocation on repos larger than this many target-language files |
 
 Configuration precedence: defaults < `.descry.toml` < environment variables.
 
