@@ -61,14 +61,39 @@ _DEFAULT_PROJECT_MARKERS = [
 ]
 _DEFAULT_API_PREFIXES = ["/api/v1", "/api/v2", "/api"]
 _DEFAULT_EXCLUDED_DIRS = {
-    "target",
-    "node_modules",
+    # Generic
+    ".git",
+    ".hg",
+    ".svn",
+    "build",
     "dist",
     "docs",
-    ".git",
+    # Rust
+    "target",
+    # JS/TS/Node
+    "node_modules",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".output",
+    # Python
     "__pycache__",
-    "build",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "venv",
+    # Go
     "vendor",
+    # .NET
+    "bin",
+    "obj",
+    # Dart / Flutter
+    ".dart_tool",
+    # Java / Kotlin / Scala
+    ".gradle",
+    ".idea",
 }
 
 _DEFAULT_TEST_PATH_PATTERNS = (
@@ -82,14 +107,49 @@ _DEFAULT_TEST_PATH_PATTERNS = (
     "/__tests__/",
 )
 _DEFAULT_TEST_FILE_SUFFIXES = (
+    # Rust
     "_test.rs",
-    ".test.ts",
-    ".spec.ts",
+    "_tests.rs",
+    # Python
     "_test.py",
-    ".test.js",
-    ".spec.js",
+    "test_.py",
+    # TypeScript / JavaScript
+    ".test.ts",
     ".test.tsx",
+    ".test.js",
+    ".test.jsx",
+    ".spec.ts",
     ".spec.tsx",
+    ".spec.js",
+    ".spec.jsx",
+    # Go (go test convention)
+    "_test.go",
+    # Ruby (RSpec / Minitest)
+    "_spec.rb",
+    "_test.rb",
+    # Java / Kotlin / Scala
+    "Test.java",
+    "Tests.java",
+    "IT.java",
+    "Test.kt",
+    "Tests.kt",
+    "Spec.scala",
+    "Test.scala",
+    # PHP
+    "Test.php",
+    # .NET (xUnit / NUnit / MSTest)
+    "Tests.cs",
+    "Test.cs",
+    # Dart
+    "_test.dart",
+    # C / C++
+    "_test.c",
+    "_test.cc",
+    "_test.cpp",
+    "_tests.c",
+    "_tests.cpp",
+    "test_.c",
+    "test_.cpp",
 )
 _DEFAULT_CODE_EXTENSIONS = {
     ".rs",

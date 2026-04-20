@@ -85,7 +85,8 @@ class RustAdapter:
            most serious multi-crate repos). Glob patterns like
            ``"crates/*"`` are expanded.
         2. Falls back to top-level ``*/Cargo.toml`` globbing for simple
-           workspaces (tokio, mantis).
+           workspaces that don't declare ``[workspace] members`` (e.g.,
+           tokio — each subdir is an independent crate).
         3. If neither matches but root has ``src/``, index root as a
            single-crate project (small libraries).
         """
