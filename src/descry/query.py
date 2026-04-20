@@ -732,7 +732,7 @@ class GraphQuerier:
         found_tests = []
 
         # 1. Scan all File nodes to find matches
-        for nid, node in self.nodes.items():
+        for node in self.nodes.values():
             if node["type"] == "File":
                 fpath = node.get("metadata", {}).get("path", "")
                 fbase = os.path.basename(fpath)
@@ -749,7 +749,7 @@ class GraphQuerier:
             candidates.append(f"test_{snake}")
 
         if candidates:
-            for nid, node in self.nodes.items():
+            for node in self.nodes.values():
                 if node["type"] in ("Function", "Method"):
                     name = node["metadata"]["name"]
                     # Check exact match or verify it starts with test_ and contains symbol

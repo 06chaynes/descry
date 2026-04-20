@@ -18,10 +18,12 @@ from pathlib import Path
 
 from descry._env import safe_env
 
+from descry import __version__
+
 logger = logging.getLogger(__name__)
 
-# Server version for tracking
-SERVER_VERSION = "0.1.0"
+# Server version for tracking (follows descry.__version__)
+SERVER_VERSION = __version__
 
 
 # --- Configuration ---

@@ -147,7 +147,7 @@ class CrossLangTracer:
                 handler_index[name] = node_id
 
         # Map operationIds to handlers
-        for (method, path), info in self.path_to_operation.items():
+        for info in self.path_to_operation.values():
             op_id = info["operationId"]
             if op_id in handler_index:
                 self.operation_to_handler[op_id] = handler_index[op_id]

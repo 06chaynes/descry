@@ -53,11 +53,10 @@ _RE_METHOD = re.compile(
     r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^]]+\])?\s*\("
 )
 
-# Const / var single-line: `const Name = value` or `var Name Type = value`
+# Const single-line: `const Name = value`
 _RE_CONST_SINGLE = re.compile(
     r"^\s*const\s+([A-Z][A-Za-z0-9_]*)\s*(?:[A-Za-z0-9_\[\]]*\s*)?="
 )
-_RE_VAR_SINGLE = re.compile(r"^\s*var\s+([A-Za-z_][A-Za-z0-9_]*)\s+[A-Za-z0-9_\[\]*]+")
 
 # Grouped const/var block: `const (` / `var (`
 _RE_CONST_BLOCK_START = re.compile(r"^\s*const\s*\(")

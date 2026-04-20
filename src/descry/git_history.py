@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 class GitError(Exception):
     """Raised for git-specific errors (not installed, not a repo, etc.)."""
 
-    pass
 
 
 # --- Git argument validators (A.1) ---

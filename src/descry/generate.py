@@ -6827,11 +6827,7 @@ def is_non_project_call(callee: str) -> bool:
         return True
 
     # Prefix match for qualified names
-    for prefix in STDLIB_PREFIXES:
-        if callee.startswith(prefix):
-            return True
-
-    return False
+    return any(callee.startswith(prefix) for prefix in STDLIB_PREFIXES)
 
 
 # --- Schema Definition ---
