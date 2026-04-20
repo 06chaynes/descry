@@ -95,9 +95,35 @@ class JavaAdapter:
         sbt) plus at least one JVM source file. The root itself is
         detected as a single project when it carries a build marker with
         no subdirectory competing for the name.
+
+        Gradle multi-project builds (signalled by a root
+        ``settings.gradle`` / ``settings.gradle.kts``) are treated as a
+        single unit — scip-java handles their submodules natively, and
+        trying to index a ``buildSrc/`` directory in isolation fails
+        because it depends on the parent project's configuration
+        (observed on spring-framework, pre-fix).
         """
         seen: set[str] = set()
         projects: list[DiscoveredProject] = []
+
+        # Gradle multi-project short-circuit — scip-java handles the
+        # subproject tree natively; iterating ourselves picks up
+        # buildSrc/ alone which fails to build standalone.
+        root_has_gradle = (root / "build.gradle").exists() or (
+            root / "build.gradle.kts"
+        ).exists()
+        root_has_settings = (root / "settings.gradle").exists() or (
+            root / "settings.gradle.kts"
+        ).exists()
+        if root_has_gradle and root_has_settings and _has_jvm_sources(root):
+            projects.append(
+                DiscoveredProject(
+                    name=root.name,
+                    root=root,
+                    language=self.name,
+                )
+            )
+            return projects
 
         for marker_name in _JAVA_BUILD_MARKERS:
             for marker in root.glob(f"*/{marker_name}"):
