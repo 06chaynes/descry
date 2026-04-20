@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-20
+
+A large feature + resolution-quality release. Seven new SCIP language
+adapters land (Java/Kotlin/Scala, Go, Ruby, PHP, C#/VB, C/C++, Dart)
+alongside a language-general STDLIB_FILTER sweep that brought CALLS
+resolution above 90% on 20 of 26 measured corpora. The release also
+folds in a full session of convergence-audit hardening: user-input
+parsing no longer 500s on garbage query strings, subprocess output
+tolerates non-UTF-8 bytes, and the documented security invariants match
+what the code actually does.
+
+Graph schema stays at v1 — existing `.descry_cache/codebase_graph.json`
+files remain readable. CLI subcommands and MCP tool names are unchanged
+(19 of each, 1:1 parity).
+
 ### Added
 
 - **Dart / Flutter support** via `scip-dart` (Milestone D). DartAdapter
@@ -189,6 +204,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Regression: `tests/test_git_history.py::TestGitHistoryNonUtf8Output`
   seeds a throwaway repo with 0x92 / 0xfd bytes and asserts
   `_run_git` + `get_changes` stay clean.
+- **User-input numeric parsing is crash-safe.** The web API's
+  `?limit=foo` / `?depth=bar` inputs and the `DESCRY_SCIP_WORKERS` /
+  `DESCRY_PRIME_THREADS` / `DESCRY_SCIP_TIMEOUT` env-var overrides
+  previously called `int(raw)` directly; a non-integer value raised
+  `ValueError` and surfaced as a 500 (web) or a hard crash during
+  SCIP cache init (env var). Web handlers now go through the new
+  `_int_param(request, name, default)` helper that returns the
+  default on parse failure; env-var paths catch `ValueError`, log a
+  warning, and fall through to the auto-tuned default.
+- **Exception chains preserved on re-raise.** Three sites in
+  `git_history.py` and one in `embeddings.py` re-raised exceptions
+  without `from err` / `from None`, which hid the underlying cause in
+  tracebacks. Now `FileNotFoundError` → `GitError("git not found")` /
+  `TimeoutExpired` → `GitError("timed out")` / `FileExistsError` →
+  `TimeoutError("embeddings lock")` all use `from None` (cause
+  already captured in the message), and `_verify_git`'s internal
+  re-raise uses `from err` to preserve the inner git failure.
+- **`descry.__version__` matches `pyproject.toml`.** Since the 0.1.1
+  tag, the package version string was `"0.1.0"` in `__init__.py` but
+  `"0.1.1"` in `pyproject.toml`, so `descry health` reported the
+  wrong version. Bumped `__init__.py` and added this to the release
+  gate so a future mismatch is caught before tagging.
+- **Documented security invariants now match the code.** `CLAUDE.md`
+  said `descry-web` "allows CORS `*`"; in reality the code omits
+  `CORSMiddleware` entirely so browsers enforce same-origin by
+  default (with `TrustedHostMiddleware` defeating DNS-rebinding).
+  The subprocess-sanitization list also named only `scip-typescript`
+  as the representative SCIP indexer — now enumerates all ten.
+- **Implicit-`Optional` annotations in `query.py` made explicit.**
+  11 signatures across `flow` / `trace_flow_structured` /
+  `get_context_prompt` / `find_trait_impls` used `x: int = None`
+  (which PEP 484 prohibits); now `int | None = None`.
+
+### Changed
+
+- **Configuration docs now cover every parsed field.** README's
+  `[cross_lang]` TOML section (with `openapi_path`,
+  `backend_handler_patterns`, `frontend_api_patterns`, `api_prefixes`)
+  and `[timeouts] index_minutes` were parsed at runtime but undocumented;
+  added. Four `DESCRY_*` env vars (`SCIP_WORKERS`, `SCIP_TIMEOUT`,
+  `PRIME_THREADS`, `AST_GREP_MAX_FILES`) were honoured by the code but
+  missing from the environment-variables table; added.
 
 ## [0.1.1] — 2026-04-17
 
