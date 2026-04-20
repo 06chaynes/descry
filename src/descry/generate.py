@@ -2583,6 +2583,9 @@ _LIBRARY_NAMES = frozenset(
         "gen_range",
         "gen_bool",
         "gen_ratio",
+        "random_bool",
+        "random_ratio",
+        "random_iter",
         "sample",
         "sample_iter",
         "shuffle",
@@ -2590,6 +2593,37 @@ _LIBRARY_NAMES = frozenset(
         "choose",
         "choose_multiple",
         "choose_weighted",
+        "fill",
+        "try_fill",
+        "from_entropy",
+        "from_os_rng",
+        "from_rng",
+        "seed_from_u64",
+        "rand",
+        # Rust criterion/bencher benchmarking
+        "bench",
+        "bench_function",
+        "bench_with_input",
+        "benchmark_group",
+        "criterion_group",
+        "criterion_main",
+        "measurement",
+        "with_input",
+        "with_inputs",
+        "iter_custom",
+        "iter_batched",
+        "iter_batched_ref",
+        "setup_wrappers_and_push",
+        "black_box",
+        "bench_values",
+        "throughput",
+        "sample_size",
+        "measurement_time",
+        "warm_up_time",
+        "confidence_level",
+        "significance_level",
+        "noise_threshold",
+        "plot_config",
         # Rust tempfile crate (widely used for tests).
         "tempdir",
         "tempfile",
@@ -6681,11 +6715,31 @@ def is_non_project_call(callee: str) -> bool:
     if callee in STDLIB_FILTER:
         return True
 
+    # Strip Rust/TS turbofish generics (`::<T>`, `<T, U>`) before
+    # computing the last_part — otherwise `matches.get_one::<String>`
+    # would see last_part = `<String>` instead of `get_one`.
+    # Strip `<...>` pairs (non-greedy, iterated until no more); tolerate
+    # nested generics by looping.
+    bare = callee
+    if "<" in bare:
+        # Remove `<...>` substrings — simple regex handles nested by
+        # iterating since re.sub sweeps from inside out when the inner
+        # pattern matches first.
+        prev = None
+        while prev != bare:
+            prev = bare
+            bare = re.sub(r"<[^<>]*>", "", bare)
+        # Drop any stray trailing `::` left by `Vec::<T>::new` → `Vec::::new`.
+        bare = re.sub(r":{3,}", "::", bare)
+        # Trim any trailing `::` (e.g. `matches.get_one::<String>` →
+        # `matches.get_one::` after generic strip).
+        bare = bare.rstrip(":")
+
     # Extract last component for method calls. Split on `.` (most langs),
     # `::` (Rust/C++/Ruby), and `->` (PHP / C struct pointer). We want
     # the trailing bare method name regardless of how the language
     # qualifies it, so `headers->set` matches `set` in the filter.
-    last_part = callee.split(".")[-1].split("::")[-1].split("->")[-1]
+    last_part = bare.split(".")[-1].split("::")[-1].split("->")[-1]
 
     # Diesel DSL column access pattern: table_name::column.method (e.g., targets::id.eq)
     # These are ORM DSL calls that never resolve to project functions
@@ -6699,8 +6753,8 @@ def is_non_project_call(callee: str) -> bool:
 
     # For qualified calls like Type::new, only filter if the type is also stdlib
     # This allows AppState::new but filters Vec::new, HashMap::new
-    if "::" in callee:
-        type_part = callee.split("::")[-2] if "::" in callee else ""
+    if "::" in bare:
+        type_part = bare.split("::")[-2] if "::" in bare else ""
         # If qualified with a custom type (not stdlib and not the
         # language's "same class" keyword — `Self` in Rust, `self`,
         # `static`, `parent` in PHP), don't filter. These keywords must
