@@ -735,4 +735,3 @@ class ScipCacheManager:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         with open(self.checksums_file, "w") as f:
             json.dump(checksums, f, indent=2)
-
