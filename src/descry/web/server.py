@@ -773,7 +773,6 @@ async def api_flow(request: Request) -> JSONResponse:
             start_name=start,
             direction=direction,
             depth=depth,
-            target=target,
             inline_threshold=inline_threshold,
         )
         return JSONResponse({**base, "tree": tree})

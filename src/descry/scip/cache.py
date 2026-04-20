@@ -281,12 +281,7 @@ class ScipCacheManager:
         output_path = self.cache_dir / f"{project.name}.scip"
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        existing_scip = (
-            list(self.cache_dir.glob("**/*.scip")) if self.cache_dir.exists() else []
-        )
-        is_first_run = len(existing_scip) == 0
-
-        timeout_seconds = self._get_timeout(is_first_run)
+        timeout_seconds = self._get_timeout()
         timeout_str = (
             "unlimited" if timeout_seconds is None else f"{timeout_seconds // 60}min"
         )
@@ -470,8 +465,8 @@ class ScipCacheManager:
             logger.debug(f"SCIP: Cache priming error: {e}")
             return False
 
-    def _get_timeout(self, is_first_run: bool = False) -> int | None:
-        """Get timeout in seconds based on config, environment, and run type.
+    def _get_timeout(self) -> int | None:
+        """Get timeout in seconds based on config + environment.
 
         Priority: config value > env var > default (no timeout)
         """

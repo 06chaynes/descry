@@ -84,7 +84,7 @@ class TestFormatSearchResult:
                 "signature": "fn add(a: i32, b: i32) -> i32",
             },
         }
-        result = format_search_result(node, rank=1)
+        result = format_search_result(node)
         assert "add" in result
         assert "src/lib.rs:10" in result
         assert "50 toks" in result

@@ -710,10 +710,7 @@ class GraphQuerier:
             result = self._truncate_output_progressively(
                 result,
                 max_output_tokens,
-                source_code,
                 source_lang,
-                file_path_rel,
-                start,
             )
 
         return result
@@ -811,10 +808,7 @@ class GraphQuerier:
         self,
         result: str,
         max_tokens: int,
-        source_code: str,
         source_lang: str,
-        file_path: str,
-        start_line: int,
     ) -> str:
         """Apply progressive truncation to fit within token budget.
 
@@ -830,10 +824,7 @@ class GraphQuerier:
         Args:
             result: Full output text
             max_tokens: Target token budget
-            source_code: Original source code for fallback
-            source_lang: Language for syntax highlighting
-            file_path: File path for context
-            start_line: Starting line number
+            source_lang: Language for the Source-Code fenced block match.
         """
         import re
 
@@ -1533,7 +1524,6 @@ class GraphQuerier:
         start_name: str,
         direction: str = "forward",
         depth: int = 3,
-        target: str = None,
         inline_threshold: int = 100,
         timeout_ms: int = None,
     ) -> dict:

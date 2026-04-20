@@ -583,7 +583,7 @@ class DescryConfig:
 
 
 def format_search_result(
-    node: dict, rank: int = 0, show_score: bool = False, score: float = 0.0
+    node: dict, show_score: bool = False, score: float = 0.0
 ) -> str:
     """Format a single search result with enriched information."""
     meta = node.get("metadata", {})
@@ -1554,8 +1554,8 @@ class DescryService:
             lines = [
                 f"{len(results)} match(es) for '{' '.join(terms)}' [{search_method}]{filter_note}:\n"
             ]
-            for i, node in enumerate(results, 1):
-                lines.append(format_search_result(node, rank=i))
+            for node in results:
+                lines.append(format_search_result(node))
                 lines.append("")
             result = "\n".join(lines).rstrip()
 
@@ -1664,9 +1664,9 @@ class DescryService:
             result = f"No semantic matches for '{query}'."
         else:
             lines = [f"{len(results)} semantic match(es) for '{query}':\n"]
-            for i, (node, score) in enumerate(results, 1):
+            for node, score in results:
                 lines.append(
-                    format_search_result(node, rank=i, show_score=True, score=score)
+                    format_search_result(node, show_score=True, score=score)
                 )
                 lines.append("")
             result = "\n".join(lines).rstrip()
@@ -1713,7 +1713,7 @@ class DescryService:
         header_lines = [
             f"### Quick Context for `{name}`",
             "",
-            format_search_result(best_match, rank=1),
+            format_search_result(best_match),
             "",
         ]
 
