@@ -7,57 +7,50 @@ from pathlib import Path
 
 from descry.scip.parser import ScipIndex
 from descry.scip.cache import ScipCacheManager
+from descry.scip.adapters.typescript import parse_backtick_descriptors
 from descry.generate import TypeScriptSymbolTable
 
 
 class TestTypescriptScipParsing:
-    """Tests for TypeScript SCIP symbol parsing."""
+    """Tests for the shared backtick-descriptor parser used by scip-typescript
+    and scip-python. Routes through ``parse_backtick_descriptors`` — the
+    canonical helper in ``descry.scip.adapters.typescript`` that both
+    adapters delegate to.
+    """
 
     def test_simple_function(self):
         """Should extract simple function name from TypeScript SCIP symbol."""
-        # Create a minimal index to test parsing
-        index = ScipIndex([])
-
-        # Test the internal descriptor parsing
         descriptors = "src/lib/api/`client.ts`/getAuthToken()."
-        result = index._parse_typescript_descriptors(descriptors)
+        result = parse_backtick_descriptors(descriptors)
         assert result == ["getAuthToken"], f"Expected ['getAuthToken'], got {result}"
 
     def test_class_method(self):
         """Should extract class and method from TypeScript SCIP symbol."""
-        index = ScipIndex([])
-
         descriptors = "src/lib/stores/`users.ts`/UsersStore#fetchUsers()."
-        result = index._parse_typescript_descriptors(descriptors)
+        result = parse_backtick_descriptors(descriptors)
         assert result == ["UsersStore", "fetchUsers"], (
             f"Expected ['UsersStore', 'fetchUsers'], got {result}"
         )
 
     def test_multiple_backticks(self):
         """Should handle multiple backtick segments in path."""
-        index = ScipIndex([])
-
         descriptors = "src/lib/`stores`/`auth.ts`/AuthStore#login()."
-        result = index._parse_typescript_descriptors(descriptors)
+        result = parse_backtick_descriptors(descriptors)
         assert result == ["AuthStore", "login"], (
             f"Expected ['AuthStore', 'login'], got {result}"
         )
 
     def test_nested_class_method(self):
         """Should handle nested type/method symbols."""
-        index = ScipIndex([])
-
         descriptors = "src/`client.ts`/ApiClient#request()."
-        result = index._parse_typescript_descriptors(descriptors)
+        result = parse_backtick_descriptors(descriptors)
         assert "ApiClient" in result
         assert "request" in result
 
     def test_export_function(self):
         """Should handle exported function symbols."""
-        index = ScipIndex([])
-
         descriptors = "src/lib/`utils.ts`/formatDate()."
-        result = index._parse_typescript_descriptors(descriptors)
+        result = parse_backtick_descriptors(descriptors)
         assert result == ["formatDate"], f"Expected ['formatDate'], got {result}"
 
 
@@ -259,9 +252,9 @@ class TestPythonSCIPSymbolExtraction:
 
     scip-python emits symbols in the same backtick-wrapped format as
     scip-typescript (``<scheme> <manager> <pkg> <ver> `module.path`/name().``),
-    so the parser routes both through ``_parse_typescript_descriptors``.
-    These tests pin that behaviour so a future refactor can't silently
-    regress Python call resolution to 0%.
+    so both adapters delegate to ``parse_backtick_descriptors``.
+    These tests pin that behaviour via ``ScipIndex._extract_name`` so a
+    future refactor can't silently regress Python call resolution to 0%.
     """
 
     def test_extract_module_level_function(self):

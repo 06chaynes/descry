@@ -6839,13 +6839,13 @@ class RustParser(BaseParser):
                         )
 
         # Also extract struct literal instantiations
-        self._extract_struct_literals(file_path, file_id, lines, line_to_context)
+        self._extract_struct_literals(file_id, lines, line_to_context)
 
         # Extract calls from macro bodies (tokio::select!, etc.)
         self._extract_macro_body_calls(file_id, lines, line_to_context)
 
     def _extract_struct_literals(
-        self, file_path: str, file_id: str, lines: list, line_to_context: dict
+        self, file_id: str, lines: list, line_to_context: dict
     ):
         """Extract struct literal instantiations like `MyStruct { field: value }`.
 
@@ -7564,7 +7564,7 @@ class TSParser(BaseParser):
 
         # Use ast-grep for more accurate CALLS detection
         if self.builder.use_ast_grep:
-            self._extract_calls_with_ast_grep(str(file_path), file_id, lines)
+            self._extract_calls_with_ast_grep(str(file_path), file_id)
 
     def _extract_ts_types(self, full_sig: str) -> tuple:
         """Extract return type and parameter types from TypeScript function signature.
@@ -7657,7 +7657,7 @@ class TSParser(BaseParser):
                 return node["type"] == "Class"
         return False
 
-    def _extract_calls_with_ast_grep(self, file_path: str, file_id: str, lines: list):
+    def _extract_calls_with_ast_grep(self, file_path: str, file_id: str):
         """Extract calls using ast-grep for higher accuracy.
 
         Uses the TypeScriptSymbolTable to filter type-only imports.
