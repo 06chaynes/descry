@@ -28,7 +28,6 @@ class GitError(Exception):
     """Raised for git-specific errors (not installed, not a repo, etc.)."""
 
 
-
 # --- Git argument validators (A.1) ---
 # Accepts: HEAD, HEAD^, HEAD^^, HEAD~N, HEAD^{tree}, @, @{-1},
 #          branch@{upstream}, master@{yesterday}, branch names, sha prefixes.

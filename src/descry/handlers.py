@@ -1667,9 +1667,7 @@ class DescryService:
         else:
             lines = [f"{len(results)} semantic match(es) for '{query}':\n"]
             for node, score in results:
-                lines.append(
-                    format_search_result(node, show_score=True, score=score)
-                )
+                lines.append(format_search_result(node, show_score=True, score=score))
                 lines.append("")
             result = "\n".join(lines).rstrip()
 
