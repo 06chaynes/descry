@@ -95,7 +95,7 @@ except ImportError:
 
 # --- Project config (lazy-loaded via DescryConfig) ---
 
-from descry.handlers import DescryConfig, DescryService  # noqa: E402
+from descry.handlers import DescryConfig, DescryService, symbol_type_priority  # noqa: E402
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -1034,19 +1034,10 @@ async def api_quick(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
 
     matches = q.find_nodes_by_name(name)
-
-    def type_priority(node):
-        t = node.get("type", "")
-        if t in ("Function", "Method"):
-            return 0
-        if t == "Class":
-            return 1
-        return 2
-
-    matches.sort(key=type_priority)
+    matches.sort(key=symbol_type_priority)
     if not matches:
         matches = q.find_nodes_by_name(name, fuzzy=True)
-        matches.sort(key=type_priority)
+        matches.sort(key=symbol_type_priority)
 
     if not matches:
         return JSONResponse({"error": f"No symbol found for '{name}'"}, status_code=404)

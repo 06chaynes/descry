@@ -699,6 +699,21 @@ def is_natural_language_query(terms: list[str]) -> bool:
     return len(terms) >= 3
 
 
+def symbol_type_priority(node: dict) -> int:
+    """Ranking key: prefer Function/Method > Class > everything else.
+
+    Shared by ``DescryService.context`` and the web ``/api/context``
+    handler so both surfaces agree on which match wins when multiple
+    symbols share a name.
+    """
+    t = node.get("type", "")
+    if t in ("Function", "Method"):
+        return 0
+    if t == "Class":
+        return 1
+    return 2
+
+
 def reciprocal_rank_fusion(
     tfidf_results: list, semantic_results: list, k: int = 60
 ) -> list:
@@ -1680,20 +1695,11 @@ class DescryService:
             return "ERROR: Graph not found. Run descry ensure first."
 
         matches = q.find_nodes_by_name(name)
-
-        def type_priority(node):
-            t = node.get("type", "")
-            if t in ("Function", "Method"):
-                return 0
-            if t == "Class":
-                return 1
-            return 2
-
-        matches.sort(key=type_priority)
+        matches.sort(key=symbol_type_priority)
 
         if not matches:
             matches = q.find_nodes_by_name(name, fuzzy=True)
-            matches.sort(key=type_priority)
+            matches.sort(key=symbol_type_priority)
 
         if not matches:
             return f"No symbol found for '{name}'. Try descry search to explore."
