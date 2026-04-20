@@ -97,11 +97,6 @@ _JAVA_CONTROL_KEYWORDS = frozenset(
 )
 
 
-def _is_record_definition(line: str) -> bool:
-    """Quick check for the Java 14+ ``record Foo(...)`` form."""
-    return bool(re.match(r"^\s*(?:public\s+)?(?:static\s+)?record\s+", line))
-
-
 def _strip_line_comment(line: str) -> str:
     """Return `line` with any trailing ``//...`` comment removed.
 
