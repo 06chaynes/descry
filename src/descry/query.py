@@ -335,7 +335,7 @@ class GraphQuerier:
         end_line: int,
         token_count: int,
         full: bool = False,
-        head_lines_only: int = None,
+        head_lines_only: int | None = None,
     ) -> str:
         """Get source code with smart truncation based on token count.
 
@@ -416,14 +416,14 @@ class GraphQuerier:
         self,
         node_id,
         depth: int = 1,
-        max_tokens: int = None,
-        inline_threshold: int = None,
+        max_tokens: int | None = None,
+        inline_threshold: int | None = None,
         full: bool = False,
-        head_lines: int = None,
+        head_lines: int | None = None,
         expand_callees: bool = False,
         callee_budget: int = 2000,
         brief: bool = False,
-        max_output_tokens: int = None,
+        max_output_tokens: int | None = None,
     ):
         """Get comprehensive context for a symbol.
 
@@ -1254,8 +1254,8 @@ class GraphQuerier:
         expanded: set,
         current_depth: int = 1,
         indent: int = 0,
-        start_time: float = None,
-        inline_threshold: int = None,
+        start_time: float | None = None,
+        inline_threshold: int | None = None,
     ) -> tuple[list[str], int]:
         """Recursively expand callees up to depth limit with token budget.
 
@@ -1382,9 +1382,9 @@ class GraphQuerier:
         start_name: str,
         direction: str = "forward",
         depth: int = 3,
-        target: str = None,
+        target: str | None = None,
         inline_threshold: int = 100,
-        timeout_ms: int = None,
+        timeout_ms: int | None = None,
     ) -> str:
         """Trace call flow showing path with inline code.
 
@@ -1526,7 +1526,7 @@ class GraphQuerier:
         direction: str = "forward",
         depth: int = 3,
         inline_threshold: int = 100,
-        timeout_ms: int = None,
+        timeout_ms: int | None = None,
     ) -> dict:
         """Trace call flow, returning a structured tree for UI rendering.
 
@@ -2009,7 +2009,7 @@ class GraphQuerier:
             return variant_matches
         return fuzzy_matches
 
-    def find_trait_impls(self, method_name: str, trait_name: str = None) -> list:
+    def find_trait_impls(self, method_name: str, trait_name: str | None = None) -> list:
         """Find all implementations of a trait method across the codebase.
 
         When you know a trait method name (e.g., 'from_request_parts') but need

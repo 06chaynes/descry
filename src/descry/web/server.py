@@ -187,6 +187,23 @@ async def _get_git_analyzer() -> "GitHistoryAnalyzer | None":
     return await _get_service()._get_git_analyzer()
 
 
+def _int_param(request: Request, name: str, default: int) -> int:
+    """Parse an integer query parameter. Non-integer values fall back to default.
+
+    Web endpoints were using `int(request.query_params.get(name, "N"))` which
+    raises ValueError on garbage input (e.g. ``?limit=foo``) and surfaced as
+    a 500. This helper returns the default instead, so malformed user input
+    degrades quietly rather than crashing the request.
+    """
+    raw = request.query_params.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def _update_graph_meta():
     global _graph_meta
     cfg = _get_config()
@@ -453,7 +470,7 @@ async def api_search(request: Request) -> JSONResponse:
     if not terms:
         return JSONResponse({"error": "Missing 'terms' parameter"}, status_code=400)
 
-    limit = int(request.query_params.get("limit", "10"))
+    limit = _int_param(request, "limit", 10)
     lang = request.query_params.get("lang")
     crate = request.query_params.get("crate")
     symbol_type = request.query_params.get("type")
@@ -518,7 +535,7 @@ async def api_semantic(request: Request) -> JSONResponse:
     query = request.query_params.get("query", "")
     if not query:
         return JSONResponse({"error": "Missing 'query' parameter"}, status_code=400)
-    limit = int(request.query_params.get("limit", "10"))
+    limit = _int_param(request, "limit", 10)
 
     if not SEMANTIC_AVAILABLE:
         return JSONResponse({"error": "Semantic search not available"}, status_code=503)
@@ -548,7 +565,7 @@ async def api_callers(request: Request) -> JSONResponse:
     name = request.query_params.get("name", "")
     if not name:
         return JSONResponse({"error": "Missing 'name' parameter"}, status_code=400)
-    limit = int(request.query_params.get("limit", "20"))
+    limit = _int_param(request, "limit", 20)
 
     q = await _get_querier()
     if not q:
@@ -575,7 +592,7 @@ async def api_callees(request: Request) -> JSONResponse:
     name = request.query_params.get("name", "")
     if not name:
         return JSONResponse({"error": "Missing 'name' parameter"}, status_code=400)
-    limit = int(request.query_params.get("limit", "20"))
+    limit = _int_param(request, "limit", 20)
 
     q = await _get_querier()
     if not q:
@@ -622,8 +639,8 @@ async def api_context(request: Request) -> JSONResponse:
     full = request.query_params.get("full", "").lower() == "true"
     brief = request.query_params.get("brief", "").lower() == "true"
     expand_callees = request.query_params.get("expand_callees", "").lower() == "true"
-    depth = int(request.query_params.get("depth", "1"))
-    max_tokens = int(request.query_params.get("max_tokens", "2000"))
+    depth = _int_param(request, "depth", 1)
+    max_tokens = _int_param(request, "max_tokens", 2000)
 
     q = await _get_querier()
     if not q:
@@ -762,9 +779,9 @@ async def api_flow(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Missing 'start' parameter"}, status_code=400)
 
     direction = request.query_params.get("direction", "forward")
-    depth = int(request.query_params.get("depth", "3"))
+    depth = _int_param(request, "depth", 3)
     target = request.query_params.get("target") or None
-    inline_threshold = int(request.query_params.get("inline_threshold", "100"))
+    inline_threshold = _int_param(request, "inline_threshold", 100)
     fmt = request.query_params.get("format", "markdown")
 
     q = await _get_querier()
@@ -800,7 +817,7 @@ async def api_path(request: Request) -> JSONResponse:
             {"error": "Missing 'start' and/or 'end' parameter"}, status_code=400
         )
 
-    max_depth = int(request.query_params.get("max_depth", "10"))
+    max_depth = _int_param(request, "max_depth", 10)
     direction = request.query_params.get("direction", "forward")
 
     q = await _get_querier()
@@ -926,7 +943,7 @@ async def api_churn(request: Request) -> JSONResponse:
 
     time_range = request.query_params.get("time_range")
     path_filter = request.query_params.get("path_filter")
-    limit = int(request.query_params.get("limit", "20"))
+    limit = _int_param(request, "limit", 20)
     mode = request.query_params.get("mode", "symbols")
     exclude_generated = (
         request.query_params.get("exclude_generated", "true").lower() == "true"
@@ -969,7 +986,7 @@ async def api_evolution(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Git history not available"}, status_code=503)
 
     time_range = request.query_params.get("time_range")
-    limit = int(request.query_params.get("limit", "10"))
+    limit = _int_param(request, "limit", 10)
     show_diff = request.query_params.get("show_diff", "").lower() == "true"
     crate = request.query_params.get("crate")
 
@@ -996,7 +1013,7 @@ async def api_changes(request: Request) -> JSONResponse:
     time_range = request.query_params.get("time_range")
     path_filter = request.query_params.get("path_filter")
     show_callers = request.query_params.get("show_callers", "true").lower() == "true"
-    limit = int(request.query_params.get("limit", "50"))
+    limit = _int_param(request, "limit", 50)
 
     fmt = request.query_params.get("format", "markdown")
 
@@ -1121,8 +1138,7 @@ async def api_source(request: Request) -> JSONResponse:
     if not file_param:
         return JSONResponse({"error": "Missing 'file' parameter"}, status_code=400)
 
-    line = request.query_params.get("line")
-    target_line = int(line) if line else None
+    target_line = _int_param(request, "line", 0) or None
 
     # A.6 / H.1 pipeline: resolve → containment → S_ISREG → size → text-check → read
     cfg = _get_config()

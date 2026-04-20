@@ -387,7 +387,12 @@ class ScipCacheManager:
         """
         env_workers = os.environ.get("DESCRY_SCIP_WORKERS")
         if env_workers:
-            return min(int(env_workers), num_items)
+            try:
+                return min(int(env_workers), num_items)
+            except ValueError:
+                logger.warning(
+                    f"DESCRY_SCIP_WORKERS={env_workers!r} is not an integer; ignoring"
+                )
 
         # Detect available memory and adjust
         try:
@@ -414,7 +419,12 @@ class ScipCacheManager:
         """
         env_threads = os.environ.get("DESCRY_PRIME_THREADS")
         if env_threads:
-            return int(env_threads)
+            try:
+                return int(env_threads)
+            except ValueError:
+                logger.warning(
+                    f"DESCRY_PRIME_THREADS={env_threads!r} is not an integer; ignoring"
+                )
         # Default: use available CPUs minus 2 (leave room for system)
         import multiprocessing
 
@@ -486,7 +496,13 @@ class ScipCacheManager:
         env_timeout = os.environ.get("DESCRY_SCIP_TIMEOUT", "").lower()
         if env_timeout in ("0", "none", "unlimited", ""):
             return None
-        return int(env_timeout) * 60
+        try:
+            return int(env_timeout) * 60
+        except ValueError:
+            logger.warning(
+                f"DESCRY_SCIP_TIMEOUT={env_timeout!r} is not an integer; ignoring"
+            )
+            return None
 
     def _hash_project(self, project: str, project_type: str = "rust") -> str:
         """Hash project sources for change detection.
