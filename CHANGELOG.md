@@ -64,6 +64,101 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   **79.2%**; headers lag .c files (63.3% vs 81.2%) due to scip-clang
   compdb-coverage limits on transitively-included headers.
 
+### Changed
+
+- **CALLS resolution rose above the 90% bar on 20 of 26 measured
+  corpora** (up from ~10 pre-sweep) via a focused language-general
+  filter pass — zero codebase-specific entries. The sweep expanded
+  `STDLIB_FILTER` / `STDLIB_PREFIXES` across every supported language:
+  - **TypeScript / JavaScript**: `_JSTS_CONTROL_KEYWORDS` filter in
+    the `TSParser` regex fallback (rejects `if(`, `while(`, `for(`,
+    `switch(` captures — removes ~37k spurious unresolved on the
+    TypeScript compiler alone), tslib emit helpers (`__awaiter`,
+    `__generator`, `__rest`, `__spreadArray`, `__classPrivateFieldGet`,
+    `__addDisposableResource`, …), DOM APIs (`textContent`,
+    `getAttribute`, `classList`, `appendChild`, …), Array/Object
+    statics (`isArray`, `fromEntries`, `defineProperty`, …),
+    Playwright (`page.*`), Vitest/Jest todo / only / each / snapshot
+    modifiers, React core hooks + TanStack Query + Node `assert`
+    strict variants + Lingui / nanoid / uuid.* / date-fns / RN-Expo
+    surface. ast-grep now rejects `$FUNC` captures that include parens
+    or non-identifier characters (stops curried-call shape like
+    `test.runIf(isBuild)(…)` from polluting CALLS targets).
+  - **C#**: `var` added to `_DOTNET_CONTROL_KEYWORDS` (fixes ~1k/file
+    spurious `var (` captures on modern C# codebases) along with the
+    full modern declaration vocabulary (`record`, `partial`, `sealed`,
+    `override`, `static`, `params`, `required`, `scoped`, `file`,
+    `global`) and every primitive alias (`object`, `string`, `bool`,
+    `int`, `long`, `byte`, `char`, `float`, `double`, `decimal`,
+    `nint`, `nuint`). Moq (`It.IsAny`, `Mock.Of`, `Setup`, `Verify`,
+    `ReturnsAsync`), FakeItEasy (`A.CallTo`, `A.Fake`, `A.Dummy`),
+    ASP.NET Core DI (`Add*`, `Use*`, `Map*`, `GetRequiredService`),
+    .NET Reflection + Span/Memory, `System.String` statics, Selenium
+    WebDriver.
+  - **Java**: AssertJ (full `assertThat*` surface, `hasCauseInstanceOf`,
+    `isThrownBy`, `satisfies`), BDDMockito (`given`, `willReturn`,
+    `willThrow`), Project Reactor (`StepVerifier`, `expectNext`,
+    `flatMap`, `switchIfEmpty`, `subscribeOn`), Mockito static
+    (`mockStatic`, `mockConstruction`, `invocation.getArgument`),
+    Hamcrest matcher vocabulary, Apache Lucene types, ANTLR-generated
+    runtime, `java.time` / `java.util.Properties` / `java.nio.Buffer`
+    / `java.io.File`, `java.sql.*` + `java.util.Locale.*`,
+    `jakarta.servlet` + `javax.xml.sax`, reflection extras.
+  - **Go**: `encoding/binary` (`BigEndian/LittleEndian.Uint*/PutUint*`),
+    `sync` lock methods (`Lock`, `Unlock`, `RLock`, `RUnlock`,
+    `Add`/`Done`/`Wait`), `bytes.Buffer` + `strings.Builder` common
+    methods, `golang.org/x/sync/errgroup`, `go.uber.org/goleak`,
+    AWS SDK v2 helpers (`aws.Int32`, `aws.String`, …), ULID,
+    `klog.`/`ginkgo.`/`Gomega.`/`testify.` prefixes.
+  - **Rust**: clap CLI (`value_name`, `help_heading`, `get_one`,
+    `get_flag`, `long_about`, subcommand builders), snapbox test
+    (`stdout_eq`, `stderr_eq`, `subset_matches`), integer arithmetic
+    (`wrapping_*`, `saturating_*`, `checked_*`, `overflowing_*`,
+    `rotate_*`, `count_ones`/`_zeros`), atomic compare-exchange /
+    fetch variants, pointer `as_ptr`/`as_mut_ptr`/`copy_nonoverlapping`/
+    `read_volatile`, slice `is_ascii_*`/`split_whitespace`/
+    `char_indices`, fd `from_raw_fd`/`as_raw_fd`/`borrow_raw`.
+  - **C / C++**: TCL C API (`Tcl_*` prefix — sqlite bindings),
+    LLVM C API (`LLVM*` — postgres JIT), CPython C API (`Py_*`,
+    `PyObject_*`, `PyDict_*`, …), Win32 C API (`CreateFile`,
+    `GetLastError`, `LoadLibrary`, registry, `HeapAlloc`, …), POSIX
+    pthread full surface (`pthread_mutex_*`, `pthread_cond_*`,
+    `pthread_rwlock_*`, `pthread_spin_*`, `pthread_barrier_*`),
+    stdarg (`va_start`, `va_end`, `va_arg`, `va_copy`), C11
+    stdatomic, BSD-specific strings (`strlcpy`, `strlcat`, `arc4random_*`,
+    `reallocarray`), BSD socket byte-order (`ntohs`, `htonl`, …) +
+    full socket API, OpenSSL (`BN_`, `HMAC_`, `EC_KEY_`, `ENGINE_`),
+    jemalloc (public `mallocx`/`xallocx`/`rallocx`/`sallocx`/
+    `dallocx`/`nallocx` + internals `edata_`, `emap_`, `sz_`, `pa_`,
+    `hpa_`, `prof_`, `tsd_`, `tsdn_`, `atomic_*_zu`).
+  - **PHP**: PHPUnit `assertIs*` full surface + PHPUnit:: qualified
+    variants, Mockery extras (`makePartial`, `withArgs`), Carbon +
+    PHP `DateTime` full method set, `version_compare`, binary /
+    encoding / output stdlib (`pack`, `unpack`, `bin2hex`,
+    `curl_setopt_array`, `ob_start`/`ob_end_flush`, `strspn`, `strtr`,
+    `addslashes`), PSR-7 HTTP helpers (`getStatusCode`, `withHeader`,
+    `withBody`, `getUri`).
+  - **Ruby**: Full `String` / `Enumerable` / `Hash` / `IO` method
+    surface (`gsub`, `scan`, `end_with?`, `is_a?`, `key?`, `sysread`,
+    `each_with_object`, `tally`, …), `SecureRandom`/`Addrinfo`/
+    `Socket`/`TCP*`/`UDP*`/`UNIX*`/`IPAddr`/`Resolv`/`Zlib`/`CGI`/
+    `ERB`/`Liquid::` prefixes, JRuby Java-side API (`RubyString.`,
+    `RubyArray.`, `RubyHash.`, `ByteList.`, `ThreadContext.`, …) +
+    bare `newString`, `newFixnum`, `callMethod`, `getRuntime`.
+  - **Dart**: `package:test_descriptor` (`d.file`, `d.dir`,
+    `d.nothing`), `package:test_process` (`shouldExit`), `dart:typed_data`
+    fromList constructors, `dart:convert` (`JsonEncoder`, `Utf8Decoder`,
+    `LineSplitter`), `package:shelf` Response helpers, `package:args`
+    CLI builders (`addFlag`, `addOption`, `addSubcommand`,
+    `wasParsed`), `package:yaml` loaders, Dart SDK error types
+    (`StateError`, `UnsupportedError`, `FormatException`, …),
+    pub_semver (`Version`, `VersionConstraint`).
+- **`is_non_project_call` now splits on `->` in addition to `.` and
+  `::`** so PHP `$obj->method()` and C `struct_ptr->method()` resolve
+  their bare method name against `STDLIB_FILTER` — previously
+  `headers->set`, `response->getStatusCode` never matched. Laravel /
+  Symfony resolution climbed 88% → 91%.
+
 ### Fixed
 
 - **SCIP incremental re-indexing** no longer silently degrades to zero
