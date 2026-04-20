@@ -829,8 +829,6 @@ class GraphQuerier:
             max_tokens: Target token budget
             source_lang: Language for the Source-Code fenced block match.
         """
-        import re
-
         current_tokens = _estimate_tokens(result)
 
         # Priority 1: Remove Expanded Callees section

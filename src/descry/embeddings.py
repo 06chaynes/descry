@@ -59,7 +59,7 @@ def _file_lock(lock_path: Path, timeout: float = 600.0):
             if time.monotonic() - start > timeout:
                 raise TimeoutError(
                     f"Timed out waiting for embeddings lock at {lock_path}"
-                )
+                ) from None
             time.sleep(0.1)
     try:
         yield

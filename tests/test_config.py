@@ -289,8 +289,6 @@ extra_args = []
 
     def test_cross_lang_openapi_path_outside_root_rejected(self, tmp_path, caplog):
         """Paths resolving outside project_root are ignored with a warning."""
-        import logging
-
         (tmp_path / ".descry.toml").write_text(
             '[cross_lang]\nopenapi_path = "/etc/passwd"\n'
         )

@@ -193,11 +193,11 @@ class GitHistoryAnalyzer:
                 raise GitError(f"git {' '.join(args[:3])}... failed: {stderr}")
             return result.stdout
         except FileNotFoundError:
-            raise GitError("git not found. Install git to use history tools.")
+            raise GitError("git not found. Install git to use history tools.") from None
         except subprocess.TimeoutExpired:
             raise GitError(
                 f"Git timed out after {timeout}s. Try a narrower time/path range."
-            )
+            ) from None
 
     def _verify_git(self) -> None:
         """Verify we're in a git repo. Cached after first check."""
@@ -207,8 +207,8 @@ class GitHistoryAnalyzer:
             output = self._run_git(["rev-parse", "--is-inside-work-tree"])
             if output.strip() != "true":
                 raise GitError("Not inside a git repository.")
-        except GitError:
-            raise GitError("Not inside a git repository.")
+        except GitError as err:
+            raise GitError("Not inside a git repository.") from err
         self._verified = True
 
     def _is_shallow(self) -> bool:

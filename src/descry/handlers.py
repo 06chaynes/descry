@@ -659,8 +659,6 @@ def format_compact_result(node: dict, rank: int = 0) -> str:
 
 def is_natural_language_query(terms: list[str]) -> bool:
     """Detect if query terms represent natural language vs code identifiers."""
-    import re
-
     text = " ".join(terms).lower()
 
     nl_indicators = [

@@ -235,7 +235,6 @@ class TestGitHistoryNonUtf8Output:
     def test_run_git_tolerates_non_utf8_bytes(self, tmp_path):
         """_run_git must not raise UnicodeDecodeError on binary-ish output."""
         import subprocess as sp
-        import subprocess as _sp
 
         # Build a minimal git repo and plant a commit whose diff contains a
         # non-UTF-8 byte sequence (0x92 — Windows-1252 right single quote).
@@ -282,6 +281,4 @@ class TestGitHistoryNonUtf8Output:
         # diff markers.
         assert "diff --git" in out
         # Do not crash on non-ascii either
-        _ = analyzer.get_changes(commit_range="HEAD~1..HEAD")
-        # silence unused-import lint
-        assert _sp is sp
+        analyzer.get_changes(commit_range="HEAD~1..HEAD")
