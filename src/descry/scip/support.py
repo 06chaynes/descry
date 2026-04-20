@@ -5,6 +5,8 @@ backed by the pluggable `LanguageAdapter` registry in `adapter.py`. Callers
 outside the SCIP subpackage (handlers.py, generate.py, web/server.py,
 tests) keep using `scip_available()`, `get_scip_status()`, and
 `reset_scip_state()` — the three symbols imported via `_try_import_scip`.
+Per-language availability probes use `indexer_available(lang_name)` from
+`adapter.py` directly.
 
 Importing this module also imports `descry.scip.adapters`, which registers
 the built-in adapters (rust-analyzer, scip-typescript, scip-python) at load
@@ -20,31 +22,11 @@ import descry.scip.adapters  # noqa: F401 — side-effect: registers built-in ad
 from descry.scip.adapter import (
     ADAPTERS,
     available_adapters,
-    indexer_available,
     indexer_status,
     reset_registry_state,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def rust_analyzer_available() -> bool:
-    """Back-compat shim: True iff the rust-analyzer adapter's binary is present."""
-    return indexer_available("rust")
-
-
-def scip_typescript_available() -> bool:
-    """Back-compat shim: True iff the scip-typescript adapter's binary is present."""
-    return indexer_available("typescript")
-
-
-def scip_python_available() -> bool:
-    """Back-compat shim: True iff the scip-python adapter's binary is present.
-
-    scip-python is distributed via npm (`@sourcegraph/scip-python`) and
-    installs a `scip-python` binary on PATH.
-    """
-    return indexer_available("python")
 
 
 def scip_available() -> bool:

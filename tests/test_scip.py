@@ -301,14 +301,15 @@ class TestPythonSCIPSymbolExtraction:
 
 
 class TestPythonSCIPAvailability:
-    """support.py exposes scip_python_available and includes it in status."""
+    """support.py exposes scip-python status + per-adapter availability probes."""
 
     def test_scip_python_disabled_by_env(self, monkeypatch):
+        from descry.scip import adapter as adapter_mod
         from descry.scip import support
 
         support.reset_scip_state()
         monkeypatch.setenv("DESCRY_NO_SCIP", "1")
-        assert support.scip_python_available() is False
+        assert adapter_mod.indexer_available("python") is False
 
     def test_get_scip_status_reports_python_key(self, monkeypatch):
         from descry.scip import support

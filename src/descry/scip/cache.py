@@ -105,16 +105,6 @@ class ScipCacheManager:
         self._scip_skip_crates = set(scip_skip_crates) if scip_skip_crates else set()
         self._scip_toolchain = scip_toolchain
 
-    def _discover_all(self) -> Dict[str, List[DiscoveredProject]]:
-        """Run discovery for every registered adapter.
-
-        Returns a mapping from adapter.name to the list of projects it found.
-        """
-        out: Dict[str, List[DiscoveredProject]] = {}
-        for adapter in ADAPTERS.values():
-            out[adapter.name] = adapter.discover(self.project_root, self.excluded_dirs)
-        return out
-
     def _discover_for(self, lang: str) -> List[DiscoveredProject]:
         """Run discovery for one adapter by `lang` name; empty list if unknown."""
         adapter = ADAPTERS.get(lang)
@@ -135,10 +125,6 @@ class ScipCacheManager:
             for project in adapter.discover(self.project_root, self.excluded_dirs):
                 out.append((project.name, adapter.name))
         return sorted(out)
-
-    def get_crates(self) -> List[str]:
-        """Auto-discover Rust crates (backwards compatibility alias)."""
-        return self.get_rust_crates()
 
     def get_rust_crates(self) -> List[str]:
         """Auto-discover Rust crates (names only) via RustAdapter.
@@ -177,17 +163,6 @@ class ScipCacheManager:
         checksums = self._load_checksums()
         current_hash = self._hash_project(project, project_type)
         return checksums.get(project) != current_hash
-
-    def update_changed(self, parallel: bool = True) -> Dict[str, Path]:
-        """Update SCIP for changed Rust crates only (backwards compatible).
-
-        Args:
-            parallel: Whether to generate SCIP for multiple crates in parallel
-
-        Returns:
-            Dictionary mapping crate names to their SCIP file paths
-        """
-        return self.update_changed_rust(parallel)
 
     def _update_changed_for_adapter(
         self, adapter: LanguageAdapter, parallel: bool
@@ -251,30 +226,6 @@ class ScipCacheManager:
             logger.debug(f"SCIP: All {adapter.name} projects up-to-date")
 
         return self._get_scip_paths(names)
-
-    def update_changed_rust(self, parallel: bool = True) -> Dict[str, Path]:
-        """Update SCIP for changed Rust crates only (back-compat shim).
-
-        Pre-warms rust-analyzer cache before generation for better performance.
-        """
-        adapter = ADAPTERS.get("rust")
-        if adapter is None:
-            return {}
-        return self._update_changed_for_adapter(adapter, parallel)
-
-    def update_changed_typescript(self, parallel: bool = False) -> Dict[str, Path]:
-        """Update SCIP for changed TypeScript packages (back-compat shim)."""
-        adapter = ADAPTERS.get("typescript")
-        if adapter is None:
-            return {}
-        return self._update_changed_for_adapter(adapter, parallel)
-
-    def update_changed_python(self, parallel: bool = False) -> Dict[str, Path]:
-        """Update SCIP for changed Python packages (back-compat shim)."""
-        adapter = ADAPTERS.get("python")
-        if adapter is None:
-            return {}
-        return self._update_changed_for_adapter(adapter, parallel)
 
     def update_all(self, parallel: bool = False) -> Dict[str, Path]:
         """Update SCIP for every registered adapter concurrently.
@@ -785,55 +736,3 @@ class ScipCacheManager:
         with open(self.checksums_file, "w") as f:
             json.dump(checksums, f, indent=2)
 
-    def get_all_scip_files(self) -> List[Path]:
-        """Get all existing SCIP files in the cache.
-
-        Returns:
-            List of paths to SCIP files
-        """
-        if not self.cache_dir.exists():
-            return []
-        return sorted(self.cache_dir.glob("**/*.scip"))
-
-    def clear_cache(self):
-        """Clear all cached SCIP files and checksums."""
-        import shutil
-
-        if self.cache_dir.exists():
-            shutil.rmtree(self.cache_dir)
-            logger.info("SCIP: Cache cleared")
-
-    def validate_coverage(self) -> Dict[str, dict]:
-        """Validate SCIP coverage for all projects.
-
-        Checks each SCIP file exists and reports basic statistics.
-
-        Returns:
-            Dictionary mapping project names to coverage info:
-            {
-                "project_name": {
-                    "exists": bool,
-                    "size_kb": float,
-                    "project_type": str,
-                }
-            }
-        """
-        coverage = {}
-
-        for project, project_type in self.get_projects():
-            scip_file = self.cache_dir / f"{project}.scip"
-            if scip_file.exists():
-                size_kb = scip_file.stat().st_size / 1024
-                coverage[project] = {
-                    "exists": True,
-                    "size_kb": round(size_kb, 1),
-                    "project_type": project_type,
-                }
-            else:
-                coverage[project] = {
-                    "exists": False,
-                    "size_kb": 0,
-                    "project_type": project_type,
-                }
-
-        return coverage
