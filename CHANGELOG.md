@@ -177,6 +177,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   skipped. Tighten Strategy 1 to require a name match; non-matching
   line lookups now fall through to fuzzy. Measured: pub Dart 52% →
   71%, Redis C 79.2% → 80.4%.
+- **`changes` no longer crashes on non-UTF-8 git diff output.**
+  `GitHistoryAnalyzer._run_git` previously used `subprocess.run(text=True)`
+  which raises `UnicodeDecodeError` the moment `git diff` emits a byte
+  that isn't valid UTF-8 (observed on c-postgres — byte 0x92 — and
+  rust-coreutils — byte 0xfd, both carrying Latin-1 content in older
+  source files). All subprocess callers that capture stdout/stderr
+  (`git_history.py`, `scip/cache.py`, `scip/adapter.py`, `ast_grep.py`)
+  now decode with `encoding="utf-8", errors="replace"` so a stray
+  non-UTF-8 byte becomes `U+FFFD` instead of aborting the tool.
+  Regression: `tests/test_git_history.py::TestGitHistoryNonUtf8Output`
+  seeds a throwaway repo with 0x92 / 0xfd bytes and asserts
+  `_run_git` + `get_changes` stay clean.
 
 ## [0.1.1] — 2026-04-17
 

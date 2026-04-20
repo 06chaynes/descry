@@ -141,6 +141,8 @@ def _probe_binary(adapter: LanguageAdapter) -> dict:
                 [path, "--version"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
                 env=safe_env(),
             )

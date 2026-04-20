@@ -308,6 +308,8 @@ class ScipCacheManager:
                 spec.argv,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_seconds,
                 cwd=str(spec.cwd),
                 env=env,
@@ -442,6 +444,8 @@ class ScipCacheManager:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=600,  # 10 minute timeout for cache priming
                 cwd=str(self.project_root),
                 env={**safe_env(), "RUST_ANALYZER_THREADS": str(num_threads)},

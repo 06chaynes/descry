@@ -221,3 +221,67 @@ class TestGitHistoryEndToEnd:
         # Just verify it returns a boolean without error
         result = analyzer._is_shallow()
         assert isinstance(result, bool)
+
+
+class TestGitHistoryNonUtf8Output:
+    """Regression: git output containing non-UTF-8 bytes must not crash.
+
+    Observed in the wild on c-postgres and rust-coreutils where `git diff`
+    produced diff content containing Latin-1 bytes (0x92, 0xfd) — the
+    previous `text=True` decode crashed with UnicodeDecodeError. The fix
+    is to decode with errors='replace'.
+    """
+
+    def test_run_git_tolerates_non_utf8_bytes(self, tmp_path, monkeypatch):
+        """_run_git must not raise UnicodeDecodeError on binary-ish output."""
+        import subprocess as sp
+        import subprocess as _sp
+
+        # Build a minimal git repo and plant a commit whose diff contains a
+        # non-UTF-8 byte sequence (0x92 — Windows-1252 right single quote).
+        sp.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        sp.run(["git", "config", "user.email", "t@t"], cwd=str(tmp_path), check=True)
+        sp.run(["git", "config", "user.name", "t"], cwd=str(tmp_path), check=True)
+        # Disable gpg signing inside the fixture repo so the test does not
+        # depend on the user's signing setup (e.g. 1Password SSH agent).
+        sp.run(
+            ["git", "config", "commit.gpgsign", "false"],
+            cwd=str(tmp_path),
+            check=True,
+        )
+        sp.run(
+            ["git", "config", "tag.gpgsign", "false"],
+            cwd=str(tmp_path),
+            check=True,
+        )
+        # File with non-UTF-8 content (Latin-1 curly quote, 0x92)
+        target = tmp_path / "legacy.txt"
+        target.write_bytes(b"hello \x92 world\n")
+        sp.run(["git", "add", "legacy.txt"], cwd=str(tmp_path), check=True)
+        sp.run(
+            ["git", "commit", "-q", "-m", "initial"],
+            cwd=str(tmp_path),
+            check=True,
+        )
+        # Modify it so `git diff HEAD~` has real hunk content
+        target.write_bytes(b"hello \x92 world\nsecond \xfd line\n")
+        sp.run(["git", "add", "legacy.txt"], cwd=str(tmp_path), check=True)
+        sp.run(
+            ["git", "commit", "-q", "-m", "second"],
+            cwd=str(tmp_path),
+            check=True,
+        )
+
+        analyzer = GitHistoryAnalyzer(str(tmp_path))
+        # This must not raise — pre-fix it raised UnicodeDecodeError on 0x92.
+        out = analyzer._run_git(["diff", "HEAD~1..HEAD"])
+        # Output contains the replacement char where bytes were invalid.
+        assert isinstance(out, str)
+        # Bytes 0x92 / 0xfd are not valid utf-8 continuation of a start
+        # byte; they get replaced. The output must still contain recognizable
+        # diff markers.
+        assert "diff --git" in out
+        # Do not crash on non-ascii either
+        _ = analyzer.get_changes(commit_range="HEAD~1..HEAD")
+        # silence unused-import lint
+        assert _sp is sp

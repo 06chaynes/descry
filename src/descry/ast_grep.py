@@ -48,6 +48,8 @@ def extract_calls_rust(file_path: str) -> Iterator[dict]:
                 ["sg", "run", "-p", pattern, "-l", "rust", "--json", "--", file_path],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
                 env=safe_env(),
             )
@@ -152,6 +154,8 @@ def extract_calls_typescript(file_path: str) -> Iterator[dict]:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
                 env=safe_env(),
             )
@@ -286,6 +290,8 @@ def extract_imports_typescript(file_path: str) -> dict:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
                 env=safe_env(),
             )

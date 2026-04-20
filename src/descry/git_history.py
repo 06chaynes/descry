@@ -182,6 +182,8 @@ class GitHistoryAnalyzer:
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=str(self.project_root),
                 timeout=timeout,
                 env=safe_env(),
