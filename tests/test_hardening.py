@@ -173,7 +173,7 @@ class TestAtomicGraphWrite:
 
         original_replace = gen_mod.os.replace
 
-        def failing_replace(src, dst):
+        def failing_replace(_src, _dst):
             raise OSError("simulated crash")
 
         monkeypatch.setattr(gen_mod.os, "replace", failing_replace)

@@ -211,7 +211,7 @@ def _strip_line_comment(line: str) -> str:
 class ClangParser(BaseParser):
     """Regex + brace-depth C/C++ parser."""
 
-    def parse(self, file_path, rel_path, content):
+    def parse(self, _file_path, rel_path, content):
         file_id = f"FILE:{rel_path}"
         self.builder.add_node(
             file_id,

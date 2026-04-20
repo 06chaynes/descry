@@ -225,7 +225,7 @@ class PhpAdapter:
     def build_command(
         self,
         project: DiscoveredProject,
-        out_path: Path,
+        _out_path: Path,
         config: AdapterConfig,
     ) -> CommandSpec:
         """scip-php has no subcommands or --output flag — just run it.

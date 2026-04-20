@@ -96,7 +96,7 @@ class RubyAdapter:
     def build_command(
         self,
         project: DiscoveredProject,
-        out_path: Path,
+        _out_path: Path,
         config: AdapterConfig,
     ) -> CommandSpec:
         """Build the ``scip-ruby .`` command.

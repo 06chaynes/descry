@@ -35,7 +35,10 @@ def _estimate_tokens(text: str) -> int:
 
 
 @lru_cache(maxsize=128)
-def _read_file_cached_inner(file_path: str, mtime_ns: int) -> tuple[str, ...]:
+def _read_file_cached_inner(
+    file_path: str,
+    mtime_ns: int,  # noqa: ARG001 — forms lru_cache key so mtime changes invalidate the entry
+) -> tuple[str, ...]:
     """Inner cache keyed on (path, mtime_ns) so edits invalidate the entry.
 
     The mtime is read once by the outer wrapper and threaded through as a

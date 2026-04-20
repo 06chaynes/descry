@@ -322,7 +322,7 @@ class TestGenerateScipRenameMode:
     default output into the cache-dir location after success.
     """
 
-    def _stub_adapter(self, tmp_path, mode):
+    def _stub_adapter(self, mode):
         """Build a stub adapter that runs `true` and optionally pre-seeds
         the default-output file before the subprocess runs.
         """
@@ -334,12 +334,12 @@ class TestGenerateScipRenameMode:
             binary = "true"
             extensions = (".stub",)
 
-            def discover(self, root, excluded_dirs):
+            def discover(self, root, _excluded_dirs):
                 return [
                     DiscoveredProject(name="stubproj", root=root, language=self.name)
                 ]
 
-            def build_command(self, project, out_path, config):
+            def build_command(self, project, _out_path, _config):
                 # Simulate the indexer by pre-creating index.scip in cwd
                 # before the subprocess runs — a shell one-liner keeps the
                 # test hermetic without needing a real SCIP binary.
@@ -352,7 +352,7 @@ class TestGenerateScipRenameMode:
                 ]
                 return CommandSpec(argv=argv, cwd=project.root, output_mode=mode)
 
-            def parse_descriptors(self, raw):
+            def parse_descriptors(self, _raw):
                 return []
 
         return _StubAdapter()
@@ -362,7 +362,7 @@ class TestGenerateScipRenameMode:
 
         mgr = ScipCacheManager(tmp_path)
         mgr.cache_dir.mkdir(parents=True, exist_ok=True)
-        adapter = self._stub_adapter(tmp_path, mode="rename")
+        adapter = self._stub_adapter(mode="rename")
         project = DiscoveredProject(name="stubproj", root=tmp_path, language="stublang")
 
         ok = mgr._generate_scip(adapter, project)
@@ -389,10 +389,10 @@ class TestGenerateScipRenameMode:
             binary = "true"
             extensions = (".direct",)
 
-            def discover(self, root, excluded_dirs):
+            def discover(self, _root, _excluded_dirs):
                 return []
 
-            def build_command(self, project, out_path, config):
+            def build_command(self, project, out_path, _config):
                 argv = [
                     "/bin/sh",
                     "-c",
@@ -400,7 +400,7 @@ class TestGenerateScipRenameMode:
                 ]
                 return CommandSpec(argv=argv, cwd=project.root, output_mode="direct")
 
-            def parse_descriptors(self, raw):
+            def parse_descriptors(self, _raw):
                 return []
 
         mgr = ScipCacheManager(tmp_path)

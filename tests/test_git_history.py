@@ -232,7 +232,7 @@ class TestGitHistoryNonUtf8Output:
     is to decode with errors='replace'.
     """
 
-    def test_run_git_tolerates_non_utf8_bytes(self, tmp_path, monkeypatch):
+    def test_run_git_tolerates_non_utf8_bytes(self, tmp_path):
         """_run_git must not raise UnicodeDecodeError on binary-ish output."""
         import subprocess as sp
         import subprocess as _sp

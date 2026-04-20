@@ -62,7 +62,7 @@ def web_project(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(web_project):
+def client(web_project):  # noqa: ARG001 — pytest resolves fixtures by name; renaming breaks dependency
     """TestClient that defaults to a loopback Host header."""
     return TestClient(web_server.app, base_url="http://127.0.0.1")
 

@@ -35,12 +35,12 @@ def _print_result(coro):
         sys.exit(2)
 
 
-def cmd_health(args):
+def cmd_health(_args):
     svc = _make_service()
     _print_result(svc.health())
 
 
-def cmd_status(args):
+def cmd_status(_args):
     svc = _make_service()
     _print_result(svc.status())
 

@@ -68,7 +68,7 @@ except ImportError:
     SEMANTIC_AVAILABLE = False
     SemanticSearcher = None
 
-    def get_embeddings_status(*args, **kwargs):
+    def get_embeddings_status(*_args, **_kwargs):
         return {"available": False}
 
 
@@ -306,7 +306,7 @@ def _openapi_path_exists() -> bool:
 # --- API Endpoint Handlers ---
 
 
-async def api_health(request: Request) -> JSONResponse:
+async def api_health(_request: Request) -> JSONResponse:
     status = _graph_status()
     return JSONResponse(
         {
@@ -326,7 +326,7 @@ async def api_health(request: Request) -> JSONResponse:
     )
 
 
-async def api_status(request: Request) -> JSONResponse:
+async def api_status(_request: Request) -> JSONResponse:
     status = _graph_status()
     return JSONResponse(status)
 
@@ -389,14 +389,14 @@ def _reset_caches():
     _get_service().reset_caches()
 
 
-async def api_index(request: Request) -> JSONResponse:
+async def api_index(_request: Request) -> JSONResponse:
     # H.2: path body param removed; always index cfg.project_root.
     result = await _run_index()
     _reset_caches()
     return JSONResponse({"result": result, "graph": _graph_status()})
 
 
-async def api_index_stream(request: Request) -> StreamingResponse:
+async def api_index_stream(_request: Request) -> StreamingResponse:
     """Streaming reindex endpoint using Server-Sent Events for live output."""
 
     async def event_stream():
@@ -1217,7 +1217,7 @@ async def api_source(request: Request) -> JSONResponse:
     )
 
 
-async def api_examples(request: Request) -> JSONResponse:
+async def api_examples(_request: Request) -> JSONResponse:
     """Return dynamic example symbols derived from the indexed graph.
 
     Picks interesting symbols (high in-degree, classes, good flow candidates)
@@ -1360,7 +1360,7 @@ async def api_examples(request: Request) -> JSONResponse:
 # --- App entrypoint ---
 
 
-async def index_page(request: Request) -> FileResponse:
+async def index_page(_request: Request) -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")
 
 

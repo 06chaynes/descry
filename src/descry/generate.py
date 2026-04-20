@@ -7070,7 +7070,7 @@ class RustParser(BaseParser):
 
 
 class ProtoParser(BaseParser):
-    def parse(self, file_path, rel_path, content):
+    def parse(self, _file_path, rel_path, content):
         file_id = f"FILE:{rel_path}"
         self.builder.add_node(
             file_id,

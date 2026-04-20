@@ -116,7 +116,7 @@ class DartAdapter:
     def build_command(
         self,
         project: DiscoveredProject,
-        out_path: Path,
+        _out_path: Path,
         config: AdapterConfig,
     ) -> CommandSpec:
         """scip-dart takes the package root as a positional arg and
