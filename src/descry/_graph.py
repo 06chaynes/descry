@@ -25,7 +25,7 @@ def load_graph_with_schema(path: Path | str) -> dict:
         FileNotFoundError: if path does not exist.
         json.JSONDecodeError: if path is not valid JSON.
     """
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
     ver = data.get("schema_version")
     if ver != CURRENT_SCHEMA:

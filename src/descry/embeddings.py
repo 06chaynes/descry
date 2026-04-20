@@ -36,7 +36,7 @@ def _file_lock(lock_path: Path, timeout: float = 600.0):
     platforms without fcntl (Windows).
     """
     if _fcntl is not None:
-        with open(lock_path, "w") as f:
+        with open(lock_path, "w", encoding="utf-8") as f:
             _fcntl.flock(f, _fcntl.LOCK_EX)
             try:
                 yield
@@ -225,7 +225,7 @@ class SemanticSearcher:
         cleanup = [npz_tmp, json_tmp]
         try:
             np.savez(npz_tmp, embeddings=self.embeddings)
-            with open(json_tmp, "w") as f:
+            with open(json_tmp, "w", encoding="utf-8") as f:
                 json.dump({"texts": self.node_texts}, f)
             os.replace(npz_tmp, npz_path)
             os.replace(json_tmp, json_path)
@@ -277,7 +277,7 @@ class SemanticSearcher:
         try:
             data = np.load(npz_path, allow_pickle=False)
             embeddings = data["embeddings"]
-            with open(json_path) as f:
+            with open(json_path, encoding="utf-8") as f:
                 sidecar = json.load(f)
             texts = sidecar["texts"]
             # Consistency check: an interrupted _atomic_save (or two racing
@@ -510,11 +510,13 @@ def get_embeddings_status(
         if sidecar.exists():
             status["cached"] = True
             status["cache_path"] = str(npz_file)
+            # Best-effort read of the cached sidecar's node count — a
+            # corrupt sidecar shouldn't break status reporting.
             try:
-                with open(sidecar) as f:
+                with open(sidecar, encoding="utf-8") as f:
                     texts = json.load(f).get("texts", [])
                 status["node_count"] = len(texts)
-            except Exception:
+            except (OSError, json.JSONDecodeError, KeyError):
                 pass
             return status
 

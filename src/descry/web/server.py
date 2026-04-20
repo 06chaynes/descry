@@ -193,8 +193,11 @@ def _update_graph_meta():
     if cfg.graph_path.exists():
         mtime = cfg.graph_path.stat().st_mtime
         if mtime != _graph_meta["mtime"]:
+            # Best-effort graph-metadata refresh: a corrupt / schema-
+            # mismatched graph shouldn't break status polling. The old
+            # cached meta stays in place until the next successful load.
             try:
-                from descry._graph import load_graph_with_schema
+                from descry._graph import GraphSchemaError, load_graph_with_schema
 
                 data = load_graph_with_schema(cfg.graph_path)
                 _graph_meta = {
@@ -202,7 +205,7 @@ def _update_graph_meta():
                     "nodes": len(data.get("nodes", [])),
                     "edges": len(data.get("edges", [])),
                 }
-            except Exception:
+            except (OSError, ValueError, GraphSchemaError):
                 pass
 
 

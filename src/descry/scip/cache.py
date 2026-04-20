@@ -720,7 +720,7 @@ class ScipCacheManager:
         """Load cached checksums from disk."""
         if self.checksums_file.exists():
             try:
-                with open(self.checksums_file) as f:
+                with open(self.checksums_file, encoding="utf-8") as f:
                     return json.load(f)
             except (json.JSONDecodeError, OSError):
                 return {}
@@ -729,5 +729,5 @@ class ScipCacheManager:
     def _save_checksums(self, checksums: Dict[str, str]):
         """Save checksums to disk."""
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.checksums_file, "w") as f:
+        with open(self.checksums_file, "w", encoding="utf-8") as f:
             json.dump(checksums, f, indent=2)

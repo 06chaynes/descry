@@ -77,7 +77,7 @@ class CrossLangTracer:
             return
 
         try:
-            with open(self.openapi_path) as f:
+            with open(self.openapi_path, encoding="utf-8") as f:
                 spec = json.load(f)
         except (json.JSONDecodeError, IOError) as e:
             logger.error(f"Failed to parse OpenAPI spec: {e}")
