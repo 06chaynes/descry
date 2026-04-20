@@ -32,7 +32,8 @@ def _parse_workspace_members(root_cargo: Path) -> list[Path]:
 
         with open(root_cargo, "rb") as f:
             data = tomllib.load(f)
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Cargo.toml parse failed at {root_cargo}: {e}")
         return []
 
     workspace = data.get("workspace") or {}

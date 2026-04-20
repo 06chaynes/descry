@@ -7169,8 +7169,12 @@ class TSParser(BaseParser):
             try:
                 import_data = extract_imports_typescript(str(file_path))
                 self.symbol_table.load_imports(import_data)
-            except Exception:
-                pass  # Fall back to unqualified calls
+            except Exception as e:
+                # Fall back to unqualified calls — debug-level so it's
+                # traceable without spamming INFO on every parser failure.
+                logger.debug(
+                    f"ast-grep TS import extraction failed for {file_path}: {e}"
+                )
 
         re_class = re.compile(
             r"^\s*(?:export\s+)?(?:abstract\s+)?class\s+([a-zA-Z0-9_]+)"

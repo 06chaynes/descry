@@ -152,6 +152,7 @@ timeout = 30
 scip_minutes = 0       # 0 = unlimited
 embedding_seconds = 60
 query_ms = 4000
+index_minutes = 60     # Timeout for `descry index` subprocess
 
 [query]
 max_depth = 3
