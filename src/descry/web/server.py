@@ -367,6 +367,8 @@ async def _run_index() -> str:
             [sys.executable, "-m", "descry.generate", str(cfg.project_root)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=str(cfg.project_root),
             timeout=600,
             env=safe_env(),

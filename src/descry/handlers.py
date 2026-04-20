@@ -1225,6 +1225,8 @@ class DescryService:
                 [sys.executable, "-m", "descry.generate", index_path],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=str(self.config.project_root),
                 timeout=timeout,
                 env=safe_env(),

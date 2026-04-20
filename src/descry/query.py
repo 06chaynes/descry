@@ -42,9 +42,9 @@ def _read_file_cached_inner(file_path: str, mtime_ns: int) -> tuple[str, ...]:
     cache key — callers get tuple-of-lines without worrying about staleness.
     """
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
             return tuple(f.readlines())
-    except Exception:
+    except OSError:
         return ()
 
 
