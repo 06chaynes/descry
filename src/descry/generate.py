@@ -6191,13 +6191,7 @@ class BaseParser:
         while j >= 0:
             line = lines[j].strip()
             # Handle common comment styles: ///, //, /*, *, /**
-            if (
-                line.startswith("///")
-                or line.startswith("//!")
-                or line.startswith("*")
-                or line.startswith("/**")
-                or line.startswith("//")
-            ):
+            if line.startswith(("///", "//!", "*", "/**", "//")):
                 # Skip end of block comments if they don't contain content
                 if line == "*/":
                     j -= 1
@@ -6824,8 +6818,7 @@ class RustParser(BaseParser):
                     # Match constructor patterns (exact or prefix for with_*)
                     is_constructor = (
                         method_name in constructor_patterns
-                        or method_name.startswith("with_")
-                        or method_name.startswith("from_")
+                        or method_name.startswith(("with_", "from_"))
                     )
                     # Skip if it's a module path like std::collections::HashMap::new
                     if is_constructor and struct_name[0].isupper():
@@ -7907,11 +7900,7 @@ class CodeGraphBuilder:
                     from descry.dart_parser import DartParser
 
                     DartParser(self).parse(file_path, rel_path, content)
-                elif (
-                    file.endswith(".ts")
-                    or file.endswith(".tsx")
-                    or file.endswith(".js")
-                ):
+                elif file.endswith((".ts", ".tsx", ".js")):
                     TSParser(self).parse(file_path, rel_path, content)
                 elif file.endswith(".svelte"):
                     # D.2: iterate all <script> blocks and shift each block's

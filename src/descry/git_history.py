@@ -81,7 +81,7 @@ def _validate_git_file(path: str) -> str:
     """
     if not path:
         raise GitError("Empty git file path")
-    if path.startswith("-") or path.startswith(":") or path.startswith("/"):
+    if path.startswith(("-", ":", "/")):
         raise GitError(f"Invalid git file: {path!r}")
     if ".." in path.split("/"):
         raise GitError(f"Invalid git file: {path!r}")
@@ -94,7 +94,7 @@ def _validate_pathspec(spec: str) -> str:
     """Validate a pathspec entry (no magic prefixes)."""
     if not spec:
         raise GitError("Empty pathspec")
-    if spec.startswith(":") or spec.startswith("-"):
+    if spec.startswith((":", "-")):
         raise GitError(f"Invalid pathspec (magic prefix): {spec!r}")
     if ".." in spec.split("/"):
         raise GitError(f"Invalid pathspec: {spec!r}")
@@ -337,7 +337,7 @@ class GitHistoryAnalyzer:
                     }
                     hunks.append(current_hunk)
             elif current_hunk is not None:
-                if line.startswith("+") or line.startswith("-") or line.startswith(" "):
+                if line.startswith(("+", "-", " ")):
                     current_hunk["lines"].append(line)
 
         return hunks

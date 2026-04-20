@@ -1112,7 +1112,7 @@ def _is_text_sample(sample: bytes) -> bool:
     # Strip BOM if present.
     if sample.startswith(b"\xef\xbb\xbf"):
         sample = sample[3:]
-    elif sample.startswith(b"\xff\xfe") or sample.startswith(b"\xfe\xff"):
+    elif sample.startswith((b"\xff\xfe", b"\xfe\xff")):
         # UTF-16 BOM; try decode before NUL check.
         try:
             sample.decode("utf-16")

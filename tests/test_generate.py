@@ -794,7 +794,7 @@ class TestRaisedThresholds:
 
         graph_file = tmp_path / "graph.json"
         graph_file.write_text(json.dumps(graph))
-        yield str(graph_file), str(source_file)
+        return str(graph_file), str(source_file)
 
     def test_under_threshold_no_truncation(self, large_function_graph):
         """Functions under 1000 tokens should NOT be truncated regardless of line count."""

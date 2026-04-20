@@ -562,7 +562,7 @@ fn fetch_user(user_id: &str) -> Result<User> {
 
         graph_file = tmp_path / "graph.json"
         graph_file.write_text(json.dumps(graph))
-        yield str(graph_file), str(source_file)
+        return str(graph_file), str(source_file)
 
     def test_expand_callees_shows_full_source(self, graph_with_callees):
         """expand_callees should show full source of direct callees."""
@@ -670,7 +670,7 @@ fn validate_token_format(token: &str) -> bool {
 
         graph_file = tmp_path / "graph.json"
         graph_file.write_text(json.dumps(graph))
-        yield str(graph_file), str(source_file)
+        return str(graph_file), str(source_file)
 
     def test_exact_node_id_works(self, graph_with_symbols):
         """Exact node ID should work without fuzzy matching."""
@@ -767,7 +767,7 @@ class TestFullSourceBypass:
 
         graph_file = tmp_path / "graph.json"
         graph_file.write_text(json.dumps(graph))
-        yield str(graph_file), str(source_file)
+        return str(graph_file), str(source_file)
 
     def test_full_false_truncates_large_function(self, large_function_graph):
         """Should truncate large functions when full=False."""

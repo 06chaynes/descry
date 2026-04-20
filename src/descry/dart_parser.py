@@ -384,7 +384,7 @@ class DartParser(BaseParser):
                         las = la.strip()
                         if not las:
                             continue
-                        if las.startswith("{") or las.startswith("=>"):
+                        if las.startswith(("{", "=>")):
                             has_open_brace = True
                             break
                         if "{" in las:

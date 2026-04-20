@@ -1976,7 +1976,7 @@ class GraphQuerier:
             # Qualified name match (e.g., "ThoraxServer::start")
             if "::" in name:
                 # Check if node ID ends with the qualified name
-                if node_id.endswith(f"::{name}") or node_id.endswith(name):
+                if node_id.endswith((f"::{name}", name)):
                     exact_matches.append(node)
                     continue
                 # Check if the qualified pattern appears in the node ID
@@ -2115,7 +2115,7 @@ class GraphQuerier:
         # Build additional targets from existing nodes/edges that end with our name
         # This catches cases like REF:Foo::Bar when searching for "Bar"
         for node_id in self.nodes.keys():
-            if node_id.endswith(f"::{func_name}") or node_id.endswith(f"::{base_name}"):
+            if node_id.endswith((f"::{func_name}", f"::{base_name}")):
                 target_ids.add(node_id)
 
         # Also check for REF targets in incoming edges (for unresolved calls)
@@ -2127,13 +2127,9 @@ class GraphQuerier:
                 if ref_name == func_name or ref_name == base_name:
                     target_ids.add(target_id)
                 # Suffix match
-                elif ref_name.endswith(f"::{func_name}") or ref_name.endswith(
-                    f".{func_name}"
-                ):
+                elif ref_name.endswith((f"::{func_name}", f".{func_name}")):
                     target_ids.add(target_id)
-                elif ref_name.endswith(f"::{base_name}") or ref_name.endswith(
-                    f".{base_name}"
-                ):
+                elif ref_name.endswith((f"::{base_name}", f".{base_name}")):
                     target_ids.add(target_id)
                 # Fuzzy prefix match
                 elif fuzzy and len(func_name) >= 3:
