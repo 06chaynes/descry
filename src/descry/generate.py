@@ -9146,7 +9146,10 @@ def main():
             logger.info("SCIP: Disabled (DESCRY_NO_SCIP=1)")
         else:
             logger.info(
-                "SCIP: Unavailable (no indexers found: install rust-analyzer and/or scip-typescript)"
+                "SCIP: Unavailable (no indexers found — install any of: "
+                "rust-analyzer, scip-typescript, scip-python, scip-java, "
+                "scip-go, scip-ruby, scip-php, scip-dotnet, scip-clang, "
+                "scip-dart)"
             )
 
     # Export with optional SCIP resolution
