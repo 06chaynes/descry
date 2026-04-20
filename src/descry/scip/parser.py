@@ -93,11 +93,8 @@ class ScipIndex:
             # Import here to avoid import errors if protobuf not installed
             from descry.scip import pb2 as scip_pb2
         except ImportError:
-            try:
-                from descry.scip import pb2 as scip_pb2
-            except ImportError:
-                logger.warning("SCIP: protobuf bindings not available")
-                return
+            logger.warning("SCIP: protobuf bindings not available")
+            return
 
         try:
             index = scip_pb2.Index()

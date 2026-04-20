@@ -466,9 +466,11 @@ class ScipCacheManager:
             return False
 
     def _get_timeout(self) -> int | None:
-        """Get timeout in seconds based on config + environment.
+        """Get SCIP-generation timeout in seconds.
 
-        Priority: config value > env var > default (no timeout)
+        Precedence: ``scip_timeout_minutes`` constructor arg > the
+        ``DESCRY_SCIP_TIMEOUT`` env var (minutes, or ``0``/``none``/
+        ``unlimited``) > default (no timeout).
         """
         # Config value takes priority
         if self._scip_timeout_minutes is not None:
@@ -480,8 +482,7 @@ class ScipCacheManager:
         env_timeout = os.environ.get("DESCRY_SCIP_TIMEOUT", "").lower()
         if env_timeout in ("0", "none", "unlimited", ""):
             return None
-        else:
-            return int(env_timeout) * 60
+        return int(env_timeout) * 60
 
     def _hash_project(self, project: str, project_type: str = "rust") -> str:
         """Hash project sources for change detection.
