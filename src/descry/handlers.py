@@ -28,11 +28,36 @@ SERVER_VERSION = "0.1.0"
 
 
 _DEFAULT_PROJECT_MARKERS = [
+    # Generic / explicit
     ".git",
-    "Cargo.toml",
-    "package.json",
-    "pyproject.toml",
     ".descry.toml",
+    # Rust
+    "Cargo.toml",
+    # JavaScript / TypeScript / Node
+    "package.json",
+    # Python
+    "pyproject.toml",
+    "setup.py",
+    # Go
+    "go.mod",
+    # Ruby
+    "Gemfile",
+    # PHP
+    "composer.json",
+    # Java / Kotlin / Scala (Gradle + Maven + sbt)
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "pom.xml",
+    "build.sbt",
+    # .NET
+    "global.json",
+    # Dart / Flutter
+    "pubspec.yaml",
+    # C / C++ (CMake + compdb)
+    "CMakeLists.txt",
+    "compile_commands.json",
 ]
 _DEFAULT_API_PREFIXES = ["/api/v1", "/api/v2", "/api"]
 _DEFAULT_EXCLUDED_DIRS = {
