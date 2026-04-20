@@ -216,7 +216,7 @@ class ScipCacheManager:
                 results = [self._generate_scip(adapter, p) for p in changed]
 
             checksums = self._load_checksums()
-            for project, success in zip(changed, results):
+            for project, success in zip(changed, results, strict=True):
                 if success:
                     checksums[project.name] = self._hash_project(
                         project.name, adapter.name
