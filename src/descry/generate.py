@@ -3873,18 +3873,11 @@ _LIBRARY_NAMES = frozenset(
         "style",
         # ── clap (CLI argument parsing) ──
         "arg",
-        # ── misc library methods ──
-        "as_array",
-        "headers",
-        "contents",
-        "extensions",
-        "attributes",
-        # ── TS/Python external module names (used as receiver patterns) ──
-        "authenticatedPage",
-        "container",
-        "page",
-        "pptx",
-        "mcp",
+        # ── Python stdlib module names (bare — used as receivers
+        # for module-level calls, e.g. `re.compile`, `os.path.join`).
+        # Also covered by `re.` / `os.` prefix filters above, but the
+        # bare form catches cases where the module is reassigned to a
+        # local before use. ──
         "re",
         "sys",
         "os",
@@ -6622,7 +6615,6 @@ _LIBRARY_PREFIXES = (
     "ID2SYM",
     "SYM2ID",
     "CLASS_OF",
-    "TYPE",
     "SPECIAL_CONST_P",
     "RB_TYPE_P",
     "BUILTIN_TYPE",
