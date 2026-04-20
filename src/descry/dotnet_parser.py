@@ -10,13 +10,10 @@ pipeline with only file discovery — full VB parsing is out of scope
 
 from __future__ import annotations
 
-import logging
 import re
 from pathlib import Path
 
 from descry.generate import BaseParser, is_generated_source, is_non_project_call
-
-logger = logging.getLogger(__name__)
 
 
 # namespace App.Foo  (block) or  namespace App.Foo;  (file-scoped, C# 10+)
