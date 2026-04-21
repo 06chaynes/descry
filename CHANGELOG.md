@@ -257,6 +257,49 @@ files remain readable. CLI subcommands and MCP tool names are unchanged
   `PRIME_THREADS`, `AST_GREP_MAX_FILES`) were honoured by the code but
   missing from the environment-variables table; added.
 
+### Known limitations (surfaced by the pre-publish corpus sweep)
+
+These aren't regressions in 0.2.0 — they're scenarios the new corpus
+coverage made visible. Documenting so users know what to expect.
+
+- **Kotlin codebases need scip-java to be useful.** Descry has no
+  `.kt` / `.scala` parser baseline; Kotlin and Scala source files are
+  walked by the file walker but produce no nodes when scip-java
+  doesn't run. scip-java in turn fails on Kotlin-DSL Gradle projects
+  that use precompiled-script-plugins (observed on both `ktorio/ktor`
+  and `Kotlin/kotlinx.coroutines` — same upstream task-ordering
+  error). Practical effect: pure-Kotlin repos with that build
+  pattern will produce a near-empty graph. Mixed Java+Kotlin repos
+  index the Java side only.
+- **C++ resolution ceiling without scip-clang.** scip-clang requires
+  a working `compile_commands.json` with all transitive deps
+  available (Boost, gflags, glog, fmt, etc. for `facebook/folly`).
+  When deps are missing scip-clang is skipped and the regex
+  `ClangParser` baseline reaches ~46–54% on modern template-heavy
+  C++ (folly 46%, abseil-cpp 54%). With a working compdb scip-clang
+  contributes ~40% of resolved CALLS; the rest is regex fallback.
+  Plain C codebases (redis, sqlite, postgres, curl) sit at 72–80%
+  on regex baseline alone.
+- **scip-java does not support Ant.** Maven, Gradle, sbt, and Mill
+  are supported; Ant projects (e.g. `apache/cassandra`) fall back
+  to the regex `JavaParser`, which still reaches ~86% on its own.
+- **scip-dart needs `dart pub get` first.** scip-dart aborts with
+  "Unable to locate packageConfig" when the project hasn't been
+  bootstrapped. Run `dart pub get` (or `flutter pub get` for Flutter
+  packages) before `descry index` to get type-aware Dart resolution.
+- **scip-dotnet honours `global.json` SDK pins.** When a project
+  pins an SDK not installed on the host (e.g. `PowerShell/PowerShell`
+  pins .NET 11 preview), scip-dotnet's adapter detects the
+  incompatibility and falls back to the regex `DotnetParser`. The
+  regex baseline alone reached 90% on PowerShell, so the fallback
+  is usually fine.
+- **Pinned Rust toolchains need `rust-analyzer` installed.** A
+  `rust-toolchain.toml` pin (e.g. `helix` pins `1.90.0`) means
+  rust-analyzer must be installed for that specific toolchain
+  via `rustup component add rust-analyzer --toolchain <version>`.
+  Otherwise scip-rust emits per-crate warnings and the regex
+  `RustParser` baseline carries the project (~80%).
+
 ## [0.1.1] — 2026-04-17
 
 Patch release focused on making cross-language tracing actually configurable,
