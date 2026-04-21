@@ -236,6 +236,16 @@ files remain readable. CLI subcommands and MCP tool names are unchanged
   11 signatures across `flow` / `trace_flow_structured` /
   `get_context_prompt` / `find_trait_impls` used `x: int = None`
   (which PEP 484 prohibits); now `int | None = None`.
+- **Pure-JavaScript repos no longer drop every CALLS edge.** ast-grep
+  has separate `typescript` and `javascript` grammars; the
+  `extract_calls_typescript` / `extract_imports_typescript` helpers
+  hardcoded `-l typescript` for the subprocess, which returns no
+  matches when fed `.js` / `.jsx` / `.mjs` / `.cjs`. Caught by the
+  pre-publish corpus sweep against express (100% .js): scip-typescript
+  emitted 9,702 references but the graph had **0 CALLS edges**. New
+  `_ast_grep_lang_for(file_path)` routes to `javascript` for JS-family
+  extensions; express now resolves 58% of CALLS (graph went 1,353 →
+  6,117 edges). 0.1.x users on pure-JS repos were silently affected.
 
 ### Changed
 
