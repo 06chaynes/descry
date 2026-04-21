@@ -2,7 +2,7 @@
 
 Polyglot codebase knowledge graph with call-graph analysis, semantic search, and SCIP integration. Built for AI coding agents (MCP), with CLI and Web UI interfaces.
 
-Descry indexes your codebase into a knowledge graph of symbols (functions, classes, constants) and their relationships (calls, imports, defines). SCIP-backed type-aware resolution is available for Rust, TypeScript, Python, Java (+ Kotlin / Scala), Go, Ruby, PHP, C# (+ VB.NET), C / C++, and Dart. JavaScript and Svelte fall back to regex-only parsing.
+Descry indexes your codebase into a knowledge graph of symbols (functions, classes, constants) and their relationships (calls, imports, defines). SCIP-backed type-aware resolution is available for Rust, TypeScript, JavaScript, Svelte, Python, Java (+ Kotlin / Scala), Go, Ruby, PHP, C# (+ VB.NET), C / C++, and Dart. The `.js` / `.jsx` / `.svelte` paths run through `scip-typescript`; pure Kotlin / Scala source needs `scip-java` (which doesn't always work on Kotlin-DSL Gradle projects — see [CHANGELOG](CHANGELOG.md#020--2026-04-20) known limitations).
 
 > ### ⚠️ Disclaimer — please read
 >
@@ -123,36 +123,49 @@ Descry provides 19 tools, available through all interfaces:
 
 ## Configuration
 
-Descry works zero-config by auto-detecting your project root (looks for `.git`, `Cargo.toml`, `package.json`, `pyproject.toml`). For customization, add a `.descry.toml` to your project root:
+Descry works zero-config by auto-detecting your project root. The walker looks for any of: `.git`, `.descry.toml`, `Cargo.toml`, `package.json`, `pyproject.toml`, `setup.py`, `go.mod`, `Gemfile`, `composer.json`, `build.gradle{,.kts}`, `settings.gradle{,.kts}`, `pom.xml`, `build.sbt`, `global.json`, `pubspec.yaml`, `CMakeLists.txt`, or `compile_commands.json`.
+
+For customization, add a `.descry.toml` to your project root.
+
+> **Heads-up on list-typed fields.** Several settings below are **lists that REPLACE descry's defaults** when set, not merge. These include `[project] excluded_dirs`, `[code_files] extensions`, `[test_detection] path_patterns` / `file_suffixes`, and `[git] churn_exclusions`. Leave them out unless you have a specific reason — descry's defaults already cover a wide language matrix. If you do set them, copy the full default list (see `_DEFAULT_*` constants in `src/descry/handlers.py`) and modify from there. `[syntax.lang_map]` is the one list-shaped field that *merges* with defaults.
 
 ```toml
 [project]
-excluded_dirs = ["target", "node_modules", "dist", ".git", "__pycache__", "build", "vendor"]
+# OPTIONAL — REPLACES the 25-element default. Leave unset to keep defaults
+# (.git, .gradle, .next, .svelte-kit, .venv, node_modules, target, build, …).
+# excluded_dirs = ["target", "node_modules", "dist", "build", "vendor"]
 max_stale_hours = 24
 
 [features]
-enable_scip = true        # Type-aware resolution (requires rust-analyzer or scip-typescript)
+enable_scip = true         # Type-aware resolution (auto-detects which indexers are on PATH)
 enable_embeddings = true   # Semantic search (requires sentence-transformers)
 
 [embeddings]
 model = "jinaai/jina-code-embeddings-0.5b"
 
 [test_detection]
-path_patterns = ["/tests/", "/test/", "/__tests__/"]
-file_suffixes = ["_test.rs", ".test.ts", ".spec.ts", "_test.py"]
+# OPTIONAL — REPLACES defaults. Defaults cover Rust/Python/TS/Go/Ruby/Java/Kotlin/
+# Scala/PHP/C#/Dart/C/C++ test conventions.
+# path_patterns = ["/tests/", "/test/", "/__tests__/"]
+# file_suffixes = ["_test.rs", ".test.ts", ".spec.ts", "_test.py"]
 
 [code_files]
-extensions = [".rs", ".py", ".ts", ".tsx", ".js", ".jsx", ".svelte", ".go", ".java"]
+# OPTIONAL — REPLACES the 30-element default (.rs/.py/.ts/.tsx/.js/.jsx/.svelte/
+# .go/.java/.kt/.scala/.rb/.rake/.gemspec/.php/.cs/.vb/.c/.cc/.cpp/.cxx/.cu/.h/
+# .hh/.hpp/.hxx/.dart/.css/.scss/.html). Leave unset to keep defaults.
+# extensions = [".rs", ".py", ".ts", ".tsx", ".go", ".java"]
 
 [git]
-churn_exclusions = [".descry_cache/", "Cargo.lock", "package-lock.json"]
+# OPTIONAL — REPLACES defaults (.descry_cache/, .beads/, Cargo.lock,
+# package-lock.json, yarn.lock, pnpm-lock.yaml).
+# churn_exclusions = [".descry_cache/", "Cargo.lock", "package-lock.json"]
 timeout = 30
 
 [timeouts]
 scip_minutes = 0       # 0 = unlimited
 embedding_seconds = 60
 query_ms = 4000
-index_minutes = 60     # Timeout for `descry index` subprocess
+index_minutes = 30     # Timeout for `descry index` subprocess
 
 [query]
 max_depth = 3
@@ -168,6 +181,7 @@ skip_crates = []         # Crate names to skip during SCIP indexing
 toolchain = "1.92.0"     # Pin rust-analyzer version via rustup
 
 [syntax.lang_map]
+# MERGES with defaults (additive). Maps file extensions to syntax-highlight names.
 ".svelte" = "svelte"
 ".proto" = "protobuf"
 
@@ -198,20 +212,20 @@ Configuration precedence: defaults < `.descry.toml` < environment variables.
 
 | Language | Parsing | SCIP (Type-Aware) | Requirements |
 |----------|---------|-------------------|--------------|
-| Rust | Regex + AST | Yes | `rust-analyzer` via rustup |
-| TypeScript | Regex (+ Tree-sitter opt-in) | Yes | `scip-typescript` via npm; `descry-codegraph[ast]` for tree-sitter |
-| Python | Regex + AST | Yes | `scip-python` via npm |
-| Java / Kotlin / Scala | Regex (Java) | Yes | `scip-java` (`coursier install scip-java`) |
+| Rust | Regex (+ ast-grep when `sg` on PATH) | Yes | `rust-analyzer` via rustup |
+| TypeScript | Regex (+ ast-grep when `sg` on PATH) | Yes | `scip-typescript` via npm |
+| JavaScript | Regex (+ ast-grep when `sg` on PATH) | Yes (via `scip-typescript`) | `scip-typescript` via npm |
+| Svelte | Regex | Yes (via `scip-typescript`) | `scip-typescript` via npm |
+| Python | Regex + Python `ast` module | Yes | `scip-python` via npm |
+| Java / Kotlin / Scala | Regex (Java only — `.kt` / `.scala` produce no nodes when scip-java doesn't run) | Yes | `scip-java` (`coursier install scip-java`); see [CHANGELOG](CHANGELOG.md#020--2026-04-20) for the Kotlin-DSL Gradle limitation |
 | Go | Regex | Yes | `scip-go` (`go install github.com/sourcegraph/scip-go/cmd/scip-go@latest`) |
 | Ruby | Regex | Yes | `scip-ruby` gem or direct binary |
 | PHP | Regex | Yes | `scip-php` via `composer require --dev davidrjenni/scip-php` (third-party indexer) |
 | C# / VB.NET | Regex (C# only) | Yes | `scip-dotnet` via `dotnet tool install --global scip-dotnet` |
 | C / C++ | Regex | Yes | `scip-clang` binary + `compile_commands.json` (CMake `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, Meson+Ninja, or `bear -- make`) |
 | Dart / Flutter | Regex | Yes | `scip-dart` via `dart pub global activate scip_dart`; requires `dart pub get` at project root |
-| JavaScript | Regex (+ Tree-sitter opt-in) | — | `descry-codegraph[ast]` for tree-sitter |
-| Svelte | Regex | — | — |
 
-TypeScript / JavaScript parsing uses regex + ast-grep (when the `ast` extra is installed). The tree-sitter module at `src/descry/tree_sitter_parser.py` is experimental scaffolding and is not currently wired into the active parser; it exists as a stepping stone for future AST-driven extraction.
+`ast-grep` is the `sg` Rust binary (install via Homebrew or `cargo install ast-grep`) — when present on `PATH`, descry uses it for higher-fidelity call extraction in Rust, TypeScript, and JavaScript files. It's auto-disabled on TS/JS corpora over `DESCRY_AST_GREP_MAX_FILES` (default 5,000) where per-file subprocess overhead would dominate. The `descry-codegraph[ast]` Python extra installs `tree-sitter*` packages that are scaffolding for a future AST-driven parser at `src/descry/tree_sitter_parser.py` — currently not wired into the active pipeline.
 
 SCIP provides precise call-graph resolution (resolving which specific function is called through traits, generics, etc.). Without SCIP, Descry falls back to regex-based name matching which handles most cases but may produce false positives on overloaded names.
 
@@ -268,17 +282,19 @@ Requires [uv](https://github.com/astral-sh/uv) and [just](https://github.com/cas
 
 3. **Query** — All tools query the cached graph. Keyword search uses TF-IDF scoring. Semantic search uses sentence-transformer embeddings. Call-graph traversal follows edges in the graph.
 
-4. **Freshness** — `ensure` checks graph age against `max_stale_hours` and regenerates if needed. The MCP server pre-warms the graph on startup.
+4. **Freshness** — `ensure` regenerates the graph when its age exceeds the `--max-age-hours` flag (CLI) / `max_age_hours` argument (MCP), defaulting to 24 hours. The `[project] max_stale_hours` config drives the "STALE" badge in `descry status` output but does not by itself trigger regeneration. The MCP server pre-warms the graph on startup.
 
 ## Design Notes
 
-### Web UI is local-only (CORS + auth)
+### Web UI is local-only — same-origin + DNS-rebind defenses
 
-`descry-web` is designed as a single-user local development tool. It binds to `127.0.0.1` by default, allows cross-origin requests (`allow_origins=["*"]`), and does not require authentication. This is deliberate:
+`descry-web` is designed as a single-user local development tool. It binds to `127.0.0.1` by default, has no authentication, and **deliberately omits `CORSMiddleware`** so browsers enforce same-origin by default — a tab on `evil.com` cannot read `/api/source` or trigger `/api/index`. This is deliberate:
 
 - The UI is served by the same process that reads your repository; any authentication layer would be a shared-secret between your browser and your own terminal.
-- Path traversal and file-serving endpoints are hardened independently of CORS: `/api/source` enforces project-root containment, rejects non-regular files, caps size at 10 MiB, and refuses non-text content (with `O_NOFOLLOW` on the final open to defeat symlink swaps).
-- The reindex endpoints accept no path parameter; they always index the configured project root.
+- `TrustedHostMiddleware` rejects requests whose `Host` header isn't loopback (`127.0.0.1`, `localhost`, `::1`), defeating DNS-rebinding attacks that would otherwise bypass the 127.0.0.1 bind.
+- The `--host` flag is validated by `_loopback_host` and rejects non-loopback values with a clear error pointing at the reverse-proxy guidance.
+- Path-traversal hardening on `/api/source` is independent of any CORS posture: it enforces project-root containment, rejects non-regular files, caps size at 10 MiB, refuses non-text content, and uses `O_NOFOLLOW` on the final open to defeat symlink swaps.
+- The reindex endpoints (`/api/index`, `/api/index/stream`) accept no path parameter; they always index the configured project root.
 
 **Do not expose `descry-web` to an untrusted network.** If you need remote access, put it behind your own authenticated reverse proxy.
 
@@ -286,7 +302,7 @@ Requires [uv](https://github.com/astral-sh/uv) and [just](https://github.com/cas
 
 Descry is pre-1.0. Minor version bumps (`0.1.x` → `0.2.x`) may include breaking changes to the library API, graph schema, CLI, or MCP tool signatures. Patch releases (`0.1.0` → `0.1.1`) will not introduce breaking changes. Once we reach `1.0.0`, the project will follow [semver](https://semver.org/) strictly.
 
-The public library API in v0.1 is limited to `descry.__version__`. Submodules (`descry.handlers`, `descry.query`, etc.) are not considered stable API yet.
+The only stable public API in pre-1.0 releases is `descry.__version__`. Submodules (`descry.handlers`, `descry.query`, etc.) are not considered stable API yet — refactor freely.
 
 ## Further Reading
 

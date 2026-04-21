@@ -79,6 +79,86 @@ def _has_jvm_sources(pkg_dir: Path) -> bool:
     return False
 
 
+# Marker for the Kotlin DSL precompiled-script-plugin pattern that breaks
+# scip-java. Both ``plugins { `kotlin-dsl` }`` (Kotlin DSL) and
+# ``apply plugin: 'kotlin-dsl'`` (Groovy DSL) variants count.
+_KOTLIN_DSL_RE = re.compile(
+    r"""(?:
+        ['"`]kotlin-dsl['"`]
+        | id\s*\(\s*['"]org\.gradle\.kotlin\.kotlin-dsl['"]
+        | id\s+['"]org\.gradle\.kotlin\.kotlin-dsl['"]
+    )""",
+    re.VERBOSE,
+)
+
+
+def _detect_kotlin_dsl_buildSrc(project_root: Path) -> str | None:
+    """Return a one-line reason if scip-java will fail on this project.
+
+    scip-java's init-script applies ``SemanticdbGradlePlugin`` to every
+    project including ``:buildSrc`` and any ``includeBuild`` participants.
+    If one of those projects applies the ``kotlin-dsl`` Gradle plugin,
+    Gradle 8.x raises ``Querying the mapped value of map(flatmap(provider(
+    task 'generatePrecompiledScriptPluginAccessors'))) before task ... has
+    completed is not supported`` during *task creation* — there's no flag
+    that defers this past configuration phase, so scip-java can't proceed.
+
+    Observed on:
+      * ``Kotlin/kotlinx.coroutines`` — ``buildSrc/build.gradle.kts``
+        with ``plugins { `kotlin-dsl` }``.
+      * ``ktorio/ktor`` — ``build-settings-logic/build.gradle.kts`` (an
+        ``includeBuild`` participant) with ``kotlin-dsl``.
+
+    We probe the well-known locations that Gradle treats as included
+    builds with their own configuration:
+
+      * ``buildSrc/build.gradle{,.kts}``
+      * Any ``<dir>/build.gradle{,.kts}`` where ``<dir>`` is referenced
+        via ``includeBuild`` in ``settings.gradle{,.kts}``.
+
+    Returns the path that triggered detection, or ``None`` if safe.
+    """
+    candidates: list[Path] = []
+
+    # buildSrc is implicitly included by Gradle.
+    for ext in ("build.gradle.kts", "build.gradle"):
+        bs = project_root / "buildSrc" / ext
+        if bs.is_file():
+            candidates.append(bs)
+
+    # includeBuild('<path>') in settings.gradle{,.kts} — best-effort regex
+    # parse, only used to decide which extra build files to probe.
+    include_build_re = re.compile(r"""includeBuild\s*\(?\s*['"]([^'"]+)['"]""")
+    for settings_name in ("settings.gradle.kts", "settings.gradle"):
+        settings = project_root / settings_name
+        if not settings.is_file():
+            continue
+        try:
+            text = settings.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for sub_path in include_build_re.findall(text):
+            sub_dir = (project_root / sub_path).resolve()
+            try:
+                sub_dir.relative_to(project_root.resolve())
+            except ValueError:
+                # includeBuild outside project root — out of our scope.
+                continue
+            for ext in ("build.gradle.kts", "build.gradle"):
+                bs = sub_dir / ext
+                if bs.is_file():
+                    candidates.append(bs)
+
+    for build_file in candidates:
+        try:
+            text = build_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _KOTLIN_DSL_RE.search(text):
+            return str(build_file.relative_to(project_root))
+    return None
+
+
 class JavaAdapter:
     """scip-java — Java (+ Kotlin, Scala via the same indexer)."""
 
@@ -183,6 +263,28 @@ class JavaAdapter:
         AFTER the compat flags, so users can override or add to the
         default tasks.
         """
+        # Pre-flight: scip-java's SemanticdbGradlePlugin applies to
+        # allprojects (incl. :buildSrc and includeBuild participants).
+        # On Kotlin DSL projects with precompiled-script-plugins, that
+        # query-during-config combination is unsupported by Gradle 8.x
+        # and there is no flag (incl. -x / --exclude-task) that defers
+        # it past task creation. Skip with a clear log so the user
+        # sees what's happening instead of an opaque scip-java stderr.
+        kotlin_dsl_marker = _detect_kotlin_dsl_buildSrc(project.root)
+        if kotlin_dsl_marker is not None:
+            logger.warning(
+                f"SCIP: skipping scip-java for {project.name}: "
+                f"{kotlin_dsl_marker} applies the `kotlin-dsl` Gradle plugin, "
+                f"which scip-java's SemanticdbGradlePlugin cannot index "
+                f"alongside Gradle 8.x precompiled-script-plugin accessors "
+                f"(upstream sourcegraph/scip-java limitation). "
+                f"Falling back to regex-only resolution for this project."
+            )
+            raise RuntimeError(
+                "scip-java incompatibility: kotlin-dsl precompiled-script-plugins "
+                f"in {kotlin_dsl_marker}"
+            )
+
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
 
         init_script = _compat_init_script()

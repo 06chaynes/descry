@@ -23,7 +23,7 @@ just test tests/test_handlers.py::test_index     # one test
 just test -k "cross_lang and not slow"           # by expression
 ```
 
-Python 3.11+ required (enforced by `pyproject.toml`). Pre-commit gate: `just lint && just fmt && just test` all pass (491 tests currently — a drop is a regression signal).
+Python 3.11+ required (enforced by `pyproject.toml`). Pre-commit gate: `just lint && just fmt && just test` all pass (497 tests currently — a drop is a regression signal).
 
 Invoke the tool while developing:
 

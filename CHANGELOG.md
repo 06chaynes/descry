@@ -270,7 +270,12 @@ coverage made visible. Documenting so users know what to expect.
   and `Kotlin/kotlinx.coroutines` — same upstream task-ordering
   error). Practical effect: pure-Kotlin repos with that build
   pattern will produce a near-empty graph. Mixed Java+Kotlin repos
-  index the Java side only.
+  index the Java side only. The `JavaAdapter` now pre-flights for
+  this scenario and skips scip-java with a clear log message
+  ("scip-java incompatibility: kotlin-dsl precompiled-script-plugins
+  in <path>") instead of a confusing 1100-byte stderr dump from the
+  failed Gradle invocation. Detection covers `buildSrc/` and any
+  `includeBuild()` participants in `settings.gradle{,.kts}`.
 - **C++ resolution ceiling without scip-clang.** scip-clang requires
   a working `compile_commands.json` with all transitive deps
   available (Boost, gflags, glog, fmt, etc. for `facebook/folly`).

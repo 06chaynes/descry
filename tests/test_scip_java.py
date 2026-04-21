@@ -146,6 +146,90 @@ class TestJavaAdapterBuildCommand:
         assert spec.env_extras == {"JVM_VERSION": "17"}
 
 
+class TestJavaAdapterKotlinDslPreflight:
+    """scip-java's SemanticdbGradlePlugin can't index Kotlin DSL builds
+    that use precompiled-script-plugins (kotlin-dsl plugin). The pre-flight
+    check raises with a clear reason instead of letting scip-java fail
+    with an opaque 1100-byte stderr dump.
+    """
+
+    def test_kotlin_dsl_in_buildSrc_kts_raises(self, tmp_path):
+        # buildSrc/build.gradle.kts with `kotlin-dsl` (kotlinx.coroutines pattern)
+        (tmp_path / "buildSrc").mkdir()
+        (tmp_path / "buildSrc" / "build.gradle.kts").write_text(
+            "plugins {\n    `kotlin-dsl`\n}\n"
+        )
+        project = DiscoveredProject(name="kx", root=tmp_path, language="java")
+
+        import pytest
+
+        with pytest.raises(RuntimeError, match="kotlin-dsl"):
+            JavaAdapter().build_command(project, tmp_path / "out.scip", AdapterConfig())
+
+    def test_kotlin_dsl_via_includeBuild_raises(self, tmp_path):
+        # ktor pattern: includeBuild('build-settings-logic') in settings.gradle.kts
+        # and that included build applies kotlin-dsl
+        (tmp_path / "settings.gradle.kts").write_text(
+            'rootProject.name = "ktor"\nincludeBuild("build-settings-logic")\n'
+        )
+        (tmp_path / "build-settings-logic").mkdir()
+        (tmp_path / "build-settings-logic" / "build.gradle.kts").write_text(
+            'plugins { id("org.gradle.kotlin.kotlin-dsl") }\n'
+        )
+        project = DiscoveredProject(name="ktor", root=tmp_path, language="java")
+
+        import pytest
+
+        with pytest.raises(RuntimeError, match="kotlin-dsl"):
+            JavaAdapter().build_command(project, tmp_path / "out.scip", AdapterConfig())
+
+    def test_kotlin_dsl_groovy_dsl_buildSrc_raises(self, tmp_path):
+        # The Groovy-DSL `apply plugin: 'kotlin-dsl'` variant
+        (tmp_path / "buildSrc").mkdir()
+        (tmp_path / "buildSrc" / "build.gradle").write_text(
+            "apply plugin: 'kotlin-dsl'\n"
+        )
+        project = DiscoveredProject(name="weird", root=tmp_path, language="java")
+
+        import pytest
+
+        with pytest.raises(RuntimeError, match="kotlin-dsl"):
+            JavaAdapter().build_command(project, tmp_path / "out.scip", AdapterConfig())
+
+    def test_plain_buildSrc_does_not_raise(self, tmp_path):
+        # Java buildSrc without kotlin-dsl is fine
+        (tmp_path / "buildSrc").mkdir()
+        (tmp_path / "buildSrc" / "build.gradle.kts").write_text(
+            "plugins {\n    java\n}\n"
+        )
+        project = DiscoveredProject(name="ok", root=tmp_path, language="java")
+        spec = JavaAdapter().build_command(
+            project, tmp_path / "out.scip", AdapterConfig()
+        )
+        assert spec.argv[0] == "scip-java"
+
+    def test_no_buildSrc_does_not_raise(self, tmp_path):
+        # Plain Maven project — no buildSrc at all
+        (tmp_path / "pom.xml").write_text("<project></project>")
+        project = DiscoveredProject(name="maven", root=tmp_path, language="java")
+        spec = JavaAdapter().build_command(
+            project, tmp_path / "out.scip", AdapterConfig()
+        )
+        assert spec.argv[0] == "scip-java"
+
+    def test_includeBuild_outside_root_ignored(self, tmp_path):
+        # Defensive: a settings.gradle.kts that includeBuild()s a path
+        # outside the project root must not be probed.
+        (tmp_path / "settings.gradle.kts").write_text(
+            'includeBuild("../somewhere-else")\n'
+        )
+        project = DiscoveredProject(name="ok", root=tmp_path, language="java")
+        spec = JavaAdapter().build_command(
+            project, tmp_path / "out.scip", AdapterConfig()
+        )
+        assert spec.argv[0] == "scip-java"
+
+
 class TestJavaAdapterDescriptorParsing:
     def test_simple_method(self):
         adapter = JavaAdapter()
