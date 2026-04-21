@@ -115,6 +115,20 @@ def extract_calls_rust(file_path: str) -> Iterator[dict]:
             continue
 
 
+def _ast_grep_lang_for(file_path: str) -> str:
+    """Pick the ast-grep language tag for a JS-family file.
+
+    ast-grep has separate ``typescript`` and ``javascript`` grammars; passing
+    ``-l typescript`` to a pure ``.js`` file returns no matches even though
+    syntactically TS is a JS superset. This caused express (100% .js) to
+    drop every CALLS edge despite scip-typescript happily emitting 9k+
+    references. Pick the right grammar per extension.
+    """
+    if file_path.endswith((".js", ".jsx", ".mjs", ".cjs")):
+        return "javascript"
+    return "typescript"
+
+
 def extract_calls_typescript(file_path: str) -> Iterator[dict]:
     """Extract function calls from a TypeScript file using ast-grep.
 
@@ -135,6 +149,7 @@ def extract_calls_typescript(file_path: str) -> Iterator[dict]:
         "$RECEIVER.$METHOD()",  # No-arg method calls
     ]
 
+    lang = _ast_grep_lang_for(file_path)
     seen = set()  # Deduplicate by (lineno, callee)
 
     for pattern in patterns:
@@ -147,7 +162,7 @@ def extract_calls_typescript(file_path: str) -> Iterator[dict]:
                     "-p",
                     pattern,
                     "-l",
-                    "typescript",
+                    lang,
                     "--json",
                     "--",
                     file_path,
@@ -259,6 +274,8 @@ def extract_imports_typescript(file_path: str) -> dict:
         "namespaces": {},  # alias -> module_path
     }
 
+    lang = _ast_grep_lang_for(file_path)
+
     # Pattern 1: Named imports - import { foo, bar as baz } from 'module'
     patterns = [
         # Named imports
@@ -283,7 +300,7 @@ def extract_imports_typescript(file_path: str) -> dict:
                     "-p",
                     pattern,
                     "-l",
-                    "typescript",
+                    lang,
                     "--json",
                     "--",
                     file_path,
