@@ -70,7 +70,12 @@ jobs:
       - name: Audit resolved environment
         run: |
           . .venv/bin/activate
-          pip-audit --skip-editable
+          # CVE-2026-3219 (GHSA-58qw-9mgm-455v): concatenated tar/ZIP
+          # interpretation conflict in pip itself. Affects pip <= 26.0.1
+          # with no patched version upstream. pip is a build-time
+          # installer in the venv, not a runtime dep we ship.
+          # Re-evaluate when pip ships a fix.
+          pip-audit --skip-editable --ignore-vuln CVE-2026-3219
 
   publish-testpypi:
     name: Publish to TestPyPI
