@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Optional semantic search with embeddings for descry.
 
 Uses sentence-transformers for embedding generation and numpy for similarity.
@@ -19,8 +18,6 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Optional
-
 
 try:
     import fcntl as _fcntl  # Unix only
@@ -137,7 +134,7 @@ class SemanticSearcher:
     def __init__(
         self,
         graph_path: str,
-        cache_dir: Optional[str] = None,
+        cache_dir: str | None = None,
         force_rebuild: bool = False,
         model_name: str | None = None,
     ):
@@ -209,7 +206,7 @@ class SemanticSearcher:
                 old_file.unlink()
             if old_files:
                 logger.info(f"Cleaned up {len(old_files)} old embedding file(s)")
-        except Exception as e:
+        except OSError as e:
             logger.warning(f"Failed to cleanup old embeddings: {e}")
 
     def _atomic_save(self, npz_path: Path, json_path: Path) -> None:
@@ -296,7 +293,7 @@ class SemanticSearcher:
             logger.info(f"Loaded {len(self.node_texts)} embeddings from cache")
             self._cleanup_old_embeddings(keep={npz_path, json_path})
             return True
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — corrupt cache regenerates; numpy/zipfile signal corruption with open-ended types
             logger.warning(f"Cache load failed: {e}, regenerating...")
             return False
 

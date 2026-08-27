@@ -9,7 +9,6 @@ GITHUB_WORKSPACE, AWS_REGION, etc.) intact.
 import os
 import re
 
-
 _SECRET_PATTERNS = re.compile(
     r"(?i)("
     r"secret|token|password|passphrase|credential|"

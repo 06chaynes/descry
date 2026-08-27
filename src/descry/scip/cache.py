@@ -26,7 +26,7 @@ import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import ClassVar
 
 import descry.scip.adapters  # noqa: F401 — side-effect: populate ADAPTERS registry
 from descry._env import safe_env
@@ -36,9 +36,6 @@ from descry.scip.adapter import (
     DiscoveredProject,
     LanguageAdapter,
 )
-
-if TYPE_CHECKING:
-    from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +50,7 @@ class ScipCacheManager:
     Cache location: {project_root}/.descry_cache/scip/
     """
 
-    _DEFAULT_EXCLUDED_DIRS = {
+    _DEFAULT_EXCLUDED_DIRS: ClassVar[set[str]] = {
         "target",
         "node_modules",
         "dist",
@@ -105,14 +102,14 @@ class ScipCacheManager:
         self._scip_skip_crates = set(scip_skip_crates) if scip_skip_crates else set()
         self._scip_toolchain = scip_toolchain
 
-    def _discover_for(self, lang: str) -> List[DiscoveredProject]:
+    def _discover_for(self, lang: str) -> list[DiscoveredProject]:
         """Run discovery for one adapter by `lang` name; empty list if unknown."""
         adapter = ADAPTERS.get(lang)
         if adapter is None:
             return []
         return adapter.discover(self.project_root, self.excluded_dirs)
 
-    def get_projects(self) -> List[Tuple[str, str]]:
+    def get_projects(self) -> list[tuple[str, str]]:
         """Auto-discover all indexable projects across every registered adapter.
 
         Returns:
@@ -126,7 +123,7 @@ class ScipCacheManager:
                 out.append((project.name, adapter.name))
         return sorted(out)
 
-    def get_rust_crates(self) -> List[str]:
+    def get_rust_crates(self) -> list[str]:
         """Auto-discover Rust crates (names only) via RustAdapter.
 
         Returns:
@@ -134,11 +131,11 @@ class ScipCacheManager:
         """
         return [p.name for p in self._discover_for("rust")]
 
-    def get_typescript_packages(self) -> List[str]:
+    def get_typescript_packages(self) -> list[str]:
         """Auto-discover TypeScript/JavaScript packages (names only) via TypeScriptAdapter."""
         return [p.name for p in self._discover_for("typescript")]
 
-    def get_python_packages(self) -> List[str]:
+    def get_python_packages(self) -> list[str]:
         """Auto-discover Python packages (names only) via PythonAdapter."""
         return [p.name for p in self._discover_for("python")]
 
@@ -166,7 +163,7 @@ class ScipCacheManager:
 
     def _update_changed_for_adapter(
         self, adapter: LanguageAdapter, parallel: bool
-    ) -> Dict[str, Path]:
+    ) -> dict[str, Path]:
         """Shared body of `update_changed_<lang>` — runs one adapter.
 
         Discovers projects via the adapter, applies language-specific skip
@@ -227,13 +224,13 @@ class ScipCacheManager:
 
         return self._get_scip_paths(names)
 
-    def update_all(self, parallel: bool = False) -> Dict[str, Path]:
+    def update_all(self, parallel: bool = False) -> dict[str, Path]:
         """Update SCIP for every registered adapter concurrently.
 
         Each adapter's generation runs in its own worker since adapters use
         independent tools with no shared resources.
         """
-        results: Dict[str, Path] = {}
+        results: dict[str, Path] = {}
 
         if not ADAPTERS:
             return results
@@ -250,7 +247,7 @@ class ScipCacheManager:
                 try:
                     lang_results = future.result()
                     results.update(lang_results)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — one adapter's failure must not abandon the other languages in the pool
                     logger.error(f"SCIP: {lang} generation failed: {e}")
 
         return results
@@ -293,7 +290,7 @@ class ScipCacheManager:
         config = self._adapter_config_for(adapter)
         try:
             spec = adapter.build_command(project, output_path, config)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — boundary over third-party adapter code in the ADAPTERS registry
             logger.warning(
                 f"SCIP: {adapter.name} failed to build command for {project.name}: {e}"
             )
@@ -313,6 +310,7 @@ class ScipCacheManager:
                 timeout=timeout_seconds,
                 cwd=str(spec.cwd),
                 env=env,
+                check=False,
             )
         except subprocess.TimeoutExpired:
             logger.warning(
@@ -322,7 +320,7 @@ class ScipCacheManager:
         except FileNotFoundError:
             logger.debug(f"SCIP: {adapter.binary} binary not on PATH")
             return False
-        except Exception as e:
+        except (OSError, ValueError) as e:
             logger.warning(
                 f"SCIP: Error generating {adapter.name} index for {project.name}: {e}"
             )
@@ -459,6 +457,7 @@ class ScipCacheManager:
                 timeout=600,  # 10 minute timeout for cache priming
                 cwd=str(self.project_root),
                 env={**safe_env(), "RUST_ANALYZER_THREADS": str(num_threads)},
+                check=False,
             )
             # analysis-stats returns non-zero for warnings (like cyclic deps)
             # but still warms the cache, so we consider it a success
@@ -475,7 +474,7 @@ class ScipCacheManager:
         except FileNotFoundError:
             logger.debug("SCIP: rust-analyzer not found for cache priming")
             return False
-        except Exception as e:
+        except (OSError, ValueError) as e:
             logger.debug(f"SCIP: Cache priming error: {e}")
             return False
 
@@ -720,7 +719,7 @@ class ScipCacheManager:
 
         return hasher.hexdigest()[:16]
 
-    def _get_scip_paths(self, crates: List[str]) -> Dict[str, Path]:
+    def _get_scip_paths(self, crates: list[str]) -> dict[str, Path]:
         """Get paths to existing SCIP files.
 
         Args:
@@ -736,7 +735,7 @@ class ScipCacheManager:
                 paths[crate] = scip_file
         return paths
 
-    def _load_checksums(self) -> Dict[str, str]:
+    def _load_checksums(self) -> dict[str, str]:
         """Load cached checksums from disk."""
         if self.checksums_file.exists():
             try:
@@ -746,7 +745,7 @@ class ScipCacheManager:
                 return {}
         return {}
 
-    def _save_checksums(self, checksums: Dict[str, str]):
+    def _save_checksums(self, checksums: dict[str, str]):
         """Save checksums to disk."""
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         with open(self.checksums_file, "w", encoding="utf-8") as f:

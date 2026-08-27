@@ -21,7 +21,6 @@ from pathlib import Path
 
 from descry.generate import BaseParser, is_generated_source, is_non_project_call
 
-
 # class Foo, class Foo < Bar
 _RE_CLASS = re.compile(
     r"^(\s*)class\s+([A-Z][A-Za-z0-9_:]*)\s*(?:<\s*([A-Z][A-Za-z0-9_:]*))?"

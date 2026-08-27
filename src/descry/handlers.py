@@ -16,9 +16,9 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from descry._env import safe_env
-
 from descry import __version__
+from descry._env import safe_env
+from descry._graph import GraphSchemaError, load_graph_with_schema
 
 logger = logging.getLogger(__name__)
 
@@ -406,7 +406,7 @@ class DescryConfig:
                 return {}
             with open(toml_path, "rb") as f:
                 return tomllib.load(f)
-        except Exception as e:
+        except (OSError, tomllib.TOMLDecodeError) as e:
             logger.warning(f"Failed to parse .descry.toml: {e}")
             return {}
 
@@ -759,8 +759,8 @@ def _try_import_embeddings(enabled: bool):
         return False, None, None
     try:
         from descry.embeddings import (
-            embeddings_available,
             SemanticSearcher,
+            embeddings_available,
             get_embeddings_status,
         )
 
@@ -773,7 +773,7 @@ def _try_import_scip(enabled: bool):
     if not enabled:
         return False, None, None
     try:
-        from descry.scip.support import scip_available, get_scip_status
+        from descry.scip.support import get_scip_status, scip_available
 
         return scip_available(), scip_available, get_scip_status
     except ImportError:
@@ -782,7 +782,7 @@ def _try_import_scip(enabled: bool):
 
 def _try_import_git_history():
     try:
-        from descry.git_history import GitHistoryAnalyzer, GitError
+        from descry.git_history import GitError, GitHistoryAnalyzer
 
         return True, GitHistoryAnalyzer, GitError
     except ImportError:
@@ -851,15 +851,13 @@ class DescryService:
                 mtime = gp.stat().st_mtime
                 if mtime != self._graph_cache["mtime"]:
                     try:
-                        from descry._graph import load_graph_with_schema
-
                         data = load_graph_with_schema(gp)
                         self._graph_cache = {
                             "mtime": mtime,
                             "nodes": len(data.get("nodes", [])),
                             "edges": len(data.get("edges", [])),
                         }
-                    except Exception as e:
+                    except (OSError, json.JSONDecodeError, GraphSchemaError) as e:
                         logger.warning(f"Failed to update graph cache: {e}")
 
     async def _get_querier(self):
@@ -985,11 +983,11 @@ class DescryService:
                 self._semantic_cache["mtime"] = mtime
                 self._semantic_cache["instance"] = searcher
                 logger.info("Pre-warm: embeddings ready")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             async with self._semantic_cache_lock:
                 self._semantic_cache["error"] = "Timeout loading embeddings (60s)"
             logger.warning("Pre-warm: embeddings load timed out")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and logged
             async with self._semantic_cache_lock:
                 self._semantic_cache["error"] = str(e)
             logger.warning(f"Pre-warm: embeddings failed: {e}")
@@ -1043,14 +1041,14 @@ class DescryService:
                 self._semantic_cache["instance"] = searcher
                 self._semantic_cache["error"] = None
             return searcher
-        except asyncio.TimeoutError:
+        except TimeoutError:
             async with self._semantic_cache_lock:
                 self._semantic_cache["error"] = (
                     f"Timeout loading embeddings ({self.config.embedding_timeout}s)"
                 )
             logger.warning("Embeddings load timed out")
             return None
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and returned
             async with self._semantic_cache_lock:
                 self._semantic_cache["error"] = str(e)
             logger.warning(f"Embeddings load failed: {e}")
@@ -1087,7 +1085,7 @@ class DescryService:
         async with self._querier_cache_lock:
             health["warm"] = self._querier_cache["instance"] is not None
 
-        exists, age_str, age_hours = self._get_graph_status()
+        exists, _, age_hours = self._get_graph_status()
         health["graph"]["exists"] = exists
         health["graph"]["age_hours"] = age_hours
         if exists:
@@ -1290,7 +1288,7 @@ class DescryService:
                         embeddings_status = (
                             f"\nEmbeddings: {len(searcher.nodes):,} nodes indexed"
                         )
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch; reported in the index summary
                         embeddings_status = f"\nEmbeddings: Failed ({e})"
                         logger.warning(f"Embeddings generation failed: {e}")
 
@@ -1301,7 +1299,7 @@ class DescryService:
         except subprocess.TimeoutExpired:
             mins = self.config.index_timeout_minutes
             return f"Index timed out after {mins} minutes. Set [timeouts] index_minutes in .descry.toml to increase."
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — tool boundary: every failure must come back as an error payload
             return f"Index error: {e}"
 
     async def callers(self, name: str, limit: int = 20) -> str:
@@ -1544,7 +1542,7 @@ class DescryService:
                             searcher.search, query, limit=limit * 2, min_score=0.25
                         )
                         search_method = "hybrid"
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — boundary over the embedding backend; search degrades to keyword-only
                     logger.warning(f"Semantic search failed, using keyword only: {e}")
 
         if semantic_results and tfidf_results:
@@ -1674,7 +1672,7 @@ class DescryService:
 
         try:
             results = await asyncio.to_thread(searcher.search, query, limit=limit)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — tool boundary: every failure must come back as an error payload
             return f"Semantic search error: {e}"
 
         if not results:

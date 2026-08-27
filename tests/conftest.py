@@ -1,6 +1,7 @@
 """Shared fixtures for descry test suite."""
 
 import json
+
 import pytest
 
 

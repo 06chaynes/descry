@@ -1,10 +1,10 @@
 import logging
-import os
 import math
+import os
+import re
 import time
 from collections import defaultdict
 from functools import lru_cache
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ def _estimate_tokens(text: str) -> int:
 @lru_cache(maxsize=128)
 def _read_file_cached_inner(
     file_path: str,
-    mtime_ns: int,  # noqa: ARG001 — forms lru_cache key so mtime changes invalidate the entry
+    mtime_ns: int,
 ) -> tuple[str, ...]:
     """Inner cache keyed on (path, mtime_ns) so edits invalidate the entry.
 
@@ -228,7 +228,7 @@ class GraphQuerier:
             start = max(0, start_line - 1)
             end = min(len(lines), end_line)
             return "".join(lines[start:end])
-        except Exception as e:
+        except OSError as e:
             return f"<Error reading file: {e}>"
 
     def _ensure_filter_indices(self):
@@ -409,7 +409,7 @@ class GraphQuerier:
                 + "".join(tail)
             )
 
-        except Exception as e:
+        except OSError as e:
             return f"<Error reading file: {e}>"
 
     def get_context_prompt(
@@ -1605,11 +1605,10 @@ class GraphQuerier:
 
             # Inline small functions
             code = None
-            if tokens <= inline_threshold and tokens > 0:
-                if os.path.exists(file_path):
-                    start_line = meta.get("lineno", 1)
-                    end_line = meta.get("end_lineno", start_line + 10)
-                    code = self.get_source_segment(file_path, start_line, end_line)
+            if tokens <= inline_threshold and tokens > 0 and os.path.exists(file_path):
+                start_line = meta.get("lineno", 1)
+                end_line = meta.get("end_lineno", start_line + 10)
+                code = self.get_source_segment(file_path, start_line, end_line)
 
             # Recurse into children
             if direction == "forward":
@@ -2047,10 +2046,8 @@ class GraphQuerier:
 
             # Check if this is a trait implementation
             impl_trait = meta.get("trait_impl")
-            if impl_trait:
-                # If trait_name filter is specified, check it matches
-                if trait_name is None or impl_trait == trait_name:
-                    results.append(node)
+            if impl_trait and (trait_name is None or impl_trait == trait_name):
+                results.append(node)
 
         return results
 
@@ -2114,7 +2111,7 @@ class GraphQuerier:
 
         # Build additional targets from existing nodes/edges that end with our name
         # This catches cases like REF:Foo::Bar when searching for "Bar"
-        for node_id in self.nodes.keys():
+        for node_id in self.nodes:
             if node_id.endswith((f"::{func_name}", f"::{base_name}")):
                 target_ids.add(node_id)
 
@@ -2124,12 +2121,19 @@ class GraphQuerier:
             if target_id.startswith("REF:"):
                 ref_name = target_id.replace("REF:", "")
                 # Exact match
-                if ref_name == func_name or ref_name == base_name:
-                    target_ids.add(target_id)
-                # Suffix match
-                elif ref_name.endswith((f"::{func_name}", f".{func_name}")):
-                    target_ids.add(target_id)
-                elif ref_name.endswith((f"::{base_name}", f".{base_name}")):
+                # Exact or suffix match
+                if (
+                    ref_name == func_name
+                    or ref_name == base_name
+                    or ref_name.endswith(
+                        (
+                            f"::{func_name}",
+                            f".{func_name}",
+                            f"::{base_name}",
+                            f".{base_name}",
+                        )
+                    )
+                ):
                     target_ids.add(target_id)
                 # Fuzzy prefix match
                 elif fuzzy and len(func_name) >= 3:

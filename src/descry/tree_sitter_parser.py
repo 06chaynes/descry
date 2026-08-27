@@ -55,14 +55,14 @@ def tree_sitter_available() -> bool:
         return _TS_AVAILABLE
     try:
         import tree_sitter as ts
-        import tree_sitter_typescript as tsts
         import tree_sitter_javascript as tsjs
+        import tree_sitter_typescript as tsts
 
         _TS_LANGUAGE = ts.Language(tsts.language_typescript())
         _TSX_LANGUAGE = ts.Language(tsts.language_tsx())
         _JS_LANGUAGE = ts.Language(tsjs.language())
         _TS_AVAILABLE = True
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:  # noqa: BLE001 — optional-dep probe; an ABI mismatch raises any type  # pragma: no cover - defensive
         logger.debug("tree-sitter unavailable: %s", exc)
         _TS_AVAILABLE = False
     return _TS_AVAILABLE
@@ -108,7 +108,7 @@ class ExtractedSymbol:
     docstring: str | None = None
     is_async: bool = False
     is_static: bool = False
-    accessor: Literal["get", "set", None] | None = None
+    accessor: Literal["get", "set"] | None = None
     module: str | None = None  # populated for Import
     imported_names: list[str] = field(default_factory=list)  # for Import
 
@@ -125,29 +125,29 @@ class ParseResult:
 # --- Extractor -------------------------------------------------------------
 
 
-def _node_text(node: "tree_sitter.Node") -> str:
+def _node_text(node: tree_sitter.Node) -> str:
     return node.text.decode("utf-8", errors="replace") if node.text else ""
 
 
 def _first_child_of_type(
-    node: "tree_sitter.Node", type_name: str
-) -> "tree_sitter.Node | None":
+    node: tree_sitter.Node, type_name: str
+) -> tree_sitter.Node | None:
     for child in node.named_children:
         if child.type == type_name:
             return child
     return None
 
 
-def _line(node: "tree_sitter.Node") -> int:
+def _line(node: tree_sitter.Node) -> int:
     return node.start_point[0] + 1
 
 
-def _end_line(node: "tree_sitter.Node") -> int:
+def _end_line(node: tree_sitter.Node) -> int:
     return node.end_point[0] + 1
 
 
 def _walk(
-    node: "tree_sitter.Node",
+    node: tree_sitter.Node,
     on_enter,
     parent_name: str | None = None,
 ) -> None:

@@ -7,7 +7,6 @@ from unittest.mock import patch
 from descry.handlers import DescryConfig
 from descry.scip.cache import ScipCacheManager
 
-
 # --- Default field values ---
 
 

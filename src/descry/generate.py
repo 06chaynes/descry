@@ -1,9 +1,9 @@
 """Generate codebase knowledge graph with optional SCIP-based type-aware resolution."""
 
 import ast
+import json
 import logging
 import os
-import json
 import re
 from pathlib import Path
 
@@ -32,9 +32,9 @@ except ImportError:
 
 # Try to import SCIP support for type-aware call resolution
 try:
-    from descry.scip.support import scip_available, get_scip_status
     from descry.scip.cache import ScipCacheManager
     from descry.scip.parser import ScipIndex
+    from descry.scip.support import get_scip_status, scip_available
 
     SCIP_SUPPORT_LOADED = True
 except ImportError:
@@ -5940,12 +5940,14 @@ def build_line_to_context_map(nodes: list, file_id: str) -> dict:
     # Collect all function/method spans in this file
     spans = []
     for node in nodes:
-        if node["id"].startswith(file_id + "::"):
-            if node["type"] in ("Function", "Method"):
-                start = node["metadata"].get("lineno", 0)
-                end = node["metadata"].get("end_lineno", start + 100)
-                span_size = end - start
-                spans.append((span_size, start, end, node["id"]))
+        if node["id"].startswith(file_id + "::") and node["type"] in (
+            "Function",
+            "Method",
+        ):
+            start = node["metadata"].get("lineno", 0)
+            end = node["metadata"].get("end_lineno", start + 100)
+            span_size = end - start
+            spans.append((span_size, start, end, node["id"]))
 
     # Sort by span size DESCENDING (largest first)
     # This way, smaller (inner) spans override larger (outer) spans
@@ -6238,7 +6240,7 @@ class PythonParser(BaseParser):
         except SyntaxError as e:
             logger.warning(f"Syntax error in {rel_path}:{e.lineno}: {e.msg}")
             return
-        except Exception as e:
+        except (ValueError, RecursionError) as e:
             logger.warning(f"Parse error in {rel_path}: {e}")
             return
 
@@ -6416,16 +6418,17 @@ class PythonParser(BaseParser):
                                 "metadata": {"lineno": decorator.lineno},
                             }
                         )
-                elif isinstance(decorator, ast.Name):
-                    if not is_non_project_call(decorator.id):
-                        self.builder.edges.append(
-                            {
-                                "source": func_id,
-                                "target": f"REF:{decorator.id}",
-                                "relation": "CALLS",
-                                "metadata": {"lineno": decorator.lineno},
-                            }
-                        )
+                elif isinstance(decorator, ast.Name) and not is_non_project_call(
+                    decorator.id
+                ):
+                    self.builder.edges.append(
+                        {
+                            "source": func_id,
+                            "target": f"REF:{decorator.id}",
+                            "relation": "CALLS",
+                            "metadata": {"lineno": decorator.lineno},
+                        }
+                    )
 
             self.visit_body_for_calls(node.body, func_id)
 
@@ -6611,16 +6614,16 @@ class RustParser(BaseParser):
                 token_count = (end_lineno - lineno + 1) * 10
 
                 # Build metadata dict, only include trait_impl if set
-                node_kwargs = dict(
-                    name=name,
-                    signature=sig,
-                    lineno=lineno,
-                    end_lineno=end_lineno,
-                    token_count=token_count,
-                    docstring=docstring,
-                    return_type=ret,
-                    param_types=param_types,
-                )
+                node_kwargs = {
+                    "name": name,
+                    "signature": sig,
+                    "lineno": lineno,
+                    "end_lineno": end_lineno,
+                    "token_count": token_count,
+                    "docstring": docstring,
+                    "return_type": ret,
+                    "param_types": param_types,
+                }
                 if current_trait_impl and node_type == "Method":
                     node_kwargs["trait_impl"] = current_trait_impl
 
@@ -7162,7 +7165,7 @@ class TSParser(BaseParser):
             try:
                 import_data = extract_imports_typescript(str(file_path))
                 self.symbol_table.load_imports(import_data)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — boundary over the external ast-grep binary; falls back to unqualified calls
                 # Fall back to unqualified calls — debug-level so it's
                 # traceable without spamming INFO on every parser failure.
                 logger.debug(
@@ -7216,9 +7219,8 @@ class TSParser(BaseParser):
             lineno = i + 1
 
             brace_balance += line.count("{") - line.count("}")
-            if brace_balance < len(current_context) - 1:
-                if len(current_context) > 1:
-                    current_context.pop()
+            if brace_balance < len(current_context) - 1 and len(current_context) > 1:
+                current_context.pop()
 
             parent_id = current_context[-1]
 
@@ -7861,7 +7863,7 @@ class CodeGraphBuilder:
                 except OSError as e:
                     logger.warning(f"Cannot read {rel_path}: {e.strerror}")
                     continue
-                except Exception as e:
+                except ValueError as e:
                     logger.warning(f"Error reading {rel_path}: {e}")
                     continue
                 if file.endswith(".py"):
@@ -8078,8 +8080,7 @@ class CodeGraphBuilder:
 
                 # Normalize crate:: prefix (Rust-specific)
                 # crate::path::Symbol -> path::Symbol for matching
-                if ref_name.startswith("crate::"):
-                    ref_name = ref_name[7:]  # Remove "crate::"
+                ref_name = ref_name.removeprefix("crate::")  # Remove "crate::"
 
                 # Strip trailing method chains for resolution
                 # Handles: Type::new(&arg).unwrap -> Type::new
@@ -8369,7 +8370,7 @@ def main():
                     f"SCIP: Loaded {stats['definitions']} definitions, "
                     f"{stats['unique_names']} unique names from {len(scip_files)} files"
                 )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — boundary over external SCIP indexers; indexing continues regex-only
             logger.warning(f"SCIP: Failed to load ({e}), using regex only")
     elif SCIP_SUPPORT_LOADED:
         status = get_scip_status()
@@ -8390,7 +8391,7 @@ def main():
     # Generate embeddings for semantic search (if dependencies available and enabled)
     if config.enable_embeddings:
         try:
-            from descry.embeddings import embeddings_available, SemanticSearcher
+            from descry.embeddings import SemanticSearcher, embeddings_available
 
             if embeddings_available():
                 logger.info("Generating embeddings for semantic search...")
@@ -8409,7 +8410,7 @@ def main():
                 )
         except ImportError:
             logger.debug("Embeddings: module not available, skipping")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch; indexing continues without embeddings
             logger.warning(f"Embeddings: Failed to generate ({e})")
 
 
