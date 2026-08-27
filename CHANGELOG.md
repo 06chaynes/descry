@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **MCP server now targets the MCP Python SDK v2.** `FastMCP` became
+  `MCPServer` (`mcp.server.mcpserver`) in mcp 2.0; the `mcp` extra now
+  floors at `mcp>=2` so the new import path cannot resolve against a v1
+  SDK. Server construction, the `@mcp.tool()` decorator and `mcp.run()`
+  are unchanged, so the 19 tool definitions carry over as-is.
+
 ## [0.2.0] — 2026-04-20
 
 A large feature + resolution-quality release. Seven new SCIP language

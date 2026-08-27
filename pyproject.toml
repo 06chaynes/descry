@@ -26,7 +26,7 @@ Issues = "https://github.com/06chaynes/descry/issues"
 
 [project.optional-dependencies]
 mcp = [
-    "mcp>=1.6.0",
+    "mcp>=2",
     # CVE floors on mcp transitive deps (constraints carry to users).
     "pyjwt>=2.12.0",
     "python-multipart>=0.0.26",
