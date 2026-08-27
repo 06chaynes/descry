@@ -145,6 +145,7 @@ def _probe_binary(adapter: LanguageAdapter) -> dict:
                 errors="replace",
                 timeout=10,
                 env=safe_env(),
+                check=False,
             )
             if proc.returncode == 0:
                 result["available"] = True

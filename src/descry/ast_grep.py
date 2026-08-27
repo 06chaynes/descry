@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 ast-grep based CALLS extraction for improved accuracy.
 
@@ -12,7 +11,7 @@ than regex-based detection. Handles:
 
 import json
 import subprocess
-from typing import Iterator
+from collections.abc import Iterator
 
 from descry._env import safe_env
 
@@ -52,6 +51,7 @@ def extract_calls_rust(file_path: str) -> Iterator[dict]:
                 errors="replace",
                 timeout=30,
                 env=safe_env(),
+                check=False,
             )
 
             if result.returncode != 0:
@@ -173,6 +173,7 @@ def extract_calls_typescript(file_path: str) -> Iterator[dict]:
                 errors="replace",
                 timeout=30,
                 env=safe_env(),
+                check=False,
             )
 
             if result.returncode != 0:
@@ -237,7 +238,11 @@ def is_ast_grep_available() -> bool:
     """Check if ast-grep (sg) is available on the system."""
     try:
         result = subprocess.run(
-            ["sg", "--version"], capture_output=True, timeout=5, env=safe_env()
+            ["sg", "--version"],
+            capture_output=True,
+            timeout=5,
+            env=safe_env(),
+            check=False,
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -311,6 +316,7 @@ def extract_imports_typescript(file_path: str) -> dict:
                 errors="replace",
                 timeout=30,
                 env=safe_env(),
+                check=False,
             )
 
             if proc_result.returncode != 0:

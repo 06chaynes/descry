@@ -45,7 +45,7 @@ dev = [
     "descry-codegraph[all]",
     "pytest>=9.0.3",
     "pytest-asyncio>=0.21.0",
-    "ruff>=0.1.0",
+    "ruff==0.16.4",
     "httpx>=0.27.0",
     "pip-audit>=2.9.0",
     "pygments>=2.20.0",
@@ -56,6 +56,10 @@ descry = "descry.cli:main"
 descry-mcp = "descry.mcp_server:main"
 descry-generate = "descry.generate:main"
 descry-web = "descry.web.server:main"
+
+[tool.ruff]
+# protoc output — regenerating it discards any edit ruff makes here.
+extend-exclude = ["src/descry/scip/pb2.py"]
 
 [build-system]
 requires = ["hatchling"]

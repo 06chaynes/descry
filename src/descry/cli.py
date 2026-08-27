@@ -12,7 +12,7 @@ import argparse
 import asyncio
 import sys
 
-from descry.handlers import DescryService, DescryConfig
+from descry.handlers import DescryConfig, DescryService
 
 
 def _make_service() -> DescryService:

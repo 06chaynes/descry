@@ -11,7 +11,6 @@ import pytest
 
 from descry.tree_sitter_parser import parse_file, tree_sitter_available
 
-
 pytestmark = pytest.mark.skipif(
     not tree_sitter_available(), reason="tree-sitter not installed"
 )

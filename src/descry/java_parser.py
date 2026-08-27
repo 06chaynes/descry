@@ -21,7 +21,6 @@ from pathlib import Path
 
 from descry.generate import BaseParser, is_generated_source, is_non_project_call
 
-
 # Package declaration: `package com.foo.bar;`
 _RE_PACKAGE = re.compile(r"^\s*package\s+([\w.]+)\s*;")
 

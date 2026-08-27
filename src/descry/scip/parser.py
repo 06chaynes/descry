@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import descry.scip.adapters  # noqa: F401 — side-effect: populate ADAPTERS registry
 from descry.scip.adapter import (
@@ -24,9 +23,6 @@ from descry.scip.adapter import (
     adapter_for_extension,
     adapter_for_scheme,
 )
-
-if TYPE_CHECKING:
-    from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -46,30 +42,30 @@ class ScipIndex:
     - Converting between SCIP symbol IDs and descry node IDs
     """
 
-    def __init__(self, scip_files: List[Path]):
+    def __init__(self, scip_files: list[Path]):
         """Initialize the index from SCIP files.
 
         Args:
             scip_files: List of paths to .scip files to load
         """
         # symbol_id -> (file_path, line_number)
-        self.definitions: Dict[str, Tuple[str, int]] = {}
+        self.definitions: dict[str, tuple[str, int]] = {}
 
         # (file_path, line) -> list of symbol_ids (may be multiple if several
         # crates contribute the same relative file). At resolve time we prefer
         # a candidate whose extracted name matches ref_name, then fall back to
         # the first.
-        self.references: Dict[Tuple[str, int], List[str]] = {}
+        self.references: dict[tuple[str, int], list[str]] = {}
 
         # symbol_id -> parsed symbol metadata
-        self.symbols: Dict[str, dict] = {}
+        self.symbols: dict[str, dict] = {}
 
         # Simple name -> list of symbol_ids (for fuzzy matching)
-        self.name_to_symbols: Dict[str, List[str]] = {}
+        self.name_to_symbols: dict[str, list[str]] = {}
 
         # Resolution statistics by language, driven by the adapter registry
         # so new SCIP languages automatically get a stats bucket.
-        self._resolution_stats: Dict[str, Dict[str, int]] = {
+        self._resolution_stats: dict[str, dict[str, int]] = {
             adapter.name: {"attempted": 0, "resolved": 0}
             for adapter in ADAPTERS.values()
         }
@@ -91,6 +87,8 @@ class ScipIndex:
         """
         try:
             # Import here to avoid import errors if protobuf not installed
+            from google.protobuf.message import DecodeError
+
             from descry.scip import pb2 as scip_pb2
         except ImportError:
             logger.warning("SCIP: protobuf bindings not available")
@@ -99,7 +97,7 @@ class ScipIndex:
         try:
             index = scip_pb2.Index()
             index.ParseFromString(scip_file.read_bytes())
-        except Exception as e:
+        except (OSError, DecodeError) as e:
             logger.warning(f"SCIP: Failed to parse {scip_file}: {e}")
             return
 
@@ -144,7 +142,7 @@ class ScipIndex:
                         self.name_to_symbols[name] = []
                     self.name_to_symbols[name].append(sym.symbol)
 
-    def _extract_name(self, symbol_id: str) -> Optional[str]:
+    def _extract_name(self, symbol_id: str) -> str | None:
         """Extract the simple name from a SCIP symbol ID.
 
         SCIP symbol format:
@@ -192,7 +190,7 @@ class ScipIndex:
 
         return name_parts[-1] if name_parts else None
 
-    def resolve(self, ref_name: str, source_file: str, line: int) -> Optional[str]:
+    def resolve(self, ref_name: str, source_file: str, line: int) -> str | None:
         """Resolve a reference to its definition node ID.
 
         Attempts resolution in order:
@@ -249,7 +247,7 @@ class ScipIndex:
                     chosen = cid
                     break
             if chosen is not None:
-                def_file, def_line = self.definitions[chosen]
+                def_file, _ = self.definitions[chosen]
                 if lang in self._resolution_stats:
                     self._resolution_stats[lang]["resolved"] += 1
                 return self._to_node_id(chosen, def_file)
@@ -260,7 +258,7 @@ class ScipIndex:
             self._resolution_stats[lang]["resolved"] += 1
         return result
 
-    def _fuzzy_resolve(self, ref_name: str) -> Optional[str]:
+    def _fuzzy_resolve(self, ref_name: str) -> str | None:
         """Attempt fuzzy resolution by name.
 
         Args:
@@ -279,10 +277,13 @@ class ScipIndex:
             if "::" in ref_name:
                 type_name = ref_name.split("::")[-2] if "::" in ref_name else ""
                 for sym_id in symbol_ids:
-                    if type_name and type_name.lower() in sym_id.lower():
-                        if sym_id in self.definitions:
-                            def_file, _ = self.definitions[sym_id]
-                            return self._to_node_id(sym_id, def_file)
+                    if (
+                        type_name
+                        and type_name.lower() in sym_id.lower()
+                        and sym_id in self.definitions
+                    ):
+                        def_file, _ = self.definitions[sym_id]
+                        return self._to_node_id(sym_id, def_file)
 
             # Fall back to first match
             for sym_id in symbol_ids:
@@ -356,7 +357,7 @@ class ScipIndex:
             return f"FILE:{full_path}::{'::'.join(name_parts)}"
         return f"FILE:{full_path}"
 
-    def _parse_descriptors(self, descriptors: str) -> List[str]:
+    def _parse_descriptors(self, descriptors: str) -> list[str]:
         """Parse SCIP descriptors into name components for descry node IDs.
 
         SCIP descriptors use suffixes to indicate type:

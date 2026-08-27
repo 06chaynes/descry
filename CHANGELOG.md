@@ -13,6 +13,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   floors at `mcp>=2` so the new import path cannot resolve against a v1
   SDK. Server construction, the `@mcp.tool()` decorator and `mcp.run()`
   are unchanged, so the 19 tool definitions carry over as-is.
+- **ruff is pinned to an exact version** (`ruff==0.16.4`) in both the dev
+  extra and the CI lint job. It was floored at `>=0.1.0` and installed
+  unpinned in CI, so every ruff release silently widened enforcement —
+  181 findings had accumulated in the stable rule set. All are resolved:
+  32 blind `except Exception` handlers were triaged individually (13
+  narrowed to the exceptions actually raised, 19 kept as tool/route
+  boundaries and suppressed with a reason), all 12 `subprocess.run` calls
+  are explicit about `check=`, and the generated protobuf module is
+  excluded rather than edited.
 
 ## [0.2.0] — 2026-04-20
 

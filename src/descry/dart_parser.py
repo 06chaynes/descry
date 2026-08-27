@@ -19,7 +19,6 @@ from pathlib import Path
 
 from descry.generate import BaseParser, is_generated_source, is_non_project_call
 
-
 # import 'package:foo/bar.dart'; / import 'dart:async'; / import '../baz.dart';
 _RE_IMPORT = re.compile(r"""^\s*import\s+['"]([^'"]+)['"]""")
 

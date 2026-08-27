@@ -9,7 +9,6 @@ results.
 import json
 from pathlib import Path
 
-
 CURRENT_SCHEMA = 1
 
 

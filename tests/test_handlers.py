@@ -1,18 +1,18 @@
 """Tests for descry.handlers — DescryConfig, DescryService, and format helpers."""
 
 import json
-import pytest
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from descry.handlers import (
     DescryConfig,
     DescryService,
-    format_search_result,
     format_compact_result,
+    format_search_result,
     is_natural_language_query,
 )
-
 
 # --- DescryConfig ---
 

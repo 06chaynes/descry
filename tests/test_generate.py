@@ -12,6 +12,8 @@ from descry.generate import (
     PythonParser,
     RustParser,
     TSParser,
+)
+from descry.generate import (
     is_non_project_call as is_stdlib_call,
 )
 
@@ -113,7 +115,7 @@ def process(data: str | bytes) -> int | None:
         parser = PythonParser(builder)
         parser.parse(Path("test.py"), "test.py", content)
 
-        func = [n for n in builder.nodes if n["type"] == "Function"][0]
+        func = next(n for n in builder.nodes if n["type"] == "Function")
         assert "str | bytes" in func["metadata"]["param_types"]
         assert func["metadata"]["return_type"] == "int | None"
 

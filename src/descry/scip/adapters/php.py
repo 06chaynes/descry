@@ -209,15 +209,18 @@ class PhpAdapter:
                 )
             )
 
-        if not projects:
-            if (root / "composer.json").exists() and _has_php_sources(root):
-                projects.append(
-                    DiscoveredProject(
-                        name=root.name,
-                        root=root,
-                        language=self.name,
-                    )
+        if (
+            not projects
+            and (root / "composer.json").exists()
+            and _has_php_sources(root)
+        ):
+            projects.append(
+                DiscoveredProject(
+                    name=root.name,
+                    root=root,
+                    language=self.name,
                 )
+            )
 
         projects.sort(key=lambda p: p.name)
         return projects

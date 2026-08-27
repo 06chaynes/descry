@@ -204,6 +204,7 @@ class TestGitHistoryEndToEnd:
             ["git", "rev-parse", "HEAD~1"],
             cwd=str(project_root),
             capture_output=True,
+            check=False,
         )
         if ret.returncode != 0:
             pytest.skip("Need at least 2 commits for HEAD~1..HEAD")

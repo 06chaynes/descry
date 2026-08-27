@@ -4,11 +4,10 @@ import multiprocessing
 import os
 from pathlib import Path
 
-
-from descry.scip.parser import ScipIndex
-from descry.scip.cache import ScipCacheManager
-from descry.scip.adapters.typescript import parse_backtick_descriptors
 from descry.generate import TypeScriptSymbolTable
+from descry.scip.adapters.typescript import parse_backtick_descriptors
+from descry.scip.cache import ScipCacheManager
+from descry.scip.parser import ScipIndex
 
 
 class TestTypescriptScipParsing:

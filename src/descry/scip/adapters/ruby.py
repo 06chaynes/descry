@@ -80,15 +80,14 @@ class RubyAdapter:
                 )
             )
 
-        if not projects:
-            if (root / "Gemfile").exists() and _has_ruby_sources(root):
-                projects.append(
-                    DiscoveredProject(
-                        name=root.name,
-                        root=root,
-                        language=self.name,
-                    )
+        if not projects and (root / "Gemfile").exists() and _has_ruby_sources(root):
+            projects.append(
+                DiscoveredProject(
+                    name=root.name,
+                    root=root,
+                    language=self.name,
                 )
+            )
 
         projects.sort(key=lambda p: p.name)
         return projects

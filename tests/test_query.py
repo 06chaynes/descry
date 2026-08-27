@@ -685,7 +685,7 @@ fn validate_token_format(token: &str) -> bool {
 
     def test_symbol_name_only_matches(self, graph_with_symbols):
         """Just symbol name should find the node via fuzzy matching."""
-        graph_file, source_file = graph_with_symbols
+        graph_file, _ = graph_with_symbols
         q = GraphQuerier(graph_file)
 
         # Just the function name, no FILE: prefix or path
@@ -698,7 +698,7 @@ fn validate_token_format(token: &str) -> bool {
 
     def test_multiple_matches_shows_suggestions(self, graph_with_symbols):
         """When multiple nodes match, should show suggestions."""
-        graph_file, source_file = graph_with_symbols
+        graph_file, _ = graph_with_symbols
         q = GraphQuerier(graph_file)
 
         # "validate" matches both functions partially
@@ -712,7 +712,7 @@ fn validate_token_format(token: &str) -> bool {
 
     def test_camel_case_finds_snake_case(self, graph_with_symbols):
         """camelCase query should find snake_case function."""
-        graph_file, source_file = graph_with_symbols
+        graph_file, _ = graph_with_symbols
         q = GraphQuerier(graph_file)
 
         # camelCase version
@@ -724,7 +724,7 @@ fn validate_token_format(token: &str) -> bool {
 
     def test_partial_path_matches(self, graph_with_symbols):
         """Partial path should help narrow down matches."""
-        graph_file, source_file = graph_with_symbols
+        graph_file, _ = graph_with_symbols
         q = GraphQuerier(graph_file)
 
         # Just filename::function

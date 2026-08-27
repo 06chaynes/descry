@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Descry Web UI Server
 
@@ -27,12 +26,12 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, FileResponse, StreamingResponse
-from starlette.routing import Route, Mount
+from starlette.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from descry._env import safe_env
 from descry import __version__
+from descry._env import safe_env
 
 # Configure logging
 _log_level = os.environ.get("DESCRY_LOG_LEVEL", "INFO")
@@ -46,7 +45,7 @@ SERVER_VERSION = __version__
 
 # --- Import shared modules ---
 
-from descry.query import GraphQuerier, _get_syntax_lang  # noqa: E402
+from descry.query import GraphQuerier, _get_syntax_lang
 
 try:
     from descry.cross_lang import CrossLangTracer
@@ -58,8 +57,8 @@ except ImportError:
 
 try:
     from descry.embeddings import (
-        embeddings_available,
         SemanticSearcher,
+        embeddings_available,
         get_embeddings_status,
     )
 
@@ -73,7 +72,7 @@ except ImportError:
 
 
 try:
-    from descry.scip.support import scip_available, get_scip_status
+    from descry.scip.support import get_scip_status, scip_available
 except ImportError:
 
     def scip_available():
@@ -84,7 +83,7 @@ except ImportError:
 
 
 try:
-    from descry.git_history import GitHistoryAnalyzer, GitError
+    from descry.git_history import GitError, GitHistoryAnalyzer
 
     GIT_HISTORY_AVAILABLE = True
 except ImportError:
@@ -95,7 +94,11 @@ except ImportError:
 
 # --- Project config (lazy-loaded via DescryConfig) ---
 
-from descry.handlers import DescryConfig, DescryService, symbol_type_priority  # noqa: E402
+from descry.handlers import (
+    DescryConfig,
+    DescryService,
+    symbol_type_priority,
+)
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -397,7 +400,7 @@ async def _run_index() -> str:
         )
     except subprocess.TimeoutExpired:
         return "Timed out after 10 minutes"
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — route boundary: every failure must come back as a response body
         return f"Error: {e}"
 
 
@@ -441,7 +444,7 @@ async def api_index_stream(_request: Request) -> StreamingResponse:
                 text = line.decode("utf-8", errors="replace").rstrip()
                 if text:
                     yield f"data: {json.dumps({'type': 'output', 'line': text})}\n\n"
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             yield f"data: {json.dumps({'type': 'error', 'message': 'Timed out after 11 minutes'})}\n\n"
             yield f"data: {json.dumps({'type': 'done', 'success': False})}\n\n"
@@ -494,22 +497,25 @@ async def api_search(request: Request) -> JSONResponse:
     # Semantic search if available
     semantic_results = []
     search_method = "keyword"
-    if SEMANTIC_AVAILABLE and _get_config().graph_path.exists():
-        if is_natural_language_query(terms) or len(tfidf_results) < 3:
-            try:
-                searcher = await _get_semantic_searcher()
-                if searcher:
-                    query = " ".join(terms)
-                    # CPU-bound numpy/encode; run off the event loop.
-                    semantic_results = await asyncio.to_thread(
-                        searcher.search,
-                        query,
-                        limit=limit * 2,
-                        min_score=0.25,
-                    )
-                    search_method = "hybrid"
-            except Exception as e:
-                logger.warning(f"Semantic search failed: {e}")
+    if (
+        SEMANTIC_AVAILABLE
+        and _get_config().graph_path.exists()
+        and (is_natural_language_query(terms) or len(tfidf_results) < 3)
+    ):
+        try:
+            searcher = await _get_semantic_searcher()
+            if searcher:
+                query = " ".join(terms)
+                # CPU-bound numpy/encode; run off the event loop.
+                semantic_results = await asyncio.to_thread(
+                    searcher.search,
+                    query,
+                    limit=limit * 2,
+                    min_score=0.25,
+                )
+                search_method = "hybrid"
+        except Exception as e:  # noqa: BLE001 — boundary over the embedding backend; search degrades to keyword-only
+            logger.warning(f"Semantic search failed: {e}")
 
     # Combine
     if semantic_results and tfidf_results:
@@ -546,7 +552,7 @@ async def api_semantic(request: Request) -> JSONResponse:
 
     try:
         results = await asyncio.to_thread(searcher.search, query, limit=limit)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — route boundary: every failure must come back as a response body
         return JSONResponse({"error": str(e)}, status_code=500)
 
     return JSONResponse(
@@ -973,7 +979,7 @@ async def api_churn(request: Request) -> JSONResponse:
                 exclude_generated=exclude_generated,
             )
             return JSONResponse({"mode": mode, "markdown": result})
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — route boundary: every failure must come back as a response body
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
@@ -1001,7 +1007,7 @@ async def api_evolution(request: Request) -> JSONResponse:
             crate=crate,
         )
         return JSONResponse({"name": name, "markdown": result})
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — route boundary: every failure must come back as a response body
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
@@ -1039,7 +1045,7 @@ async def api_changes(request: Request) -> JSONResponse:
                 limit=limit,
             )
             return JSONResponse({"markdown": result})
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — route boundary: every failure must come back as a response body
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
@@ -1192,7 +1198,7 @@ async def api_source(request: Request) -> JSONResponse:
                 return JSONResponse({"error": "Not a text file"}, status_code=415)
             f.seek(0)
             content = f.read().decode("utf-8", errors="replace")
-    except Exception as e:
+    except OSError as e:
         return JSONResponse({"error": f"Cannot read file: {e}"}, status_code=500)
 
     lang = _get_syntax_lang(str(file_path))

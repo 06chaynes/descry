@@ -15,7 +15,6 @@ from pathlib import Path
 
 from descry.generate import BaseParser, is_generated_source, is_non_project_call
 
-
 # namespace App.Foo  (block) or  namespace App.Foo;  (file-scoped, C# 10+)
 _RE_NAMESPACE = re.compile(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)")
 

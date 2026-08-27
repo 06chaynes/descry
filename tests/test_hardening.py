@@ -10,10 +10,9 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
-
-from types import SimpleNamespace
 
 from descry._graph import CURRENT_SCHEMA, GraphSchemaError, load_graph_with_schema
 from descry.handlers import (
@@ -24,7 +23,6 @@ from descry.handlers import (
     _validate_toolchain,
 )
 from descry.query import GraphQuerier
-
 
 # --- Schema version enforcement -------------------------------------------
 
@@ -313,7 +311,7 @@ class TestFindCallPathBounds:
 
 class TestCacheResetStaleFile:
     def test_file_cache_mtime_keyed(self, tmp_path):
-        from descry.query import _read_file_cached, _clear_file_cache
+        from descry.query import _clear_file_cache, _read_file_cached
 
         _clear_file_cache()
         path = tmp_path / "sample.py"
@@ -332,7 +330,7 @@ class TestCacheResetStaleFile:
         assert second == ("second\n",)
 
     def test_service_reset_caches_clears_file_cache(self, tmp_path):
-        from descry.query import _read_file_cached, _clear_file_cache
+        from descry.query import _clear_file_cache, _read_file_cached
 
         _clear_file_cache()
         config = DescryConfig(project_root=tmp_path)

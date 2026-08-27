@@ -20,7 +20,6 @@ from pathlib import Path
 
 from descry.generate import BaseParser, is_generated_source, is_non_project_call
 
-
 # Package declaration: `package foo`
 _RE_PACKAGE = re.compile(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_]*)")
 

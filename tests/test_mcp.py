@@ -84,8 +84,8 @@ class TestMcpEnums:
 
 class TestSvcAssertion:
     def test_svc_raises_when_uninitialized(self):
-        from descry.mcp_server import _svc
         import descry.mcp_server as mod
+        from descry.mcp_server import _svc
 
         original = mod._service
         try:

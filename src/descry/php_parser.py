@@ -14,7 +14,6 @@ from pathlib import Path
 
 from descry.generate import BaseParser, is_generated_source, is_non_project_call
 
-
 # namespace App\\Foo;  (one-line) or  namespace App\\Foo { ... }  (block)
 _RE_NAMESPACE = re.compile(r"^\s*namespace\s+([A-Za-z_\\][A-Za-z0-9_\\]*)\s*[;{]")
 
