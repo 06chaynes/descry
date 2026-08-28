@@ -1377,6 +1377,27 @@ class GraphQuerier:
 
         return results, budget
 
+    def _resolve_flow_start(self, start_name, depth):
+        """Clamp depth to the configured ceiling and resolve the start symbol.
+
+        Returns ``(func_nodes, depth)``; ``func_nodes`` is empty when nothing
+        matched, leaving each caller to raise its own error shape.
+        """
+        # Respect the project's `[query] max_depth` ceiling, falling back to
+        # the legacy limit of 5.
+        effective_max = self._max_depth if self._max_depth else 5
+        depth = min(depth, effective_max)
+
+        start_nodes = self.find_nodes_by_name(start_name)
+        if not start_nodes:
+            start_nodes = self.find_nodes_by_name(start_name, fuzzy=True)
+
+        func_nodes = [n for n in start_nodes if n["type"] in ("Function", "Method")]
+        if not func_nodes and start_nodes:
+            # Fall back to the first match even when it is not a function.
+            func_nodes = start_nodes[:1]
+        return func_nodes, depth
+
     def trace_flow(
         self,
         start_name: str,
@@ -1401,24 +1422,9 @@ class GraphQuerier:
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
-        # Respect the project's configured `[query] max_depth` ceiling, with
-        # a fallback of 5 for the legacy hard limit. Previously this method
-        # hardcoded `min(depth, 5)` and silently ignored `.descry.toml`.
-        effective_max = self._max_depth if self._max_depth else 5
-        depth = min(depth, effective_max)
-
-        # Resolve start node
-        start_nodes = self.find_nodes_by_name(start_name)
-        if not start_nodes:
-            # Try fuzzy match
-            start_nodes = self.find_nodes_by_name(start_name, fuzzy=True)
-
-        func_nodes = [n for n in start_nodes if n["type"] in ("Function", "Method")]
+        func_nodes, depth = self._resolve_flow_start(start_name, depth)
         if not func_nodes:
-            if start_nodes:
-                func_nodes = start_nodes[:1]  # Use first match even if not function
-            else:
-                return f"No function '{start_name}' found."
+            return f"No function '{start_name}' found."
 
         start_node = func_nodes[0]
         start_id = start_node["id"]
@@ -1535,20 +1541,9 @@ class GraphQuerier:
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
-        effective_max = self._max_depth if self._max_depth else 5
-        depth = min(depth, effective_max)
-
-        # Resolve start node
-        start_nodes = self.find_nodes_by_name(start_name)
-        if not start_nodes:
-            start_nodes = self.find_nodes_by_name(start_name, fuzzy=True)
-
-        func_nodes = [n for n in start_nodes if n["type"] in ("Function", "Method")]
+        func_nodes, depth = self._resolve_flow_start(start_name, depth)
         if not func_nodes:
-            if start_nodes:
-                func_nodes = start_nodes[:1]
-            else:
-                return {"error": f"No function '{start_name}' found."}
+            return {"error": f"No function '{start_name}' found."}
 
         start_node = func_nodes[0]
         start_id = start_node["id"]

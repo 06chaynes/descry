@@ -16,8 +16,8 @@ with type-aware cross-package information when the binary is installed.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
+from descry._comments import strip_double_slash_comment
 from descry.generate import BaseParser, is_generated_source, is_non_project_call
 
 # Package declaration: `package foo`
@@ -102,41 +102,14 @@ _GO_CONTROL_KEYWORDS = frozenset(
 
 
 def _strip_line_comment(line: str) -> str:
-    """Return `line` with any trailing ``//...`` comment removed.
-
-    Tracks simple string state so ``"http://"`` is preserved. Does NOT
-    handle block comments (``/* ... */``) — those spans are suppressed
-    by a separate in-block flag tracked in the main loop.
-    """
-    in_string = False
-    escape = False
-    i = 0
-    while i < len(line):
-        c = line[i]
-        if escape:
-            escape = False
-        elif c == "\\" and in_string:
-            escape = True
-        elif c == '"':
-            in_string = not in_string
-        elif not in_string and c == "/" and i + 1 < len(line) and line[i + 1] == "/":
-            return line[:i]
-        i += 1
-    return line
+    return strip_double_slash_comment(line)
 
 
 class GoParser(BaseParser):
     """Regex-driven Go source parser."""
 
     def parse(self, _file_path, rel_path, content):
-        file_id = f"FILE:{rel_path}"
-        self.builder.add_node(
-            file_id,
-            "File",
-            path=rel_path,
-            name=Path(rel_path).name,
-            token_count=len(content) // 4,
-        )
+        file_id = self.add_file_node(rel_path, content)
 
         lines = content.splitlines()
 

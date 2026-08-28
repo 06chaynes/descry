@@ -1260,6 +1260,43 @@ class GitHistoryAnalyzer:
 
         return "\n".join(lines)
 
+    def _attribute_hunks_to_symbols(self, hunks) -> dict[str, dict]:
+        """Attribute added/removed diff lines to the symbols containing them.
+
+        Removed lines are attributed using new-side line numbers; old-side
+        attribution would need a line map built from the pre-change state, so
+        per-symbol +N/-M counts are approximate. Commit-level attribution is
+        exact.
+        """
+        file_hunks: dict[str, list[dict]] = defaultdict(list)
+        for hunk in hunks:
+            file_hunks[hunk["file"]].append(hunk)
+
+        modified_symbols: dict[str, dict] = {}
+        for file_path, fhunks in file_hunks.items():
+            line_map = self._build_file_line_map(file_path)
+            if not line_map:
+                continue
+            for hunk in fhunks:
+                line = hunk["new_start"]
+                for diff_line in hunk["lines"]:
+                    if diff_line.startswith("+"):
+                        symbol = line_map.get(line)
+                        if symbol:
+                            modified_symbols.setdefault(
+                                symbol, {"added": 0, "removed": 0}
+                            )["added"] += 1
+                        line += 1
+                    elif diff_line.startswith("-"):
+                        symbol = line_map.get(line)
+                        if symbol:
+                            modified_symbols.setdefault(
+                                symbol, {"added": 0, "removed": 0}
+                            )["removed"] += 1
+                    else:
+                        line += 1
+        return modified_symbols
+
     def get_changes(
         self,
         commit_range: str | None = None,
@@ -1365,37 +1402,7 @@ class GitHistoryAnalyzer:
         # Attribute changes to symbols
         modified_symbols: dict[str, dict] = {}  # node_id -> {added, removed}
 
-        # Group hunks by file
-        file_hunks: dict[str, list[dict]] = defaultdict(list)
-        for hunk in hunks:
-            file_hunks[hunk["file"]].append(hunk)
-
-        for file_path, fhunks in file_hunks.items():
-            line_map = self._build_file_line_map(file_path)
-            if not line_map:
-                continue
-
-            for hunk in fhunks:
-                line = hunk["new_start"]
-                for diff_line in hunk["lines"]:
-                    if diff_line.startswith("+"):
-                        symbol = line_map.get(line)
-                        if symbol:
-                            if symbol not in modified_symbols:
-                                modified_symbols[symbol] = {"added": 0, "removed": 0}
-                            modified_symbols[symbol]["added"] += 1
-                        line += 1
-                    elif diff_line.startswith("-"):
-                        # NOTE: For removed lines, symbol attribution uses new-side line numbers
-                        # (approximate — old-side would require building line map from pre-change state).
-                        # The +N/-M stats may be slightly inaccurate but commit-level attribution is correct.
-                        symbol = line_map.get(line)
-                        if symbol:
-                            if symbol not in modified_symbols:
-                                modified_symbols[symbol] = {"added": 0, "removed": 0}
-                            modified_symbols[symbol]["removed"] += 1
-                    else:
-                        line += 1
+        modified_symbols = self._attribute_hunks_to_symbols(hunks)
 
         # Format output
         lines = []
@@ -1538,33 +1545,7 @@ class GitHistoryAnalyzer:
 
         hunks = self._parse_diff_hunks(diff_output) if diff_output else []
 
-        modified_symbols: dict[str, dict] = {}
-        file_hunks: dict[str, list[dict]] = defaultdict(list)
-        for hunk in hunks:
-            file_hunks[hunk["file"]].append(hunk)
-
-        for file_path, fhunks in file_hunks.items():
-            line_map = self._build_file_line_map(file_path)
-            if not line_map:
-                continue
-            for hunk in fhunks:
-                line = hunk["new_start"]
-                for diff_line in hunk["lines"]:
-                    if diff_line.startswith("+"):
-                        symbol = line_map.get(line)
-                        if symbol:
-                            if symbol not in modified_symbols:
-                                modified_symbols[symbol] = {"added": 0, "removed": 0}
-                            modified_symbols[symbol]["added"] += 1
-                        line += 1
-                    elif diff_line.startswith("-"):
-                        symbol = line_map.get(line)
-                        if symbol:
-                            if symbol not in modified_symbols:
-                                modified_symbols[symbol] = {"added": 0, "removed": 0}
-                            modified_symbols[symbol]["removed"] += 1
-                    else:
-                        line += 1
+        modified_symbols = self._attribute_hunks_to_symbols(hunks)
 
         range_display = commit_range or time_range or "HEAD~1..HEAD"
 
