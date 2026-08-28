@@ -15,7 +15,7 @@ class TestNewFieldDefaults:
 
     def test_embedding_model_default(self):
         config = DescryConfig()
-        assert config.embedding_model == "jinaai/jina-code-embeddings-0.5b"
+        assert config.embedding_model == "google/embeddinggemma-300m"
 
     def test_test_path_patterns_default(self):
         config = DescryConfig()
@@ -170,7 +170,7 @@ max_callers_shown = 30
         config = DescryConfig(project_root=tmp_path)
         config._apply_toml(data)
         # Should keep all defaults
-        assert config.embedding_model == "jinaai/jina-code-embeddings-0.5b"
+        assert config.embedding_model == "google/embeddinggemma-300m"
         assert config.max_depth == 3
         assert config.git_timeout == 30
 
@@ -192,7 +192,7 @@ timeout = 45
         assert config.git_timeout == 45
         # Other fields stay default
         assert config.max_nodes == 100
-        assert config.embedding_model == "jinaai/jina-code-embeddings-0.5b"
+        assert config.embedding_model == "google/embeddinggemma-300m"
 
     def test_from_toml_invalid(self, tmp_path, caplog):
         """Malformed TOML falls back to defaults with warning."""
