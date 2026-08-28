@@ -11,7 +11,6 @@ pipeline with only file discovery — full VB parsing is out of scope
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 from descry.generate import BaseParser, is_generated_source, is_non_project_call
 
@@ -227,14 +226,7 @@ class DotnetParser(BaseParser):
     """C# parser (VB source contributes only file-level discovery)."""
 
     def parse(self, _file_path, rel_path, content):
-        file_id = f"FILE:{rel_path}"
-        self.builder.add_node(
-            file_id,
-            "File",
-            path=rel_path,
-            name=Path(rel_path).name,
-            token_count=len(content) // 4,
-        )
+        file_id = self.add_file_node(rel_path, content)
 
         # VB files — scip-dotnet covers them; our regex parser only handles C#.
         if rel_path.endswith(".vb"):

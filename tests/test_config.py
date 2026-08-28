@@ -404,14 +404,14 @@ class TestScipCacheManagerConfig:
         )
 
         mgr = ScipCacheManager(tmp_path, scip_skip_crates=["beta"])
-        crates = mgr.get_rust_crates()
-        assert "beta" in crates  # get_rust_crates still discovers it
+        crates = mgr.get_project_names("rust")
+        assert "beta" in crates  # get_project_names still discovers it
 
         # But update_changed_rust should filter it out
         # We can't run the full generation (no rust-analyzer), but we can
         # verify the filtering logic by checking what needs_update sees
         # after filtering
-        all_crates = mgr.get_rust_crates()
+        all_crates = mgr.get_project_names("rust")
         filtered = [c for c in all_crates if c not in mgr._scip_skip_crates]
         assert "beta" not in filtered
         assert "alpha" in filtered

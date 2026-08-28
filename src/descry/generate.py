@@ -6187,6 +6187,47 @@ class BaseParser:
     def parse(self, file_path, rel_path, content):
         raise NotImplementedError
 
+    def add_config_node(
+        self,
+        file_id,
+        config_id,
+        name,
+        *,
+        signature,
+        docstring,
+        config_type,
+        lineno,
+        end_lineno,
+        token_count,
+        **extra,
+    ):
+        """Register a Configuration node and the DEFINES edge from its file."""
+        self.builder.add_node(
+            config_id,
+            "Configuration",
+            name=name,
+            signature=signature,
+            lineno=lineno,
+            end_lineno=end_lineno,
+            token_count=token_count,
+            docstring=docstring,
+            config_type=config_type,
+            **extra,
+        )
+        self.builder.add_edge(file_id, config_id, "DEFINES")
+
+    def add_file_node(self, rel_path, content):
+        """Register the File node for a source file and return its id."""
+        file_id = f"FILE:{rel_path}"
+        self.builder.add_node(
+            file_id,
+            "File",
+            path=rel_path,
+            name=Path(rel_path).name,
+            token_count=len(content) // 4,
+        )
+        return file_id
+
     def get_leading_docstring(self, lines, start_idx):
         doc_lines = []
         j = start_idx - 1
@@ -6244,13 +6285,7 @@ class PythonParser(BaseParser):
             logger.warning(f"Parse error in {rel_path}: {e}")
             return
 
-        self.builder.add_node(
-            file_id,
-            "File",
-            path=rel_path,
-            name=Path(rel_path).name,
-            token_count=len(content) // 4,
-        )
+        self.add_file_node(rel_path, content)
         self.visit_node(tree, file_id)
 
     def _get_type_annotation(self, annotation):
@@ -6505,14 +6540,7 @@ class PythonParser(BaseParser):
 
 class RustParser(BaseParser):
     def parse(self, file_path, rel_path, content):
-        file_id = f"FILE:{rel_path}"
-        self.builder.add_node(
-            file_id,
-            "File",
-            path=rel_path,
-            name=Path(rel_path).name,
-            token_count=len(content) // 4,
-        )
+        file_id = self.add_file_node(rel_path, content)
 
         lines = content.splitlines()
         current_context = [file_id]  # Stack of IDs
@@ -7067,14 +7095,7 @@ class RustParser(BaseParser):
 
 class ProtoParser(BaseParser):
     def parse(self, _file_path, rel_path, content):
-        file_id = f"FILE:{rel_path}"
-        self.builder.add_node(
-            file_id,
-            "File",
-            path=rel_path,
-            name=Path(rel_path).name,
-            token_count=len(content) // 4,
-        )
+        file_id = self.add_file_node(rel_path, content)
 
         lines = content.splitlines()
         current_context = [file_id]
@@ -7143,14 +7164,7 @@ class ProtoParser(BaseParser):
 
 class TSParser(BaseParser):
     def parse(self, file_path, rel_path, content):
-        file_id = f"FILE:{rel_path}"
-        self.builder.add_node(
-            file_id,
-            "File",
-            path=rel_path,
-            name=Path(rel_path).name,
-            token_count=len(content) // 4,
-        )
+        file_id = self.add_file_node(rel_path, content)
 
         lines = content.splitlines()
         current_context = [file_id]
@@ -7460,20 +7474,19 @@ class TSParser(BaseParser):
                             break
                 token_count = max((end_lineno - lineno + 1) * 10, 50)
                 docstring = self.get_leading_docstring(lines, i)
-                self.builder.add_node(
+                self.add_config_node(
+                    file_id,
                     config_id,
-                    "Configuration",
-                    name=config_name,
+                    config_name,
                     signature=f"{client_name}.interceptors.{interceptor_type}.use(...)",
-                    lineno=lineno,
-                    end_lineno=end_lineno,
-                    token_count=token_count,
                     docstring=docstring
                     or f"Configures {interceptor_type} interceptor for {client_name}",
                     config_type="interceptor",
+                    lineno=lineno,
+                    end_lineno=end_lineno,
+                    token_count=token_count,
                     target=client_name,
                 )
-                self.builder.add_edge(file_id, config_id, "DEFINES")
             elif match := re_middleware.search(line):
                 middleware_name = match.group(2).strip()
                 if middleware_name and not middleware_name.startswith("("):
@@ -7483,18 +7496,17 @@ class TSParser(BaseParser):
                         self._find_block_end(lines, i) if "{" in line else lineno
                     )
                     token_count = max((end_lineno - lineno + 1) * 10, 30)
-                    self.builder.add_node(
+                    self.add_config_node(
+                        file_id,
                         config_id,
-                        "Configuration",
-                        name=config_name,
+                        config_name,
                         signature=f"app.use({middleware_name})",
+                        docstring=f"Registers middleware: {middleware_name}",
+                        config_type="middleware",
                         lineno=lineno,
                         end_lineno=end_lineno,
                         token_count=token_count,
-                        docstring=f"Registers middleware: {middleware_name}",
-                        config_type="middleware",
                     )
-                    self.builder.add_edge(file_id, config_id, "DEFINES")
             elif match := re_event_handler.search(line):
                 emitter_name = match.group(1)
                 event_name = match.group(2)
@@ -7507,21 +7519,20 @@ class TSParser(BaseParser):
                 )
                 token_count = max((end_lineno - lineno + 1) * 10, 30)
                 docstring = self.get_leading_docstring(lines, i)
-                self.builder.add_node(
+                self.add_config_node(
+                    file_id,
                     config_id,
-                    "Configuration",
-                    name=config_name,
+                    config_name,
                     signature=f"{emitter_name}.on('{event_name}', ...)",
-                    lineno=lineno,
-                    end_lineno=end_lineno,
-                    token_count=token_count,
                     docstring=docstring
                     or f"Handles '{event_name}' event on {emitter_name}",
                     config_type="event_handler",
+                    lineno=lineno,
+                    end_lineno=end_lineno,
+                    token_count=token_count,
                     target=emitter_name,
                     event=event_name,
                 )
-                self.builder.add_edge(file_id, config_id, "DEFINES")
 
             # Calls (regex fallback - only used if ast-grep unavailable)
             if not self.builder.use_ast_grep and parent_id != file_id:
@@ -8398,6 +8409,7 @@ def main():
                 # B.3: respect config.embedding_model
                 searcher = SemanticSearcher(
                     str(graph_path),
+                    cache_dir=str(config.cache_dir),
                     force_rebuild=True,
                     model_name=config.embedding_model,
                 )

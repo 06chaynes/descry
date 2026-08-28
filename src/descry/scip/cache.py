@@ -123,21 +123,9 @@ class ScipCacheManager:
                 out.append((project.name, adapter.name))
         return sorted(out)
 
-    def get_rust_crates(self) -> list[str]:
-        """Auto-discover Rust crates (names only) via RustAdapter.
-
-        Returns:
-            Sorted list of crate directory names.
-        """
-        return [p.name for p in self._discover_for("rust")]
-
-    def get_typescript_packages(self) -> list[str]:
-        """Auto-discover TypeScript/JavaScript packages (names only) via TypeScriptAdapter."""
-        return [p.name for p in self._discover_for("typescript")]
-
-    def get_python_packages(self) -> list[str]:
-        """Auto-discover Python packages (names only) via PythonAdapter."""
-        return [p.name for p in self._discover_for("python")]
+    def get_project_names(self, lang: str) -> list[str]:
+        """Discovered project names for one adapter, e.g. Rust crate dirs."""
+        return [p.name for p in self._discover_for(lang)]
 
     def needs_update(self, project: str, project_type: str = "rust") -> bool:
         """Check if project SCIP needs regeneration.

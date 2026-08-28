@@ -172,7 +172,7 @@ class TestScipCachePerformance:
 
 
 class TestPythonSCIPDiscovery:
-    """get_python_packages covers monorepo and single-package layouts."""
+    """get_project_names covers monorepo and single-package layouts."""
 
     def test_monorepo_layout_with_pyproject(self, tmp_path):
         for name in ("backend", "workers"):
@@ -185,7 +185,7 @@ class TestPythonSCIPDiscovery:
         (tmp_path / "frontend" / "index.js").write_text("")
 
         manager = ScipCacheManager(tmp_path)
-        assert manager.get_python_packages() == ["backend", "workers"]
+        assert manager.get_project_names("python") == ["backend", "workers"]
 
     def test_monorepo_respects_excluded_dirs(self, tmp_path):
         node_modules = tmp_path / "node_modules" / "some-pkg"
@@ -194,7 +194,7 @@ class TestPythonSCIPDiscovery:
         (node_modules / "a.py").write_text("")
 
         manager = ScipCacheManager(tmp_path)
-        assert manager.get_python_packages() == []
+        assert manager.get_project_names("python") == []
 
     def test_single_package_layout_uses_root_name(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text('[project]\nname = "standalone"\n')
@@ -204,13 +204,13 @@ class TestPythonSCIPDiscovery:
         (src / "app.py").write_text("def main(): pass\n")
 
         manager = ScipCacheManager(tmp_path)
-        assert manager.get_python_packages() == [tmp_path.name]
+        assert manager.get_project_names("python") == [tmp_path.name]
 
     def test_setup_py_recognized(self, tmp_path):
         (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup()\n")
         (tmp_path / "mod.py").write_text("x = 1\n")
         manager = ScipCacheManager(tmp_path)
-        assert manager.get_python_packages() == [tmp_path.name]
+        assert manager.get_project_names("python") == [tmp_path.name]
 
     def test_get_projects_includes_python(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text('[project]\nname="x"\n')
