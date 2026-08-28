@@ -18,7 +18,6 @@ import re
 import stat
 import sys
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import uvicorn
@@ -121,53 +120,6 @@ def _get_service() -> DescryService:
 
 
 # --- Helper functions (pure functions) ---
-
-
-def is_natural_language_query(terms: list[str]) -> bool:
-    text = " ".join(terms).lower()
-    nl_indicators = [
-        "how to",
-        "what is",
-        "where is",
-        "where are",
-        "find the",
-        "show me",
-        "get the",
-        "look for",
-        "search for",
-        "related to",
-        "that handles",
-        "that does",
-        "responsible for",
-        "used for",
-        "deals with",
-    ]
-    if any(p in text for p in nl_indicators):
-        return True
-    if terms and terms[0].lower() in ("how", "what", "where", "why", "which", "find"):
-        return True
-    code_patterns = [r"[a-z]+_[a-z]+", r"[a-z]+[A-Z][a-z]+", r"[A-Z][a-z]+[A-Z]", r"::"]
-    for pattern in code_patterns:
-        if re.search(pattern, text):
-            return False
-    return len(terms) >= 3
-
-
-def reciprocal_rank_fusion(
-    tfidf_results: list, semantic_results: list, k: int = 60
-) -> list:
-    rrf_scores = defaultdict(float)
-    node_lookup = {}
-    for rank, node in enumerate(tfidf_results):
-        node_id = node["id"]
-        rrf_scores[node_id] += 1.0 / (k + rank + 1)
-        node_lookup[node_id] = node
-    for rank, (node, _) in enumerate(semantic_results):
-        node_id = node["id"]
-        rrf_scores[node_id] += 1.0 / (k + rank + 1)
-        node_lookup[node_id] = node
-    sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
-    return [(node_lookup[nid], rrf_scores[nid]) for nid in sorted_ids]
 
 
 # --- Cached instances (delegate to DescryService) ---
@@ -372,36 +324,8 @@ async def api_ensure(request: Request) -> JSONResponse:
 
 
 async def _run_index() -> str:
-    """Run the indexer on the configured project root (H.2: no caller input).
-
-    Uses sys.executable -m descry.generate so it works without `uv` on PATH (B.1).
-    Wrapped in asyncio.to_thread so the event loop stays responsive (C.1).
-    Subprocess env is sanitized (A.5).
-    """
-    import subprocess
-
-    cfg = _get_config()
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "descry.generate", str(cfg.project_root)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=str(cfg.project_root),
-            timeout=600,
-            env=safe_env(),
-        )
-        return (
-            result.stdout.strip()
-            if result.returncode == 0
-            else f"Error: {result.stderr}"
-        )
-    except subprocess.TimeoutExpired:
-        return "Timed out after 10 minutes"
-    except Exception as e:  # noqa: BLE001 — route boundary: every failure must come back as a response body
-        return f"Error: {e}"
+    """Regenerate the graph via DescryService, which applies `[timeouts] index_minutes`."""
+    return await _get_service().index()
 
 
 def _reset_caches():
@@ -473,66 +397,23 @@ async def api_search(request: Request) -> JSONResponse:
     if not terms:
         return JSONResponse({"error": "Missing 'terms' parameter"}, status_code=400)
 
-    limit = _int_param(request, "limit", 10)
-    lang = request.query_params.get("lang")
-    crate = request.query_params.get("crate")
-    symbol_type = request.query_params.get("type")
-    exclude_tests = request.query_params.get("exclude_tests", "").lower() == "true"
-
-    q = await _get_querier()
-    if not q:
-        return JSONResponse(
-            {"error": "Graph not found. Run ensure first."}, status_code=503
-        )
-
-    # TF-IDF search
-    tfidf_results = q.search_docs(
+    data = await _get_service().search_data(
         terms,
-        lang=lang if lang != "all" else None,
-        crate=crate,
-        symbol_type=symbol_type if symbol_type != "all" else None,
-        exclude_tests=exclude_tests,
-    )[: limit * 2]
-
-    # Semantic search if available
-    semantic_results = []
-    search_method = "keyword"
-    if (
-        SEMANTIC_AVAILABLE
-        and _get_config().graph_path.exists()
-        and (is_natural_language_query(terms) or len(tfidf_results) < 3)
-    ):
-        try:
-            searcher = await _get_semantic_searcher()
-            if searcher:
-                query = " ".join(terms)
-                # CPU-bound numpy/encode; run off the event loop.
-                semantic_results = await asyncio.to_thread(
-                    searcher.search,
-                    query,
-                    limit=limit * 2,
-                    min_score=0.25,
-                )
-                search_method = "hybrid"
-        except Exception as e:  # noqa: BLE001 — boundary over the embedding backend; search degrades to keyword-only
-            logger.warning(f"Semantic search failed: {e}")
-
-    # Combine
-    if semantic_results and tfidf_results:
-        combined = reciprocal_rank_fusion(tfidf_results, semantic_results)
-        results = [node for node, _ in combined[:limit]]
-        search_method = "hybrid"
-    elif tfidf_results:
-        results = tfidf_results[:limit]
-    else:
-        results = []
+        limit=_int_param(request, "limit", 10),
+        lang=request.query_params.get("lang"),
+        crate=request.query_params.get("crate"),
+        symbol_type=request.query_params.get("type"),
+        exclude_tests=request.query_params.get("exclude_tests", "").lower() == "true",
+    )
+    if not data["ok"]:
+        return JSONResponse({"error": data["error"]}, status_code=503)
 
     return JSONResponse(
         {
-            "results": [_node_to_dict(n) for n in results],
-            "method": search_method,
+            "results": [_node_to_dict(n) for n in data["results"]],
+            "method": data["method"],
             "query": " ".join(terms),
-            "total": len(results),
+            "total": len(data["results"]),
         }
     )
 
@@ -571,25 +452,20 @@ async def api_callers(request: Request) -> JSONResponse:
     name = request.query_params.get("name", "")
     if not name:
         return JSONResponse({"error": "Missing 'name' parameter"}, status_code=400)
-    limit = _int_param(request, "limit", 20)
+
+    data = await _get_service().callers_data(
+        name, limit=_int_param(request, "limit", 20)
+    )
+    if not data["ok"]:
+        return JSONResponse({"error": data["error"]}, status_code=503)
 
     q = await _get_querier()
-    if not q:
-        return JSONResponse({"error": "Graph not found"}, status_code=503)
-
-    all_callers = q.get_callers(name)
-    fuzzy = False
-    if not all_callers:
-        all_callers = q.get_callers(name, fuzzy=True)
-        fuzzy = bool(all_callers)
-
-    callers = sorted(all_callers)[:limit]
     return JSONResponse(
         {
-            "symbol": name,
-            "fuzzy": fuzzy,
-            "total": len(all_callers),
-            "callers": [_caller_to_dict(c, q) for c in callers],
+            "symbol": data["symbol"],
+            "fuzzy": data["fuzzy"],
+            "total": data["total"],
+            "callers": [_caller_to_dict(c, q) for c in data["callers"]],
         }
     )
 
@@ -598,21 +474,13 @@ async def api_callees(request: Request) -> JSONResponse:
     name = request.query_params.get("name", "")
     if not name:
         return JSONResponse({"error": "Missing 'name' parameter"}, status_code=400)
-    limit = _int_param(request, "limit", 20)
 
-    q = await _get_querier()
-    if not q:
-        return JSONResponse({"error": "Graph not found"}, status_code=503)
-
-    matches = q.find_nodes_by_name(name)
-    func_matches = [m for m in matches if m["type"] in ("Function", "Method")]
-    fuzzy = False
-    if not func_matches:
-        matches = q.find_nodes_by_name(name, fuzzy=True)
-        func_matches = [m for m in matches if m["type"] in ("Function", "Method")]
-        fuzzy = bool(func_matches)
-
-    if not func_matches:
+    data = await _get_service().callees_data(
+        name, limit=_int_param(request, "limit", 20)
+    )
+    if not data["ok"]:
+        return JSONResponse({"error": data["error"]}, status_code=503)
+    if not data["found"]:
         return JSONResponse(
             {
                 "symbol": name,
@@ -623,16 +491,15 @@ async def api_callees(request: Request) -> JSONResponse:
             }
         )
 
-    node = func_matches[0]
-    callees = sorted(q.get_callees(node["id"]))[:limit]
-
+    q = await _get_querier()
+    node = data["node"]
     return JSONResponse(
         {
             "symbol": node.get("metadata", {}).get("name", name),
             "node_id": node["id"],
-            "fuzzy": fuzzy,
-            "total": len(callees),
-            "callees": [_caller_to_dict(c, q) for c in callees],
+            "fuzzy": data["fuzzy"],
+            "total": data["total"],
+            "callees": [_caller_to_dict(c, q) for c in data["callees"]],
         }
     )
 
