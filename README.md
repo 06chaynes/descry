@@ -31,6 +31,49 @@ Descry indexes your codebase into a knowledge graph of symbols (functions, class
 >   applies here.
 > - **Report security issues privately** — see [SECURITY.md](SECURITY.md).
 
+## Embedding models
+
+Semantic search ships pinned configurations for several models. Pick one by
+alias in `.descry.toml`:
+
+```toml
+[embeddings]
+model = "embeddinggemma"      # alias, full HuggingFace repo id, or a local path
+```
+
+```bash
+descry embedding-models       # what is available, and what is selected
+```
+
+| alias | dim | licence | remote code | notes |
+|---|---|---|---|---|
+| `embeddinggemma` (default) | 768 | Gemma | no | best measured; smallest and fastest; 2K context |
+| `qwen3` | 1024 | Apache-2.0 | no | most permissive licence |
+| `jina-code` | 896 | CC-BY-NC-4.0 | **yes** | code-specific, but lowest measured; non-commercial |
+
+Measured with `tests/eval/` — docstring→symbol queries, leave-one-out leakage
+control, paired bootstrap over 5000 resamples:
+
+**descry** (1,140 nodes, 405 queries, pure Python)
+
+| model | R@1 | R@10 | MRR | nDCG@10 |
+|---|---|---|---|---|
+| `embeddinggemma` | **0.479** | **0.859** | **0.605** | **0.662** |
+| `qwen3` | 0.430 | 0.748 | 0.547 | 0.590 |
+| `jina-code` | 0.405 | 0.780 | 0.542 | 0.593 |
+
+Rerun on your own project — the ranking is measured, not universal:
+
+```bash
+python tests/eval/compare.py /path/to/.descry_cache/codebase_graph.json
+```
+
+Each entry carries its own pinned revision and task prompts, both of which feed
+the cache key — changing model re-embeds rather than silently reusing vectors
+from a different embedding space. **`trust_remote_code` is only ever enabled for
+models in this registry**; a model you name yourself is loaded unpinned with
+remote code disabled.
+
 ## Quick Start
 
 ```bash
