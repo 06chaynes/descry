@@ -221,8 +221,46 @@ func (s *Svc) Go() {
 }
 """.strip()
         _parse(builder, src)
-        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
-        assert "REF:fmt.Println" not in targets
+        builder.resolve_references()
+        assert [e for e in builder.edges if e["relation"].startswith("CALLS")] == []
+
+    def test_one_line_function_does_not_enclose_what_follows(self, builder):
+        src = """
+package app
+
+func noop(x int) {}
+
+func real() {
+    helper()
+}
+""".strip()
+        _parse(builder, src)
+        assert "FILE:pkg/app.go::real" in _node_ids(builder)
+
+    def test_call_after_a_nested_block_keeps_its_function(self, builder):
+        src = """
+package app
+
+func first() {
+    if ready {
+        prepare()
+    }
+    finish()
+}
+
+func second() {
+    cleanup()
+}
+""".strip()
+        _parse(builder, src)
+        sources = {
+            e["target"]: e["source"] for e in builder.edges if e["relation"] == "CALLS"
+        }
+        assert sources == {
+            "REF:prepare": "FILE:pkg/app.go::first",
+            "REF:finish": "FILE:pkg/app.go::first",
+            "REF:cleanup": "FILE:pkg/app.go::second",
+        }
 
     def test_control_flow_not_a_call(self, builder):
         src = """
@@ -259,3 +297,76 @@ func (s *Svc) Go() {
         assert "REF:make" not in targets
         assert "REF:append" not in targets
         assert "REF:len" not in targets
+
+
+class TestUnexportedAndReceivers:
+    def test_unexported_type_and_const(self, builder):
+        """Lowercase types and consts are indexed like exported ones."""
+        src = """
+package app
+
+type worker struct {
+    id int
+}
+
+const maxRetries = 3
+
+func (w *worker) Run() {
+    dispatch(w)
+}
+""".strip()
+        _parse(builder, src)
+        ids = _node_ids(builder)
+        assert "FILE:pkg/app.go::worker" in ids
+        assert "FILE:pkg/app.go::maxRetries" in ids
+        assert "FILE:pkg/app.go::worker::Run" in ids
+
+    def test_generic_receiver_method(self, builder):
+        """A method on a generic type is indexed under that type."""
+        src = """
+package app
+
+type Stack[T any] struct {
+    items []T
+}
+
+func (s *Stack[T]) Push(v T) {
+    grow(s)
+}
+""".strip()
+        _parse(builder, src)
+        assert "FILE:pkg/app.go::Stack::Push" in _node_ids(builder)
+        calls = {
+            (e["source"], e["target"])
+            for e in builder.edges
+            if e["relation"] == "CALLS"
+        }
+        assert ("FILE:pkg/app.go::Stack::Push", "REF:grow") in calls
+
+    def test_receiver_declared_in_another_file_gets_node(self, builder):
+        """Every edge source exists even when the receiver type is elsewhere."""
+        src = """
+package app
+
+func (r *Remote) Do() {
+}
+""".strip()
+        _parse(builder, src)
+        ids = set(_node_ids(builder))
+        assert "FILE:pkg/app.go::Remote" in ids
+        assert {e["source"] for e in builder.edges} <= ids
+
+    def test_mid_line_block_comment_stripped(self, builder):
+        """Code inside a block comment that shares a line with code is skipped."""
+        src = """
+package app
+
+func run() {
+    stepOne() /* hidden(1)
+    alsoHidden(2) */
+    stepTwo()
+}
+""".strip()
+        _parse(builder, src)
+        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
+        assert targets == {"REF:stepOne", "REF:stepTwo"}

@@ -4,8 +4,12 @@ import ast
 import json
 import logging
 import os
+import posixpath
 import re
+from collections import deque
 from pathlib import Path
+
+from descry._comments import strip_block_comments, strip_line_comment
 
 # Configure logging for consistent error reporting
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -14,6 +18,50 @@ logger = logging.getLogger(__name__)
 # Refuse to index individual source files above this size. Matches the
 # /api/source cap in web/server.py so the indexer and viewer share a budget.
 _MAX_SOURCE_FILE_BYTES = 10 * 1024 * 1024  # 10 MiB
+
+_JSTS_EXTENSIONS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
+_RUBY_EXTENSIONS = (".rb", ".rake", ".gemspec")
+_DOTNET_EXTENSIONS = (".cs", ".vb")
+_CLANG_EXTENSIONS = (".c", ".cc", ".cpp", ".cxx", ".cu", ".h", ".hh", ".hpp", ".hxx")
+# Manifests read for the package names call resolution needs. They do not
+# become graph nodes.
+_MANIFESTS = ("go.mod", "Cargo.toml", "package.json")
+_GO_MODULE_RE = re.compile(r"^module\s+(\S+)", re.MULTILINE)
+_CARGO_PACKAGE_RE = re.compile(
+    r'^\[package\][^\[]*?^name\s*=\s*"([^"]+)"', re.MULTILINE | re.DOTALL
+)
+# A TypeScript or JavaScript project file, read for its import path aliases
+_TSCONFIG_RE = re.compile(r"[jt]sconfig(?:\.[\w.-]+)?\.json")
+# What a tsconfig may hold that JSON may not, next to the strings to keep:
+# comments, then commas before a closing bracket.
+_JSON_STRING = r'"(?:[^"\\]|\\.)*"'
+_JSONC_COMMENT_RE = re.compile(_JSON_STRING + r"|//[^\n]*|/\*.*?\*/", re.DOTALL)
+_JSONC_COMMA_RE = re.compile(_JSON_STRING + r"|,(?=\s*[}\]])")
+
+
+def _loads_jsonc(text: str):
+    """Parse JSON that may have comments and trailing commas."""
+    for extra in (_JSONC_COMMENT_RE, _JSONC_COMMA_RE):
+        text = extra.sub(lambda m: m.group() if m.group()[0] == '"' else "", text)
+    return json.loads(text)
+
+
+# Extensions the indexer has a parser for. Besides these it opens only the
+# manifests in _MANIFESTS and the project files _TSCONFIG_RE names.
+_INDEXED_EXTENSIONS = (
+    ".py",
+    ".rs",
+    ".proto",
+    ".java",
+    ".go",
+    *_RUBY_EXTENSIONS,
+    ".php",
+    *_DOTNET_EXTENSIONS,
+    *_CLANG_EXTENSIONS,
+    ".dart",
+    ".svelte",
+    *_JSTS_EXTENSIONS,
+)
 
 # Try to import ast-grep integration for improved CALLS detection
 try:
@@ -4708,6 +4756,7 @@ _JSTS_CONTROL_KEYWORDS = frozenset(
         "as",
         "from",
         "with",
+        "constructor",
     }
 )
 
@@ -5433,16 +5482,11 @@ _LIBRARY_PREFIXES = (
     "Input::",
     "Password::",
     "query.load::",
-    # ── Common receiver-variable patterns in Python tests and code.
-    # Kept conservative: removed descry-specific prefixes
-    # (authenticatedPage, pptx, spinner, node_id, mcp, prs, stripped)
-    # and short/generic ones (c, line, table, group, cert, np, pb)
-    # that would over-match project code in other languages too.
+    # ── Test/logging module-qualified calls. Local-variable receiver names
+    # (parser, args, config, result, request, …) do not belong here: a
+    # prefix applies to every language, where they are ordinary identifiers.
     "pytest.",
-    "subparsers.",
     "logger.",
-    "response.",
-    "match.",
     # ── Python stdlib modules (dotted call form: json.dumps, asyncio.Lock) ──
     "json.",
     "time.",
@@ -5535,29 +5579,6 @@ _LIBRARY_PREFIXES = (
     "monkeypatch.",
     "psutil.",
     "scip_pb2.",
-    # ── Common Python local-variable receiver patterns ──
-    # ArgumentParser / subparser common receiver names.
-    "parser.",
-    "sub.",
-    "subparsers.",
-    "subcommands.",
-    "args.",
-    "ns.",
-    "namespace.",
-    # Path / file / graph receiver names commonly used across descry code.
-    "path_obj.",
-    "p.",
-    "cfg.",
-    "config.",
-    "gp.",
-    "fd.",
-    "fh.",
-    "result.",
-    "proc.",
-    "res.",
-    "req.",
-    "resp.",
-    "request.",
     # ── Dart core / Flutter / common packages (prefix form) ──
     "dart.",
     "dart:",
@@ -6005,31 +6026,28 @@ def is_generated_source(content: str, first_n_lines: int = 30) -> bool:
     return any(marker in head for marker in _GENERATED_MARKERS)
 
 
+def _strip_generics(callee: str) -> str:
+    """Remove Rust/TS generic arguments (`::<T>`, `<T, U>`) from a callee, so
+    `matches.get_one::<String>` reads as `matches.get_one`."""
+    bare = callee
+    if "<" in bare:
+        # Innermost pairs first, repeated, so nested generics come out too.
+        prev = None
+        while prev != bare:
+            prev = bare
+            bare = re.sub(r"<[^<>]*>", "", bare)
+        # `Vec::<T>::new` leaves `Vec::::new`; a trailing generic leaves `::`.
+        bare = re.sub(r":{3,}", "::", bare).rstrip(":")
+    return bare
+
+
 def is_non_project_call(callee: str) -> bool:
     """Check if a callee is a non-project call (stdlib or third-party library) that should be filtered."""
     # Direct match
     if callee in STDLIB_FILTER:
         return True
 
-    # Strip Rust/TS turbofish generics (`::<T>`, `<T, U>`) before
-    # computing the last_part — otherwise `matches.get_one::<String>`
-    # would see last_part = `<String>` instead of `get_one`.
-    # Strip `<...>` pairs (non-greedy, iterated until no more); tolerate
-    # nested generics by looping.
-    bare = callee
-    if "<" in bare:
-        # Remove `<...>` substrings — simple regex handles nested by
-        # iterating since re.sub sweeps from inside out when the inner
-        # pattern matches first.
-        prev = None
-        while prev != bare:
-            prev = bare
-            bare = re.sub(r"<[^<>]*>", "", bare)
-        # Drop any stray trailing `::` left by `Vec::<T>::new` → `Vec::::new`.
-        bare = re.sub(r":{3,}", "::", bare)
-        # Trim any trailing `::` (e.g. `matches.get_one::<String>` →
-        # `matches.get_one::` after generic strip).
-        bare = bare.rstrip(":")
+    bare = _strip_generics(callee)
 
     # Extract last component for method calls. Split on `.` (most langs),
     # `::` (Rust/C++/Ruby), and `->` (PHP / C struct pointer). We want
@@ -6043,8 +6061,9 @@ def is_non_project_call(callee: str) -> bool:
         parts = callee.split("::")
         if len(parts) == 2 and "." in parts[1]:
             col_part = parts[1].split(".")[0]
-            # If both table and column are lowercase identifiers, it's Diesel DSL
-            if parts[0].islower() and col_part.islower():
+            # Both lowercase, and the first plural like a table name — which
+            # keeps crate::helpers.load / self::state.reset out of this bucket.
+            if parts[0].islower() and parts[0].endswith("s") and col_part.islower():
                 return True
 
     # For qualified calls like Type::new, only filter if the type is also stdlib
@@ -6180,12 +6199,314 @@ class TypeScriptSymbolTable:
         return None
 
 
+_LICENSE_HEADER_RE = re.compile(r"copyright|licen[cs]e|spdx-", re.IGNORECASE)
+# What a count of braces must skip: "..." and `...` strings, '{' / '}' char
+# literals and // comments. A // right after `:`, a quote or `}` is left
+# alone: that is a URL, a quoted "//" or template text, not a comment. A
+# backslash-escaped character outside a string (a regex literal's `\}`, an
+# escaped quote) is consumed so it neither counts nor opens a string.
+_NON_CODE_RE = re.compile(
+    r"""\\.|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`|'[{}]'|(?<![:'"`}])//.*"""
+)
+
+
+_LITERAL_RE = re.compile(
+    r"""//|/\*|(?<![A-Za-z0-9_])[bc]?r(#*)"|\"{3}|"|`|'(?:[^'\\]|\\.)'"""
+)
+_STRING_END_RE = re.compile(r'(?:[^"\\]|\\.)*"')
+
+
+def blank_strings(line, inside, spanning):
+    """Return ``line`` without its comments and with its string and
+    character literals turned to spaces, so that text in one is not read as
+    code, and what it ends inside of, if anything.
+
+    ``inside`` is what the line starts inside of: `/*`, the opener of a
+    literal named in ``spanning``, or None. ``spanning`` lists the literals
+    that can continue on the next line: a backquote for a raw string, `"` for
+    an ordinary one, `r` for `r#"..."#` and three quotes for a text block.
+    """
+    code = []
+    position = 0
+    spans = True
+    while True:
+        start = position
+        if inside is None:
+            match = _LITERAL_RE.search(line, position)
+            if not match or match.group() == "//":
+                code.append(line[position : match.start() if match else None])
+                return "".join(code), None
+            opener = match.group()
+            start = match.start()
+            code.append(line[position:start])
+            position = match.end()
+            if opener.startswith("'"):
+                code.append(" " * len(opener))
+                continue
+            if match.group(1) is not None and "r" in spanning:
+                inside = "r" + match.group(1)
+            elif opener in ("/*", "`") or opener in spanning:
+                inside = opener
+            else:
+                # A prefix or two more quotes are no part of the delimiter.
+                quote = start + opener.index('"')
+                code.append(line[start:quote])
+                start, position, inside = quote, quote + 1, '"'
+            spans = inside == "/*" or inside[0] in spanning or inside in spanning
+        if inside == '"':
+            end = _STRING_END_RE.match(line, position)
+            end = end.end() if end else -1
+        else:
+            closer = {"/*": "*/"}.get(inside, inside.replace("r", '"', 1))
+            end = line.find(closer, position)
+            end = end + len(closer) if end >= 0 else -1
+        if end < 0:
+            code.append(" " * (len(line) - start))
+            return "".join(code), inside if spans else None
+        code.append(" " * (end - start))
+        position, inside = end, None
+
+
+def _scip_columns(prefix: str):
+    """Column a SCIP index gives the character after ``prefix`` on its line:
+    one number, or ``(UTF-8, UTF-16, UTF-32)`` code-unit offsets where those
+    differ, in the order of SCIP's position encodings."""
+    if prefix.isascii():
+        return len(prefix)
+    return (
+        len(prefix.encode()),
+        len(prefix.encode("utf-16-le")) // 2,
+        len(prefix),
+    )
+
+
 class BaseParser:
+    # Prefix of a doc-comment line, and the characters stripped from one.
+    doc_line_prefix = "//"
+    doc_strip_chars = "/!* "
+
+    # Matches the `name =` of a statement whose value types ``name``, in a
+    # ``name`` group; an ``unwrap`` group matches where the value is awaited.
+    binding_re = None
+
     def __init__(self, builder):
         self.builder = builder
+        self.declared = {}
+        self._line = 0
+        self._code = ""
+        self._pairs = {}  # column of a `(` on the line -> column of its `)`
+        self._closes = {}  # column of a `)` -> edge index of the call it ends
+        self._opens = {}  # column of a `(` left open on the line -> edge index
+        self._open_calls = []  # edge index of each call open across lines
+        self._tail = None  # edge index of the call the previous line ends with
+        self._scope = None  # definition the line being read belongs to
+        self._raw = ""  # the line being read, as written
+        self._locals = set()  # (definition ID, name of a parameter or variable)
+        self._first_node = 0  # where the nodes and edges of the file being
+        self._first_edge = 0  # parsed start in the builder's lists
+        self._pending = None  # (name, unwrap) of a binding still being read
+        # (node ID, first line, last line, parameter names) of each context
+        self._contexts = []
 
     def parse(self, file_path, rel_path, content):
         raise NotImplementedError
+
+    def enter_context(self, node_id, first_line, last_line, params=frozenset()):
+        """Make ``node_id``, which spans ``first_line`` to ``last_line``, the
+        innermost context. ``params`` are the names of its parameters."""
+        self._contexts.append((node_id, first_line, last_line, params))
+
+    def context_at(self, lineno):
+        """``(node ID, first line)`` of the innermost context entered that
+        reaches line ``lineno``. Lines are asked for in ascending order."""
+        while lineno > self._contexts[-1][2]:
+            self._contexts.pop()
+        return self._contexts[-1][:2]
+
+    @staticmethod
+    def leave_contexts(contexts, levels, level):
+        """Pop the innermost context, never the first, for as long as its
+        entry in ``levels``, the brace depth or indentation it was entered
+        at, is ``level`` or more."""
+        while len(contexts) > 1 and level <= levels[-1]:
+            contexts.pop()
+            levels.pop()
+
+    def scan_declarations(self, lines, patterns):
+        """Record every declaration in ``lines`` that one of ``patterns``
+        reads as ``name`` having type ``type``, or as type parameter
+        ``param`` being bounded by ``type``."""
+        # name -> [(lineno, origin of its value, at file level)], and
+        # <param> -> [(lineno, bound, at file level)]
+        self.declared = {}
+        for lineno, line in enumerate(lines, 1):
+            for pattern in patterns:
+                for match in pattern.finditer(line):
+                    groups = match.groupdict()
+                    # A qualified type is one step of an origin path.
+                    declared_type = groups["type"].replace(".", "::")
+                    # Unindented and not in a parameter list.
+                    file_level = (
+                        not line[:1].isspace() and "(" not in line[: match.start()]
+                    )
+                    if groups.get("generic"):
+                        declared_type += "<>"
+                    if groups.get("name"):
+                        key, value = groups["name"], f"{declared_type}()"
+                    else:
+                        key, value = f"<{groups['param']}>", declared_type
+                    self.declared.setdefault(key, []).append(
+                        (lineno, value, file_level)
+                    )
+
+    def _declared(self, name, lineno, since, anywhere=False):
+        """What ``name`` is declared as at ``lineno``: by its last
+        declaration from line ``since``, the start of the enclosing
+        definition. Failing that what its file-level declarations agree on.
+        ``anywhere`` looks at every declaration instead, for a field or a
+        type parameter."""
+        declarations = self.declared.get(name, ())
+        if not anywhere:
+            local = [d for d in declarations if since <= d[0] <= lineno]
+            if local:
+                return max(local, key=lambda d: d[0])[1]
+        values = {v for _, v, top in declarations if anywhere or top or not since}
+        return values.pop() if len(values) == 1 else None
+
+    def call_origin(self, callee, lineno, since):
+        """Origin path (see ``PythonParser._origin``) of a `receiver.method`
+        callee whose receiver has a declared type or was bound to a call's
+        result; None for any other. ``since`` is the first line of the
+        enclosing definition, or 0 when the parser does not track one."""
+        receiver, _, method = callee.rpartition(".")
+        field = receiver.removeprefix("this.").removeprefix("self.")
+        value = self._declared(field, lineno, since, field != receiver)
+        if value is None:
+            return None
+        if not value.startswith("#"):
+            # A type parameter stands for its bound.
+            param = f"<{value[:-2]}>"
+            bound = self._declared(param, lineno, since)
+            bound = bound or self._declared(param, lineno, since, True)
+            value = f"{bound}()" if bound else value
+        return f"{value}.{method}"
+
+    def begin_line(self, code, lineno, scope=None, raw=None):
+        """Start reading the calls of ``code``, source line ``lineno``. Call
+        this for every line whose calls are recorded, in order. ``scope`` is
+        the definition a variable the line binds is local to, and ``raw``
+        the line as written where ``code`` has its literals blanked."""
+        self._end_line()
+        self._line, self._code = lineno, code
+        self._scope, self._raw = scope, raw or code
+        self._pairs, self._closes = {}, {}
+        if code[:1].strip():
+            # An unindented line starts or ends a top-level item.
+            self._open_calls.clear()
+        stack = []
+        for column, char in enumerate(code):
+            if char == "(":
+                stack.append(column)
+            elif char == ")" and stack:
+                self._pairs[stack.pop()] = column
+            elif char == ")" and self._open_calls:
+                self._closes[column] = self._open_calls.pop()
+        self._opens = dict.fromkeys(stack)
+
+    def _end_line(self):
+        """Carry what the finished line leaves open over to the next: its
+        unclosed calls, the call it ends with, and what it binds."""
+        self._open_calls.extend(self._opens.values())
+        statement = self._code.rstrip().rstrip(";").rstrip()
+        value = statement.rstrip("?")
+        chain = value.rstrip(".").rstrip()
+        self._tail = self._closes.get(len(chain) - 1) if chain else None
+        binding = self.binding_re.search(self._code) if self.binding_re else None
+        if binding:
+            name, unwrap = binding["name"], bool(binding.groupdict().get("unwrap"))
+            expression = self._code[binding.end() :]
+            if self._scope:
+                self.add_local(self._scope, name)
+        elif self._pending and self._code.lstrip()[:1] in (".", ")"):
+            name, unwrap = self._pending
+            expression = self._code
+        else:
+            name = None
+        self._pending = (name, unwrap) if name else None
+        self._code = ""
+        if name is None or self._tail is None or not value.endswith(")"):
+            return
+        # Bind only where the whole value is one call chain.
+        flat, previous = expression, None
+        while flat != previous:
+            previous, flat = flat, re.sub(r"\([^()]*\)", "", flat)
+        if re.fullmatch(
+            r"[\s)]*(?:(?:await|new)\s+|&(?:mut\s+)?)*[\w$.:?\s]*;?\s*", flat
+        ):
+            unwrap = unwrap or value != statement
+            origin = f"#{self._tail}.?" if unwrap else f"#{self._tail}"
+            self.declared.setdefault(name, []).append((self._line, origin, False))
+
+    def call_closed_at(self, column):
+        """The call whose `)` is at ``column`` of the line being read, as
+        ``(edge index, column of its "(")``, else None."""
+        edge = self._closes.get(column)
+        opened = [start for start, end in self._pairs.items() if end == column]
+        return (edge, opened[0]) if edge is not None and opened else None
+
+    def continue_chain(self, column, edge):
+        """Read a call that follows the character at ``column`` of the line
+        being read as made on what the call at edge index ``edge`` returned."""
+        self._closes[column] = edge
+
+    def add_local(self, scope, name):
+        """Record that ``name`` is a parameter or variable of ``scope``: a
+        bare call of it there calls a value, not a definition of that name
+        from outside ``scope``."""
+        self._locals.add((scope, name))
+
+    def add_call(self, source_id, callee, lineno, since, start, paren, origin=None):
+        """Record a call of ``callee`` from ``source_id`` on ``lineno``, the
+        line given to ``begin_line``. ``start`` and ``paren`` are the columns
+        in it of the callee and of the `(` after it. A call on the result of
+        another call (`a().b()`, or `.b()` on the next line) gets an origin
+        path that names that call by its edge index, unless ``origin`` gives
+        one, and the edge carries the column of the called name for a SCIP
+        lookup."""
+        if origin is None:
+            before = self._code[:start].rstrip()
+            if before.endswith(".") and not before.endswith(".."):
+                receiver = before[:-1].rstrip()
+                edge = (
+                    self._closes.get(len(receiver.rstrip("?")) - 1)
+                    if receiver
+                    else self._tail
+                )
+                unwrap = ".?" if receiver.endswith("?") else ""
+                origin = (
+                    f"#{edge}{unwrap}.{callee}" if edge is not None else f"?.{callee}"
+                )
+        if origin is None and (source_id, callee) in self._locals:
+            origin = f"={callee}"
+        origin = origin or self.call_origin(callee, lineno, since)
+        metadata = {"lineno": lineno}
+        if origin:
+            metadata["origin"] = origin
+        column = start + len(callee) - len(_split_callee(callee)[1])
+        metadata["col"] = _scip_columns(self._raw[:column])
+        index = len(self.builder.edges)
+        self.builder.edges.append(
+            {
+                "source": source_id,
+                "target": f"REF:{callee}",
+                "relation": "CALLS",
+                "metadata": metadata,
+            }
+        )
+        if paren in self._pairs:
+            self._closes[self._pairs[paren]] = index
+        elif paren in self._opens:
+            self._opens[paren] = index
 
     def add_config_node(
         self,
@@ -6219,6 +6540,8 @@ class BaseParser:
     def add_file_node(self, rel_path, content):
         """Register the File node for a source file and return its id."""
         file_id = f"FILE:{rel_path}"
+        self._first_node = len(self.builder.nodes)
+        self._first_edge = len(self.builder.edges)
         self.builder.add_node(
             file_id,
             "File",
@@ -6228,46 +6551,157 @@ class BaseParser:
         )
         return file_id
 
+    def set_file_metadata(self, file_id, key, value):
+        """Set ``key`` in the metadata of the File node ``file_id``."""
+        for node in reversed(self.builder.nodes):
+            if node["id"] == file_id:
+                node["metadata"][key] = value
+                break
+
+    def rename_node(self, old_id, new_id):
+        """Give the node ``old_id`` of the file being parsed, and all that
+        is defined inside it, the ID ``new_id``."""
+
+        def moved(node_id):
+            if node_id == old_id or node_id.startswith(f"{old_id}::"):
+                return new_id + node_id[len(old_id) :]
+            return node_id
+
+        for node in self.builder.nodes[self._first_node :]:
+            if node["id"] != moved(node["id"]):
+                self.builder.node_registry.discard(node["id"])
+                node["id"] = moved(node["id"])
+                self.builder.node_registry.add(node["id"])
+        for edge in self.builder.edges[self._first_edge :]:
+            edge["source"] = moved(edge["source"])
+            edge["target"] = moved(edge["target"])
+
     def get_leading_docstring(self, lines, start_idx):
         doc_lines = []
+        # Walking upward: True between a block comment's `*/` and its `/*`.
+        # Outside one, a line starting with `*` is code (`*ptr = value;`).
+        in_block = False
         j = start_idx - 1
         while j >= 0:
             line = lines[j].strip()
-            # Handle common comment styles: ///, //, /*, *, /**
-            if line.startswith(("///", "//!", "*", "/**", "//")):
+            if in_block:
+                if line.startswith("/*"):
+                    in_block = False
+                elif not line.startswith("*"):
+                    break
+            elif line.endswith("*/") and line.startswith(("*", "/*")):
+                in_block = not line.startswith("/*")
                 # Skip end of block comments if they don't contain content
                 if line == "*/":
                     j -= 1
                     continue
-                cleaned = line.lstrip("/!* ").strip()
-                doc_lines.insert(0, cleaned)
-                j -= 1
-            else:
+            elif not line.startswith(self.doc_line_prefix):
                 break
-        return "\n".join(doc_lines)
+            cleaned = line.lstrip(self.doc_strip_chars).strip()
+            doc_lines.insert(0, cleaned)
+            j -= 1
+        docstring = "\n".join(doc_lines)
+        # A licence notice running from the top of the file documents the
+        # file, not the first declaration under it.
+        if j < 0 and _LICENSE_HEADER_RE.search(docstring):
+            return ""
+        return docstring
+
+    @staticmethod
+    def opening_brace_line(lines, index, code):
+        """Index of the line with the `{` that opens the block declared on
+        ``lines[index]``. ``code`` is that line without its comments; where
+        it has no `{` the next nine lines are searched. None if none of
+        them has one either."""
+        if "{" in code:
+            return index
+        for ahead in range(index + 1, min(index + 10, len(lines))):
+            if "{" in lines[ahead]:
+                return ahead
+        return None
 
     def _find_block_end(self, lines, start_idx):
         """Find the closing brace line for a block starting at start_idx.
 
-        Counts braces to find the matching closing brace.
+        Counts braces to find the matching closing brace, skipping
+        comments and string/char literals.
         Returns the 1-indexed line number of the closing brace.
         """
         brace_depth = 0
         found_open = False
+        in_comment = False
 
         for i in range(start_idx, len(lines)):
-            line = lines[i]
+            line, in_comment = strip_block_comments(lines[i], in_comment)
+            line = _NON_CODE_RE.sub("", line)
             for char in line:
                 if char == "{":
                     brace_depth += 1
                     found_open = True
                 elif char == "}":
                     brace_depth -= 1
-                    if found_open and brace_depth == 0:
+                    # On the first line a brace pair may belong to the
+                    # signature (`f(opts: { a: T }) {`); only its end counts.
+                    if found_open and brace_depth == 0 and i > start_idx:
                         return i + 1  # 1-indexed line number
+            if found_open and brace_depth == 0:
+                return i + 1
 
         # If no closing brace found, estimate based on file end
         return min(start_idx + 100, len(lines))
+
+
+_PY_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+# Compound statements whose blocks can hold definitions and imports.
+_PY_COMPOUND_STMTS = (
+    ast.If,
+    ast.Try,
+    ast.TryStar,
+    ast.With,
+    ast.AsyncWith,
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.Match,
+)
+
+
+def _py_block_statements(node):
+    """Yield the statements in every block of a compound statement."""
+    for block in ("body", "orelse", "finalbody"):
+        yield from getattr(node, block, ())
+    for handler in getattr(node, "handlers", ()):
+        yield from handler.body
+    for case in getattr(node, "cases", ()):
+        yield from case.body
+
+
+_PY_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+# Nodes whose `name` they bind: `except E as name`, `case ... as name`, `*name`.
+_PY_NAME_BINDERS = (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)
+
+
+def _py_import_bindings(node):
+    """Yield ``(local name, dotted target)`` for each name an import statement
+    binds. A relative target keeps its leading dots."""
+    for alias in node.names:
+        if isinstance(node, ast.Import):
+            root = alias.name.split(".")[0]
+            yield (alias.asname, alias.name) if alias.asname else (root, root)
+        else:
+            module = "." * node.level + (node.module or "")
+            sep = "." if node.module else ""
+            yield alias.asname or alias.name, f"{module}{sep}{alias.name}"
+
+
+def _py_nested_definitions(statements):
+    """Yield the definitions among ``statements``, looking through compound
+    statements but not into other definitions."""
+    for stmt in statements:
+        if isinstance(stmt, _PY_DEFINITIONS):
+            yield stmt
+        elif isinstance(stmt, _PY_COMPOUND_STMTS):
+            yield from _py_nested_definitions(_py_block_statements(stmt))
 
 
 class PythonParser(BaseParser):
@@ -6286,7 +6720,14 @@ class PythonParser(BaseParser):
             return
 
         self.add_file_node(rel_path, content)
+        self.source_lines = content.split("\n")
+        self.class_ids = set()
+        self.class_attrs = [{}]
+        self.import_targets = {}
+        self.bindings = []
+        self._push_bindings(tree.body)
         self.visit_node(tree, file_id)
+        self.builder.imports[file_id] = self.import_targets
 
     def _get_type_annotation(self, annotation):
         """Extract type annotation as a string.
@@ -6375,6 +6816,7 @@ class PythonParser(BaseParser):
                 docstring=ast.get_docstring(node) or "",
             )
             self.builder.add_edge(parent_id, class_id, "DEFINES")
+            self.class_ids.add(class_id)
 
             # Track decorator calls (e.g., @dataclass, @pytest.mark.parametrize(...))
             for decorator in node.decorator_list:
@@ -6382,16 +6824,7 @@ class PythonParser(BaseParser):
                     self._record_call(decorator, class_id, decorator.lineno)
                 elif isinstance(decorator, ast.Attribute):
                     # Handle @module.decorator without call parens
-                    name = self._get_attribute_name(decorator)
-                    if name and not is_non_project_call(name):
-                        self.builder.edges.append(
-                            {
-                                "source": class_id,
-                                "target": f"REF:{name}",
-                                "relation": "CALLS",
-                                "metadata": {"lineno": decorator.lineno},
-                            }
-                        )
+                    self._record_callee(decorator, class_id, decorator.lineno)
 
             for base in node.bases:
                 base_name = (
@@ -6403,18 +6836,17 @@ class PythonParser(BaseParser):
                     resolved_base = self.builder.current_scope.resolve(base_name)
                     self.builder.add_edge(class_id, f"REF:{resolved_base}", "INHERITS")
 
+            self.class_attrs.append(self._class_attrs(node))
             for child in node.body:
                 self.visit_node(child, class_id)
+            self.class_attrs.pop()
 
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             func_id = f"{parent_id}::{node.name}"
             # D.1: a function is a method iff its enclosing parent node is a Class.
             # Previous logic used string matching on parent_id which incorrectly
             # classified nested functions inside other functions as Methods.
-            parent_node = next(
-                (n for n in self.builder.nodes if n["id"] == parent_id), None
-            )
-            is_method = parent_node is not None and parent_node["type"] == "Class"
+            is_method = parent_id in self.class_ids
             node_type = "Method" if is_method else "Function"
 
             args = self._get_args_info(node.args)
@@ -6442,36 +6874,21 @@ class PythonParser(BaseParser):
             for decorator in node.decorator_list:
                 if isinstance(decorator, ast.Call):
                     self._record_call(decorator, func_id, decorator.lineno)
-                elif isinstance(decorator, ast.Attribute):
-                    name = self._get_attribute_name(decorator)
-                    if name and not is_non_project_call(name):
-                        self.builder.edges.append(
-                            {
-                                "source": func_id,
-                                "target": f"REF:{name}",
-                                "relation": "CALLS",
-                                "metadata": {"lineno": decorator.lineno},
-                            }
-                        )
-                elif isinstance(decorator, ast.Name) and not is_non_project_call(
-                    decorator.id
-                ):
-                    self.builder.edges.append(
-                        {
-                            "source": func_id,
-                            "target": f"REF:{decorator.id}",
-                            "relation": "CALLS",
-                            "metadata": {"lineno": decorator.lineno},
-                        }
-                    )
+                else:
+                    self._record_callee(decorator, func_id, decorator.lineno)
 
+            self._push_bindings(node.body, node, is_method)
+            fixture = self._fixture_name(node)
+            if fixture:
+                self.builder.fixtures[parent_id, fixture] = (
+                    func_id,
+                    self._returned_origin(node),
+                )
             self.visit_body_for_calls(node.body, func_id)
 
-            for child in node.body:
-                if isinstance(
-                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-                ):
-                    self.visit_node(child, func_id)
+            for child in _py_nested_definitions(node.body):
+                self.visit_node(child, func_id)
+            self.bindings.pop()
 
         elif isinstance(node, ast.Import):
             for alias in node.names:
@@ -6495,32 +6912,248 @@ class PythonParser(BaseParser):
             for child in node.body:
                 self.visit_node(child, parent_id)
 
+        elif isinstance(node, _PY_COMPOUND_STMTS):
+            for child in _py_block_statements(node):
+                self.visit_node(child, parent_id)
+
     def visit_body_for_calls(self, body, parent_func_id):
-        """Find all Call nodes in the function body using ast.walk().
+        """Find all Call nodes in the function body.
 
         This catches calls in all contexts: comprehensions, generators,
         with statements, if/while conditions, for iterables, decorators,
-        nested calls, await expressions, etc.
+        nested calls, await expressions, etc. Nested function and class
+        definitions are not entered: visit_node records their calls.
         """
-        for node in body:
-            for child in ast.walk(node):
-                if isinstance(child, ast.Call):
-                    lineno = getattr(child, "lineno", 0)
-                    self._record_call(child, parent_func_id, lineno)
+        todo = deque(body)
+        while todo:
+            node = todo.popleft()
+            if isinstance(node, _PY_DEFINITIONS):
+                continue
+            todo.extend(ast.iter_child_nodes(node))
+            if isinstance(node, ast.Call):
+                self._record_call(node, parent_func_id, node.lineno)
 
     def _record_call(self, call_node, parent_func_id, lineno):
-        func_name = self._get_func_name(call_node.func)
+        self._record_callee(call_node.func, parent_func_id, lineno)
+
+    def _record_callee(self, func_node, parent_func_id, lineno):
+        func_name = self._get_func_name(func_node)
         if func_name:
             resolved_name = self.builder.current_scope.resolve(func_name)
-            if not is_non_project_call(resolved_name):
-                self.builder.edges.append(
-                    {
-                        "source": parent_func_id,
-                        "target": f"REF:{resolved_name}",
-                        "relation": "CALLS",
-                        "metadata": {"lineno": lineno},
-                    }
-                )
+            metadata = {"lineno": lineno, "origin": self._origin(func_node, lineno)}
+            if func_node.end_lineno == lineno:
+                # The called name ends where the callee expression does. It
+                # is read from the line: the AST holds its NFKC form, which
+                # can differ in length.
+                line = self.source_lines[lineno - 1].encode()
+                written = line[: func_node.end_col_offset].decode()
+                name = re.search(r"\w*$", written)
+                metadata["col"] = _scip_columns(written[: name.start()])
+            self.builder.edges.append(
+                {
+                    "source": parent_func_id,
+                    "target": f"REF:{resolved_name}",
+                    "relation": "CALLS",
+                    "metadata": metadata,
+                }
+            )
+
+    def _origin(self, node, lineno):
+        """Write the expression ``node`` as an origin path for CallResolver:
+        dotted names with ``()`` after each call, imported names expanded
+        behind ``@``, and local names replaced by what they were bound to
+        before ``lineno``. ``?`` stands for anything that has no such path."""
+        if isinstance(node, ast.Name):
+            for depth, frame in enumerate(reversed(self.bindings)):
+                if node.id in frame:
+                    bound = [o for at, o in frame[node.id] if depth or at < lineno]
+                    return bound[-1] if bound else "?"
+            imported = self.import_targets.get(node.id)
+            return f"@{imported}" if imported else node.id
+        if isinstance(node, ast.Attribute):
+            base = self._origin(node.value, lineno)
+            if base == "self" and node.attr in self.class_attrs[-1]:
+                return self.class_attrs[-1][node.attr]
+            return f"{base}.{node.attr}"
+        if isinstance(node, ast.Call):
+            return f"{self._origin(node.func, lineno)}()"
+        if isinstance(node, ast.Await):
+            return self._origin(node.value, lineno)
+        return "?"
+
+    def _fixture_name(self, func):
+        """Name of the pytest fixture ``func`` is decorated as, if any."""
+        for decorator in func.decorator_list:
+            called = isinstance(decorator, ast.Call)
+            target = decorator.func if called else decorator
+            if self._origin(target, func.lineno) != "@pytest.fixture":
+                continue
+            for keyword in decorator.keywords if called else ():
+                given = keyword.value
+                if keyword.arg == "name" and isinstance(given, ast.Constant):
+                    return str(given.value)
+            return func.name
+        return None
+
+    def _returned_origin(self, func):
+        """Origin of the one value ``func`` returns or yields, None when it
+        has several or the value has no origin path."""
+        origins = set()
+        todo = deque(func.body)
+        while todo:
+            node = todo.popleft()
+            if isinstance(node, (ast.Return, ast.Yield)) and node.value:
+                origins.add(self._origin(node.value, node.lineno))
+            if not isinstance(node, (*_PY_DEFINITIONS, ast.Lambda)):
+                todo.extend(ast.iter_child_nodes(node))
+        origin = origins.pop() if len(origins) == 1 else "?"
+        return None if "?" in origin else origin
+
+    def _instance_origin(self, annotation, lineno):
+        """Origin of a value annotated with ``annotation``."""
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            try:
+                annotation = ast.parse(annotation.value, mode="eval").body
+            except SyntaxError:
+                return "?"
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            sides = [annotation.left, annotation.right]
+            typed = [
+                s
+                for s in sides
+                if not (isinstance(s, ast.Constant) and s.value is None)
+            ]
+            if len(typed) != 1:
+                return "?"
+            annotation = typed[0]
+        if isinstance(annotation, (ast.Name, ast.Attribute)):
+            return f"{self._origin(annotation, lineno)}()"
+        return "?"
+
+    def _push_bindings(self, body, func=None, is_method=False):
+        """Push a frame mapping each name bound in ``body`` (and by the
+        parameters of ``func``) to its ``(lineno, origin)`` bindings in
+        source order. Module-level imports go to ``import_targets``."""
+        frame = {}
+        self.bindings.append(frame)
+
+        def bind(target, lineno, origin):
+            if isinstance(target, ast.Name):
+                frame.setdefault(target.id, []).append((lineno, origin))
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                for element in target.elts:
+                    bind(element, lineno, "?")
+            elif isinstance(target, ast.Starred):
+                bind(target.value, lineno, "?")
+
+        if func is not None:
+            args = func.args
+            params = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+            params += [a for a in (args.vararg, args.kwarg) if a]
+            decorators = {d.id for d in func.decorator_list if isinstance(d, ast.Name)}
+            positional = len(args.posonlyargs) + len(args.args)
+            # pytest passes a test or fixture the fixtures its parameters
+            # name, unless a `parametrize` mark supplies the argument.
+            injected = func.name.startswith("test") or self._fixture_name(func)
+            parametrized = {
+                name.strip()
+                for decorator in func.decorator_list
+                if isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr == "parametrize"
+                and decorator.args
+                for constant in ast.walk(decorator.args[0])
+                if isinstance(constant, ast.Constant)
+                and isinstance(constant.value, str)
+                for name in constant.value.split(",")
+            }
+            for index, arg in enumerate(params):
+                if (
+                    index == 0
+                    and positional
+                    and is_method
+                    and "staticmethod" not in decorators
+                ):
+                    origin = "cls" if "classmethod" in decorators else "self"
+                elif arg.annotation:
+                    origin = self._instance_origin(arg.annotation, func.lineno)
+                elif injected and arg.arg not in parametrized:
+                    origin = f"~{arg.arg}"
+                else:
+                    origin = "?"
+                frame[arg.arg] = [(func.lineno, origin)]
+
+        found = []
+        todo = deque(body)
+        while todo:
+            node = todo.popleft()
+            found.append(node)
+            if not isinstance(node, _PY_DEFINITIONS):
+                todo.extend(ast.iter_child_nodes(node))
+        for node in sorted(found, key=lambda n: getattr(n, "lineno", 0)):
+            lineno = getattr(node, "lineno", 0)
+            if isinstance(node, _PY_DEFINITIONS):
+                frame.pop(node.name, None)
+            elif isinstance(node, ast.Assign):
+                origin = self._origin(node.value, lineno)
+                for target in node.targets:
+                    bind(target, lineno, origin)
+            elif isinstance(node, ast.AnnAssign):
+                origin = self._instance_origin(node.annotation, lineno)
+                bind(node.target, lineno, origin)
+            elif isinstance(node, ast.NamedExpr):
+                bind(node.target, lineno, self._origin(node.value, lineno))
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for name, target in _py_import_bindings(node):
+                    if func is None:
+                        self.import_targets[name] = target
+                    else:
+                        frame.setdefault(name, []).append((lineno, f"@{target}"))
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                bind(node.target, lineno - 1, "?")
+            elif isinstance(node, _PY_COMPREHENSIONS):
+                for generator in node.generators:
+                    bind(generator.target, lineno - 1, "?")
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                for item in node.items:
+                    bind(item.optional_vars, lineno - 1, "?")
+            elif isinstance(node, ast.Lambda):
+                for arg in ast.walk(node.args):
+                    if isinstance(arg, ast.arg):
+                        frame.setdefault(arg.arg, []).append((lineno - 1, "?"))
+            elif isinstance(node, _PY_NAME_BINDERS) and node.name:
+                frame.setdefault(node.name, []).append((lineno - 1, "?"))
+
+    def _class_attrs(self, class_node):
+        """Map each attribute of ``class_node`` to the origin of the value
+        its body annotates it with or a method assigns to it."""
+        attrs = {}
+        for stmt in class_node.body:
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                origin = self._instance_origin(stmt.annotation, stmt.lineno)
+                attrs.setdefault(stmt.target.id, origin)
+            elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self._push_bindings(stmt.body, stmt, is_method=True)
+                for node in ast.walk(stmt):
+                    if isinstance(node, ast.Assign):
+                        targets, value = node.targets, node.value
+                    elif isinstance(node, ast.AnnAssign):
+                        targets, value = [node.target], node.annotation
+                    else:
+                        continue
+                    for target in targets:
+                        if (
+                            isinstance(target, ast.Attribute)
+                            and self._origin(target.value, node.lineno) == "self"
+                        ):
+                            origin = (
+                                self._origin(value, node.lineno)
+                                if isinstance(node, ast.Assign)
+                                else self._instance_origin(value, node.lineno)
+                            )
+                            attrs.setdefault(target.attr, origin)
+                self.bindings.pop()
+        return {name: origin for name, origin in attrs.items() if "?" not in origin}
 
     def _get_func_name(self, func_node):
         if isinstance(func_node, ast.Name):
@@ -6538,7 +7171,82 @@ class PythonParser(BaseParser):
         return None
 
 
+_RUST_DECLARATIONS = (
+    # `name: Type`, `name: &'a mut Type`, `name: &dyn Trait`, `name: Type<'a>`;
+    # not `name: None`, a field of a struct literal. A type with type
+    # arguments is marked generic: unless the project defines it (`Arc<T>`),
+    # its methods are mostly those of what it wraps.
+    re.compile(
+        r"\b(?P<name>[a-z_]\w*)\s*:\s*(?:&\s*)?(?:'\w+\s+)?(?:mut\s+)?"
+        r"(?:dyn\s+|impl\s+)?(?P<type>(?!None\b)[A-Z]\w*)\b(?![:(!])"
+        r"(?:<'\w+>|(?P<generic><))?"
+    ),
+    # `let name = Type { ... }`
+    re.compile(r"\blet\s+(?:mut\s+)?(?P<name>\w+)\s*=\s*(?P<type>[A-Z]\w*)\s*\{"),
+    # A type parameter's bound, in `<T: Trait>` or a `where` clause
+    re.compile(
+        r"(?:[<,]|\bwhere\s|^)\s*(?P<param>[A-Z]\w*)\s*:\s*"
+        r"(?P<type>[A-Z]\w*)\b(?![<:(!])"
+    ),
+)
+
+
+# `type Name = ...` in Rust or TypeScript, behind any visibility or `export`
+_TYPE_ALIAS_RE = re.compile(r"^[ \t]*(?:[\w()]+\s+)*type\s+(\w+)[^=;{]*=", re.MULTILINE)
+
+
+def _use_leaves(tree: str, prefix: str = ""):
+    """Yield ``(local name, full path)`` for each name a `use` tree binds:
+    `a::{b, c::d as e, f::*}` binds b to `a::b` and e to `a::c::d`. The
+    glob is yielded under its own path, `a::f::*`."""
+    head, brace, group = tree.strip().partition("{")
+    if not brace:
+        path, _, alias = (prefix + head).partition(" as ")
+        path = path.strip().removesuffix("::self")
+        if path.endswith("::*"):
+            yield path, path
+        elif head.strip():
+            yield alias.strip() or path.rpartition("::")[2], path
+        return
+    depth = 0
+    start = 0
+    group = group.rpartition("}")[0] + ","
+    for column, char in enumerate(group):
+        depth += (char == "{") - (char == "}")
+        if char == "," and depth == 0:
+            yield from _use_leaves(group[start:column], prefix + head.strip())
+            start = column + 1
+
+
+# An optional visibility: pub, pub(crate), pub(super), pub(in path)
+_RUST_VIS = r"(?:pub(?:\([^)]*\))?\s+)?"
+# A `use` declaration's tree, which may span lines
+_RUST_USE_RE = re.compile(rf"^\s*{_RUST_VIS}use\s+([^;]+);", re.MULTILINE)
+
+
+# A parameter name in a `fn` signature
+_RUST_PARAMETER_RE = re.compile(r"[(,]\s*(?:mut\s+)?([a-z_]\w*)\s*:")
+# A `fn` with its body on the line of the `impl` block it is in
+_RUST_INLINE_FN_RE = re.compile(
+    r"\bfn\s+(?P<name>\w+)[^{;]*?(?:->(?P<returns>[^{;]+))?\{(?P<body>[^{}]*)\}"
+)
+
+
 class RustParser(BaseParser):
+    binding_re = re.compile(r"\blet\s+(?:mut\s+)?(?P<name>\w+)\s*=(?!=)")
+
+    def _generic_path_origin(self, callee):
+        """Origin of a path that starts at a type parameter: `T::name` is a
+        function of the bound of `T`, `T::Assoc::name` one of a type that
+        only an implementation of the bound names."""
+        root, *path = callee.split("::")
+        if not path or f"<{root}>" not in self.declared:
+            return None
+        bounds = {bound for _, bound, _ in self.declared[f"<{root}>"]}
+        if len(path) == 1 and len(bounds) == 1:
+            return f"{bounds.pop()}.{path[0]}"
+        return f"?.{path[-1]}"
+
     def parse(self, file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
 
@@ -6548,33 +7256,57 @@ class RustParser(BaseParser):
 
         # Regex patterns
         re_fn_start = re.compile(
-            r"^\s*(?:pub\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([a-zA-Z0-9_]+)"
+            rf"^\s*{_RUST_VIS}(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?"
+            r"(?:extern\s+\"[^\"]*\"\s+)?fn\s+([a-zA-Z0-9_]+)"
         )
-        re_struct = re.compile(r"^\s*(?:pub\s+)?(?:struct|trait)\s+([a-zA-Z0-9_]+)")
-        re_enum = re.compile(r"^\s*(?:pub\s+)?enum\s+([a-zA-Z0-9_]+)")
+        re_struct = re.compile(rf"^\s*{_RUST_VIS}(?:struct|trait)\s+([a-zA-Z0-9_]+)")
+        re_enum = re.compile(rf"^\s*{_RUST_VIS}enum\s+([a-zA-Z0-9_]+)")
         # Enum variant patterns: Name, Name(Type), Name { field: Type }
         re_enum_variant = re.compile(r"^\s*([A-Z][a-zA-Z0-9_]*)\s*(?:[({\,]|$)")
         re_impl = re.compile(
             r"^\s*impl(?:<.*?>)?\s+(?:([a-zA-Z0-9_:<>,\s]+?)\s+for\s+)?([a-zA-Z0-9_:]+)"
         )
-        re_mod = re.compile(r"^\s*(?:pub\s+)?mod\s+([a-zA-Z0-9_]+)\s*\{?")
-        re_use = re.compile(r"^\s*(?:pub\s+)?use\s+([^;]+);")
+        re_mod = re.compile(rf"^\s*{_RUST_VIS}mod\s+([a-zA-Z0-9_]+)\s*\{{?")
         re_const = re.compile(
             r"^\s*(?:pub(?:\(.*?\))?\s+)?(?:const|static)\s+([A-Z0-9_]+)\s*:\s*.*?\s*=\s*(.*?);"
         )
-        re_call = re.compile(r"([a-zA-Z0-9_:]+)\(")
+        re_call = re.compile(r"([a-zA-Z0-9_:.]+)\(")
+        self.scan_declarations(lines, _RUST_DECLARATIONS)
+        self.builder.type_aliases.update(_TYPE_ALIAS_RE.findall(content))
+        for tree in _RUST_USE_RE.findall(content):
+            self.builder.imports.setdefault(file_id, {}).update(_use_leaves(tree))
 
         current_impl_target = None
         current_trait_impl = (
             None  # Track trait name when in "impl Trait for Struct" block
         )
         current_enum_id = None  # Track if we're inside an enum for variant parsing
+        impl_targets = {}  # id of each impl block's type -> (name, lineno)
+        fn_start = 0  # first line of the function being read
+        fn_ids = set()  # functions whose body is a context; a `fn` in one is nested
+
+        def opens_block(text):
+            """True if ``text`` leaves a `{` open; `struct P { x: i32 }` does not."""
+            return text.count("{") > text.count("}")
+
+        # Each line without comments and literal text, and whether it lies
+        # partly inside a comment or literal that spans lines.
+        codes = []
+        inside = None
+        for raw in lines:
+            code, ends_inside = blank_strings(raw, inside, ('"', "r"))
+            codes.append((code, bool(inside or ends_inside)))
+            inside = ends_inside
 
         i = 0
         while i < len(lines):
-            line = lines[i]
+            code, spanned = codes[i]
+            # The text of a string or comment declares nothing.
+            line = code if spanned else lines[i]
             lineno = i + 1
             indent = len(line) - len(line.lstrip())
+            # The regex call fallback starts past a name declared on the line.
+            call_scan_start = 0
 
             # Pop context
             if "}" in line:
@@ -6608,6 +7340,8 @@ class RustParser(BaseParser):
             # 1. Functions
             if match := re_fn_start.search(line):
                 name = match.group(1)
+                call_scan_start = match.end()
+                fn_start = lineno
                 j, full_sig = self._consume_until_body(lines, i)
 
                 ret = "()"
@@ -6626,7 +7360,7 @@ class RustParser(BaseParser):
                 sig = f"fn {name}(...) -> {ret}"
                 docstring = self.get_leading_docstring(lines, i)
 
-                if current_impl_target:
+                if current_impl_target and parent_id not in fn_ids:
                     func_id = f"{file_id}::{current_impl_target}::{name}"
                     node_type = "Method"
                 else:
@@ -6657,15 +7391,19 @@ class RustParser(BaseParser):
 
                 self.builder.add_node(func_id, node_type, **node_kwargs)
                 self.builder.add_edge(parent_id, func_id, "DEFINES")
+                for parameter in _RUST_PARAMETER_RE.findall(full_sig):
+                    self.add_local(func_id, parameter)
 
-                if "{" in lines[j]:
+                if opens_block(lines[j]):
                     current_context.append(func_id)
                     context_indent.append(indent)
+                    fn_ids.add(func_id)
                 i = j
 
             # 2. Structs/Traits
             elif match := re_struct.search(line):
                 name = match.group(1)
+                call_scan_start = match.end()
                 docstring = self.get_leading_docstring(lines, i)
                 type_id = f"{parent_id}::{name}"
                 # Find end of struct/trait block
@@ -6681,7 +7419,7 @@ class RustParser(BaseParser):
                     docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, type_id, "DEFINES")
-                if "{" in line:
+                if opens_block(line):
                     current_context.append(type_id)
                     context_indent.append(indent)
 
@@ -6703,7 +7441,7 @@ class RustParser(BaseParser):
                     docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, type_id, "DEFINES")
-                if "{" in line:
+                if opens_block(line):
                     current_context.append(type_id)
                     context_indent.append(indent)
                     current_enum_id = type_id  # Track enum for variant parsing
@@ -6711,6 +7449,7 @@ class RustParser(BaseParser):
             # 2c. Enum variants (when inside an enum)
             elif current_enum_id and (match := re_enum_variant.search(line)):
                 variant_name = match.group(1)
+                call_scan_start = match.end(1)
                 # Skip common Rust keywords/patterns that match variant regex
                 if variant_name not in (
                     "Self",
@@ -6739,47 +7478,109 @@ class RustParser(BaseParser):
                 trait, target = match.groups()
                 real_target = (target if target else trait).split("<")[0]
                 current_impl_target = real_target.split("::")[-1]
+                struct_id = f"{file_id}::{current_impl_target}"
+                impl_targets.setdefault(struct_id, (current_impl_target, lineno))
 
                 if trait:
                     trait_name = trait.split("<")[0].split("::")[-1]
                     current_trait_impl = trait_name  # Track trait for method metadata
-                    struct_id = f"{file_id}::{current_impl_target}"
                     self.builder.add_edge(struct_id, f"REF:{trait_name}", "INHERITS")
                 else:
                     current_trait_impl = None  # Inherent impl, no trait
 
-                if "{" in line:
-                    struct_id = f"{file_id}::{current_impl_target}"
+                if opens_block(line):
                     current_context.append(struct_id)
                     context_indent.append(indent)
+                elif "{" in line:  # `impl Marker for Foo {}`
+                    # Methods of a block written on one line.
+                    body = line.index("{")
+                    self.begin_line(code, lineno, raw=lines[i])
+                    for method in _RUST_INLINE_FN_RE.finditer(code, body):
+                        method_id = f"{struct_id}::{method['name']}"
+                        self.builder.add_node(
+                            method_id,
+                            "Method",
+                            name=method["name"],
+                            signature=f"fn {method['name']}(...)",
+                            lineno=lineno,
+                            end_lineno=lineno,
+                            token_count=10,
+                            docstring="",
+                            return_type=(method["returns"] or "()").strip(),
+                        )
+                        self.builder.add_edge(struct_id, method_id, "DEFINES")
+                        for call_match in re_call.finditer(method["body"]):
+                            callee = call_match.group(1).lstrip(".")
+                            if callee:
+                                end = method.start("body") + call_match.end()
+                                self.add_call(
+                                    method_id,
+                                    callee,
+                                    lineno,
+                                    lineno,
+                                    end - 1 - len(callee),
+                                    end - 1,
+                                )
+                    call_scan_start = len(line)
+                    current_impl_target = None
+                    current_trait_impl = None
 
             # 4. Modules
             elif match := re_mod.search(line):
                 name = match.group(1)
                 mod_id = f"{parent_id}::{name}"
-                if "{" in line:
+                if opens_block(line):
+                    # The module is the source of its items' DEFINES edges.
+                    self.builder.add_node(
+                        mod_id,
+                        "Class",
+                        name=name,
+                        kind="module",
+                        lineno=lineno,
+                        docstring=self.get_leading_docstring(lines, i),
+                    )
+                    self.builder.add_edge(parent_id, mod_id, "DEFINES")
                     current_context.append(mod_id)
                     context_indent.append(indent)
 
             # 5. Imports
-            elif match := re_use.search(line):
+            elif match := _RUST_USE_RE.search(line):
                 path = match.group(1).replace("::", ".")
                 self.builder.add_edge(file_id, f"MODULE:{path}", "IMPORTS")
 
             # 6. Calls (regex fallback - only used if ast-grep unavailable)
             if not self.builder.use_ast_grep and parent_id != file_id:
-                for call_match in re_call.finditer(line):
-                    callee = call_match.group(1)
-                    if not is_non_project_call(callee):
-                        self.builder.edges.append(
-                            {
-                                "source": parent_id,
-                                "target": f"REF:{callee}",
-                                "relation": "CALLS",
-                                "metadata": {"lineno": lineno},
-                            }
+                code = codes[lineno - 1][0]
+                self.begin_line(code, lineno, parent_id, lines[lineno - 1])
+                for call_match in re_call.finditer(code, call_scan_start):
+                    # In `0..items.len()` the callee follows the range's `..`.
+                    callee = call_match.group(1).rpartition("..")[2].lstrip(".")
+                    # `pub(crate)` is a visibility, not a call.
+                    if callee and callee != "pub":
+                        self.add_call(
+                            parent_id,
+                            callee,
+                            lineno,
+                            fn_start,
+                            call_match.end(1) - len(callee),
+                            call_match.end() - 1,
+                            self._generic_path_origin(callee),
                         )
             i += 1
+
+        # An impl block's edges are sourced at its type. A type declared in
+        # another file has no node here, so give it one.
+        for struct_id, (name, impl_lineno) in impl_targets.items():
+            if struct_id not in self.builder.node_registry:
+                self.builder.add_node(
+                    struct_id,
+                    "Class",
+                    name=name,
+                    kind="impl",
+                    lineno=impl_lineno,
+                    docstring="",
+                )
+                self.builder.add_edge(file_id, struct_id, "DEFINES")
 
         # Use ast-grep for more accurate CALLS detection
         if self.builder.use_ast_grep:
@@ -6794,10 +7595,6 @@ class RustParser(BaseParser):
         for call in extract_calls_rust(file_path):
             lineno = call["lineno"]
             callee = call["callee"]
-
-            # Filter stdlib calls
-            if is_non_project_call(callee):
-                continue
 
             # Find the containing function for this line
             context_id = line_to_context.get(lineno)
@@ -6841,7 +7638,7 @@ class RustParser(BaseParser):
                 "init",
                 "initialize",
             )
-            if "::" in callee:
+            if "::" in callee and not is_non_project_call(callee):
                 parts = callee.split("::")
                 if len(parts) >= 2:
                     method_name = parts[-1]
@@ -6879,7 +7676,7 @@ class RustParser(BaseParser):
 
         for lineno, line in enumerate(lines, 1):
             # Skip struct/enum/trait definitions
-            if re.match(r"^\s*(?:pub\s+)?(?:struct|enum|trait)\s+", line):
+            if re.match(rf"^\s*{_RUST_VIS}(?:struct|enum|trait)\s+", line):
                 continue
             # Skip impl blocks
             if re.match(r"^\s*impl", line):
@@ -6961,10 +7758,6 @@ class RustParser(BaseParser):
                         else:
                             receiver = match.group(1)
                             method_name = match.group(2)
-
-                        # Skip stdlib methods
-                        if is_non_project_call(method_name):
-                            continue
 
                         # Skip if receiver is a common variable pattern
                         if receiver in ("e", "err", "error", "_"):
@@ -7112,9 +7905,7 @@ class ProtoParser(BaseParser):
             indent = len(line) - len(line.lstrip())
 
             if "}" in line:
-                while len(context_indent) > 1 and indent <= context_indent[-1]:
-                    context_indent.pop()
-                    current_context.pop()
+                self.leave_contexts(current_context, context_indent, indent)
 
             parent_id = current_context[-1]
 
@@ -7162,12 +7953,172 @@ class ProtoParser(BaseParser):
                     context_indent.append(indent)
 
 
+_TS_DECLARATIONS = (
+    # `name: Type` on a parameter (alone on its line or not), variable or field
+    re.compile(
+        r"(?:^|[(,]|\b(?:const|let|var|private|public|protected|readonly)\s)\s*"
+        r"(?P<name>[A-Za-z_$][\w$]*)\??\s*:\s*(?P<type>[A-Z][\w$.]*)\b(?![<(\[])"
+    ),
+    # `name = new Type(`
+    re.compile(r"\b(?P<name>[A-Za-z_$][\w$]*)\s*=\s*new\s+(?P<type>[A-Za-z_$][\w$.]*)"),
+    # A type parameter's bound: `<T extends Type`
+    re.compile(
+        r"[<,]\s*(?P<param>[A-Z]\w*)\s+extends\s+(?P<type>[A-Z][\w$.]*)\b(?![<(])"
+    ),
+)
+
+
+_TS_VARIABLE_RE = re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_$]+)")
+
+
+def _arrow_function(statement: str) -> tuple[str, str] | None:
+    """Read `const name = (params) => ...`, with or without a type
+    annotation on ``name``, or `const name = function (params) ...`. Returns
+    the name and the function from its parameters on, else None."""
+    match = _TS_VARIABLE_RE.match(statement)
+    if not match:
+        return None
+    # The initialiser follows the first `=` outside brackets that is not
+    # the `=>` of a function type.
+    depth = 0
+    for column in range(match.end(), len(statement)):
+        char = statement[column]
+        if char in "([{<":
+            depth += 1
+        elif char in ")]}>" and statement[column - 1] != "=":
+            depth -= 1
+        elif char == "=" and depth == 0 and statement[column + 1 : column + 2] != ">":
+            break
+    else:
+        return None
+    value = re.sub(r"^\s*(?:async\b\s*)?", "", statement[column + 1 :])
+    if re.match(r"function\b|[A-Za-z_$][\w$]*\s*=>", value):
+        return match.group(1), value
+    if not value.startswith("("):
+        return None
+    depth = 0
+    for column, char in enumerate(value):
+        depth += (char == "(") - (char == ")")
+        if depth == 0:
+            # `=>` follows the parameters, after any return type.
+            rest = value[column + 1 :].lstrip()
+            is_arrow = rest.startswith("=>") or (rest.startswith(":") and "=>" in rest)
+            return (match.group(1), value) if is_arrow else None
+    return None
+
+
+def _ts_params(signature: str) -> set[str]:
+    """Names of the parameters in the first parameter list of ``signature``."""
+    names = set()
+    depth = 0
+    at_start = False
+    tokens = re.findall(r"[A-Za-z_$][\w$]*|\.\.\.|=>|\S", signature)
+    for token in tokens[tokens.index("(") if "(" in tokens else len(tokens) :]:
+        if token in ("(", "<", "[", "{"):
+            depth += 1
+            at_start = depth == 1
+        elif token in (")", ">", "]", "}"):
+            depth -= 1
+            if depth == 0:
+                break
+        elif depth == 1 and token == ",":
+            at_start = True
+        elif at_start and token not in _TS_PARAM_MODIFIERS:
+            if token[0].isalpha() or token[0] in "_$":
+                names.add(token)
+            at_start = False
+    return names
+
+
+_TS_METHOD_MODIFIERS = ("", "async", "static", "get", "set", "*", "async *")
+_TS_PARAM_MODIFIERS = ("...", "public", "private", "protected", "readonly")
+# `export * from "<specifier>"`, `export { <clause> } from "<specifier>"` and,
+# with no specifier, `export { <clause> }`
+_TS_REEXPORT_RE = re.compile(
+    r"""^\s*export\s+(?:type\s+)?(?:(\*)\s+from\s+|\{([^}]*)\}(?:\s+from\s+)?)"""
+    r"""(?:['"]([^'"]+)['"])?""",
+    re.MULTILINE,
+)
+# `import <clause> from "<specifier>"`, the clause possibly over several lines
+_TS_IMPORT_RE = re.compile(
+    r"""^\s*import\s+(?:type\s+)?([^;'"]*?)\s+from\s+['"]([^'"]+)['"]""", re.MULTILINE
+)
+
+
+# A '...' literal closed on its line; a lone apostrophe, as in JSX text, is not one.
+_JS_SINGLE_QUOTED_RE = re.compile(r"'(?:[^'\\]|\\.)*'")
+
+
+def _blank_js_strings(line: str) -> str:
+    """Return ``line`` with the text of "...", '...' and `...` literals turned
+    to spaces. The `${...}` expressions of a template literal are kept."""
+    out = []
+    stack = []  # open literals: a quote character, or a `${`'s brace depth
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        top = stack[-1] if stack else None
+        if isinstance(top, str):
+            if ch == "\\":
+                out.append("  ")
+                i += 2
+                continue
+            if top == "`" and line.startswith("${", i):
+                stack.append(0)
+                out.append("${")
+                i += 2
+                continue
+            if ch == top:
+                stack.pop()
+            out.append(ch if ch == top else " ")
+        else:
+            if ch in ('"', "`") or (ch == "'" and _JS_SINGLE_QUOTED_RE.match(line, i)):
+                stack.append(ch)
+            elif ch == "{" and top is not None:
+                stack[-1] += 1
+            elif ch == "}" and top is not None:
+                if top == 0:
+                    stack.pop()
+                else:
+                    stack[-1] -= 1
+            out.append(ch)
+        i += 1
+    return "".join(out)[: len(line)]
+
+
+def _opens_body(signature: str) -> bool:
+    """True when ``signature`` reads `name(params) {` or `name(params): T {`:
+    its first brace outside parentheses directly follows a parameter list."""
+    depth = 0
+    after_params = False
+    for char in signature:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            after_params = depth == 0
+        elif depth == 0 and char == "{":
+            return after_params
+        elif depth == 0 and char in "=;,.":
+            after_params = False
+    return False
+
+
 class TSParser(BaseParser):
-    def parse(self, file_path, rel_path, content):
+    binding_re = re.compile(
+        r"\b(?:const|let|var)\s+(?P<name>[\w$]+)\s*=(?![=>])\s*(?P<unwrap>await\b)?"
+    )
+
+    def parse(self, file_path, rel_path, content, line_offset=0):
+        """Parse ``content``: the text of ``file_path``, or one ``<script>``
+        block of it that starts ``line_offset`` lines in. Emitted line
+        numbers are relative to ``content``."""
         file_id = self.add_file_node(rel_path, content)
 
         lines = content.splitlines()
-        current_context = [file_id]
+        self.line_offset = line_offset
+        self.line_count = len(lines)
+        self.enter_context(file_id, 0, len(lines))
 
         # Initialize TypeScript symbol table for import tracking
         self.symbol_table = TypeScriptSymbolTable(
@@ -7187,33 +8138,48 @@ class TSParser(BaseParser):
                 )
 
         re_class = re.compile(
-            r"^\s*(?:export\s+)?(?:abstract\s+)?class\s+([a-zA-Z0-9_]+)"
+            r"^\s*(?:export\s+)?(?:abstract\s+)?class\s+([a-zA-Z0-9_$]+)"
         )
-        re_interface = re.compile(r"^\s*(?:export\s+)?interface\s+([a-zA-Z0-9_]+)")
+        re_interface = re.compile(r"^\s*(?:export\s+)?interface\s+([a-zA-Z0-9_$]+)")
         re_func = re.compile(
-            r"^\s*(?:export\s+)?(?:async\s+)?function\s+([a-zA-Z0-9_]+)"
+            r"^\s*(?:export\s+)?(?:declare\s+)?(?:default\s+)?(?:async\s+)?"
+            r"function\s+([a-zA-Z0-9_$]+)"
         )
         re_method = re.compile(
-            r"^\s*(?:private|public|protected)?\s*(?:static\s+)?(?:async\s+)?([a-zA-Z0-9_]+)\s*(?:<[^>]*>)?\s*[(]"
+            r"^\s*(?:private|public|protected)?\s*(?:static\s+)?(?:async\s+)?([a-zA-Z0-9_$]+)\s*(?:<[^>]*>)?\s*[(]"
         )
         # Getter/setter methods: get name() or set name(value)
         re_getter_setter = re.compile(
-            r"^\s*(?:private|public|protected)?\s*(?:static\s+)?(get|set)\s+([a-zA-Z0-9_]+)\s*[(]"
+            r"^\s*(?:private|public|protected)?\s*(?:static\s+)?(get|set)\s+([a-zA-Z0-9_$]+)\s*[(]"
         )
-        # D.4: merged alternation to avoid ReDoS. Previous pattern
-        # (?:[^)]*|[^=]*) had overlapping unbounded alternatives which could
-        # produce catastrophic backtracking on pathological long lines.
-        re_const_arrow = re.compile(
-            r"^\s*(?:export\s+)?const\s+([a-zA-Z0-9_]+)\s*=\s*(?:async\s*)?[^)=]*\s*=>"
-        )
-        re_enum = re.compile(r"^\s*(?:export\s+)?enum\s+([a-zA-Z0-9_]+)")
+        re_enum = re.compile(r"^\s*(?:export\s+)?enum\s+([a-zA-Z0-9_$]+)")
         re_const = re.compile(
-            r"^\s*(?:export\s+)?const\s+([a-zA-Z0-9_]+)\s*(?::\s*.*?)?\s*=\s*(.*?);"
+            r"^\s*(?:export\s+)?const\s+([a-zA-Z0-9_$]+)\s*(?::\s*.*?)?\s*=\s*(.*?);"
         )
         re_import = re.compile(r'import\s+.*?from\s+([\'"])(.*?)\1')
         re_call_candidate = re.compile(
-            r"([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*)\s*(?=[<(])"
+            r"([a-zA-Z0-9_$]+(?:\.[a-zA-Z0-9_$]+)*)\s*(?=[<(])"
         )
+        self.scan_declarations(lines, _TS_DECLARATIONS)
+        self.builder.type_aliases.update(_TYPE_ALIAS_RE.findall(content))
+        for star, clause, specifier in _TS_REEXPORT_RE.findall(content):
+            names = [("*", "")] if star else []
+            for part in clause.split(","):
+                # `name`, `type name`, `name as alias`
+                original, _, alias = part.partition(" as ")
+                if original.split():
+                    names.append(
+                        ((alias or original).split()[-1], original.split()[-1])
+                    )
+            self.builder.reexports.setdefault(file_id, []).extend(
+                (exported, specifier, original) for exported, original in names
+            )
+        for clause, specifier in _TS_IMPORT_RE.findall(content):
+            for part in re.split(r"[{},]", clause):
+                # `name`, `type name`, `name as alias`, `* as alias`
+                local = part.rpartition(" as ")[2].split()[-1:]
+                if local:
+                    self.builder.imports.setdefault(file_id, {})[local[0]] = specifier
         # Configuration patterns: interceptors, middleware, event handlers
         # These are method calls that set up important runtime behavior
         re_interceptor = re.compile(
@@ -7226,20 +8192,52 @@ class TSParser(BaseParser):
             r"^\s*([a-zA-Z0-9_]+)\.on\s*\(\s*['\"]([a-zA-Z0-9_:]+)['\"]"
         )
 
-        brace_balance = 0
+        class_ids = set()  # class/interface/enum nodes declared in this file
+        interface_ids = set()  # interfaces that have the ID `<scope>::<name>`
+        value_ids = set()  # functions and variables, which always have it
+
+        def enter(node_id, lineno, end_lineno, signature=""):
+            """Make a definition that spans further lines the context."""
+            if end_lineno > lineno:
+                self.enter_context(node_id, lineno, end_lineno, _ts_params(signature))
+
+        in_comment = False
         i = 0
         while i < len(lines):
-            line = lines[i]
+            line, in_comment = strip_block_comments(lines[i], in_comment)
+            line = strip_line_comment(line, backticks=True)
             lineno = i + 1
+            # Column of a function/method name declared on this line, which
+            # the regex call fallback must not read as a call.
+            declared_at = None
 
-            brace_balance += line.count("{") - line.count("}")
-            if brace_balance < len(current_context) - 1 and len(current_context) > 1:
-                current_context.pop()
+            parent_id = self.context_at(lineno)[0]
 
-            parent_id = current_context[-1]
+            def claim(node_id):
+                """Take ``node_id`` for a function or variable; an interface
+                declared under it moves to `<scope>::interface_<name>`."""
+                value_ids.add(node_id)
+                if node_id in interface_ids:
+                    interface_ids.discard(node_id)
+                    scope, _, own = node_id.rpartition("::")
+                    self.rename_node(node_id, f"{scope}::interface_{own}")
+
+            def read_arrow(idx):
+                """Read `const name = (params) => ...` from line ``idx`` to
+                the line that closes its parameter list. Returns that line's
+                index and what ``_arrow_function`` makes of the statement."""
+                text = ""
+                for j in range(idx, min(idx + 40, len(lines))):
+                    text = f"{text} {lines[j].strip()}".lstrip()
+                    arrow = _arrow_function(text)
+                    code = _NON_CODE_RE.sub("", text).rstrip()
+                    # The value may start on the line after the `=`.
+                    open_ended = code.endswith("=") or code.count("(") > code.count(")")
+                    if arrow or not open_ended:
+                        return j, arrow
+                return idx, None
 
             def consume_sig(idx):
-                nonlocal brace_balance
                 sig_lines = [lines[idx]]
                 j = idx
                 while (
@@ -7247,13 +8245,13 @@ class TSParser(BaseParser):
                 ):
                     j += 1
                     sig_lines.append(lines[j])
-                    brace_balance += lines[j].count("{") - lines[j].count("}")
                 return j, " ".join([ln.strip() for ln in sig_lines])
 
             if match := re_const.search(line):
                 name, val = match.groups()
                 doc = self.get_leading_docstring(lines, i)
                 cid = f"{parent_id}::{name}"
+                claim(cid)
                 self.builder.add_node(
                     cid, "Constant", name=name, value=val, lineno=lineno, docstring=doc
                 )
@@ -7266,8 +8264,9 @@ class TSParser(BaseParser):
                     cid, "Class", name=name, lineno=lineno, docstring=doc
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
+                class_ids.add(cid)
                 if "{" in line:
-                    current_context.append(cid)
+                    enter(cid, lineno, self._find_block_end(lines, i))
             elif match := re_class.search(line):
                 name = match.group(1)
                 docstring = self.get_leading_docstring(lines, i)
@@ -7288,20 +8287,28 @@ class TSParser(BaseParser):
                     docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
-                if "extends" in full_sig:
+                class_ids.add(cid)
+                # Generic arguments go first: `class A<T extends B> extends C<T>`
+                # inherits from C.
+                heritage = _strip_generics(full_sig)
+                if "extends" in heritage:
                     try:
-                        base = full_sig.split("extends")[1].split()[0].split("{")[0]
+                        base = heritage.split("extends")[1].split()[0].split("{")[0]
                         self.builder.add_edge(cid, f"REF:{base}", "INHERITS")
                     except (IndexError, ValueError):
                         pass
-                if "{" in lines[j]:
-                    current_context.append(cid)
+                enter(cid, lineno, end_lineno)
                 i = j
             elif match := re_interface.search(line):
                 name = match.group(1)
                 docstring = self.get_leading_docstring(lines, i)
                 j, full_sig = consume_sig(i)
                 cid = f"{parent_id}::{name}"
+                if cid in value_ids:
+                    # The function or variable of that name has this ID.
+                    cid = f"{parent_id}::interface_{name}"
+                else:
+                    interface_ids.add(cid)
                 # Find end of interface block
                 end_lineno = (
                     self._find_block_end(lines, j) if "{" in lines[j] else lineno
@@ -7317,18 +8324,20 @@ class TSParser(BaseParser):
                     docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
-                if "extends" in full_sig:
+                class_ids.add(cid)
+                heritage = _strip_generics(full_sig)
+                if "extends" in heritage:
                     try:
-                        bases = full_sig.split("extends")[1].split("{")[0].split(",")
+                        bases = heritage.split("extends")[1].split("{")[0].split(",")
                         for b in bases:
                             self.builder.add_edge(cid, f"REF:{b.strip()}", "INHERITS")
                     except (IndexError, ValueError):
                         pass
-                if "{" in lines[j]:
-                    current_context.append(cid)
+                enter(cid, lineno, end_lineno)
                 i = j
             elif match := re_func.search(line):
                 name = match.group(1)
+                declared_at = match.start(1)
                 docstring = self.get_leading_docstring(lines, i)
                 j, full_sig = consume_sig(i)
                 fid = f"{parent_id}::{name}"
@@ -7338,6 +8347,7 @@ class TSParser(BaseParser):
                 )
                 signature = self._build_ts_signature(name, param_types, return_type)
                 token_count = (end_lineno - lineno + 1) * 10
+                claim(fid)
                 self.builder.add_node(
                     fid,
                     "Function",
@@ -7351,17 +8361,27 @@ class TSParser(BaseParser):
                     param_types=param_types,
                 )
                 self.builder.add_edge(parent_id, fid, "DEFINES")
-                if "{" in lines[j]:
-                    current_context.append(fid)
+                enter(fid, lineno, end_lineno, full_sig)
                 i = j
-            elif match := re_const_arrow.search(line):
-                name = match.group(1)
+            elif _TS_VARIABLE_RE.match(line) and (
+                arrow := (statement := read_arrow(i))[1]
+            ):
+                name, parameters = arrow
+                j = statement[0]
                 docstring = self.get_leading_docstring(lines, i)
                 fid = f"{parent_id}::{name}"
-                end_lineno = self._find_block_end(lines, i) if "{" in line else lineno
+                # A block is left open where the statement stops; an
+                # expression body ends there.
+                last = _NON_CODE_RE.sub("", lines[j])
+                end_lineno = (
+                    self._find_block_end(lines, j)
+                    if last.count("{") > last.count("}")
+                    else j + 1
+                )
                 # Arrow functions don't have easily extractable signatures
                 signature = f"const {name} = (...) => ..."
                 token_count = (end_lineno - lineno + 1) * 10
+                claim(fid)
                 self.builder.add_node(
                     fid,
                     "Function",
@@ -7373,17 +8393,22 @@ class TSParser(BaseParser):
                     docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, fid, "DEFINES")
-                if "{" in line:
-                    current_context.append(fid)
+                enter(fid, lineno, end_lineno, parameters)
+                i = j
             elif (
                 "::" in parent_id
                 and parent_id != file_id
                 and (match := re_method.search(line))
             ):
                 name = match.group(1)
-                if name not in ["if", "for", "while", "switch", "catch"]:
+                j, full_sig = consume_sig(i)
+                # `name(` declares a method directly in a class body, or where
+                # a block follows its parameter list; otherwise it is a call.
+                if name not in ["if", "for", "while", "switch", "catch"] and (
+                    parent_id in class_ids or _opens_body(full_sig)
+                ):
+                    declared_at = match.start(1)
                     docstring = self.get_leading_docstring(lines, i)
-                    j, full_sig = consume_sig(i)
                     mid = f"{parent_id}::{name}"
                     return_type, param_types = self._extract_ts_types(full_sig)
                     end_lineno = (
@@ -7405,8 +8430,7 @@ class TSParser(BaseParser):
                         param_types=param_types,
                     )
                     self.builder.add_edge(parent_id, mid, "DEFINES")
-                    if "{" in lines[j]:
-                        current_context.append(mid)
+                    enter(mid, lineno, end_lineno, full_sig)
                     i = j
             # Handle getter/setter methods: get name() or set name(value)
             # Only match when parent is a Class (not inside a function/method)
@@ -7418,6 +8442,7 @@ class TSParser(BaseParser):
             ):
                 accessor_type = match.group(1)  # "get" or "set"
                 name = match.group(2)
+                declared_at = match.start(2)
                 docstring = self.get_leading_docstring(lines, i)
                 j, full_sig = consume_sig(i)
                 # Include accessor type in ID to distinguish get/set pairs
@@ -7535,40 +8560,55 @@ class TSParser(BaseParser):
                 )
 
             # Calls (regex fallback - only used if ast-grep unavailable)
-            if not self.builder.use_ast_grep and parent_id != file_id:
-                for match in re_call_candidate.finditer(line):
+            # Module-level calls are sourced at the file, as with ast-grep.
+            if not self.builder.use_ast_grep:
+                code = _blank_js_strings(line)
+                # A module's top level takes in the bodies of callbacks, whose
+                # variables are not the module's.
+                scope = None if parent_id == file_id else parent_id
+                self.begin_line(code, lineno, scope, line)
+                for match in re_call_candidate.finditer(code):
+                    if match.start(1) == declared_at:
+                        continue
                     callee = match.group(1)
+                    # `name(params) {` at the start of a line defines a
+                    # method of an object literal.
+                    if (
+                        code[: match.start(1)].strip() in _TS_METHOD_MODIFIERS
+                        and "." not in callee
+                        and _opens_body(code[match.start(1) :])
+                    ):
+                        continue
                     # JS/TS control-flow keywords look like calls (`if(x)`,
                     # `while (y)`). Reject them by simple name — language
                     # general, not codebase specific.
                     simple_name = callee.split(".")[-1]
                     if simple_name in _JSTS_CONTROL_KEYWORDS:
                         continue
-                    if is_non_project_call(callee):
-                        continue
-                    rem = line[match.end() :].lstrip()
-                    is_call = False
-                    if rem.startswith("("):
-                        is_call = True
-                    elif rem.startswith("<"):
-                        bal = 0
-                        for idx, c in enumerate(rem):
-                            if c == "<":
-                                bal += 1
-                            elif c == ">":
-                                bal -= 1
-                            if bal == 0:
-                                if rem[idx + 1 :].lstrip().startswith("("):
-                                    is_call = True
+                    paren = match.end()
+                    if code[paren] == "<":
+                        # Generic arguments: `name<T, U>(`
+                        depth = 0
+                        for offset, char in enumerate(code[paren:]):
+                            depth += (char == "<") - (char == ">")
+                            if depth == 0:
+                                rest = code[paren + offset + 1 :]
+                                paren += offset + 1 + len(rest) - len(rest.lstrip())
                                 break
-                    if is_call:
-                        self.builder.edges.append(
-                            {
-                                "source": parent_id,
-                                "target": f"REF:{callee}",
-                                "relation": "CALLS",
-                                "metadata": {"lineno": lineno},
-                            }
+                    if code[paren : paren + 1] == "(":
+                        # A call of a value passed in as a parameter, unless
+                        # the name is a member of an expression.
+                        is_parameter = any(
+                            callee in params for *_, params in self._contexts
+                        ) and not code[: match.start(1)].rstrip().endswith(".")
+                        self.add_call(
+                            parent_id,
+                            callee,
+                            lineno,
+                            self.context_at(lineno)[1],
+                            match.start(1),
+                            paren,
+                            "?" if is_parameter else None,
                         )
             i += 1
 
@@ -7678,12 +8718,12 @@ class TSParser(BaseParser):
         line_to_context = build_line_to_context_map(self.builder.nodes, file_id)
 
         for call in extract_calls_typescript(file_path):
-            lineno = call["lineno"]
-            callee = call["callee"]
-
-            # Filter stdlib calls
-            if is_non_project_call(callee):
+            # ast-grep numbers the lines of the file on disk; keep only the
+            # calls inside the parsed text, renumbered relative to it.
+            lineno = call["lineno"] - self.line_offset
+            if not 1 <= lineno <= self.line_count:
                 continue
+            callee = call["callee"]
 
             # Skip type-only imports (they don't generate runtime calls)
             if hasattr(self, "symbol_table") and self.symbol_table.is_type_import(
@@ -7712,6 +8752,880 @@ class TSParser(BaseParser):
             )
 
 
+# Languages whose methods are reachable only through an explicit receiver:
+# a bare `name(...)` there never calls a method of the enclosing class.
+_EXPLICIT_RECEIVER_LANGS = frozenset({"python", "rust", "go", "typescript"})
+# Languages whose parser reports every member call with its receiver, so a
+# bare callee is a free call.
+_FREE_BARE_CALL_LANGS = frozenset({"python", "go"})
+# Languages where `receiver.name(...)` can reach a top-level definition
+# through a namespace object.
+_NAMESPACE_RECEIVER_LANGS = frozenset({"typescript"})
+# Languages where a bare call reaches another file's definition only
+# through an import of its name.
+_IMPORT_SCOPED_LANGS = frozenset({"rust", "typescript"})
+# Methods that hand on what their receiver wraps: `Result<T, E>::unwrap`.
+_UNWRAPPING_METHODS = {"rust": ("unwrap", "expect")}
+# Languages that spread one type's members over several declarations.
+_SPLIT_TYPE_LANGS = frozenset({"rust", "go", "clang", "dotnet", "ruby", "typescript"})
+_SELF_RECEIVERS = frozenset({"self", "this", "Self", "cls", "static", "parent"})
+_EXTERNAL = "external"
+_UNRESOLVED = "unresolved"
+# What a call returns when nothing is known of it, not even that it comes
+# from outside the project.
+_OPAQUE = "opaque"
+
+
+def _split_callee(callee: str) -> tuple[list[str], str]:
+    """Split a callee into its qualifier segments and its name."""
+    bare = _strip_generics(callee)
+    if "(" in bare:
+        # ast-grep hands over whole chains: `Type::new(&arg).unwrap` is read
+        # as `Type::new`, `make(x).run` as `run`.
+        head = re.match(r"(?:[A-Za-z_]\w*::)+[A-Za-z_]\w*", bare)
+        bare = head.group(0) if head else bare[bare.rfind(")") + 1 :]
+    parts = [part for part in re.split(r"::|->|\.|\\", bare) if part]
+    return parts[:-1], parts[-1] if parts else ""
+
+
+def _star_match(pattern: str, text: str) -> str | None:
+    """What the `*` of ``pattern`` stands for where ``pattern`` matches
+    ``text``: the empty string for a pattern without one, None for no match."""
+    prefix, star, suffix = pattern.partition("*")
+    if star and text.startswith(prefix) and text.endswith(suffix):
+        return text[len(prefix) : len(text) - len(suffix)]
+    return "" if pattern == text else None
+
+
+class CallResolver:
+    """Decides which project definition, if any, a call site reaches.
+
+    ``resolve`` returns ``(node_id, source)`` for a call pinned to one
+    definition, ``(None, "external")`` for a call that cannot reach a project
+    definition (no project symbol carries its name, its receiver comes from
+    outside the project, or it calls a value held in a variable), and
+    ``(None, "unresolved")`` for a call that may reach one of several
+    project definitions.
+    """
+
+    def __init__(self, builder):
+        self.builder = builder
+        self.lang = builder._get_language
+        self.nodes = {node["id"]: node for node in builder.nodes}
+        self.by_name = {}  # (language, name) -> node IDs
+        self.members = {}  # parent ID -> {name: node ID}
+        # ID of a value -> ID of the interface declared under its name
+        self.companions = {}
+        self.renamed_types = {}  # (language, declared name) -> those interfaces
+        for node_id, node in self.nodes.items():
+            parent, sep, name = node_id.rpartition("::")
+            if sep:
+                lang = self.lang(node_id)
+                self.by_name.setdefault((lang, name), []).append(node_id)
+                self.members.setdefault(parent, {})[name] = node_id
+                declared = self._name(node_id)
+                if declared != name and node["type"] == "Class":
+                    # A type is looked up by the name it was declared under.
+                    self.renamed_types.setdefault((lang, declared), []).append(node_id)
+                    self.companions[f"{parent}::{declared}"] = node_id
+        self.bases = {}  # class ID -> base type names
+        for edge in builder.edges:
+            if edge["relation"] == "INHERITS" and edge["target"].startswith("REF:"):
+                base = _split_callee(edge["target"][4:])[1]
+                self.bases.setdefault(edge["source"], []).append(base)
+        self.containers = {}  # (language, module or package name) -> file IDs
+        self.go_packages = {}  # directory -> Go file IDs
+        self.go_modules = sorted(  # (go.mod directory, module path), longest first
+            builder.go_modules.items(), key=lambda item: -len(item[1])
+        )
+        self.java_types = {}  # dotted class name -> class ID
+        self.py_modules = {}  # dotted module name -> file ID
+        self.py_module_of = {}  # file ID -> dotted module name
+        files = {nid for nid, node in self.nodes.items() if node["type"] == "File"}
+        py_files = []
+        for file_id in sorted(files):
+            parts = file_id[5:].rsplit(".", 1)[0].split("/")
+            lang = self.lang(file_id)
+            if lang == "python":
+                top = len(parts) - 1
+                while top and f"FILE:{'/'.join(parts[:top])}/__init__.py" in files:
+                    top -= 1
+                if parts[-1] == "__init__":
+                    parts = parts[:-1]
+                if parts[top:]:
+                    self.py_module_of[file_id] = ".".join(parts[top:])
+                    py_files.append((top, parts, file_id))
+            elif lang == "rust":
+                if parts[-1] in ("lib", "main") and parts[-2:-1] == ["src"]:
+                    parts = parts[:-2]
+                elif parts[-1] == "mod":
+                    parts = parts[:-1]
+                if parts:
+                    key = (lang, parts[-1].replace("-", "_"))
+                    self.containers.setdefault(key, []).append(file_id)
+            elif lang == "go":
+                self.go_packages.setdefault("/".join(parts[:-1]), []).append(file_id)
+                if len(parts) > 1:
+                    self.containers.setdefault((lang, parts[-2]), []).append(file_id)
+            elif lang == "java" and f"{file_id}::{parts[-1]}" in self.nodes:
+                # A public class is importable by any dotted suffix of its path.
+                for start in range(len(parts)):
+                    self.java_types.setdefault(
+                        ".".join(parts[start:]), f"{file_id}::{parts[-1]}"
+                    )
+        # A module is importable by its path below its topmost package and,
+        # through namespace packages, by any longer path no other module owns.
+        for top, parts, file_id in py_files:
+            self.py_modules.setdefault(".".join(parts[top:]), file_id)
+        for top, parts, file_id in py_files:
+            for start in range(top):
+                self.py_modules.setdefault(".".join(parts[start:]), file_id)
+        self.py_roots = {module.split(".")[0] for module in self.py_modules}
+        self.shared_declaration = {}  # candidate node IDs -> node ID or None
+        self.returned = {}  # edge index of a call -> the value it returns
+        self._result = None  # value of the call being resolved, where known
+
+    def _name(self, node_id):
+        """The name ``node_id`` was declared under, which its ID may prefix."""
+        declared = self.nodes[node_id]["metadata"].get("name")
+        return declared or node_id.rpartition("::")[2]
+
+    def resolve(self, callee, source_id, origin=None):
+        self._result = None
+        verdict = self._verdict(callee, source_id, origin)
+        if verdict[1] == _EXTERNAL and self._result is None:
+            # What a call returns is from outside too when its receiver or
+            # its path is.
+            self._result = _EXTERNAL
+        return verdict
+
+    def _verdict(self, callee, source_id, origin):
+        lang = self.lang(source_id)
+        qualifier, name = _split_callee(callee)
+        candidates = self.by_name.get((lang, name), [])
+        if origin is not None:
+            verdict = self._resolve_origin(origin, source_id)
+            if verdict is None:
+                verdict = self._resolve_member(candidates, lang, callee)
+            if verdict[0] or candidates:
+                return verdict
+            # No project symbol carries the name, so the call is external;
+            # what it returns is unknown unless its receiver is external too.
+            if verdict[1] != _EXTERNAL:
+                self._result = _OPAQUE
+            return None, _EXTERNAL
+        imported = self._imported(qualifier[0] if qualifier else name, source_id)
+        if imported == _EXTERNAL:
+            return None, _EXTERNAL
+        if not candidates:
+            # No project symbol has the name; that alone does not say where
+            # the receiver, and so the result, comes from.
+            self._result = _OPAQUE
+            return None, _EXTERNAL
+        if imported is not None and len(qualifier) <= 1:
+            # An import names the definition itself or the scope it is in.
+            hits = {i for i in imported if not qualifier and i.endswith(f"::{name}")}
+            hits |= {self._find_member(scope, name)[0] for scope in imported} - {None}
+            hit = self._nearest(sorted(hits), source_id) if hits else None
+            return (hit, "regex") if hit else (None, _UNRESOLVED)
+        if not qualifier:
+            return self._resolve_bare(name, candidates, source_id, lang, callee)
+        receiver = qualifier[-1]
+        if receiver in _SELF_RECEIVERS:
+            owners = [self._enclosing_class(source_id)] if len(qualifier) == 1 else []
+            source = "self_type"
+        else:
+            owners = self._types(lang, receiver)
+            if lang != "rust" or callee.endswith(f"::{name}"):
+                # A Rust module is named in a path, never before a `.`.
+                owners += self.containers.get((lang, receiver), [])
+            source = "regex"
+            root = qualifier[0]
+            # A path of two or more segments, not a chain of fields, that
+            # starts outside the project.
+            if (
+                lang == "rust"
+                and len(qualifier) > 1
+                and callee.startswith(f"{root}::")
+                and root != "Self"
+                and self._use_crate(root, source_id.split("::")[0]) == ()
+            ):
+                # `io::Error` is not a project type; the project can
+                # still give it methods through a trait impl.
+                hits = {
+                    self.members[o][name]
+                    for o in owners
+                    if self.nodes[o]["metadata"].get("kind") == "impl"
+                    and name in self.members.get(o, ())
+                }
+                hit = self._nearest(sorted(hits), source_id) if hits else None
+                return (hit, source) if hit else (None, _EXTERNAL)
+        if any(owners):
+            hits, complete = set(), True
+            for owner in owners:
+                hit, owner_complete = self._find_member(owner, name)
+                complete = complete and owner_complete
+                if hit:
+                    hits.add(hit)
+            if hits:
+                hit = self._nearest(sorted(hits), source_id)
+                return (hit, source) if hit else (None, _UNRESOLVED)
+            # A member a project type has from outside may return that type.
+            self._result = _OPAQUE
+            return None, _UNRESOLVED if complete else _EXTERNAL
+        if lang == "rust" and "::" in callee:
+            return None, _EXTERNAL
+        return self._resolve_member(candidates, lang, callee)
+
+    def _imported(self, name, scope_id):
+        """What an import in the file of ``scope_id`` binds ``name`` to: the
+        IDs of the project definitions or files it names (none when they
+        cannot be located), ``"external"`` for a target outside the project,
+        None when no import binds it."""
+        file_id = scope_id.split("::")[0]
+        target = self.builder.imports.get(file_id, {}).get(name)
+        lang = self.lang(file_id)
+        if target is None or lang not in ("go", "java", "typescript", "rust"):
+            return None
+        if lang == "typescript":
+            return self._js_module(target, file_id)
+        if lang == "rust":
+            *path, leaf = target.split("::")
+            modules = path[1:]
+            crate = self._use_crate(target, file_id)
+            if not crate:
+                return None if crate is None else _EXTERNAL
+            found = [
+                c
+                for c in self.by_name.get((lang, leaf), ())
+                if (self._unit(c, lang),) == crate
+            ]
+            # Prefer the definition under the module the path names last.
+            inside = [
+                c
+                for c in found
+                if modules and re.search(rf"[/:]{modules[-1]}(\.rs|/mod\.rs|::)", c)
+            ]
+            return inside or found or None
+        if lang == "go":
+            for folder, module in self.go_modules:
+                if target == module or target.startswith(f"{module}/"):
+                    parts = (folder, target[len(module) + 1 :])
+                    return self.go_packages.get("/".join(p for p in parts if p), [])
+            return _EXTERNAL if self.go_modules else None
+        if target in self.java_types:
+            return [self.java_types[target]]
+        owner, _, member = target.rpartition(".")
+        if owner in self.java_types:
+            hit = self._find_member(self.java_types[owner], member)[0]
+            return [hit] if hit else []
+        return _EXTERNAL
+
+    def result(self, target):
+        """Value returned by the call just resolved, to ``target`` if it was."""
+        if target:
+            return self._called(("def", target))
+        return None if self._result == _OPAQUE else self._result
+
+    def _use_crate(self, path, file_id):
+        """Where a Rust path written in ``file_id`` leads: ``(crate
+        directory,)``, ``()`` for a crate outside the project, None when
+        the path starts at a module or type in scope."""
+        root = path.split("::")[0]
+        if root in ("crate", "self", "super"):
+            return (self._unit(file_id, "rust"),)
+        if root in self.builder.rust_crates:
+            return (self.builder.rust_crates[root],)
+        if ("rust", root) in self.containers or self._types("rust", root):
+            return None
+        return ()
+
+    def _js_module(self, specifier, file_id):
+        """Resolve a module specifier written in ``file_id``: ``[file ID]``
+        for a project module, ``[]`` for one that cannot be located,
+        ``"external"`` for a declared dependency, None for anything else."""
+        folder = posixpath.dirname(file_id[5:])
+        if specifier.startswith("."):
+            found = self._js_file(posixpath.join(folder, specifier))
+            return [found] if found else []
+        aliased = self._js_alias(specifier, folder)
+        if aliased is not None:
+            return aliased
+        for name, (folder, exports) in self.builder.js_packages.items():
+            if specifier != name and not specifier.startswith(f"{name}/"):
+                continue
+            subpath = f".{specifier[len(name) :]}"
+            if exports is None:
+                # Without `exports` a subpath is a path inside the package.
+                found = self._js_file(posixpath.join(folder, subpath))
+                return [found] if found else []
+            if not isinstance(exports, dict) or not all(k[:1] == "." for k in exports):
+                exports = {".": exports}
+            for key, target in exports.items():
+                matched = _star_match(key, subpath)
+                if matched is None:
+                    continue
+                # A conditional target lists one path per condition.
+                pending = [target]
+                while pending:
+                    target = pending.pop(0)
+                    if isinstance(target, dict):
+                        pending.extend(target.values())
+                    elif isinstance(target, str):
+                        path = target.replace("*", matched)
+                        if found := self._js_file(posixpath.join(folder, path)):
+                            return [found]
+            return []
+        package = "/".join(specifier.split("/")[: 2 if specifier[0] == "@" else 1])
+        outside = package in self.builder.js_dependencies
+        return _EXTERNAL if outside or specifier.startswith("node:") else None
+
+    def _js_alias(self, specifier, folder):
+        """Resolve ``specifier`` through the `paths` and `baseUrl` of the
+        tsconfig nearest above ``folder``: ``[file ID]``, ``[]`` when a
+        pattern matches but no target is a project module, None when the
+        configuration says nothing about it."""
+        configs = self.builder.ts_configs
+        while True:
+            names = (
+                posixpath.join(folder, n) for n in ("tsconfig.json", "jsconfig.json")
+            )
+            config = next((name for name in names if name in configs), None)
+            if config or not folder:
+                break
+            folder = posixpath.dirname(folder)
+        if config is None:
+            return None
+        base, paths = self._ts_options(config, set())
+        # The pattern with the longest prefix wins.
+        for pattern in sorted(paths or (), key=lambda p: -len(p.partition("*")[0])):
+            matched = _star_match(pattern, specifier)
+            if matched is None:
+                continue
+            targets = (t.replace("*", matched) for t in paths[pattern])
+            found = (self._js_file(target) for target in targets)
+            return [target for target in found if target][:1]
+        found = base is not None and self._js_file(posixpath.join(base, specifier))
+        return [found] if found else None
+
+    def _ts_options(self, config, seen):
+        """The effective ``(baseUrl directory, {pattern: [target paths]})``
+        of the tsconfig at ``config``, either of them None when neither it
+        nor a config it extends sets one."""
+        extends, base, paths = self.builder.ts_configs[config]
+        seen.add(config)
+        folder = posixpath.dirname(config)
+        if base is not None:
+            base = posixpath.normpath(posixpath.join(folder, base))
+        if paths is not None:
+            # Targets are relative to `baseUrl`, else to the config's folder.
+            paths = {
+                pattern: [posixpath.join(base or folder, t) for t in targets]
+                for pattern, targets in paths.items()
+            }
+        for parent in extends:
+            parent = posixpath.normpath(posixpath.join(folder, parent))
+            if not parent.endswith(".json"):
+                parent += ".json"
+            if parent in self.builder.ts_configs and parent not in seen:
+                inherited = self._ts_options(parent, seen)
+                base = inherited[0] if base is None else base
+                paths = inherited[1] if paths is None else paths
+        return base, paths
+
+    def _js_file(self, path):
+        """File ID of the JS/TS module at ``path``, written with any or no
+        extension, or naming a directory with an index module."""
+        stem = re.sub(r"\.[cm]?[jt]sx?$", "", posixpath.normpath(path))
+        for tail in ("", "/index"):
+            for extension in _JSTS_EXTENSIONS:
+                if f"FILE:{stem}{tail}{extension}" in self.nodes:
+                    return f"FILE:{stem}{tail}{extension}"
+        return None
+
+    def _exported(self, file_id, name, seen):
+        """Definition a file makes available as ``name``: its own, or one
+        it re-exports from another module."""
+        hit = self.members.get(file_id, {}).get(name)
+        if hit or file_id in seen:
+            return hit
+        seen.add(file_id)
+        for exported, specifier, original in self.builder.reexports.get(file_id, ()):
+            if exported in ("*", name):
+                # Without a specifier the name is exported from the file itself.
+                modules = (
+                    self._js_module(specifier, file_id) if specifier else [file_id]
+                )
+                for module in modules or ():
+                    hit = self._exported(module, original or name, seen)
+                    if hit:
+                        return hit
+        return None
+
+    def _resolve_bare(self, name, candidates, source_id, lang, callee):
+        explicit = lang in _EXPLICIT_RECEIVER_LANGS
+        hit = self._lexical(name, source_id, skip_classes=explicit)
+        if hit:
+            return hit, "regex"
+        owner = None if explicit else self._enclosing_class(source_id)
+        if owner:
+            hit, _ = self._find_member(owner, name)
+            if hit:
+                return hit, "regex"
+        free = [c for c in candidates if self._is_top_level(c)]
+        file_id = source_id.split("::")[0]
+        imports = self.builder.imports.get(file_id, {})
+        if lang in _IMPORT_SCOPED_LANGS and name not in imports:
+            # Only a glob import can bring the name in, from the crate it
+            # names; one that starts at something in scope stays in this one.
+            own = (self._unit(file_id, lang),)
+            crates = set()
+            for path in imports:
+                if path.endswith("::*"):
+                    found = self._use_crate(path, file_id)
+                    crates.update(own if found is None else found)
+            free = [c for c in free if self._unit(c, lang) in crates]
+        if lang == "go":
+            # A bare Go call stays inside its package, which is its directory.
+            package = self._unit(file_id, lang)
+            free = [c for c in free if self._unit(c, lang) == package]
+        if free:
+            hit = self._nearest(free, source_id)
+            return (hit, "regex") if hit else (None, _UNRESOLVED)
+        if lang in _FREE_BARE_CALL_LANGS:
+            self._result = _OPAQUE
+            return None, _EXTERNAL
+        if explicit:
+            # Without a receiver a method is out of reach.
+            candidates = [c for c in candidates if self.nodes[c]["type"] != "Method"]
+        return self._resolve_member(candidates, lang, callee)
+
+    def _resolve_member(self, candidates, lang, callee):
+        """Resolve a call through a receiver whose type is not known."""
+        namespace = lang in _NAMESPACE_RECEIVER_LANGS
+        pool = [
+            c
+            for c in candidates
+            if self._is_class(c.rpartition("::")[0])
+            or (namespace and self._is_top_level(c))
+        ]
+        if not pool or is_non_project_call(callee):
+            # The receiver is not known, so neither is what is returned.
+            self._result = _OPAQUE
+            return None, _EXTERNAL
+        pool = tuple(pool)
+        if pool not in self.shared_declaration:
+            self.shared_declaration[pool] = self._shared_declaration(pool)
+        hit = self.shared_declaration[pool]
+        return (hit, "regex") if hit else (None, _UNRESOLVED)
+
+    def _shared_declaration(self, pool):
+        """The one definition every other one in ``pool`` overrides, if any."""
+        if len(pool) == 1:
+            return pool[0]
+        owners = {c: c.rpartition("::")[0] for c in pool}
+        ancestors = {owner: self._ancestors(owner) for owner in owners.values()}
+        for candidate, owner in owners.items():
+            base = self._name(owner)
+            if all(c == candidate or base in ancestors[o] for c, o in owners.items()):
+                return candidate
+        return None
+
+    def _resolve_origin(self, origin, source_id):
+        """Follow an origin path (see ``PythonParser._origin``) to a verdict.
+        Returns None when the receiver of the last attribute is of unknown
+        type."""
+        value, steps, source = self._root_value(origin, source_id, set())
+        if value is None and origin.startswith("@"):
+            return None, _UNRESOLVED
+        if value is None and origin.startswith("="):
+            # A value held in a variable is no definition, and what calling
+            # it returns is not known.
+            self._result = _OPAQUE
+            return None, _EXTERNAL
+        unwraps = _UNWRAPPING_METHODS.get(self.lang(source_id), ())
+        for index, step in enumerate(steps):
+            if value is None or value == _EXTERNAL:
+                break
+            last = index == len(steps) - 1
+            if step == "()":
+                value = self._called(value)
+            elif value[0] == "wrapped":
+                unwrapped = ("self", value[1])
+                if last and step in unwraps:
+                    self._result = unwrapped
+                    return None, _EXTERNAL
+                value = unwrapped if step == "?" else None
+            elif step != "?":
+                value = self._attr(value, step, called=last)
+                if value is None and last:
+                    return None, _UNRESOLVED
+        if isinstance(value, tuple) and value[0] in ("def", "cls"):
+            return value[1], source
+        if value == _EXTERNAL:
+            return None, _EXTERNAL
+        # A call of a value held in a variable, or returned by another call.
+        if origin.endswith(")") or "." not in origin:
+            self._result = _OPAQUE
+            return None, _UNRESOLVED
+        return None
+
+    def _root_value(self, origin, source_id, seen):
+        """Evaluate the first step of an origin path written in
+        ``source_id``: an imported path behind `@`, `self`, `cls` or
+        `super`, `#N` for what the call at edge index N returned, `~name`
+        for what pytest passes as the parameter `name`, `=name` for a
+        parameter or variable of ``source_id`` (a definition only where it
+        is one of ``source_id``'s own), `?` for a value of no known origin,
+        or a name read in scope. Returns its value, the steps after it, and
+        the resolution source a call found through it has. ``seen`` holds
+        the fixtures being evaluated."""
+        file_id = source_id.split("::")[0]
+        path = origin.lstrip("@")
+        steps = re.findall(r"\(\)|[^.()]+", path)
+        if origin.startswith("@"):
+            dots = len(path) - len(path.lstrip("."))
+            return (*self._import_value(steps, dots, file_id), "regex")
+        source = "regex"
+        root, steps = steps[0], steps[1:]
+        owner = self._enclosing_class(source_id)
+        if root in ("self", "cls", "super") and owner:
+            source = "self_type"
+            value = (root, owner)
+            if root == "super":
+                steps = steps[1:]
+        elif root in ("self", "cls", "super", "?"):
+            value = None
+        elif root.startswith("#"):
+            value = self.returned.get(int(root[1:]))
+        elif root.startswith("~"):
+            value = self._fixture_value(root[1:], source_id, seen)
+        elif root.startswith("="):
+            hit = self.members.get(source_id, {}).get(root[1:])
+            value = ("def", hit) if hit else None
+        else:
+            value = self._name_value(root, source_id, set())
+        return value, steps, source
+
+    def _fixture_value(self, name, scope_id, seen):
+        """Value pytest passes for the parameter ``name`` of the test or
+        fixture ``scope_id``: what the nearest fixture of that name gives,
+        looking in the enclosing classes, the module, and then each
+        `conftest.py` from the module's directory upwards."""
+        file_id = scope_id.split("::")[0]
+        scopes = [s for s in self._scopes(scope_id) if self._is_class(s)]
+        scopes.append(file_id)
+        folder = posixpath.dirname(file_id[len("FILE:") :])
+        while True:
+            scopes.append(f"FILE:{posixpath.join(folder, 'conftest.py')}")
+            if not folder:
+                break
+            folder = posixpath.dirname(folder)
+        for scope in scopes:
+            function_id, origin = self.builder.fixtures.get((scope, name), (None, None))
+            # A fixture that takes a parameter of its own name gets the one
+            # it overrides.
+            if function_id is None or function_id == scope_id or function_id in seen:
+                continue
+            seen.add(function_id)
+            value = self._called(("def", function_id))
+            if value is None and origin:
+                value, steps, _ = self._root_value(origin, function_id, seen)
+                for step in steps:
+                    if not isinstance(value, tuple):
+                        break
+                    value = (
+                        self._called(value) if step == "()" else self._attr(value, step)
+                    )
+            return value
+        return None
+
+    def _name_value(self, name, scope_id, seen):
+        """Value of a name read inside ``scope_id``."""
+        hit = self._lexical(name, scope_id, skip_classes=True)
+        if hit:
+            return ("def", hit)
+        lang = self.lang(scope_id)
+        if lang != "python":
+            # `Type<>` is a type written with type arguments.
+            name, generic, _ = name.partition("<>")
+            found = self._type_named(name, scope_id)
+            name = name.rpartition("::")[2]
+            if generic and found == _EXTERNAL:
+                # A wrapper from outside around what may be a project type.
+                return None
+            if found is None and not self._types(lang, name):
+                # An alias may stand for a project type, as may what a
+                # generic type wraps.
+                aliased = generic or name in self.builder.type_aliases
+                return None if aliased else _EXTERNAL
+            return ("def", found) if found not in (None, _EXTERNAL) else found
+        file_id = scope_id.split("::")[0]
+        imports = self.builder.imports.get(file_id, {})
+        if name in imports and (file_id, name) not in seen:
+            seen.add((file_id, name))
+            target = imports[name]
+            dots = len(target) - len(target.lstrip("."))
+            value, steps = self._import_value(
+                target.strip(".").split("."), dots, file_id
+            )
+            for step in steps:
+                if value is None or value == _EXTERNAL:
+                    break
+                value = self._attr(value, step, seen)
+            return value
+        # Neither defined nor imported: a builtin, unless a star import hides it.
+        return None if "*" in imports else _EXTERNAL
+
+    def _import_value(self, steps, dots, file_id):
+        """Split an imported dotted path into the project module it starts
+        with and the steps left to take inside it."""
+        names = steps[: steps.index("()")] if "()" in steps else steps
+        package = []
+        if dots:
+            package = self.py_module_of.get(file_id, "").split(".")
+            if not file_id.endswith("/__init__.py"):
+                package = package[:-1]
+            package = package[: len(package) - (dots - 1)]
+        for size in range(len(names), -1, -1):
+            module = ".".join(package + names[:size])
+            if module in self.py_modules:
+                return ("module", module), steps[size:]
+        if dots or names[0] in self.py_roots:
+            return None, []
+        return _EXTERNAL, []
+
+    def _attr(self, value, name, seen=None, called=False):
+        """Value of attribute ``name`` of ``value``; ``called`` says the
+        attribute is the callee itself rather than part of its receiver."""
+        kind, ref = value
+        if kind == "module":
+            if f"{ref}.{name}" in self.py_modules:
+                return ("module", f"{ref}.{name}")
+            file_id = self.py_modules[ref]
+            hit = self.members.get(file_id, {}).get(name)
+            if hit:
+                return ("def", hit)
+            # A name the module itself imports is re-exported by it.
+            if name in self.builder.imports.get(file_id, {}):
+                return self._name_value(name, file_id, set() if seen is None else seen)
+            return None
+        if kind == "def" and self.nodes[ref]["type"] != "Class":
+            return None
+        hit, complete = self._find_member(ref, name, inherited_only=kind == "super")
+        if hit:
+            return ("def", hit)
+        # A method missing from a type with a base outside the project is
+        # inherited from that base, and may return the type; a missing data
+        # attribute need not be inherited.
+        if called and not complete:
+            self._result = _OPAQUE
+            return _EXTERNAL
+        return None
+
+    def _type_named(self, name, scope_id):
+        """The project type a possibly qualified type name written in
+        ``scope_id`` refers to, ``"external"`` for one an import places
+        outside the project, None when it cannot be told."""
+        lang = self.lang(scope_id)
+        *qualifier, name = [part for part in re.split(r"::|\.", name) if part]
+        imported = self._imported(qualifier[0] if qualifier else name, scope_id)
+        if imported == _EXTERNAL:
+            return _EXTERNAL
+        if qualifier and imported:
+            found = (self._find_member(scope, name)[0] for scope in imported)
+            found = (self.companions.get(hit, hit) for hit in found)
+            types = [hit for hit in found if hit and self._is_class(hit)]
+        else:
+            types = [i for i in imported or () if self._is_class(i)]
+        types = types or self._types(lang, name)
+        hit = self._nearest(types, scope_id) if types else None
+        if hit is None and len({self._unit(t, lang) for t in types}) == 1:
+            # Declarations of one split type, in one crate or package.
+            hit = types[0]
+        return hit
+
+    def _called(self, value):
+        """Value returned by calling ``value``."""
+        kind, ref = value
+        if kind == "cls" or (kind == "def" and self.nodes[ref]["type"] == "Class"):
+            return ("self", ref)
+        if kind != "def":
+            return None
+        returns = self.nodes[ref]["metadata"].get("return_type") or ""
+        if self.lang(ref) != "python":
+            # A value declared under the name of an interface constructs it,
+            # unless its return type says otherwise.
+            companion = self.companions.get(ref)
+            found = self._returned_type(returns, ref)
+            return found or (companion and ("self", companion))
+        match = re.fullmatch(r"([A-Za-z_][\w.]*)(?: \| None)?", returns.strip("'\""))
+        # "None" and "Any" are also what an unannotated function records.
+        if not match or match[1] in ("None", "Any"):
+            return None
+        root, *attrs = match[1].split(".")
+        # The annotation is read where the function is defined.
+        result = self._name_value(root, ref.rpartition("::")[0], set())
+        for attr in attrs:
+            if result is None or result == _EXTERNAL:
+                break
+            result = self._attr(result, attr)
+        if isinstance(result, tuple):
+            return self._called(result) if self._is_class(result[1]) else None
+        return result
+
+    def _returned_type(self, returns, function_id):
+        """Value of the declared return type ``returns`` of ``function_id``:
+        an instance of a project type, a wrapper around one (`Result<T, E>`,
+        `Promise<T>`), ``"external"``, or None."""
+        match = re.match(
+            r"[&*\s]*(?:'\w+\s+)?(?:mut\s+)?([\w$.:]+)\s*(?:<\s*([\w$.:]+))?",
+            returns,
+        )
+        if not match:
+            return None
+        owner = self._enclosing_class(function_id)
+        for kind, name in zip(("self", "wrapped"), match.groups()):
+            if name in ("Self", "this"):
+                found = owner
+            else:
+                found = name and self._type_named(name, function_id)
+            if found == _EXTERNAL:
+                return _EXTERNAL if kind == "self" else None
+            if found:
+                return (kind, found)
+        return None
+
+    def _scopes(self, node_id):
+        """Yield ``node_id`` and each scope enclosing it, out to its file."""
+        while node_id:
+            yield node_id
+            node_id = node_id.rpartition("::")[0]
+
+    def _is_class(self, node_id):
+        node = self.nodes.get(node_id)
+        return bool(
+            node
+            and node["type"] == "Class"
+            and node["metadata"].get("kind") != "module"
+        )
+
+    def _is_top_level(self, node_id):
+        parent = self.nodes.get(node_id.rpartition("::")[0])
+        return parent is None or parent["type"] == "File"
+
+    def _enclosing_class(self, node_id):
+        return next((s for s in self._scopes(node_id) if self._is_class(s)), None)
+
+    def _lexical(self, name, scope_id, skip_classes):
+        """Definition of ``name`` in the innermost scope enclosing ``scope_id``."""
+        for scope in self._scopes(scope_id):
+            if skip_classes and self._is_class(scope):
+                continue
+            hit = self.members.get(scope, {}).get(name)
+            if hit:
+                return hit
+        return None
+
+    def _types(self, lang, name):
+        return [
+            node_id
+            for node_id in self.by_name.get((lang, name), ())
+            if self.nodes[node_id]["type"] == "Class"
+        ] + self.renamed_types.get((lang, name), [])
+
+    def _find_member(self, owner_id, name, inherited_only=False, seen=None):
+        """Look ``name`` up in a type or module and then in the type's bases.
+
+        Returns ``(node_id, complete)``; ``complete`` is False when a base is
+        not a project type, so a miss may be a member defined outside.
+        """
+        if not self._is_class(owner_id):
+            return self._exported(owner_id, name, set()), True
+        lang = self.lang(owner_id)
+        type_name = self._name(owner_id)
+        seen = set() if seen is None else seen
+        if type_name in seen:
+            return None, True
+        seen.add(type_name)
+        declarations = [owner_id]
+        if lang in _SPLIT_TYPE_LANGS:
+            unit = self._unit(owner_id, lang)
+            declarations += [
+                t
+                for t in self._types(lang, type_name)
+                if t != owner_id and self._unit(t, lang) == unit
+            ]
+        if not inherited_only:
+            for declaration in declarations:
+                hit = self.members.get(declaration, {}).get(name)
+                if hit:
+                    return hit, True
+        # A type the project only writes impl blocks for is declared outside.
+        kinds = {self.nodes[d]["metadata"].get("kind") for d in declarations}
+        complete = kinds != {"impl"}
+        for declaration in declarations:
+            for base in self.bases.get(declaration, ()):
+                # The base is the type its name stands for where the
+                # subtype is declared; every type of that name when that
+                # cannot be told.
+                named = self._type_named(base, declaration)
+                if named == _EXTERNAL:
+                    base_types = []
+                else:
+                    base_types = [named] if named else self._types(lang, base)
+                if not base_types:
+                    complete = False
+                for base_type in base_types:
+                    hit, base_complete = self._find_member(base_type, name, seen=seen)
+                    if hit:
+                        return hit, True
+                    complete = complete and base_complete
+        return None, complete
+
+    def _unit(self, node_id, lang):
+        """What bounds one split type: the file in TypeScript, the package
+        directory in Go, the crate in Rust."""
+        path = node_id.split("::")[0][5:]
+        if lang == "typescript":
+            return path
+        if lang == "go":
+            return path.rpartition("/")[0]
+        if lang == "rust":
+            folders = [f for f in self.builder.rust_crates.values() if f]
+            inside = [f for f in folders if path.startswith(f"{f}/")]
+            return max(inside, key=len, default="")
+        return ""
+
+    def _ancestors(self, owner_id, seen=None):
+        """Names of every type ``owner_id`` inherits from."""
+        seen = set() if seen is None else seen
+        lang = self.lang(owner_id)
+        for base in self.bases.get(owner_id, ()):
+            if base not in seen:
+                seen.add(base)
+                for base_type in self._types(lang, base):
+                    self._ancestors(base_type, seen)
+        return seen
+
+    def _nearest(self, candidates, source_id):
+        """The candidate whose file shares the longest path prefix with the
+        caller's, or None when two are equally near."""
+        if len(candidates) == 1:
+            return candidates[0]
+        source = source_id.split("::")[0].split("/")
+
+        def shared(node_id):
+            path = node_id.split("::")[0].split("/")
+            return next(
+                (i for i, (a, b) in enumerate(zip(source, path)) if a != b),
+                min(len(source), len(path)),
+            )
+
+        ranked = sorted(candidates, key=shared, reverse=True)
+        return ranked[0] if shared(ranked[0]) > shared(ranked[1]) else None
+
+
 class CodeGraphBuilder:
     # ast-grep is invoked as a subprocess **per file** for TS/JS parsing
     # (imports + calls). On macOS each `fork+exec` costs ~10ms, so a
@@ -7722,8 +9636,11 @@ class CodeGraphBuilder:
     # actually completes. Overridable via ``DESCRY_AST_GREP_MAX_FILES``.
     _AST_GREP_MAX_FILES_DEFAULT = 5000
 
-    def __init__(self, root_dir, excluded_dirs=None):
+    def __init__(self, root_dir, excluded_dirs=None, rel_base=None):
         self.root_dir = Path(root_dir).resolve()
+        # What node-ID paths are relative to: the project root, which is
+        # above root_dir when only a subtree is indexed.
+        self.rel_base = Path(rel_base).resolve() if rel_base else self.root_dir
         self.excluded_dirs = excluded_dirs or {
             "target",
             "node_modules",
@@ -7739,6 +9656,23 @@ class CodeGraphBuilder:
         self.node_registry = set()
         self.current_file_id = None
         self.current_scope = SymbolTable()
+        # For CallResolver: file ID -> {local name: import target},
+        # go.mod directory -> module path, Cargo package name -> directory,
+        # and the npm packages the project defines and depends on.
+        self.imports = {}
+        self.go_modules = {}
+        self.rust_crates = {}
+        self.js_packages = {}  # name -> (directory, `exports` of package.json)
+        self.js_dependencies = set()
+        # tsconfig path -> (configs it extends, `baseUrl`, `paths`), as written
+        self.ts_configs = {}
+        # JS/TS file ID -> [(exported name or "*", module specifier, name there)]
+        self.reexports = {}
+        # (defining file or class ID, fixture name) -> (function ID, origin
+        # path of the value the fixture returns or yields, if it has one)
+        self.fixtures = {}
+        # Names declared as type aliases, which are not graph nodes.
+        self.type_aliases = set()
         # Per-run ast-grep enablement. Checked by parsers instead of
         # the module-level USE_AST_GREP so project size can gate it.
         self.use_ast_grep = USE_AST_GREP
@@ -7785,7 +9719,7 @@ class CodeGraphBuilder:
         # cross-platform (node IDs generated on Windows remain readable and
         # queryable on Linux/macOS, and vice versa).
         try:
-            return path.relative_to(self.root_dir).as_posix()
+            return path.relative_to(self.rel_base).as_posix()
         except ValueError:
             return Path(path).as_posix()
 
@@ -7805,12 +9739,8 @@ class CodeGraphBuilder:
                     if not d.startswith(".") and d not in self.excluded_dirs
                 ]
                 for fn in _f:
-                    if fn.endswith((".ts", ".tsx", ".js", ".jsx")):
+                    if fn.endswith(_JSTS_EXTENSIONS):
                         ts_js_count += 1
-                        if ts_js_count > self._AST_GREP_MAX_FILES_DEFAULT * 10:
-                            break
-                if ts_js_count > self._AST_GREP_MAX_FILES_DEFAULT * 10:
-                    break
             self._decide_ast_grep(ts_js_count)
 
         for root, dirs, files in os.walk(self.root_dir, followlinks=False):
@@ -7837,6 +9767,12 @@ class CodeGraphBuilder:
                     continue
             dirs[:] = safe_dirs
             for file in files:
+                if not (
+                    file.endswith(_INDEXED_EXTENSIONS)
+                    or file in _MANIFESTS
+                    or _TSCONFIG_RE.fullmatch(file)
+                ):
+                    continue
                 file_path = Path(root) / file
                 # Same containment check for files (catches symlink files).
                 try:
@@ -7877,71 +9813,113 @@ class CodeGraphBuilder:
                 except ValueError as e:
                     logger.warning(f"Error reading {rel_path}: {e}")
                     continue
-                if file.endswith(".py"):
-                    PythonParser(self).parse(file_path, rel_path, content)
-                elif file.endswith(".rs"):
-                    RustParser(self).parse(file_path, rel_path, content)
-                elif file.endswith(".proto"):
-                    ProtoParser(self).parse(file_path, rel_path, content)
-                elif file.endswith(".java"):
-                    from descry.java_parser import JavaParser
+                # A file one parser chokes on must not abort the whole index.
+                try:
+                    if file.endswith(".py"):
+                        PythonParser(self).parse(file_path, rel_path, content)
+                    elif file.endswith(".rs"):
+                        RustParser(self).parse(file_path, rel_path, content)
+                    elif file.endswith(".proto"):
+                        ProtoParser(self).parse(file_path, rel_path, content)
+                    elif file.endswith(".java"):
+                        from descry.java_parser import JavaParser
 
-                    JavaParser(self).parse(file_path, rel_path, content)
-                elif file.endswith(".go"):
-                    from descry.go_parser import GoParser
+                        JavaParser(self).parse(file_path, rel_path, content)
+                    elif file.endswith(".go"):
+                        from descry.go_parser import GoParser
 
-                    GoParser(self).parse(file_path, rel_path, content)
-                elif file.endswith((".rb", ".rake", ".gemspec")):
-                    from descry.ruby_parser import RubyParser
+                        GoParser(self).parse(file_path, rel_path, content)
+                    elif file == "go.mod":
+                        if match := _GO_MODULE_RE.search(content):
+                            folder = rel_path.rpartition("/")[0]
+                            self.go_modules[folder] = match.group(1)
+                    elif file == "Cargo.toml":
+                        if match := _CARGO_PACKAGE_RE.search(content):
+                            crate = match.group(1).replace("-", "_")
+                            self.rust_crates[crate] = rel_path.rpartition("/")[0]
+                    elif file == "package.json":
+                        manifest = json.loads(content)
+                        folder = rel_path.rpartition("/")[0]
+                        exports = manifest.get("exports")
+                        self.js_packages[manifest.get("name")] = (folder, exports)
+                        for key, value in manifest.items():
+                            if key.endswith("ependencies") and isinstance(value, dict):
+                                self.js_dependencies.update(value)
+                    elif _TSCONFIG_RE.fullmatch(file):
+                        config = _loads_jsonc(content)
+                        options = config.get("compilerOptions") or {}
+                        extends = config.get("extends")
+                        if isinstance(extends, str):
+                            extends = [extends]
+                        base, paths = options.get("baseUrl"), options.get("paths")
+                        self.ts_configs[rel_path] = (
+                            [e for e in extends or () if isinstance(e, str)],
+                            base if isinstance(base, str) else None,
+                            {
+                                str(pattern): [t for t in targets if isinstance(t, str)]
+                                for pattern, targets in paths.items()
+                                if isinstance(targets, list)
+                            }
+                            if isinstance(paths, dict)
+                            else None,
+                        )
+                    elif file.endswith(_RUBY_EXTENSIONS):
+                        from descry.ruby_parser import RubyParser
 
-                    RubyParser(self).parse(file_path, rel_path, content)
-                elif file.endswith(".php"):
-                    from descry.php_parser import PhpParser
+                        RubyParser(self).parse(file_path, rel_path, content)
+                    elif file.endswith(".php"):
+                        from descry.php_parser import PhpParser
 
-                    PhpParser(self).parse(file_path, rel_path, content)
-                elif file.endswith((".cs", ".vb")):
-                    from descry.dotnet_parser import DotnetParser
+                        PhpParser(self).parse(file_path, rel_path, content)
+                    elif file.endswith(_DOTNET_EXTENSIONS):
+                        from descry.dotnet_parser import DotnetParser
 
-                    DotnetParser(self).parse(file_path, rel_path, content)
-                elif file.endswith(
-                    (".c", ".cc", ".cpp", ".cxx", ".cu", ".h", ".hh", ".hpp", ".hxx")
-                ):
-                    from descry.clang_parser import ClangParser
+                        DotnetParser(self).parse(file_path, rel_path, content)
+                    elif file.endswith(_CLANG_EXTENSIONS):
+                        from descry.clang_parser import ClangParser
 
-                    ClangParser(self).parse(file_path, rel_path, content)
-                elif file.endswith(".dart"):
-                    from descry.dart_parser import DartParser
+                        ClangParser(self).parse(file_path, rel_path, content)
+                    elif file.endswith(".dart"):
+                        from descry.dart_parser import DartParser
 
-                    DartParser(self).parse(file_path, rel_path, content)
-                elif file.endswith((".ts", ".tsx", ".js")):
-                    TSParser(self).parse(file_path, rel_path, content)
-                elif file.endswith(".svelte"):
-                    # D.2: iterate all <script> blocks and shift each block's
-                    # parsed linenos by its offset within the .svelte file.
-                    pos = 0
-                    while True:
-                        start_tag = content.find("<script", pos)
-                        if start_tag == -1:
-                            break
-                        gt = content.find(">", start_tag)
-                        if gt == -1:
-                            break
-                        close = content.find("</script>", gt)
-                        if close == -1:
-                            break
-                        body = content[gt + 1 : close]
-                        # Lines before the script body (the character after '>').
-                        line_offset = content.count("\n", 0, gt + 1)
-                        before = len(self.nodes)
-                        TSParser(self).parse(file_path, rel_path, body)
-                        # Shift newly-added node linenos by the offset.
-                        for node in self.nodes[before:]:
-                            meta = node.get("metadata", {})
-                            for k in ("lineno", "end_lineno"):
-                                v = meta.get(k)
-                                if isinstance(v, int):
-                                    meta[k] = v + line_offset
-                        pos = close + len("</script>")
+                        DartParser(self).parse(file_path, rel_path, content)
+                    elif file.endswith(_JSTS_EXTENSIONS):
+                        TSParser(self).parse(file_path, rel_path, content)
+                    elif file.endswith(".svelte"):
+                        # D.2: iterate all <script> blocks and shift each block's
+                        # parsed linenos by its offset within the .svelte file.
+                        pos = 0
+                        while True:
+                            start_tag = content.find("<script", pos)
+                            if start_tag == -1:
+                                break
+                            gt = content.find(">", start_tag)
+                            if gt == -1:
+                                break
+                            close = content.find("</script>", gt)
+                            if close == -1:
+                                break
+                            body = content[gt + 1 : close]
+                            # Lines before the script body (the character after '>').
+                            line_offset = content.count("\n", 0, gt + 1)
+                            before = len(self.nodes)
+                            edges_before = len(self.edges)
+                            TSParser(self).parse(
+                                file_path, rel_path, body, line_offset=line_offset
+                            )
+                            # Shift newly-added node and edge linenos by the offset.
+                            for node in self.nodes[before:]:
+                                meta = node.get("metadata", {})
+                                for k in ("lineno", "end_lineno"):
+                                    v = meta.get(k)
+                                    if isinstance(v, int):
+                                        meta[k] = v + line_offset
+                            for edge in self.edges[edges_before:]:
+                                if "lineno" in edge.get("metadata", {}):
+                                    edge["metadata"]["lineno"] += line_offset
+                            pos = close + len("</script>")
+                except Exception as e:  # noqa: BLE001 — boundary over every parser and the external ast-grep binary
+                    logger.warning(f"Failed to parse {rel_path}: {e!r}")
 
     def _get_language(self, node_id: str) -> str:
         """Extract language from node ID based on file extension."""
@@ -7951,7 +9929,7 @@ class CodeGraphBuilder:
         file_part = node_id.split("::")[0].replace("FILE:", "")
         if file_part.endswith(".rs"):
             return "rust"
-        elif file_part.endswith((".ts", ".tsx", ".js", ".jsx", ".svelte")):
+        elif file_part.endswith((*_JSTS_EXTENSIONS, ".svelte")):
             return "typescript"
         elif file_part.endswith(".py"):
             return "python"
@@ -7961,36 +9939,42 @@ class CodeGraphBuilder:
             return "java"
         elif file_part.endswith(".go"):
             return "go"
-        elif file_part.endswith((".rb", ".rake", ".gemspec")):
+        elif file_part.endswith(_RUBY_EXTENSIONS):
             return "ruby"
         elif file_part.endswith(".php"):
             return "php"
-        elif file_part.endswith((".cs", ".vb")):
+        elif file_part.endswith(_DOTNET_EXTENSIONS):
             return "dotnet"
-        elif file_part.endswith(
-            (".c", ".cc", ".cpp", ".cxx", ".cu", ".h", ".hh", ".hpp", ".hxx")
-        ):
+        elif file_part.endswith(_CLANG_EXTENSIONS):
             return "clang"
         elif file_part.endswith(".dart"):
             return "dart"
         return "unknown"
 
     def resolve_references(self, scip_index=None):
-        """Resolve REF: targets to actual node IDs with smart matching.
+        """Resolve REF: targets to actual node IDs.
 
-        Resolution priorities:
-        0. SCIP lookup (highest accuracy, type-aware)
-        1. Same language (required for regex fallback)
-        2. Same struct/class for self.method patterns
-        3. Qualified name match (Type::method)
-        4. Same file
-        5. Any same-language match
+        A CALLS reference goes to SCIP first (type-aware) and then to
+        CallResolver, which pins it to a definition, leaves it unresolved,
+        or drops it as external. Other references are matched by name within
+        the source's language: qualified name (Type::method), then same
+        file, then any match.
 
         Args:
             scip_index: Optional ScipIndex for type-aware resolution
         """
         # Track resolution statistics
-        stats = {"scip": 0, "regex": 0, "self_type": 0, "unresolved": 0}
+        stats = {"scip": 0, "regex": 0, "self_type": 0, "unresolved": 0, "external": 0}
+        call_resolver = CallResolver(self)
+        # (file, line, name) of each definition -> its node ID
+        nodes_at = {
+            (
+                node["id"].split("::")[0][5:],
+                node["metadata"].get("lineno"),
+                node["id"].rpartition("::")[2],
+            ): node["id"]
+            for node in self.nodes
+        }
 
         # Build lookup tables for regex fallback
         # name -> [(node_id, language), ...]
@@ -8029,10 +10013,12 @@ class CodeGraphBuilder:
 
                 resolved = None
                 resolution_source = None
+                is_call = edge["relation"] == "CALLS"
+                origin = edge.get("metadata", {}).pop("origin", None)
+                column = edge.get("metadata", {}).pop("col", None)
 
-                # Pre-filter: skip non-project refs (stdlib/library) that slipped through parsing
-                # These will never resolve and shouldn't count as unresolved
-                if is_non_project_call(ref_name):
+                # A type reference to a stdlib/library name never resolves.
+                if not is_call and is_non_project_call(ref_name):
                     edges_to_remove.add(idx)
                     continue
 
@@ -8054,8 +10040,23 @@ class CodeGraphBuilder:
                     # Get source file and line for SCIP lookup
                     source_file = source_id.split("::")[0].replace("FILE:", "")
                     lineno = edge.get("metadata", {}).get("lineno", 0)
-                    scip_resolved = scip_index.resolve(ref_name, source_file, lineno)
-                    if scip_resolved:
+                    if is_call:
+                        # A call is taken from SCIP only where SCIP saw it; a
+                        # name match is left to CallResolver.
+                        found = scip_index.definition_at(
+                            ref_name, source_file, lineno, column
+                        )
+                        scip_resolved = found and (
+                            nodes_at.get((*found[1:], _split_callee(ref_name)[1]))
+                            or found[0]
+                        )
+                    else:
+                        scip_resolved = scip_index.resolve(
+                            ref_name, source_file, lineno
+                        )
+                    # SCIP spells a symbol's path its own way; an ID that is
+                    # no node of this graph would leave the edge dangling.
+                    if scip_resolved in self.node_registry:
                         # Validate cross-crate resolutions to prevent false positives
                         # Extract crate names from paths (first directory component)
                         source_crate = (
@@ -8089,9 +10090,20 @@ class CodeGraphBuilder:
                             resolved = scip_resolved
                             resolution_source = "scip"
 
+                if is_call:
+                    if not resolved:
+                        resolved, resolution_source = call_resolver.resolve(
+                            ref_name, source_id, origin
+                        )
+                    call_resolver.returned[idx] = call_resolver.result(resolved)
+                    if resolution_source == _EXTERNAL:
+                        edges_to_remove.add(idx)
+                        stats["external"] += 1
+                        continue
+
                 # Normalize crate:: prefix (Rust-specific)
                 # crate::path::Symbol -> path::Symbol for matching
-                ref_name = ref_name.removeprefix("crate::")  # Remove "crate::"
+                ref_name = ref_name.removeprefix("crate::")
 
                 # Strip trailing method chains for resolution
                 # Handles: Type::new(&arg).unwrap -> Type::new
@@ -8117,7 +10129,12 @@ class CodeGraphBuilder:
 
                 # Strategy 1: Try qualified name match (Type::method or Type::Variant)
                 # Use base_ref which has trailing method chains stripped
-                if not resolved and "::" in base_ref and base_ref in qualified_lookup:
+                if (
+                    not resolved
+                    and not is_call
+                    and "::" in base_ref
+                    and base_ref in qualified_lookup
+                ):
                     matches = [
                         m for m in qualified_lookup[base_ref] if m[1] == source_lang
                     ]
@@ -8125,66 +10142,8 @@ class CodeGraphBuilder:
                         resolved = matches[0][0]
                         resolution_source = "regex"
 
-                # Strategy 1.5: Resolve Self::method to StructName::method
-                # Self:: refers to the concrete struct of the enclosing impl block.
-                # We infer the struct name from the source node ID (FILE:path::Struct::method).
-                if not resolved and base_ref.startswith("Self::"):
-                    self_method = base_ref.replace("Self::", "", 1)
-                    source_parts = source_id.split("::")
-                    if len(source_parts) >= 3:
-                        source_struct = source_parts[-2]
-                        qualified_self = f"{source_struct}::{self_method}"
-                        if qualified_self in qualified_lookup:
-                            matches = [
-                                m
-                                for m in qualified_lookup[qualified_self]
-                                if m[1] == source_lang
-                            ]
-                            if matches:
-                                resolved = matches[0][0]
-                                resolution_source = "self_type"
-                        # Also try via node_lookup with struct preference
-                        if not resolved and self_method in node_lookup:
-                            matches = [
-                                m
-                                for m in node_lookup[self_method]
-                                if m[1] == source_lang
-                            ]
-                            struct_matches = [
-                                m
-                                for m in matches
-                                if f"::{source_struct}::{self_method}" in m[0]
-                            ]
-                            if struct_matches:
-                                resolved = struct_matches[0][0]
-                                resolution_source = "self_type"
-
-                # Strategy 2: For self.method, prefer same-struct methods
-                if not resolved and ref_name.startswith("self."):
-                    method_name = ref_name.replace("self.", "")
-                    if method_name in node_lookup:
-                        matches = [
-                            m for m in node_lookup[method_name] if m[1] == source_lang
-                        ]
-                        if matches:
-                            # Extract struct name from source (FILE:path::Struct::method)
-                            source_parts = source_id.split("::")
-                            if len(source_parts) >= 3:
-                                source_struct = source_parts[-2]
-                                # Prefer methods in the same struct
-                                struct_matches = [
-                                    m
-                                    for m in matches
-                                    if f"::{source_struct}::{method_name}" in m[0]
-                                ]
-                                if struct_matches:
-                                    resolved = struct_matches[0][0]
-                                else:
-                                    resolved = matches[0][0]
-                                resolution_source = "regex"
-
                 # Strategy 3: Extract base name and try standard resolution
-                if not resolved:
+                if not resolved and not is_call:
                     # Get base name (last part after . or ::)
                     base_name = ref_name.split(".")[-1].split("::")[-1]
                     if base_name in node_lookup:
@@ -8207,12 +10166,12 @@ class CodeGraphBuilder:
                     edge["target"] = resolved
                     edge["metadata"] = edge.get("metadata", {})
                     edge["metadata"]["resolution_source"] = resolution_source
-                    if edge["relation"] == "CALLS":
+                    if is_call:
                         edge["relation"] = "CALLS_RESOLVED"
                         stats[resolution_source] += 1
                     elif edge["relation"] == "INSTANTIATES":
                         edge["relation"] = "INSTANTIATES_RESOLVED"
-                elif edge["relation"] == "CALLS":
+                elif is_call:
                     stats["unresolved"] += 1
 
         # Remove filtered non-project edges (stdlib + third-party library calls)
@@ -8235,11 +10194,12 @@ class CodeGraphBuilder:
             resolved_total = stats["scip"] + stats["regex"] + stats["self_type"]
             resolved_pct = 100 * resolved_total / total if total else 0
             logger.info(
-                f"CALLS Resolution: {resolved_pct:.0f}% "
+                f"CALLS Resolution: {resolved_pct:.0f}% of {total} project calls "
                 f"(SCIP: {stats['scip']}/{scip_pct:.0f}%, "
                 f"Regex: {stats['regex']}/{regex_pct:.0f}%, "
                 f"Self: {stats['self_type']}/{self_type_pct:.0f}%, "
-                f"Unresolved: {stats['unresolved']})"
+                f"Unresolved: {stats['unresolved']}); "
+                f"{stats['external']} external calls not counted"
             )
 
     def export(self, output_path, scip_index=None):
@@ -8304,6 +10264,12 @@ def main():
         "path", nargs="?", default=".", help="Root path to index (default: .)"
     )
     parser.add_argument(
+        "--project-root",
+        default=None,
+        help="Project root, when PATH is a directory inside it: config, cache "
+        "and node-ID paths come from the root (default: PATH)",
+    )
+    parser.add_argument(
         "--no-scip",
         action="store_true",
         help="Disable SCIP resolution (use regex only)",
@@ -8318,28 +10284,17 @@ def main():
 
     target = args.path
 
-    # Load config: auto-detect from target dir, apply .descry.toml, then
-    # apply env vars (DESCRY_CACHE_DIR, DESCRY_NO_SCIP, DESCRY_NO_EMBEDDINGS,
-    # etc.). Calling from_env() directly would use Path.cwd() which may
-    # differ from the target directory, so we replicate its logic explicitly.
-    from descry.handlers import DescryConfig, _env
+    # The layers of DescryConfig.from_env(), with the root taken from the
+    # arguments instead of auto-detected from the working directory.
+    from descry.handlers import DescryConfig
 
-    # Handle SCIP opt-out CLI flag before from_env reads the env.
     if args.no_scip:
         os.environ["DESCRY_NO_SCIP"] = "1"
 
-    config = DescryConfig(project_root=Path(target).resolve())
-    toml_data = DescryConfig._load_toml(config.project_root)
-    config._apply_toml(toml_data)
-
-    # Apply env var overrides (mirrors DescryConfig.from_env).
-    cache_dir_str = _env("DESCRY_CACHE_DIR")
-    if cache_dir_str:
-        config.cache_dir = Path(cache_dir_str)
-    if _env("DESCRY_NO_SCIP").lower() in ("1", "true", "yes"):
-        config.enable_scip = False
-    if _env("DESCRY_NO_EMBEDDINGS").lower() in ("1", "true", "yes"):
-        config.enable_embeddings = False
+    project_root = Path(args.project_root or target).resolve()
+    config = DescryConfig(project_root=project_root)
+    config._apply_toml(DescryConfig._load_toml(config.project_root))
+    config._apply_env()
 
     # B.3: always pass config.excluded_dirs so non-TOML projects still get
     # the full default exclusion set.
@@ -8350,7 +10305,9 @@ def main():
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Build the graph
-    builder = CodeGraphBuilder(target, excluded_dirs=config_excluded_dirs)
+    builder = CodeGraphBuilder(
+        target, excluded_dirs=config_excluded_dirs, rel_base=project_root
+    )
     builder.process_directory()
 
     # Generate SCIP indices if available and enabled
@@ -8365,17 +10322,21 @@ def main():
             logger.info(f"SCIP: Enabled ({', '.join(enabled_indexers) or 'none'})")
 
             cache_manager = ScipCacheManager(
-                Path(target).resolve(),
+                project_root,
                 scip_extra_args=config.scip_extra_args,
                 scip_skip_crates=config.scip_skip_crates,
                 scip_toolchain=config.scip_rust_toolchain,
                 scip_timeout_minutes=config.scip_timeout_minutes,
+                cache_dir=config.cache_dir,
             )
             # Generate SCIP for all supported languages (Rust and TypeScript)
-            scip_files = list(cache_manager.update_all().values())
+            scip_paths = cache_manager.update_all()
+            scip_files = list(scip_paths.values())
 
             if scip_files:
-                scip_index = ScipIndex(scip_files)
+                scip_index = ScipIndex(
+                    scip_files, cache_manager.project_dirs(scip_paths), project_root
+                )
                 stats = scip_index.get_stats()
                 logger.info(
                     f"SCIP: Loaded {stats['definitions']} definitions, "
@@ -8412,6 +10373,7 @@ def main():
                     cache_dir=str(config.cache_dir),
                     force_rebuild=True,
                     model_name=config.embedding_model,
+                    source_root=str(config.project_root),
                 )
                 logger.info(
                     f"Embeddings generated: {len(searcher.nodes)} nodes indexed"

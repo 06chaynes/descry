@@ -214,3 +214,81 @@ class Foo {
         _parse(builder, src)
         targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
         assert any("projectHandler" in t for t in targets)
+
+
+class TestCallChains:
+    def test_every_call_of_a_chain_is_recorded(self, builder):
+        src = """
+class Foo {
+  void go(Maker maker) {
+    maker.named('x').assemble()
+        .ship();
+  }
+}
+""".strip()
+        _parse(builder, src)
+        calls = [e["target"] for e in builder.edges if e["relation"] == "CALLS"]
+        assert calls == ["REF:maker.named", "REF:assemble", "REF:ship"]
+
+    def test_call_with_type_arguments_is_recorded(self, builder):
+        src = """
+class Foo {
+  void go() {
+    final box = Box<String>('x');
+    final pairs = makePairs<String, List<int>>(box);
+  }
+}
+""".strip()
+        _parse(builder, src)
+        calls = [e["target"] for e in builder.edges if e["relation"] == "CALLS"]
+        assert calls == ["REF:Box", "REF:makePairs"]
+
+    def test_cascade_is_a_method_call_on_its_target(self, builder):
+        """`..add(1)` is recorded as a call on a receiver, so it cannot be
+        taken for a call of a top-level `add`."""
+        src = """
+class Foo {
+  void go(List<int> items) {
+    items
+      ..add(1);
+  }
+}
+""".strip()
+        _parse(builder, src)
+        (edge,) = [e for e in builder.edges if e["relation"] == "CALLS"]
+        assert (edge["target"], edge["metadata"]["origin"]) == ("REF:add", "?.add")
+
+
+class TestDeclarationsAndInlineComments:
+    def test_declaration_is_not_a_call(self, builder):
+        """Declaring a function, method or constructor does not call it."""
+        src = """
+class Foo {
+  Foo(int y) {
+    wireUp(y);
+  }
+  void bar(int x) {
+    helper(x);
+  }
+}
+void top(int a) {
+  helper(a);
+}
+""".strip()
+        _parse(builder, src)
+        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
+        assert targets == {"REF:wireUp", "REF:helper"}
+
+    def test_mid_line_block_comment_stripped(self, builder):
+        """Code inside a block comment that shares a line with code is skipped."""
+        src = """
+class Foo {
+  void bar() {
+    stepOne(); /* hidden(1);
+    alsoHidden(2); */ stepTwo();
+  }
+}
+""".strip()
+        _parse(builder, src)
+        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
+        assert targets == {"REF:stepOne", "REF:stepTwo"}

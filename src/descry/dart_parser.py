@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import re
 
-from descry.generate import BaseParser, is_generated_source, is_non_project_call
+from descry._comments import strip_block_comments, strip_line_comment
+from descry.generate import BaseParser, is_generated_source
 
 # import 'package:foo/bar.dart'; / import 'dart:async'; / import '../baz.dart';
 _RE_IMPORT = re.compile(r"""^\s*import\s+['"]([^'"]+)['"]""")
@@ -101,10 +102,12 @@ _RE_CTOR = re.compile(
 )
 
 # Call site: identifier(, or receiver.method(, or a?.method(
-# Lookbehind guards against numeric literals, ., and the call-chain dot.
+# Lookbehind guards against starting inside an identifier or a number.
 _RE_CALL = re.compile(
-    r"(?<![A-Za-z0-9_.$])"
+    r"(?<![A-Za-z0-9_$])"
     r"([A-Za-z_][A-Za-z0-9_]*(?:\??\.[A-Za-z_][A-Za-z0-9_]*)*)"
+    # Type arguments: `Foo<T>(`, `Map<String, List<int>>(`
+    r"(?:<[\w\s,.?]*(?:<[\w\s,.?<>]*>[\w\s,.?]*)*>)?"
     r"\s*\("
 )
 
@@ -155,40 +158,6 @@ _DART_CONTROL_KEYWORDS = frozenset(
 )
 
 
-def _strip_line_comment(line: str) -> str:
-    """Return `line` with any trailing ``//...`` comment removed,
-    preserving content inside single- and double-quoted strings so that
-    URL literals like ``'http://'`` survive intact.
-
-    Does NOT handle block comments (``/* ... */``) — those spans are
-    suppressed in the main loop via an `in_block_comment` flag.
-    """
-    in_single = False
-    in_double = False
-    escape = False
-    i = 0
-    while i < len(line):
-        c = line[i]
-        if escape:
-            escape = False
-        elif c == "\\" and (in_single or in_double):
-            escape = True
-        elif c == "'" and not in_double:
-            in_single = not in_single
-        elif c == '"' and not in_single:
-            in_double = not in_double
-        elif (
-            not in_single
-            and not in_double
-            and c == "/"
-            and i + 1 < len(line)
-            and line[i + 1] == "/"
-        ):
-            return line[:i]
-        i += 1
-    return line
-
-
 class DartParser(BaseParser):
     """Regex-driven Dart source parser."""
 
@@ -200,36 +169,29 @@ class DartParser(BaseParser):
 
         current_context: list[str] = [file_id]
         # Depth at which each context frame was pushed, so we pop when the
-        # matching `}` lands on the line that drops depth below that value.
+        # matching `}` lands on the line that drops depth back to that value.
         context_enter_depth: list[int] = [0]
         brace_depth = 0
         in_block_comment = False
 
         for i, raw_line in enumerate(lines):
             lineno = i + 1
-            stripped = raw_line.lstrip()
 
             # Block comment suppression — any span inside /* ... */ is
-            # opaque to the rest of the parser.
-            if in_block_comment:
-                if "*/" in raw_line:
-                    in_block_comment = False
-                continue
-            if stripped.startswith("/*") and "*/" not in raw_line:
-                in_block_comment = True
-                continue
-            # Dart doc comments `///` are one-line; `_strip_line_comment`
+            # opaque to the rest of the parser, wherever on the line it
+            # opens or closes.
+            raw_line, in_block_comment = strip_block_comments(
+                raw_line, in_block_comment
+            )
+            # Dart doc comments `///` are one-line; `strip_line_comment`
             # treats them like `//` which is the right behavior for the
             # call regex.
-            line = _strip_line_comment(raw_line)
+            line = strip_line_comment(raw_line)
 
             # Library / part directives — file-level metadata, no nodes.
             m_lib = _RE_LIBRARY.match(line)
             if m_lib:
-                for node in self.builder.nodes:
-                    if node.get("id") == file_id:
-                        node.setdefault("metadata", {})["dart_library"] = m_lib.group(1)
-                        break
+                self.set_file_metadata(file_id, "dart_library", m_lib.group(1))
                 brace_depth += line.count("{") - line.count("}")
                 continue
 
@@ -318,7 +280,7 @@ class DartParser(BaseParser):
 
                 if has_open_brace and kind != "typedef":
                     current_context.append(type_id)
-                    context_enter_depth.append(brace_depth + 1)
+                    context_enter_depth.append(brace_depth)
 
                 brace_depth += line.count("{") - line.count("}")
                 continue
@@ -346,6 +308,8 @@ class DartParser(BaseParser):
             # calls inside the body get attributed correctly instead of
             # bubbling up to the enclosing class/file node.
             m_fn = _RE_FUNC_OR_METHOD.match(line)
+            # Call scanning starts past a name declared on the line.
+            call_scan_start = m_fn.end() if m_fn else 0
             ctor_name: str | None = None
             if not m_fn and current_context[-1] != file_id:
                 m_ctor = _RE_CTOR.match(line)
@@ -355,6 +319,7 @@ class DartParser(BaseParser):
                     # `SomeType(...)` construction calls as declarations.
                     parent_short = current_context[-1].split("::")[-1]
                     if m_ctor.group(1) == parent_short:
+                        call_scan_start = m_ctor.end()
                         ctor_name = (
                             f"{parent_short}.{m_ctor.group(2)}"
                             if m_ctor.group(2)
@@ -407,7 +372,7 @@ class DartParser(BaseParser):
 
                 if has_open_brace and not is_abstract:
                     current_context.append(fn_id)
-                    context_enter_depth.append(brace_depth + 1)
+                    context_enter_depth.append(brace_depth)
 
             # Call extraction — emit for every context, including file
             # scope. Dart uses top-level functions and top-level variable
@@ -415,7 +380,10 @@ class DartParser(BaseParser):
             # non-file context would drop a large fraction of real calls.
             # Skipped entirely for autogenerated files.
             parent_id = current_context[-1]
-            call_matches = iter(()) if skip_calls else _RE_CALL.finditer(line)
+            call_matches = (
+                iter(()) if skip_calls else _RE_CALL.finditer(line, call_scan_start)
+            )
+            self.begin_line(line, lineno)
             for call_match in call_matches:
                 callee = call_match.group(1)
                 simple = callee.split(".")[-1].lstrip("?")
@@ -423,20 +391,19 @@ class DartParser(BaseParser):
                     continue
                 if callee.split(".")[0] in _DART_CONTROL_KEYWORDS:
                     continue
-                if is_non_project_call(callee):
-                    continue
-                self.builder.edges.append(
-                    {
-                        "source": parent_id,
-                        "target": f"REF:{callee}",
-                        "relation": "CALLS",
-                        "metadata": {"lineno": lineno},
-                    }
+                start = call_match.start(1)
+                self.add_call(
+                    parent_id,
+                    callee,
+                    lineno,
+                    0,
+                    start,
+                    call_match.end() - 1,
+                    # A cascade (`..add(x)`) calls a method of its target.
+                    f"?.{callee}" if line[:start].endswith("..") else None,
                 )
 
             brace_depth += line.count("{") - line.count("}")
 
             # Pop context frames whose brace has closed.
-            while len(current_context) > 1 and brace_depth < context_enter_depth[-1]:
-                current_context.pop()
-                context_enter_depth.pop()
+            self.leave_contexts(current_context, context_enter_depth, brace_depth)

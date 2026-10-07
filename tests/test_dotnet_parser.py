@@ -150,9 +150,20 @@ public class User
 }
 """.strip()
         _parse(builder, src)
-        # Property regex requires ; — one-liner auto-props should be caught.
-        # Our regex matches property with { get; set; } so we check ids.
-        assert "FILE:src/Foo.cs::User" in _ids(builder)
+        assert "FILE:src/Foo.cs::User::Name" in _ids(builder)
+
+    def test_property_with_initializer_and_field(self, builder):
+        src = """
+public class User
+{
+    public int Age { get; private set; } = 3;
+    private string _nick;
+}
+""".strip()
+        _parse(builder, src)
+        ids = _ids(builder)
+        assert "FILE:src/Foo.cs::User::Age" in ids
+        assert "FILE:src/Foo.cs::User::_nick" in ids
 
     def test_const(self, builder):
         src = """
@@ -226,6 +237,23 @@ public class Svc
         assert "REF:real" in targets
 
 
+class TestCallChains:
+    def test_every_call_of_a_chain_is_recorded(self, builder):
+        src = """
+public class Svc
+{
+    public void Go(Maker maker)
+    {
+        maker.Named("x").Assemble()
+            .Ship();
+    }
+}
+""".strip()
+        _parse(builder, src)
+        calls = [e["target"] for e in builder.edges if e["relation"] == "CALLS"]
+        assert calls == ["REF:maker.Named", "REF:Assemble", "REF:Ship"]
+
+
 class TestVbFilesSkipped:
     def test_vb_file_no_symbols_beyond_file(self, builder):
         src = """
@@ -239,3 +267,74 @@ End Class
         ids = _ids(builder)
         # VB is SCIP-only — parser only emits the File node.
         assert ids == ["FILE:src/Foo.vb"]
+
+
+class TestDeclarationsAndStrings:
+    def test_declaration_is_not_a_call(self, builder):
+        """Declaring a method does not call it."""
+        src = """
+public class Foo
+{
+    public void Bar(int x) {
+        Compute(x);
+    }
+}
+""".strip()
+        _parse(builder, src)
+        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
+        assert targets == {"REF:Compute"}
+
+    def test_comment_after_verbatim_string_stripped(self, builder):
+        """A backslash does not escape the closing quote of @"..."."""
+        src = """
+public class Foo
+{
+    public void Bar() {
+        var dir = @"C:\\temp\\"; // Hidden(dir)
+        Compute(dir);
+    }
+}
+""".strip().replace("\\\\", "\\")
+        _parse(builder, src)
+        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
+        assert targets == {"REF:Compute"}
+
+    def test_mid_line_block_comment_stripped(self, builder):
+        """Code inside a block comment that shares a line with code is skipped."""
+        src = """
+public class Foo
+{
+    public void Bar() {
+        StepOne(); /* Hidden(1);
+        AlsoHidden(2); */ StepTwo();
+    }
+}
+""".strip()
+        _parse(builder, src)
+        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
+        assert targets == {"REF:StepOne", "REF:StepTwo"}
+
+    def test_brace_in_a_comment_does_not_open_the_class(self, builder):
+        """The class closes at its own `}`; without a `{` of its own it has
+        no body."""
+        src = """
+public class Gap // {
+{
+    public void M() { A(); }
+}
+public class Next
+{
+}
+public class Tail // {
+""".strip()
+        _parse(builder, src)
+        spans = {
+            n["id"]: (n["metadata"]["lineno"], n["metadata"]["end_lineno"])
+            for n in builder.nodes
+            if n["type"] == "Class"
+        }
+        assert spans == {
+            "FILE:src/Foo.cs::Gap": (1, 4),
+            "FILE:src/Foo.cs::Next": (5, 7),
+            "FILE:src/Foo.cs::Tail": (8, 8),
+        }

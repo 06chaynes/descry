@@ -158,3 +158,157 @@ void run() {
         targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
         assert "REF:fake" not in targets
         assert "REF:real" in targets
+
+
+class TestDeclarationsAndInlineComments:
+    def test_definition_is_not_a_call(self, builder):
+        """Defining a function does not call it."""
+        src = """
+int compute(int x) {
+    return scale(x);
+}
+""".strip()
+        _parse(builder, src)
+        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
+        assert targets == {"REF:scale"}
+
+    def test_mid_line_block_comment_stripped(self, builder):
+        """Code inside a block comment that shares a line with code is skipped."""
+        src = """
+void run() {
+    stepOne(); /* hidden(1);
+    also_hidden(2); */ stepTwo();
+    /* inline(3); */ stepThree();
+}
+""".strip()
+        _parse(builder, src)
+        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
+        assert targets == {"REF:stepOne", "REF:stepTwo", "REF:stepThree"}
+
+    def test_macro_line_numbers(self, builder):
+        src = """
+#define FIRST 1
+int x;
+#define SECOND 2
+""".strip()
+        _parse(builder, src)
+        linenos = {
+            n["metadata"]["name"]: n["metadata"]["lineno"]
+            for n in builder.nodes
+            if n["metadata"].get("kind") == "macro"
+        }
+        assert linenos == {"FIRST": 1, "SECOND": 3}
+
+
+def _types(builder):
+    return {n["id"]: n["type"] for n in builder.nodes}
+
+
+class TestTypeNamesThatDefineNothing:
+    def test_forward_declaration_gets_no_node_and_no_body(self, builder):
+        """`class Widget;` ends before any `{`: the function after it keeps
+        its own node and the call in its body."""
+        src = """
+class Widget;
+struct Opaque;
+void run() {
+    start();
+}
+""".strip()
+        _parse(builder, src)
+        assert _types(builder) == {
+            "FILE:src/foo.cpp": "File",
+            "FILE:src/foo.cpp::run": "Function",
+        }
+        calls = [
+            (e["source"], e["target"])
+            for e in builder.edges
+            if e["relation"] == "CALLS"
+        ]
+        assert calls == [("FILE:src/foo.cpp", "REF:start")]
+
+    def test_definition_after_its_forward_declaration_keeps_its_span(self, builder):
+        src = """
+class Widget;
+
+class Widget {
+    void draw();
+};
+""".strip()
+        _parse(builder, src)
+        (widget,) = [n["metadata"] for n in builder.nodes if n["type"] == "Class"]
+        assert (widget["lineno"], widget["end_lineno"]) == (3, 5)
+
+    def test_struct_typed_variable_is_not_a_class(self, builder):
+        """A variable declared with `struct` is a use of the type; the calls
+        around it are still recorded."""
+        src = """
+int size(void) {
+    struct stat st;
+    if (probe(&st)) {
+        return 1;
+    }
+    struct point origin = {0, 0};
+    return finish(origin);
+}
+""".strip()
+        _parse(builder, src)
+        assert _types(builder) == {
+            "FILE:src/foo.cpp": "File",
+            "FILE:src/foo.cpp::size": "Function",
+        }
+        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
+        assert targets == {"REF:probe", "REF:finish"}
+
+    def test_struct_return_type_and_parameter_are_not_classes(self, builder):
+        src = """
+struct node *find(struct list *items) {
+    return lookup(items);
+}
+
+int scan(int fd,
+         struct stat *st) {
+    return check(fd, st);
+}
+""".strip()
+        _parse(builder, src)
+        types = _types(builder)
+        assert "Class" not in types.values()
+        assert types["FILE:src/foo.cpp::find"] == "Function"
+
+    def test_definition_heads_are_classes(self, builder):
+        src = """
+class Shape final : public Base {
+};
+template <> struct hash<Key *> {
+};
+struct Point { int x; int y; };
+enum class Color : int { Red };
+""".strip()
+        _parse(builder, src)
+        names = [n["metadata"]["name"] for n in builder.nodes if n["type"] == "Class"]
+        assert names == ["Shape", "hash", "Point", "Color"]
+
+    def test_brace_in_a_comment_does_not_open_the_class(self, builder):
+        """The class closes at its own `}`; without a `{` of its own it has
+        no body."""
+        src = """
+class Gap // {
+{
+    void m();
+};
+class Next {
+};
+class Tail // {
+""".strip()
+        _parse(builder, src)
+        spans = {
+            n["id"]: (n["metadata"]["lineno"], n["metadata"]["end_lineno"])
+            for n in builder.nodes
+            if n["type"] == "Class"
+        }
+        assert spans == {
+            "FILE:src/foo.cpp::Gap": (1, 4),
+            "FILE:src/foo.cpp::Next": (5, 6),
+            "FILE:src/foo.cpp::Tail": (7, 7),
+        }

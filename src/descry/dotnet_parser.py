@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import re
 
-from descry.generate import BaseParser, is_generated_source, is_non_project_call
+from descry._comments import strip_block_comments
+from descry.generate import BaseParser, is_generated_source
 
 # namespace App.Foo  (block) or  namespace App.Foo;  (file-scoped, C# 10+)
 _RE_NAMESPACE = re.compile(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)")
@@ -66,7 +67,7 @@ _RE_CONSTANT = re.compile(
 
 # Call site: identifier(, obj.method(, Class.static(, Class<T>.method(
 _RE_CALL = re.compile(
-    r"(?<![A-Za-z0-9_.])"
+    r"(?<![A-Za-z0-9_])"
     r"([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)"
     r"\s*(?:<[^>]+>)?\s*\("
 )
@@ -194,7 +195,11 @@ _DOTNET_CONTROL_KEYWORDS = frozenset(
 
 
 def _strip_line_comment(line: str) -> str:
-    """Strip ``//...`` trailing comments while preserving strings."""
+    """Strip ``//...`` trailing comments while preserving strings.
+
+    Verbatim strings (``@"..."``, ``$@"..."``, ``@$"..."``) have no
+    backslash escapes.
+    """
     in_single = False
     in_double = False
     in_verbatim = False
@@ -207,6 +212,10 @@ def _strip_line_comment(line: str) -> str:
         elif c == "\\" and (in_single or in_double) and not in_verbatim:
             escape = True
         elif c == '"' and not in_single:
+            if in_double:
+                in_verbatim = False
+            else:
+                in_verbatim = line[i - 1 : i] == "@" or line[max(i - 2, 0) : i] == "@$"
             in_double = not in_double
         elif c == "'" and not in_double:
             in_single = not in_single
@@ -244,10 +253,7 @@ class DotnetParser(BaseParser):
                 namespace = m.group(1)
                 break
         if namespace:
-            for node in self.builder.nodes:
-                if node.get("id") == file_id:
-                    node.setdefault("metadata", {})["dotnet_namespace"] = namespace
-                    break
+            self.set_file_metadata(file_id, "dotnet_namespace", namespace)
 
         for line in lines:
             stripped = _strip_line_comment(line)
@@ -257,7 +263,6 @@ class DotnetParser(BaseParser):
 
         current_context: list[str] = [file_id]
         context_enter_depth: list[int] = [0]
-        class_name_stack: list[str] = []
         brace_depth = 0
         in_block_comment = False
 
@@ -266,18 +271,13 @@ class DotnetParser(BaseParser):
         while i < n:
             raw_line = lines[i]
             lineno = i + 1
+            # Call scanning starts past a name declared on the line.
+            call_scan_start = 0
 
             # Block comments
-            stripped = raw_line.lstrip()
-            if in_block_comment:
-                if "*/" in raw_line:
-                    in_block_comment = False
-                i += 1
-                continue
-            if stripped.startswith(("/*", "/**")) and "*/" not in raw_line:
-                in_block_comment = True
-                i += 1
-                continue
+            raw_line, in_block_comment = strip_block_comments(
+                raw_line, in_block_comment
+            )
             # XML doc comments (///) are single-line — handled by _strip_line_comment
 
             line = _strip_line_comment(raw_line)
@@ -290,13 +290,8 @@ class DotnetParser(BaseParser):
                 type_id = f"{parent_id}::{name}"
 
                 # Allman brace style — look ahead for the `{`.
-                brace_line_idx = i
-                if "{" not in line:
-                    for j in range(i + 1, min(i + 10, n)):
-                        if "{" in lines[j]:
-                            brace_line_idx = j
-                            break
-                has_open_brace = "{" in lines[brace_line_idx]
+                brace_line_idx = self.opening_brace_line(lines, i, line)
+                has_open_brace = brace_line_idx is not None
 
                 end_lineno = (
                     self._find_block_end(lines, brace_line_idx)
@@ -318,17 +313,12 @@ class DotnetParser(BaseParser):
                 if has_open_brace:
                     current_context.append(type_id)
                     context_enter_depth.append(brace_depth)
-                    class_name_stack.append(name)
-                    for k in range(i, brace_line_idx + 1):
+                    brace_depth += line.count("{") - line.count("}")
+                    for k in range(i + 1, brace_line_idx + 1):
                         brace_depth += lines[k].count("{") - lines[k].count("}")
-                    while (
-                        len(current_context) > 1
-                        and brace_depth <= context_enter_depth[-1]
-                    ):
-                        current_context.pop()
-                        context_enter_depth.pop()
-                        if class_name_stack:
-                            class_name_stack.pop()
+                    self.leave_contexts(
+                        current_context, context_enter_depth, brace_depth
+                    )
                     i = brace_line_idx + 1
                 else:
                     i += 1
@@ -340,6 +330,7 @@ class DotnetParser(BaseParser):
                 if m_method:
                     name = m_method.group(1)
                     if name not in _DOTNET_CONTROL_KEYWORDS:
+                        call_scan_start = m_method.end()
                         parent_id = current_context[-1]
                         method_id = f"{parent_id}::{name}"
                         end_lineno = (
@@ -357,53 +348,46 @@ class DotnetParser(BaseParser):
                         )
                         self.builder.add_edge(parent_id, method_id, "DEFINES")
 
+                # Constants and fields end in `;` with no brace; a property
+                # carries its accessors in braces (`{ get; set; }`).
+                m_member = None
                 if "{" not in line and ";" in line:
-                    m_const = _RE_CONSTANT.match(line)
-                    m_field = _RE_FIELD.match(line)
-                    m_prop = None
-                    if not m_const and not m_field:
-                        m_prop = _RE_PROPERTY.match(line)
-                    for match_obj in (m_const, m_field, m_prop):
-                        if not match_obj:
-                            continue
-                        name = match_obj.group(1)
-                        parent_id = current_context[-1]
-                        sym_id = f"{parent_id}::{name}"
-                        if sym_id not in self.builder.node_registry:
-                            self.builder.add_node(
-                                sym_id,
-                                "Constant",
-                                name=name,
-                                lineno=lineno,
-                                docstring="",
-                            )
-                            self.builder.add_edge(parent_id, sym_id, "DEFINES")
-                        break
+                    m_member = _RE_CONSTANT.match(line) or _RE_FIELD.match(line)
+                elif "{" in line and not m_method:
+                    m_member = _RE_PROPERTY.match(line)
+                if m_member:
+                    name = m_member.group(1)
+                    parent_id = current_context[-1]
+                    sym_id = f"{parent_id}::{name}"
+                    if sym_id not in self.builder.node_registry:
+                        self.builder.add_node(
+                            sym_id,
+                            "Constant",
+                            name=name,
+                            lineno=lineno,
+                            docstring="",
+                        )
+                        self.builder.add_edge(parent_id, sym_id, "DEFINES")
 
             # Calls
             if not skip_calls and current_context[-1] != file_id:
                 parent_id = current_context[-1]
-                for call_match in _RE_CALL.finditer(line):
+                self.begin_line(line, lineno)
+                for call_match in _RE_CALL.finditer(line, call_scan_start):
                     callee = call_match.group(1)
                     simple = callee.split(".")[-1]
                     if simple in _DOTNET_CONTROL_KEYWORDS:
                         continue
-                    if is_non_project_call(callee):
-                        continue
-                    self.builder.edges.append(
-                        {
-                            "source": parent_id,
-                            "target": f"REF:{callee}",
-                            "relation": "CALLS",
-                            "metadata": {"lineno": lineno},
-                        }
+                    self.add_call(
+                        parent_id,
+                        callee,
+                        lineno,
+                        0,
+                        call_match.start(1),
+                        call_match.end() - 1,
                     )
 
             brace_depth += line.count("{") - line.count("}")
-            while len(current_context) > 1 and brace_depth <= context_enter_depth[-1]:
-                current_context.pop()
-                context_enter_depth.pop()
-                if class_name_stack:
-                    class_name_stack.pop()
+            self.leave_contexts(current_context, context_enter_depth, brace_depth)
 
             i += 1

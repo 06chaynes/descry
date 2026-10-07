@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import re
 
-from descry.generate import BaseParser, is_generated_source, is_non_project_call
+from descry._comments import strip_line_comment
+from descry.generate import BaseParser, is_generated_source
 
 # class Foo, class Foo < Bar
 _RE_CLASS = re.compile(
@@ -113,31 +114,14 @@ _RUBY_KEYWORDS = frozenset(
     }
 )
 
-
-def _strip_line_comment(line: str) -> str:
-    """Remove ``#...`` trailing comments, honoring string literals."""
-    in_single = False
-    in_double = False
-    escape = False
-    i = 0
-    while i < len(line):
-        c = line[i]
-        if escape:
-            escape = False
-        elif c == "\\" and (in_single or in_double):
-            escape = True
-        elif c == '"' and not in_single:
-            in_double = not in_double
-        elif c == "'" and not in_double:
-            in_single = not in_single
-        elif not in_single and not in_double and c == "#":
-            return line[:i]
-        i += 1
-    return line
+_LINE_COMMENT_MARKERS = ("#",)
 
 
 class RubyParser(BaseParser):
     """Regex + indentation Ruby parser."""
+
+    doc_line_prefix = "#"
+    doc_strip_chars = "# "
 
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
@@ -147,7 +131,7 @@ class RubyParser(BaseParser):
 
         # Requires — one pass over the file
         for line in lines:
-            stripped = _strip_line_comment(line)
+            stripped = strip_line_comment(line, _LINE_COMMENT_MARKERS)
             m = _RE_REQUIRE.match(stripped)
             if m:
                 self.builder.add_edge(file_id, f"MODULE:{m.group(1)}", "IMPORTS")
@@ -157,11 +141,6 @@ class RubyParser(BaseParser):
         # outer that's closing).
         current_context: list[str] = [file_id]
         context_indent: list[int] = [-1]
-
-        def _pop_to(indent: int) -> None:
-            while len(current_context) > 1 and context_indent[-1] >= indent:
-                current_context.pop()
-                context_indent.pop()
 
         in_block_comment = False
         i = 0
@@ -181,7 +160,7 @@ class RubyParser(BaseParser):
                 i += 1
                 continue
 
-            line = _strip_line_comment(raw_line)
+            line = strip_line_comment(raw_line, _LINE_COMMENT_MARKERS)
             if not line.strip():
                 i += 1
                 continue
@@ -191,7 +170,7 @@ class RubyParser(BaseParser):
             # 1. Class
             m_class = _RE_CLASS.match(line)
             if m_class:
-                _pop_to(indent)
+                self.leave_contexts(current_context, context_indent, indent)
                 _, name, superclass = m_class.groups()
                 parent_id = current_context[-1]
                 class_id = f"{parent_id}::{name}"
@@ -208,7 +187,7 @@ class RubyParser(BaseParser):
                 if superclass:
                     self.builder.add_edge(class_id, f"REF:{superclass}", "INHERITS")
                 # Single-line `class X; end` — don't push.
-                if "end" not in line.split(";", 1)[1:] if ";" in line else True:
+                if "end" not in line.partition(";")[2]:
                     current_context.append(class_id)
                     context_indent.append(indent)
                 i += 1
@@ -217,7 +196,7 @@ class RubyParser(BaseParser):
             # 2. Module
             m_module = _RE_MODULE.match(line)
             if m_module:
-                _pop_to(indent)
+                self.leave_contexts(current_context, context_indent, indent)
                 _, name = m_module.groups()
                 parent_id = current_context[-1]
                 mod_id = f"{parent_id}::{name}"
@@ -231,15 +210,17 @@ class RubyParser(BaseParser):
                     docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, mod_id, "DEFINES")
-                current_context.append(mod_id)
-                context_indent.append(indent)
+                # Single-line `module X; end` — don't push.
+                if "end" not in line.partition(";")[2]:
+                    current_context.append(mod_id)
+                    context_indent.append(indent)
                 i += 1
                 continue
 
             # 3. Method
             m_method = _RE_METHOD.match(line)
             if m_method:
-                _pop_to(indent)
+                self.leave_contexts(current_context, context_indent, indent)
                 _, name = m_method.groups()
                 parent_id = current_context[-1]
                 method_id = f"{parent_id}::{name}"
@@ -265,8 +246,7 @@ class RubyParser(BaseParser):
                 parent_id = current_context[-1]
                 for sym in re.findall(r":([a-z_][A-Za-z0-9_]*)", m_attr.group(2)):
                     attr_id = f"{parent_id}::{sym}"
-                    existing = {n["id"] for n in self.builder.nodes}
-                    if attr_id not in existing:
+                    if attr_id not in self.builder.node_registry:
                         self.builder.add_node(
                             attr_id,
                             "Method",
@@ -285,8 +265,7 @@ class RubyParser(BaseParser):
                 _, name = m_const.groups()
                 parent_id = current_context[-1]
                 const_id = f"{parent_id}::{name}"
-                existing = {n["id"] for n in self.builder.nodes}
-                if const_id not in existing:
+                if const_id not in self.builder.node_registry:
                     self.builder.add_node(
                         const_id,
                         "Constant",
@@ -304,8 +283,6 @@ class RubyParser(BaseParser):
                     last = callee.split(".")[-1]
                     # Check both the bare name and the ?/! stripped form.
                     if last in _RUBY_KEYWORDS or last.rstrip("?!") in _RUBY_KEYWORDS:
-                        continue
-                    if is_non_project_call(callee):
                         continue
                     self.builder.edges.append(
                         {

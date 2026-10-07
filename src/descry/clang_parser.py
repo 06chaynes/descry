@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import re
 
-from descry.generate import BaseParser, is_generated_source, is_non_project_call
+from descry._comments import strip_block_comments, strip_line_comment
+from descry.generate import BaseParser, is_generated_source
 
 # #include <foo.h>  /  #include "foo.h"
 _RE_INCLUDE = re.compile(r'^\s*#\s*include\s+[<"]([^>"]+)[>"]')
@@ -30,6 +31,14 @@ _RE_CLASS = re.compile(
     r"(class|struct|union|enum)(?:\s+class)?\s+"
     r"(?:alignas\([^)]*\)\s+)?"
     r"([A-Za-z_][A-Za-z0-9_]*)"
+)
+
+# What follows the type name where the line uses the type instead of
+# declaring it: a declarator, as in `struct stat st;`, `struct point p = {0};`,
+# `struct node *find(void) {` or the parameter `struct list *items)`.
+_RE_DECLARATOR = re.compile(
+    r"\s*(?:<[^{;]*>\s*)?"  # template arguments
+    r"(?:[*&,)=\[]|(?:[A-Za-z_]\w*\s+)*[A-Za-z_]\w*\s*[*&(=\[,);])"
 )
 
 # Function / method definition detection uses a non-regex scanner to
@@ -178,34 +187,6 @@ _C_CONTROL_KEYWORDS = frozenset(
 )
 
 
-def _strip_line_comment(line: str) -> str:
-    """Strip trailing ``//`` comments outside string/char literals."""
-    in_single = False
-    in_double = False
-    escape = False
-    i = 0
-    while i < len(line):
-        c = line[i]
-        if escape:
-            escape = False
-        elif c == "\\" and (in_single or in_double):
-            escape = True
-        elif c == '"' and not in_single:
-            in_double = not in_double
-        elif c == "'" and not in_double:
-            in_single = not in_single
-        elif (
-            not in_single
-            and not in_double
-            and c == "/"
-            and i + 1 < len(line)
-            and line[i + 1] == "/"
-        ):
-            return line[:i]
-        i += 1
-    return line
-
-
 class ClangParser(BaseParser):
     """Regex + brace-depth C/C++ parser."""
 
@@ -216,7 +197,7 @@ class ClangParser(BaseParser):
         skip_calls = is_generated_source(content)
 
         # Includes + defines — file-level
-        for line in lines:
+        for idx, line in enumerate(lines):
             m_inc = _RE_INCLUDE.match(line)
             if m_inc:
                 self.builder.add_edge(file_id, f"MODULE:{m_inc.group(1)}", "IMPORTS")
@@ -229,7 +210,7 @@ class ClangParser(BaseParser):
                         macro_id,
                         "Constant",
                         name=name,
-                        lineno=lines.index(line) + 1,
+                        lineno=idx + 1,
                         docstring="",
                         kind="macro",
                     )
@@ -237,7 +218,6 @@ class ClangParser(BaseParser):
 
         current_context: list[str] = [file_id]
         context_enter_depth: list[int] = [0]
-        class_name_stack: list[str] = []
         brace_depth = 0
         in_block_comment = False
 
@@ -247,19 +227,13 @@ class ClangParser(BaseParser):
             raw_line = lines[i]
             lineno = i + 1
 
-            # Block comments /* ... */
-            stripped_leading = raw_line.lstrip()
-            if in_block_comment:
-                if "*/" in raw_line:
-                    in_block_comment = False
-                i += 1
-                continue
-            if stripped_leading.startswith("/*") and "*/" not in raw_line:
-                in_block_comment = True
-                i += 1
-                continue
+            # Block comments /* ... */, wherever they open or close on the
+            # line.
+            raw_line, in_block_comment = strip_block_comments(
+                raw_line, in_block_comment
+            )
 
-            line = _strip_line_comment(raw_line)
+            line = strip_line_comment(raw_line)
 
             # Preprocessor lines — skip type/function detection (but still
             # contribute to brace counting so macros with braces don't
@@ -286,33 +260,27 @@ class ClangParser(BaseParser):
                 self.builder.add_edge(parent_id, ns_id, "DEFINES")
                 current_context.append(ns_id)
                 context_enter_depth.append(brace_depth)
-                class_name_stack.append(name)
                 brace_depth += line.count("{") - line.count("}")
-                while (
-                    len(current_context) > 1 and brace_depth <= context_enter_depth[-1]
-                ):
-                    current_context.pop()
-                    context_enter_depth.pop()
-                    if class_name_stack:
-                        class_name_stack.pop()
+                self.leave_contexts(current_context, context_enter_depth, brace_depth)
                 i += 1
                 continue
 
-            # class / struct / union / enum declarations
+            # class / struct / union / enum definitions. A declaration that
+            # ends before any `{` (`class Widget;`) has no body and gets no
+            # node; a use of the type is left to the code below.
             m_class = _RE_CLASS.match(line)
-            if m_class:
+            if (
+                m_class
+                and ("{" in line or ";" not in line)
+                and not _RE_DECLARATOR.match(line, m_class.end())
+            ):
                 kind, name = m_class.groups()
                 parent_id = current_context[-1]
                 type_id = f"{parent_id}::{name}"
 
                 # Allman-style braces: `{` may be on the next line.
-                brace_line_idx = i
-                if "{" not in line:
-                    for j in range(i + 1, min(i + 10, n)):
-                        if "{" in lines[j]:
-                            brace_line_idx = j
-                            break
-                has_open_brace = "{" in lines[brace_line_idx]
+                brace_line_idx = self.opening_brace_line(lines, i, line)
+                has_open_brace = brace_line_idx is not None
 
                 end_lineno = (
                     self._find_block_end(lines, brace_line_idx)
@@ -334,17 +302,12 @@ class ClangParser(BaseParser):
                 if has_open_brace:
                     current_context.append(type_id)
                     context_enter_depth.append(brace_depth)
-                    class_name_stack.append(name)
-                    for k in range(i, brace_line_idx + 1):
+                    brace_depth += line.count("{") - line.count("}")
+                    for k in range(i + 1, brace_line_idx + 1):
                         brace_depth += lines[k].count("{") - lines[k].count("}")
-                    while (
-                        len(current_context) > 1
-                        and brace_depth <= context_enter_depth[-1]
-                    ):
-                        current_context.pop()
-                        context_enter_depth.pop()
-                        if class_name_stack:
-                            class_name_stack.pop()
+                    self.leave_contexts(
+                        current_context, context_enter_depth, brace_depth
+                    )
                     i = brace_line_idx + 1
                 else:
                     i += 1
@@ -413,7 +376,7 @@ class ClangParser(BaseParser):
                 simple = simple.split("<")[0]
                 if simple in _C_CONTROL_KEYWORDS:
                     continue
-                if is_non_project_call(callee):
+                if simple == fn_name:  # the name being defined on this line
                     continue
                 self.builder.edges.append(
                     {
@@ -425,10 +388,6 @@ class ClangParser(BaseParser):
                 )
 
             brace_depth += line.count("{") - line.count("}")
-            while len(current_context) > 1 and brace_depth <= context_enter_depth[-1]:
-                current_context.pop()
-                context_enter_depth.pop()
-                if class_name_stack:
-                    class_name_stack.pop()
+            self.leave_contexts(current_context, context_enter_depth, brace_depth)
 
             i += 1

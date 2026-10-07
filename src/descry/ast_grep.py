@@ -16,6 +16,15 @@ from collections.abc import Iterator
 from descry._env import safe_env
 
 
+def _load_matches(stdout: str) -> list:
+    """Decode ``sg --json`` output: an array of matches.
+
+    Any other JSON value (an error object, say) carries no matches.
+    """
+    matches = json.loads(stdout) if stdout else []
+    return matches if isinstance(matches, list) else []
+
+
 def extract_calls_rust(file_path: str) -> Iterator[dict]:
     """Extract function calls from a Rust file using ast-grep.
 
@@ -57,9 +66,7 @@ def extract_calls_rust(file_path: str) -> Iterator[dict]:
             if result.returncode != 0:
                 continue
 
-            matches = json.loads(result.stdout) if result.stdout else []
-
-            for match in matches:
+            for match in _load_matches(result.stdout):
                 meta = match.get("metaVariables", {}).get("single", {})
 
                 # Try METHOD first (for method calls), then FUNC (for direct calls)
@@ -111,7 +118,7 @@ def extract_calls_rust(file_path: str) -> Iterator[dict]:
                     "full_text": match.get("text", ""),
                 }
 
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        except (subprocess.TimeoutExpired, OSError, ValueError):
             continue
 
 
@@ -179,9 +186,7 @@ def extract_calls_typescript(file_path: str) -> Iterator[dict]:
             if result.returncode != 0:
                 continue
 
-            matches = json.loads(result.stdout) if result.stdout else []
-
-            for match in matches:
+            for match in _load_matches(result.stdout):
                 meta = match.get("metaVariables", {}).get("single", {})
 
                 # Try METHOD first (for method calls), then FUNC (for direct calls)
@@ -230,7 +235,7 @@ def extract_calls_typescript(file_path: str) -> Iterator[dict]:
                     "full_text": match.get("text", ""),
                 }
 
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        except (subprocess.TimeoutExpired, OSError, ValueError):
             continue
 
 
@@ -245,7 +250,7 @@ def is_ast_grep_available() -> bool:
             check=False,
         )
         return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         return False
 
 
@@ -322,9 +327,7 @@ def extract_imports_typescript(file_path: str) -> dict:
             if proc_result.returncode != 0:
                 continue
 
-            matches = json.loads(proc_result.stdout) if proc_result.stdout else []
-
-            for match in matches:
+            for match in _load_matches(proc_result.stdout):
                 meta = match.get("metaVariables", {})
                 single = meta.get("single", {})
                 multi = meta.get("multi", {})
@@ -388,7 +391,7 @@ def extract_imports_typescript(file_path: str) -> dict:
                         else:
                             result["imports"][text] = (source, "named")
 
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        except (subprocess.TimeoutExpired, OSError, ValueError):
             continue
 
     return result

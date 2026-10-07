@@ -225,3 +225,63 @@ class Svc {
         targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
         assert "REF:fake" not in targets
         assert "REF:real" in targets
+
+
+class TestDeclarationsAndComments:
+    def test_declaration_is_not_a_call(self, builder):
+        """Declaring a method or function does not call it."""
+        src = """
+<?php
+class Svc {
+    public function syncOrders($x) {
+        compute($x);
+    }
+}
+function syncAll($y) {
+    compute($y);
+}
+""".strip()
+        _parse(builder, src)
+        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
+        assert targets == {"REF:compute"}
+
+    def test_mid_line_block_comment_stripped(self, builder):
+        """Code inside a block comment that shares a line with code is skipped."""
+        src = """
+<?php
+class Svc {
+    public function run() {
+        stepOne(); /* hidden(1);
+        also_hidden(2); */ stepTwo();
+    }
+}
+""".strip()
+        _parse(builder, src)
+        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
+        assert targets == {"REF:stepOne", "REF:stepTwo"}
+
+    def test_brace_in_a_comment_does_not_open_the_class(self, builder):
+        """The class closes at its own `}`; without a `{` of its own it has
+        no body."""
+        src = """
+<?php
+class Gap // {
+{
+    public function m() { a(); }
+}
+class Next
+{
+}
+class Tail # {
+""".strip()
+        _parse(builder, src)
+        spans = {
+            n["id"]: (n["metadata"]["lineno"], n["metadata"]["end_lineno"])
+            for n in builder.nodes
+            if n["type"] == "Class"
+        }
+        assert spans == {
+            "FILE:src/Foo.php::Gap": (2, 5),
+            "FILE:src/Foo.php::Next": (6, 8),
+            "FILE:src/Foo.php::Tail": (9, 9),
+        }

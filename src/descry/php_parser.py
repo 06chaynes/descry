@@ -2,16 +2,16 @@
 
 Covers PHP namespaces, classes (with ``extends`` / ``implements``),
 interfaces, traits, enums (PHP 8.1+), methods, constructors,
-properties, use-statements, and call sites. PHP syntax is close enough
-to Java that the brace-tracking ``context_enter_depth`` pattern
-transfers directly.
+properties, use-statements, and call sites. Contexts are tracked by
+brace depth.
 """
 
 from __future__ import annotations
 
 import re
 
-from descry.generate import BaseParser, is_generated_source, is_non_project_call
+from descry._comments import strip_block_comments, strip_line_comment
+from descry.generate import BaseParser, is_generated_source
 
 # namespace App\\Foo;  (one-line) or  namespace App\\Foo { ... }  (block)
 _RE_NAMESPACE = re.compile(r"^\s*namespace\s+([A-Za-z_\\][A-Za-z0-9_\\]*)\s*[;{]")
@@ -115,30 +115,7 @@ _PHP_CONTROL_KEYWORDS = frozenset(
     }
 )
 
-
-def _strip_line_comment(line: str) -> str:
-    """Strip ``//...`` and ``#...`` trailing comments outside of strings."""
-    in_single = False
-    in_double = False
-    escape = False
-    i = 0
-    while i < len(line):
-        c = line[i]
-        if escape:
-            escape = False
-        elif c == "\\" and (in_single or in_double):
-            escape = True
-        elif c == '"' and not in_single:
-            in_double = not in_double
-        elif c == "'" and not in_double:
-            in_single = not in_single
-        elif not in_single and not in_double:
-            if c == "/" and i + 1 < len(line) and line[i + 1] == "/":
-                return line[:i]
-            if c == "#":
-                return line[:i]
-        i += 1
-    return line
+_LINE_COMMENT_MARKERS = ("//", "#")
 
 
 class PhpParser(BaseParser):
@@ -153,25 +130,22 @@ class PhpParser(BaseParser):
         # One-pass namespace + use
         namespace = None
         for line in lines[:60]:
-            stripped = _strip_line_comment(line)
+            stripped = strip_line_comment(line, _LINE_COMMENT_MARKERS)
             m_ns = _RE_NAMESPACE.match(stripped)
             if m_ns:
                 namespace = m_ns.group(1)
                 break
         if namespace:
-            for node in self.builder.nodes:
-                if node.get("id") == file_id:
-                    node.setdefault("metadata", {})["php_namespace"] = namespace
-                    break
+            self.set_file_metadata(file_id, "php_namespace", namespace)
 
         for line in lines:
-            stripped = _strip_line_comment(line)
+            stripped = strip_line_comment(line, _LINE_COMMENT_MARKERS)
             m = _RE_USE.match(stripped)
             if m:
                 fqn = m.group(1).lstrip("\\")
                 self.builder.add_edge(file_id, f"MODULE:{fqn}", "IMPORTS")
 
-        # Walk with brace-depth context tracking (same pattern as Java).
+        # Walk with brace-depth context tracking.
         current_context: list[str] = [file_id]
         context_enter_depth: list[int] = [0]
         brace_depth = 0
@@ -182,20 +156,16 @@ class PhpParser(BaseParser):
         while i < n:
             raw_line = lines[i]
             lineno = i + 1
+            # Call scanning starts past a name declared on the line.
+            call_scan_start = 0
 
-            # Block comments /* ... */ (and /** ... */ Javadoc).
-            stripped = raw_line.lstrip()
-            if in_block_comment:
-                if "*/" in raw_line:
-                    in_block_comment = False
-                i += 1
-                continue
-            if stripped.startswith(("/*", "/**")) and "*/" not in raw_line:
-                in_block_comment = True
-                i += 1
-                continue
+            # Block comments /* ... */ (and /** ... */ Javadoc), wherever
+            # they open or close on the line.
+            raw_line, in_block_comment = strip_block_comments(
+                raw_line, in_block_comment, hash_comments=True
+            )
 
-            line = _strip_line_comment(raw_line)
+            line = strip_line_comment(raw_line, _LINE_COMMENT_MARKERS)
 
             # Type declarations: class / interface / trait / enum
             m_type = (
@@ -213,13 +183,8 @@ class PhpParser(BaseParser):
                 # next line after `class Foo implements X, Y, Z`. Look
                 # ahead (up to 10 lines) to find the opening brace so we
                 # can push a proper context.
-                brace_line_idx = i
-                if "{" not in line:
-                    for j in range(i + 1, min(i + 10, n)):
-                        if "{" in lines[j]:
-                            brace_line_idx = j
-                            break
-                has_open_brace = "{" in lines[brace_line_idx]
+                brace_line_idx = self.opening_brace_line(lines, i, line)
+                has_open_brace = brace_line_idx is not None
 
                 end_lineno = (
                     self._find_block_end(lines, brace_line_idx)
@@ -244,14 +209,12 @@ class PhpParser(BaseParser):
                     # lines between the class keyword and the `{`.
                     context_enter_depth.append(brace_depth)
                     # Advance past bridge lines so we don't re-scan them.
-                    for k in range(i, brace_line_idx + 1):
+                    brace_depth += line.count("{") - line.count("}")
+                    for k in range(i + 1, brace_line_idx + 1):
                         brace_depth += lines[k].count("{") - lines[k].count("}")
-                    while (
-                        len(current_context) > 1
-                        and brace_depth <= context_enter_depth[-1]
-                    ):
-                        current_context.pop()
-                        context_enter_depth.pop()
+                    self.leave_contexts(
+                        current_context, context_enter_depth, brace_depth
+                    )
                     i = brace_line_idx + 1
                 else:
                     i += 1
@@ -261,6 +224,7 @@ class PhpParser(BaseParser):
             if current_context[-1] != file_id:
                 m_method = _RE_METHOD.match(line)
                 if m_method:
+                    call_scan_start = m_method.end()
                     name = m_method.group(1)
                     parent_id = current_context[-1]
                     method_id = f"{parent_id}::{name}"
@@ -313,6 +277,7 @@ class PhpParser(BaseParser):
                 # File-scope function
                 m_fn = _RE_FUNCTION.match(line)
                 if m_fn:
+                    call_scan_start = m_fn.end()
                     name = m_fn.group(1)
                     func_id = f"{file_id}::{name}"
                     end_lineno = (
@@ -333,12 +298,10 @@ class PhpParser(BaseParser):
             # Calls (inside any context — methods, functions, etc.)
             if not skip_calls and current_context[-1] != file_id:
                 parent_id = current_context[-1]
-                for call_match in _RE_CALL.finditer(line):
+                for call_match in _RE_CALL.finditer(line, call_scan_start):
                     callee = call_match.group(1)
                     simple_name = callee.split("::")[-1].split("->")[-1].split("\\")[-1]
                     if simple_name in _PHP_CONTROL_KEYWORDS:
-                        continue
-                    if is_non_project_call(callee.lstrip("\\")):
                         continue
                     self.builder.edges.append(
                         {
@@ -351,8 +314,6 @@ class PhpParser(BaseParser):
 
             # Update brace depth + pop closed contexts
             brace_depth += line.count("{") - line.count("}")
-            while len(current_context) > 1 and brace_depth <= context_enter_depth[-1]:
-                current_context.pop()
-                context_enter_depth.pop()
+            self.leave_contexts(current_context, context_enter_depth, brace_depth)
 
             i += 1

@@ -17,15 +17,15 @@ from __future__ import annotations
 
 import re
 
-from descry._comments import strip_double_slash_comment
-from descry.generate import BaseParser, is_generated_source, is_non_project_call
+from descry._comments import strip_block_comments, strip_line_comment
+from descry.generate import BaseParser, blank_strings, is_generated_source
 
 # Package declaration: `package foo`
 _RE_PACKAGE = re.compile(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_]*)")
 
 # Single import: `import "foo/bar"` or `import alias "foo/bar"` or `import _ "foo/bar"`
 _RE_IMPORT_SINGLE = re.compile(
-    r'^\s*import\s+(?:[A-Za-z_][A-Za-z0-9_]*\s+|\.\s+|_\s+)?"([^"]+)"'
+    r'^\s*import\s+(?:([A-Za-z_][A-Za-z0-9_]*)\s+|\.\s+)?"([^"]+)"'
 )
 
 # Grouped import block start: `import (`
@@ -33,12 +33,12 @@ _RE_IMPORT_BLOCK_START = re.compile(r"^\s*import\s*\(")
 
 # Inside-block import line: `"foo/bar"` or `alias "foo/bar"`
 _RE_IMPORT_BLOCK_LINE = re.compile(
-    r'^\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+|\.\s+|_\s+)?"([^"]+)"'
+    r'^\s*(?:([A-Za-z_][A-Za-z0-9_]*)\s+|\.\s+)?"([^"]+)"'
 )
 
 # Type declaration: `type Name struct {`, `type Name interface {`, `type Name = AliasTarget`
 _RE_TYPE_DECL = re.compile(
-    r"^\s*type\s+([A-Z][A-Za-z0-9_]*)\s+"
+    r"^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)\s+"
     r"(struct|interface|func|chan|map|\[\]|\*|=|[A-Za-z])"
 )
 
@@ -48,13 +48,14 @@ _RE_FUNC = re.compile(r"^\s*func\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^]]+\])?\s*\
 # Method declaration: `func (receiver *Type) Name(...)`
 _RE_METHOD = re.compile(
     r"^\s*func\s+"
-    r"\(\s*[A-Za-z_][A-Za-z0-9_]*\s+\*?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s+"
+    r"\(\s*[A-Za-z_][A-Za-z0-9_]*\s+\*?\s*([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\[[^]]*\])?\s*\)\s+"  # optional type parameters: (s *Stack[T])
     r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^]]+\])?\s*\("
 )
 
 # Const single-line: `const Name = value`
 _RE_CONST_SINGLE = re.compile(
-    r"^\s*const\s+([A-Z][A-Za-z0-9_]*)\s*(?:[A-Za-z0-9_\[\]]*\s*)?="
+    r"^\s*const\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:[A-Za-z0-9_\[\]]*\s*)?="
 )
 
 # Grouped const/var block: `const (` / `var (`
@@ -66,9 +67,20 @@ _RE_BLOCK_ENTRY = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s+[A-Za-z0-9_.\[\]*]
 
 # Call site: `identifier(` or `receiver.method(`
 _RE_CALL = re.compile(
-    r"(?<![A-Za-z0-9_.])"
+    r"(?<![A-Za-z0-9_])"
     r"([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)"
     r"\s*\("
+)
+
+_DECLARATIONS = (
+    # `name Type` / `name *Type` in a receiver or parameter list
+    re.compile(
+        r"[(,]\s*(?P<name>[A-Za-z_]\w*)\s+\*?(?P<type>[A-Za-z_][\w.]*)\s*(?=[,)])"
+    ),
+    # `var name Type`
+    re.compile(r"\bvar\s+(?P<name>\w+)\s+\*?(?P<type>[A-Za-z_][\w.]*)"),
+    # `name := Type{` / `name = &Type{`
+    re.compile(r"\b(?P<name>\w+)\s*:?=\s*&?(?P<type>[A-Za-z_][\w.]*)\{"),
 )
 
 # Go control-flow keywords that would spuriously match the call regex.
@@ -101,12 +113,73 @@ _GO_CONTROL_KEYWORDS = frozenset(
 )
 
 
-def _strip_line_comment(line: str) -> str:
-    return strip_double_slash_comment(line)
+def _parameter_names(parameters: str) -> list[str]:
+    """Names of the parameters in the text of a parameter list, which names
+    all of them or none."""
+    segments, depth, start = [], 0, 0
+    for column, char in enumerate(f"{parameters},"):
+        depth += (char in "([{") - (char in ")]}")
+        if char == "," and depth == 0:
+            segments.append(parameters[start:column].split())
+            start = column + 1
+    if not any(len(tokens) > 1 for tokens in segments):
+        return []
+    return [tokens[0] for tokens in segments if tokens and tokens[0].isidentifier()]
+
+
+def _signature_tail(line: str, params: int) -> tuple[str, int, list[str]]:
+    """Read a `func` line from column ``params``, just inside its parameter
+    list. Returns the type of its first result (`T` for `(T, error)` or
+    `(name T, err error)`), the column its body starts at and the names of
+    its parameters."""
+    depth = 1
+    results = len(line)
+    for column in range(params, len(line)):
+        char = line[column]
+        if char in "()":
+            depth += 1 if char == "(" else -1
+            if depth == 0 and results == len(line):
+                results = column + 1
+        elif char == "{" and depth == 0:
+            if not line[:column].rstrip().endswith(("interface", "struct")):
+                first = line[results:column].strip().lstrip("(")
+                first = re.split(r"[,)]", first)[0].split()
+                names = _parameter_names(line[params : results - 1])
+                return (first[-1] if first else ""), column + 1, names
+    return "", len(line), []
 
 
 class GoParser(BaseParser):
     """Regex-driven Go source parser."""
+
+    binding_re = re.compile(r"^\s*(?P<name>\w+)(?:\s*,\s*[\w.]+)*\s*:?=(?!=)")
+
+    def _scan_calls(self, source_id, code, lineno, since, start, raw):
+        """Record the calls on ``code``, the line ``raw`` with its literals
+        blanked, from column ``start`` on. ``since`` is the first line of
+        the enclosing function."""
+        self.begin_line(code, lineno, source_id, raw)
+        for call_match in _RE_CALL.finditer(code, start):
+            callee = call_match.group(1)
+            if callee.split(".")[-1] not in _GO_CONTROL_KEYWORDS:
+                self.add_call(
+                    source_id,
+                    callee,
+                    lineno,
+                    since,
+                    call_match.start(1),
+                    call_match.end() - 1,
+                )
+
+    def _add_import(self, file_id, alias, path):
+        self.builder.add_edge(file_id, f"MODULE:{path}", "IMPORTS")
+        if alias is None:
+            # The package name is by convention the path's last element,
+            # before any major-version suffix (`yaml.v3`, `.../v2`).
+            parts = [p for p in path.split("/") if not re.fullmatch(r"v\d+", p)]
+            alias = parts[-1].split(".")[0] if parts else "_"
+        if alias != "_":
+            self.builder.imports.setdefault(file_id, {})[alias] = path
 
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
@@ -130,42 +203,35 @@ class GoParser(BaseParser):
                 package = m.group(1)
                 break
         if package:
-            for node in self.builder.nodes:
-                if node.get("id") == file_id:
-                    node.setdefault("metadata", {})["go_package"] = package
-                    break
+            self.set_file_metadata(file_id, "go_package", package)
 
         # Imports — single and grouped
         in_import_block = False
         in_const_block = False
         in_var_block = False
-        current_context: list[str] = [file_id]
-        type_name_stack: list[str] = []
+        self.scan_declarations(lines, _DECLARATIONS)
+        self.enter_context(file_id, 0, len(lines))
+        receivers: dict[str, tuple[str, int]] = {}  # type id -> (name, lineno)
 
         i = 0
         n = len(lines)
         in_block_comment = False
+        in_raw_string = None
         while i < n:
             raw_line = lines[i]
             lineno = i + 1
+            context_id, context_start = self.context_at(lineno)
 
-            # Handle block comments (/* ... */). Spans longer than one line
-            # are completely suppressed.
-            stripped = raw_line.lstrip()
-            if in_block_comment:
-                if "*/" in raw_line:
-                    in_block_comment = False
-                i += 1
-                continue
-            if stripped.startswith("/*") and "*/" not in raw_line:
-                in_block_comment = True
-                i += 1
-                continue
+            # Handle block comments (/* ... */), which may span lines.
+            raw_line, in_block_comment = strip_block_comments(
+                raw_line, in_block_comment
+            )
 
-            # Strip any trailing `// comment` to keep the call regex honest
-            # on lines like `// +k8s:alpha(since:"1.36")` where `alpha(`
-            # would otherwise look like a method invocation.
-            line = _strip_line_comment(raw_line)
+            # Declarations are matched on `line`, which has no trailing
+            # `// comment`; calls are read from `code`, which also has its
+            # string literals blanked.
+            line = strip_line_comment(raw_line, backticks=True)
+            code, in_raw_string = blank_strings(raw_line, in_raw_string, ("`",))
 
             # Import block state machine
             if _RE_IMPORT_BLOCK_START.match(line):
@@ -179,13 +245,13 @@ class GoParser(BaseParser):
                     continue
                 m = _RE_IMPORT_BLOCK_LINE.match(line)
                 if m:
-                    self.builder.add_edge(file_id, f"MODULE:{m.group(1)}", "IMPORTS")
+                    self._add_import(file_id, *m.groups())
                 i += 1
                 continue
 
             m_imp = _RE_IMPORT_SINGLE.match(line)
             if m_imp:
-                self.builder.add_edge(file_id, f"MODULE:{m_imp.group(1)}", "IMPORTS")
+                self._add_import(file_id, *m_imp.groups())
                 i += 1
                 continue
 
@@ -207,7 +273,7 @@ class GoParser(BaseParser):
                 m_entry = _RE_BLOCK_ENTRY.match(line)
                 if m_entry and not line.strip().startswith("//"):
                     name = m_entry.group(1)
-                    parent_id = current_context[-1]
+                    parent_id = context_id
                     const_id = f"{parent_id}::{name}"
                     if const_id not in self.builder.node_registry:
                         self.builder.add_node(
@@ -225,7 +291,7 @@ class GoParser(BaseParser):
             m_type = _RE_TYPE_DECL.match(line)
             if m_type:
                 name, kind = m_type.groups()
-                parent_id = current_context[-1]
+                parent_id = context_id
                 type_id = f"{parent_id}::{name}"
                 end_lineno = self._find_block_end(lines, i) if "{" in line else lineno
                 docstring = self.get_leading_docstring(lines, i)
@@ -240,9 +306,8 @@ class GoParser(BaseParser):
                     docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, type_id, "DEFINES")
-                if "{" in line and kind in ("struct", "interface"):
-                    current_context.append(type_id)
-                    type_name_stack.append(name)
+                if end_lineno > lineno and kind in ("struct", "interface"):
+                    self.enter_context(type_id, lineno, end_lineno)
                 i += 1
                 continue
 
@@ -254,6 +319,7 @@ class GoParser(BaseParser):
                 method_id = f"{file_id}::{receiver_type}::{method_name}"
                 end_lineno = self._find_block_end(lines, i) if "{" in line else lineno
                 docstring = self.get_leading_docstring(lines, i)
+                return_type, body, parameters = _signature_tail(line, m_method.end())
                 self.builder.add_node(
                     method_id,
                     "Method",
@@ -263,17 +329,18 @@ class GoParser(BaseParser):
                     token_count=(end_lineno - lineno + 1) * 10,
                     docstring=docstring,
                     receiver=receiver_type,
+                    return_type=return_type,
                 )
-                self.builder.add_edge(
-                    f"{file_id}::{receiver_type}", method_id, "DEFINES"
-                )
-                # Push the method body as call-attribution context. Without
-                # this, calls inside method bodies attribute to the file and
-                # get dropped by the `current_context[-1] != file_id` gate
-                # — so the parser used to emit only ~1-2 calls per Go file.
-                if "{" in line:
-                    current_context.append(method_id)
-                    type_name_stack.append(method_name)
+                receiver_id = f"{file_id}::{receiver_type}"
+                receivers.setdefault(receiver_id, (receiver_type, lineno))
+                self.builder.add_edge(receiver_id, method_id, "DEFINES")
+                for parameter in parameters:
+                    self.add_local(method_id, parameter)
+                # The calls in the method body are attributed to the method.
+                if end_lineno > lineno:
+                    self.enter_context(method_id, lineno, end_lineno)
+                if not skip_calls:
+                    self._scan_calls(method_id, code, lineno, lineno, body, raw_line)
                 i += 1
                 continue
 
@@ -284,10 +351,11 @@ class GoParser(BaseParser):
                 # approximate; the strict check is that `func` is followed by
                 # an identifier before the `(`, which _RE_FUNC already enforces).
                 name = m_func.group(1)
-                parent_id = current_context[-1]
+                parent_id = context_id
                 func_id = f"{parent_id}::{name}"
                 end_lineno = self._find_block_end(lines, i) if "{" in line else lineno
                 docstring = self.get_leading_docstring(lines, i)
+                return_type, body, parameters = _signature_tail(line, m_func.end())
                 self.builder.add_node(
                     func_id,
                     "Function",
@@ -296,11 +364,15 @@ class GoParser(BaseParser):
                     end_lineno=end_lineno,
                     token_count=(end_lineno - lineno + 1) * 10,
                     docstring=docstring,
+                    return_type=return_type,
                 )
                 self.builder.add_edge(parent_id, func_id, "DEFINES")
-                if "{" in line:
-                    current_context.append(func_id)
-                    type_name_stack.append(name)
+                for parameter in parameters:
+                    self.add_local(func_id, parameter)
+                if end_lineno > lineno:
+                    self.enter_context(func_id, lineno, end_lineno)
+                if not skip_calls:
+                    self._scan_calls(func_id, code, lineno, lineno, body, raw_line)
                 i += 1
                 continue
 
@@ -308,7 +380,7 @@ class GoParser(BaseParser):
             m_const = _RE_CONST_SINGLE.match(line)
             if m_const:
                 name = m_const.group(1)
-                parent_id = current_context[-1]
+                parent_id = context_id
                 const_id = f"{parent_id}::{name}"
                 if const_id not in self.builder.node_registry:
                     self.builder.add_node(
@@ -322,33 +394,22 @@ class GoParser(BaseParser):
 
             # Calls — regex path (no ast-grep Go backend today).
             # Skipped entirely for autogenerated files.
-            if not skip_calls and current_context[-1] != file_id:
-                parent_id = current_context[-1]
-                for call_match in _RE_CALL.finditer(line):
-                    callee = call_match.group(1)
-                    simple = callee.split(".")[-1]
-                    if simple in _GO_CONTROL_KEYWORDS:
-                        continue
-                    if is_non_project_call(callee):
-                        continue
-                    self.builder.edges.append(
-                        {
-                            "source": parent_id,
-                            "target": f"REF:{callee}",
-                            "relation": "CALLS",
-                            "metadata": {"lineno": lineno},
-                        }
-                    )
-
-            # Pop on closing brace
-            if "}" in line and len(current_context) > 1:
-                close = line.count("}")
-                open_ = line.count("{")
-                net = close - open_
-                for _ in range(max(0, net)):
-                    if len(current_context) > 1:
-                        current_context.pop()
-                        if type_name_stack:
-                            type_name_stack.pop()
+            if not skip_calls and context_id != file_id:
+                self._scan_calls(context_id, code, lineno, context_start, 0, raw_line)
 
             i += 1
+
+        # A method's DEFINES edge is sourced at its receiver type. A type
+        # declared in another file of the package has no node here, so give
+        # it one.
+        for receiver_id, (name, method_lineno) in receivers.items():
+            if receiver_id not in self.builder.node_registry:
+                self.builder.add_node(
+                    receiver_id,
+                    "Class",
+                    name=name,
+                    kind="type",
+                    lineno=method_lineno,
+                    docstring="",
+                )
+                self.builder.add_edge(file_id, receiver_id, "DEFINES")

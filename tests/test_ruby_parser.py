@@ -226,3 +226,57 @@ end
         targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
         assert "REF:call_never_happens" not in targets
         assert "REF:real_call" in targets
+
+
+class TestOneLineBodiesAndDocs:
+    def test_one_line_class_does_not_capture_siblings(self, builder):
+        """`class X; end` closes on its line; what follows is its sibling."""
+        src = """
+module Billing
+  class Error < StandardError; end
+  LIMIT = 3
+
+  def charge
+    submit(1)
+  end
+end
+""".strip()
+        _parse(builder, src)
+        ids = _ids(builder)
+        assert "FILE:app/foo.rb::Billing::LIMIT" in ids
+        assert "FILE:app/foo.rb::Billing::charge" in ids
+
+    def test_one_line_module_does_not_capture_siblings(self, builder):
+        """`module X; end` closes on its line too."""
+        src = """
+module Billing
+  module Marker; end
+  LIMIT = 3
+end
+""".strip()
+        _parse(builder, src)
+        assert "FILE:app/foo.rb::Billing::LIMIT" in _ids(builder)
+
+    def test_hash_comments_become_docstrings(self, builder):
+        """`#` lines directly above a class, module or method document it."""
+        src = """
+# Billing helpers.
+module Billing
+  # Raised when a charge fails.
+  class Error
+  end
+
+  # Charges the card.
+  # Retries once.
+  def charge
+  end
+end
+""".strip()
+        _parse(builder, src)
+        docs = {n["id"]: n["metadata"].get("docstring") for n in builder.nodes}
+        assert docs["FILE:app/foo.rb::Billing"] == "Billing helpers."
+        assert docs["FILE:app/foo.rb::Billing::Error"] == "Raised when a charge fails."
+        assert (
+            docs["FILE:app/foo.rb::Billing::charge"]
+            == "Charges the card.\nRetries once."
+        )
