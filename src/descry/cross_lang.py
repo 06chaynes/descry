@@ -34,7 +34,6 @@ class CrossLangTracer:
         openapi_path: str,
         graph_path: str | None = None,
         backend_handler_patterns: list[str] | None = None,
-        frontend_api_patterns: list[str] | None = None,
         api_prefixes: list[str] | None = None,
     ):
         """Initialize the tracer with OpenAPI spec.
@@ -44,15 +43,12 @@ class CrossLangTracer:
             graph_path: Optional path to codebase graph for enriched lookups
             backend_handler_patterns: Path substrings identifying backend handler files
                 (e.g., ["backend/src/routes"]). If empty, handler filtering is skipped.
-            frontend_api_patterns: Path substrings identifying frontend API files
-                (e.g., ["webapp/src/lib/api"]). If empty, frontend filtering is skipped.
             api_prefixes: API version prefixes to strip when matching endpoints
                 (defaults to ["/api/v1", "/api/v2", "/api"]).
         """
         self.openapi_path = Path(openapi_path)
         self.graph_path = Path(graph_path) if graph_path else None
         self.backend_handler_patterns = backend_handler_patterns or []
-        self.frontend_api_patterns = frontend_api_patterns or []
         self._API_PREFIXES = (
             tuple(api_prefixes) if api_prefixes else ("/api/v1", "/api/v2", "/api")
         )
@@ -79,13 +75,21 @@ class CrossLangTracer:
         try:
             with open(self.openapi_path, encoding="utf-8") as f:
                 spec = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
+        except (ValueError, OSError) as e:
             logger.error(f"Failed to parse OpenAPI spec: {e}")
             return
 
-        for path, methods in spec.get("paths", {}).items():
+        paths = spec.get("paths") if isinstance(spec, dict) else None
+        if not isinstance(paths, dict):
+            return
+
+        for path, methods in paths.items():
+            if not isinstance(methods, dict):
+                continue
             for method, details in methods.items():
                 if method not in ("get", "post", "put", "delete", "patch"):
+                    continue
+                if not isinstance(details, dict):
                     continue
 
                 operation_id = details.get("operationId", "")
@@ -125,7 +129,7 @@ class CrossLangTracer:
 
         try:
             graph = load_graph_with_schema(self.graph_path)
-        except (OSError, json.JSONDecodeError, GraphSchemaError) as e:
+        except (OSError, ValueError, GraphSchemaError) as e:
             logger.error(f"Failed to load graph: {e}")
             return
 
@@ -162,8 +166,12 @@ class CrossLangTracer:
         """
         for prefix in self._API_PREFIXES:
             if path.startswith(prefix):
-                stripped = path[len(prefix) :]
-                return stripped if stripped else "/"
+                stripped = path[len(prefix) :] or "/"
+                # Callers retry the lookup with the result, so it must differ
+                # from the input: an empty prefix, or "/" against "/", would
+                # otherwise have them recurse on the same path forever.
+                if stripped != path:
+                    return stripped
         return None
 
     def endpoint_to_handler(self, method: str, path: str) -> str | None:
