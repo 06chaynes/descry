@@ -1,20 +1,20 @@
 """Graph -> query set and document texts for the embedding comparison.
 
-Kept deliberately independent of descry.embeddings: the harness must not
-inherit production's composite, its min_score cut, or its cache, or the
-comparison would be measuring those instead of the model.
+Independent of SemanticSearcher: the harness must not inherit production's
+min_score cut or its cache, or the comparison would be measuring those instead
+of the model. Document text is production's own; see doc_text.
 """
 
-import json
 import random
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from descry.embeddings import DOCSTRING_CHAR_LIMIT, node_text
+from descry._graph import load_graph_with_schema
+from descry.embeddings import DOCSTRING_CHAR_LIMIT, code_excerpt, node_text
 
-DOC_CHAR_LIMIT = DOCSTRING_CHAR_LIMIT
 WORD_RE = re.compile(r"[A-Za-z]+")
 _EXT_RE = re.compile(r"\.([A-Za-z0-9]+)(?:::|$)")
 
@@ -26,28 +26,25 @@ def language_of(node_id: str) -> str:
 
 
 def load_nodes(graph_path: str | Path) -> list[dict]:
-    with open(graph_path, encoding="utf-8") as f:
-        return json.load(f)["nodes"]
+    return load_graph_with_schema(graph_path)["nodes"]
 
 
-def doc_text(node: dict, *, with_docstring: bool = True) -> str:
+def doc_text(
+    node: dict, *, with_docstring: bool = True, source_root: str | Path | None = None
+) -> str:
     """Index-side text, delegated to production.
 
     Shared rather than reimplemented so the leave-one-out substitute cannot
-    drift from the index it replaces a row in. Alternative assemblies being
-    *evaluated* (see composite_texts) still live here - the harness has to be
-    able to score a candidate against the shipped one.
+    drift from the index it replaces a row in.
+
+    `source_root` is the directory node ids are relative to; with it the text
+    carries the node's code excerpt, as the production index does.
     """
-    return node_text(node, include_docstring=with_docstring)
-
-
-def composite_texts(node: dict, *, with_docstring: bool = True) -> tuple[str, str, str]:
-    """The three texts production encodes separately, incl. its name fallbacks."""
-    meta = node.get("metadata") or {}
-    name = meta.get("name") or node["id"].split("::")[-1]
-    sig = meta.get("signature") or ""
-    doc = (meta.get("docstring") or "")[:DOC_CHAR_LIMIT] if with_docstring else ""
-    return name, (sig or name), (doc or name)
+    return node_text(
+        node,
+        include_docstring=with_docstring,
+        code=code_excerpt(node, source_root),
+    )
 
 
 def build_queries(
@@ -60,29 +57,22 @@ def build_queries(
     metric punishes a right answer); and it must carry enough words to be
     answerable at all.
     """
-    first_line_counts: dict[str, int] = {}
-    for n in nodes:
-        d = ((n.get("metadata") or {}).get("docstring") or "").strip()
-        if d:
-            fl = d.splitlines()[0].strip()
-            first_line_counts[fl] = first_line_counts.get(fl, 0) + 1
+    docstrings = [(n["metadata"].get("docstring") or "").strip() for n in nodes]
+    first_lines = [d.splitlines()[0].strip() if d else "" for d in docstrings]
+    first_line_counts = Counter(first_lines)
 
     queries = []
-    for idx, n in enumerate(nodes):
-        d = ((n.get("metadata") or {}).get("docstring") or "").strip()
-        if not d:
-            continue
-        fl = d.splitlines()[0].strip()
-        if first_line_counts.get(fl, 0) > 1:
+    for idx, (n, d, fl) in enumerate(zip(nodes, docstrings, first_lines, strict=True)):
+        if not d or first_line_counts[fl] > 1:
             continue
         if len(WORD_RE.findall(fl)) < min_words:
             continue
         queries.append(
             {
                 "gold_index": idx,
-                "query": d[:DOC_CHAR_LIMIT],
+                "query": d[:DOCSTRING_CHAR_LIMIT],
                 "gold_id": n["id"],
-                "type": n.get("type", ""),
+                "type": n["type"],
                 "lang": language_of(n["id"]),
             }
         )

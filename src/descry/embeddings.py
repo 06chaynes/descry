@@ -15,10 +15,13 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from descry.query import _read_file_cached, source_path
 
 try:
     import fcntl as _fcntl  # Unix only
@@ -30,8 +33,8 @@ except ImportError:
 def _file_lock(lock_path: Path, timeout: float = 600.0):
     """Cross-process advisory lock.
 
-    Uses fcntl.flock on Unix; falls back to atomic-create sentinel on
-    platforms without fcntl (Windows).
+    Uses fcntl.flock on Unix and msvcrt.locking on Windows. Both are held on
+    an open handle, so the OS releases them when the holder exits.
 
     The lock file is never unlinked. Removing it would break mutual
     exclusion: a waiter blocked on the old inode and a newcomer that
@@ -39,46 +42,44 @@ def _file_lock(lock_path: Path, timeout: float = 600.0):
     An empty lock file is cheap; correctness is not.
     """
     if _fcntl is not None:
-        with open(lock_path, "w", encoding="utf-8") as f:
-            # Poll non-blocking so the documented timeout is actually honoured;
-            # a plain LOCK_EX would block forever regardless of the argument.
-            deadline = time.monotonic() + timeout
-            while True:
-                try:
-                    _fcntl.flock(f, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-                    break
-                except OSError:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(
-                            f"Timed out waiting for embeddings lock at {lock_path}"
-                        ) from None
-                    time.sleep(0.05)
-            try:
-                yield
-            finally:
-                _fcntl.flock(f, _fcntl.LOCK_UN)
-        return
+        mode, poll_seconds = "w", 0.05
 
-    # Windows fallback: exclusive-create a sentinel file.
-    start = time.monotonic()
-    while True:
+        def lock(f):
+            _fcntl.flock(f, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+
+        def unlock(f):
+            _fcntl.flock(f, _fcntl.LOCK_UN)
+
+    else:
+        # Windows fallback: lock the first byte of the (always empty) lock file.
+        import msvcrt
+
+        mode, poll_seconds = "a", 0.1
+
+        def lock(f):
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+
+        def unlock(f):
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+
+    with open(lock_path, mode, encoding="utf-8") as f:
+        # Poll non-blocking so the timeout is honoured; a blocking lock would
+        # wait forever regardless of the argument.
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                lock(f)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"Timed out waiting for embeddings lock at {lock_path}"
+                    ) from None
+                time.sleep(poll_seconds)
         try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
-            break
-        except FileExistsError:
-            if time.monotonic() - start > timeout:
-                raise TimeoutError(
-                    f"Timed out waiting for embeddings lock at {lock_path}"
-                ) from None
-            time.sleep(0.1)
-    try:
-        yield
-    finally:
-        try:
-            lock_path.unlink()
-        except OSError:
-            pass
+            yield
+        finally:
+            unlock(f)
 
 
 logger = logging.getLogger(__name__)
@@ -87,14 +88,18 @@ logger = logging.getLogger(__name__)
 # changing the graph or the model name must be reflected here, or a stale
 # cache is silently served against freshly-encoded queries. Bump RECIPE_VERSION
 # whenever the text assembly or composition below changes.
-RECIPE_VERSION = 2
+RECIPE_VERSION = 4
 DOCSTRING_CHAR_LIMIT = 500
+CODE_CHAR_LIMIT = 1500
+# Whitespace plus the quote and comment markers that surround a docstring line
+# in source: `"""`, `'''`, `///`, `//!`, `//`, `#`, `*`, `/**`, `*/`.
+_DOC_MARKER_CHARS = " \t\r\n\"'/*#!"
+# A string prefix on a docstring's opening quotes, as in `r"""`.
+_DOC_STRING_PREFIX_RE = re.compile(r"""^\s*[rRbBuU]{1,2}(?=["'])""")
 
-# Instruction-tuned models score asymmetric retrieval markedly better when the
-# query and the document are encoded through their respective task prompts.
-# Measured on this repo's own graph (405 docstring->symbol queries, leave-one-out):
-# R@1 0.360 -> 0.405, nDCG@10 0.550 -> 0.593. Names differ per model family and
-# are applied only when the loaded model actually registers them.
+# Instruction-tuned models score asymmetric retrieval better when the query and
+# the document are encoded through their respective task prompts. Names differ
+# per model family and are applied only when the loaded model registers them.
 QUERY_PROMPT_CANDIDATES = ("nl2code_query", "query")
 DOCUMENT_PROMPT_CANDIDATES = ("nl2code_document", "document")
 
@@ -144,8 +149,8 @@ MODEL_REGISTRY: dict[str, EmbeddingModelSpec] = {
         dim=1024,
         license="Apache-2.0",
         context_tokens=32768,
-        # Measured worse through its own generic query/document prompts
-        # (R@1 0.360) than with none at all, so this entry names none.
+        # Measured worse through its own generic query/document prompts than
+        # with none at all, so this entry names none.
         query_prompt=None,
         document_prompt=None,
         summary="General purpose. Apache-2.0, the most permissive licence.",
@@ -159,11 +164,10 @@ MODEL_REGISTRY: dict[str, EmbeddingModelSpec] = {
         context_tokens=2048,
         # 'InstructionRetrieval' is this model's code-retrieval prompt,
         # 'task: code retrieval | query: '. The name is an MTEB task label, not
-        # a description. Through its generic retrieval prompts instead it drops
-        # to R@1 0.385, below jina-code.
+        # a description. It measured worse through its generic retrieval prompts.
         query_prompt="InstructionRetrieval",
         document_prompt="document",
-        summary="Default. Best measured retrieval; smallest index. 2K context.",
+        summary="Default. Gated: needs a HuggingFace login. 2K context.",
     ),
     "embeddinggemma-2": EmbeddingModelSpec(
         alias="embeddinggemma-2",
@@ -181,17 +185,28 @@ MODEL_REGISTRY: dict[str, EmbeddingModelSpec] = {
         max_seq_length=8192,
         extra="embeddinggemma-2",
     ),
+    "f2llm-v2-0.6b": EmbeddingModelSpec(
+        alias="f2llm-v2-0.6b",
+        repo_id="codefuse-ai/F2LLM-v2-0.6B",
+        revision="8786315a8711c242ee03ec67c74dd9ad0a61e2cf",
+        dim=1024,
+        license="Apache-2.0",
+        context_tokens=40960,
+        # Measured better with no prompt than through its own query prompt.
+        query_prompt=None,
+        document_prompt=None,
+        summary="Ungated, Apache-2.0. Used when the default is gated.",
+    ),
 }
 
 DEFAULT_MODEL_ALIAS = "embeddinggemma"
-# Named in the error a gated default produces, so the fix is one line of toml.
-UNGATED_FALLBACK_ALIAS = "qwen3"
+# Used instead of the default, when no model is configured and the default is
+# gated for this account.
+FALLBACK_MODEL_ALIAS = "f2llm-v2-0.6b"
 
 
-def resolve_model_spec(name: str | None) -> EmbeddingModelSpec | None:
+def resolve_model_spec(name: str) -> EmbeddingModelSpec | None:
     """Look a model up by alias or by full repo id. None if unregistered."""
-    if not name:
-        return None
     if name in MODEL_REGISTRY:
         return MODEL_REGISTRY[name]
     for spec in MODEL_REGISTRY.values():
@@ -217,11 +232,48 @@ def list_models() -> list[dict]:
     ]
 
 
-def node_text(node: dict, *, include_docstring: bool = True) -> str:
-    """The document string for one graph node: name, signature, docstring.
+def _doc_line_content(line: str) -> str:
+    """`line` without the indentation, quote and comment markers around it."""
+    return _DOC_STRING_PREFIX_RE.sub("", line).strip(_DOC_MARKER_CHARS)
 
-    One text per node, not three averaged — averaging pulls every node toward
-    the centroid of its own parts (R@1 0.185 vs 0.405 here).
+
+def code_excerpt(node: dict, source_root: str | Path | None) -> str:
+    """The node's source lines without its docstring, up to CODE_CHAR_LIMIT.
+
+    Empty without a `source_root`, for file nodes, for nodes lacking either
+    line number and for files that cannot be read. A graph may be hand-edited,
+    so only a regular file that resolves inside `source_root` is ever opened.
+
+    Lines repeating a docstring line are dropped whatever markers surround
+    them, so node_text() carries the docstring at most once and the excerpt
+    does not depend on whether the docstring is included.
+    """
+    meta = node.get("metadata") or {}
+    file_part, sep, _ = node["id"].partition("::")
+    start, end = meta.get("lineno"), meta.get("end_lineno")
+    if not (source_root and sep and file_part.startswith("FILE:") and start and end):
+        return ""
+    path = source_path(source_root, file_part.removeprefix("FILE:"))
+    if not path:
+        return ""
+    doc_lines = {
+        _doc_line_content(line) for line in (meta.get("docstring") or "").splitlines()
+    } - {""}
+    kept = [
+        line
+        for line in _read_file_cached(path)[start - 1 : end]
+        if _doc_line_content(line) not in doc_lines
+    ]
+    return "".join(kept).strip()[:CODE_CHAR_LIMIT]
+
+
+def node_text(node: dict, *, include_docstring: bool = True, code: str = "") -> str:
+    """The document string for one graph node: name, signature, docstring, code.
+
+    One text per node: averaging separate vectors for the parts pulls every
+    node toward the centroid of its own parts.
+
+    `code` is the node's code_excerpt(), or empty to leave source out.
 
     tests/eval calls this with `include_docstring=False` for its leave-one-out
     control, so it must not keep a copy: the substituted row has to match the
@@ -232,6 +284,7 @@ def node_text(node: dict, *, include_docstring: bool = True) -> str:
     parts = [name, meta.get("signature") or ""]
     if include_docstring:
         parts.append((meta.get("docstring") or "")[:DOCSTRING_CHAR_LIMIT])
+    parts.append(code)
     text = " ".join(p for p in parts if p).strip()
     return text or node["id"]
 
@@ -264,24 +317,14 @@ def _is_gated_repo_error(exc: BaseException | None) -> bool:
 def _resolve_cache_dir(graph_path: Path, cache_dir: str | None = None) -> Path:
     """Where embedding artifacts live for a given graph.
 
-    Shared by SemanticSearcher and get_embeddings_status; they disagreed
-    before, so status reported "not cached" for a perfectly good cache
-    whenever the graph sat outside a .descry_cache directory.
+    Shared by SemanticSearcher and get_embeddings_status, so status looks for
+    a cache in the directory the searcher writes it to.
     """
     if cache_dir:
         return Path(cache_dir).resolve()
     if graph_path.parent.name == ".descry_cache":
         return graph_path.parent
     return graph_path.parent / ".descry_cache"
-
-
-def _pick_prompt(model, candidates: tuple[str, ...]) -> str | None:
-    """First candidate the model actually registers, else None."""
-    available = getattr(model, "prompts", None) or {}
-    for name in candidates:
-        if name in available:
-            return name
-    return None
 
 
 # Try to import embedding dependencies
@@ -346,7 +389,7 @@ def _load_sentence_transformer(model_name: str, revision: str | None = None):
             f"{target} is a gated HuggingFace model. Accept its licence at "
             f"https://huggingface.co/{target}, then authenticate with "
             "`hf auth login` (or set HF_TOKEN). To use an ungated model "
-            f'instead, set [embeddings] model = "{UNGATED_FALLBACK_ALIAS}" in '
+            f'instead, set [embeddings] model = "{FALLBACK_MODEL_ALIAS}" in '
             ".descry.toml."
         ) from e
 
@@ -358,8 +401,8 @@ class SemanticSearcher:
     cosine similarity for semantic search.
     """
 
-    # The default model, by repo id. Its dimensionality, licence, prompts and
-    # trust setting live on its MODEL_REGISTRY entry, not here.
+    # The default model, by repo id. Its dimensionality, licence and prompts
+    # live on its MODEL_REGISTRY entry, not here.
     MODEL_NAME = MODEL_REGISTRY[DEFAULT_MODEL_ALIAS].repo_id
     # Pinned HF revision (git sha) for the default model. The revision is part
     # of the cache key, so bumping it invalidates existing caches; the model
@@ -372,6 +415,7 @@ class SemanticSearcher:
         cache_dir: str | None = None,
         force_rebuild: bool = False,
         model_name: str | None = None,
+        source_root: str | None = None,
     ):
         """Initialize the semantic searcher.
 
@@ -379,8 +423,15 @@ class SemanticSearcher:
             graph_path: Path to codebase_graph.json
             cache_dir: Optional directory for caching embeddings
             force_rebuild: Force regeneration of embeddings even if cache exists
+            model_name: Registry alias, HuggingFace repo id or local path.
+                None selects the default model, or FALLBACK_MODEL_ALIAS when
+                the default is gated for this account.
+            source_root: Directory the graph's node ids are relative to. When
+                given, each node's text includes its code_excerpt().
         """
+        self._fallback_allowed = model_name is None
         self.model_name = model_name or self.MODEL_NAME
+        self.source_root = source_root
         self._model_lock = threading.Lock()
 
         if not EMBEDDINGS_AVAILABLE:
@@ -418,12 +469,19 @@ class SemanticSearcher:
             self._resolved_revision() or "",
             str(RECIPE_VERSION),
             str(DOCSTRING_CHAR_LIMIT),
-            str(spec.query_prompt if (spec := self.spec) else None),
-            str(spec.document_prompt if spec else None),
+            # The code excerpt's limit, or 0 for an index built without code.
+            str(CODE_CHAR_LIMIT if self.source_root else 0),
+            # An unregistered model's prompts are probed for once it is
+            # loaded, after this key is needed, so the names probed for
+            # stand in for the one that will be picked.
+            str(spec.query_prompt if (spec := self.spec) else QUERY_PROMPT_CANDIDATES),
+            str(spec.document_prompt if spec else DOCUMENT_PROMPT_CANDIDATES),
         ]
         # Appended only when set, so models without a cap keep their key.
         if spec and spec.max_seq_length:
             parts.append(f"max_seq_length={spec.max_seq_length}")
+        if spec and spec.config_kwargs:
+            parts.append(f"config_kwargs={sorted(spec.config_kwargs.items())!r}")
         # A local checkpoint can change under a stable path, so fold in the
         # directory's file sizes and mtimes rather than just its name.
         local = Path(self.model_name)
@@ -458,7 +516,8 @@ class SemanticSearcher:
 
         A spec is authoritative even when it names no prompt — some models
         retrieve worse through their own generic prompts, so "none" must be
-        expressible. Unregistered models fall back to probing.
+        expressible. An unregistered model is probed for the first
+        candidate name it registers.
         """
         spec = self.spec
         if spec is not None:
@@ -472,7 +531,7 @@ class SemanticSearcher:
                 if kind == "query"
                 else DOCUMENT_PROMPT_CANDIDATES
             )
-        return _pick_prompt(self.model, candidates)
+        return next((c for c in candidates if c in self.model.prompts), None)
 
     def _cache_key(self) -> str:
         """Compute content-addressed cache key.
@@ -495,15 +554,14 @@ class SemanticSearcher:
     def _cleanup_old_embeddings(self, keep: set[Path]):
         """Remove embedding cache files not in the keep set."""
         try:
-            # Temporaries are dot-prefixed and skipped here: a glob that
-            # matches them lets a reader delete a file a writer is mid-rename.
+            # _atomic_save's temporaries are dot-prefixed, which these globs
+            # never match. `.tmp.` skips the undotted temporaries descry 0.2
+            # writes, which another process may be about to rename.
             old_files = [
                 f
                 for pattern in ("embeddings_*.npz", "embeddings_*.json")
                 for f in self.cache_dir.glob(pattern)
-                if f not in keep
-                and not f.name.startswith(".")
-                and ".tmp." not in f.name
+                if f not in keep and ".tmp." not in f.name
             ]
             for old_file in old_files:
                 logger.info(f"Removing stale embedding cache: {old_file.name}")
@@ -517,8 +575,8 @@ class SemanticSearcher:
         """Write .npz + JSON sidecar atomically (tmp then rename).
 
         Note: np.savez appends '.npz' to paths that don't end in '.npz'.
-        We write to '<final>.tmp.npz' (which numpy preserves because the
-        suffix is already .npz) and then rename to the final path.
+        We write to a temporary ending in '.tmp.npz' (which numpy preserves
+        because the suffix is already .npz) and then rename to the final path.
         """
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         # Dot-prefixed and pid-tagged: invisible to the cleanup glob, and two
@@ -531,11 +589,12 @@ class SemanticSearcher:
             with open(json_tmp, "w", encoding="utf-8") as f:
                 json.dump(
                     {
-                        "texts": self.node_texts,
+                        "node_count": len(self.node_texts),
                         "recipe_version": RECIPE_VERSION,
                         "model": self.model_name,
                         "revision": self._resolved_revision(),
                         "dim": int(self.embeddings.shape[1]),
+                        "document_prompt": self._document_prompt,
                     },
                     f,
                 )
@@ -556,33 +615,56 @@ class SemanticSearcher:
         descry-mcp + descry-web both starting on a cold cache) don't each
         load the model and write to the same files.
         """
-        npz_path, json_path = self._cache_paths()
-
         # Fast path: cache is hot, no lock needed.
-        if (
-            not force_rebuild
-            and npz_path.exists()
-            and json_path.exists()
-            and self._try_load_cache(npz_path, json_path)
-        ):
+        if not force_rebuild and self._load_cached():
             return
 
         # Cold path: acquire a cross-process lock, recheck, then generate.
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.cache_dir / "embeddings.lock"
         with _file_lock(lock_path):
-            if (
-                not force_rebuild
-                and npz_path.exists()
-                and json_path.exists()
-                and self._try_load_cache(npz_path, json_path)
-            ):
+            if not force_rebuild and self._load_cached():
                 return
 
-            self._generate_embeddings()
+            try:
+                self._generate_embeddings()
+            except EmbeddingModelGated:
+                if not self._fallback_allowed:
+                    raise
+                logger.warning(
+                    f"{self.model_name} is gated for this account; using "
+                    f"{FALLBACK_MODEL_ALIAS} instead. To use the default model, "
+                    f"accept its licence at https://huggingface.co/{self.model_name}, "
+                    "authenticate with `hf auth login` (or set HF_TOKEN) and run "
+                    "`descry index`. To keep this model without the warning, set "
+                    f'[embeddings] model = "{FALLBACK_MODEL_ALIAS}" in .descry.toml.'
+                )
+                self.model_name = FALLBACK_MODEL_ALIAS
+                self._generate_embeddings()
+            npz_path, json_path = self._cache_paths()
             self._atomic_save(npz_path, json_path)
             logger.info(f"Cached {len(self.node_texts)} embeddings to {npz_path}")
             self._cleanup_old_embeddings(keep={npz_path, json_path})
+
+    def _load_cached(self) -> bool:
+        """Load this graph's cached vectors, whichever model built them.
+
+        With no model configured the index may have been built by the default
+        or by the fallback; `model_name` is left naming the one that was.
+        """
+        candidates = [self.model_name]
+        if self._fallback_allowed:
+            candidates.append(FALLBACK_MODEL_ALIAS)
+        for self.model_name in candidates:
+            npz_path, json_path = self._cache_paths()
+            if (
+                npz_path.exists()
+                and json_path.exists()
+                and self._try_load_cache(npz_path, json_path)
+            ):
+                return True
+        self.model_name = candidates[0]
+        return False
 
     def _try_load_cache(self, npz_path: Path, json_path: Path) -> bool:
         """Attempt to load embeddings from cache. Returns True on success."""
@@ -591,7 +673,7 @@ class SemanticSearcher:
             embeddings = data["embeddings"]
             with open(json_path, encoding="utf-8") as f:
                 sidecar = json.load(f)
-            texts = sidecar["texts"]
+            node_count = sidecar["node_count"]
             if sidecar.get("recipe_version") != RECIPE_VERSION:
                 logger.warning(
                     "Embedding cache built by recipe v%s, current is v%s; regenerating",
@@ -603,20 +685,19 @@ class SemanticSearcher:
             # writers) could leave a mismatched pair on disk. Refuse to load
             # it — the cache will regenerate and overwrite with a consistent
             # pair. Cheaper than silently serving wrong embeddings.
-            if len(texts) != embeddings.shape[0]:
+            if node_count != embeddings.shape[0]:
                 logger.warning(
-                    "Embedding cache mismatch (%d texts vs %d embeddings); regenerating",
-                    len(texts),
+                    "Embedding cache mismatch (%d nodes vs %d embeddings); regenerating",
+                    node_count,
                     embeddings.shape[0],
                 )
                 return False
             self.embeddings = embeddings
-            self.node_texts = texts
-            logger.info(f"Loaded {len(self.node_texts)} embeddings from cache")
-            # Deliberately no pruning here: this runs on the lock-free fast
-            # path, where deleting files another process is writing is exactly
-            # the race that made a concurrent index fail. Pruning happens under
-            # the lock in _load_or_create_embeddings.
+            self._document_prompt = sidecar.get("document_prompt")
+            logger.info(f"Loaded {node_count} embeddings from cache")
+            # No pruning here: this runs on the lock-free fast path, where it
+            # could delete files another process is writing. Pruning happens
+            # under the lock in _load_or_create_embeddings.
             return True
         except Exception as e:  # noqa: BLE001 — corrupt cache regenerates; numpy/zipfile signal corruption with open-ended types
             logger.warning(f"Cache load failed: {e}, regenerating...")
@@ -625,9 +706,9 @@ class SemanticSearcher:
     def ensure_model(self):
         """Load the model once, even under concurrent first searches.
 
-        DescryService shares one searcher across worker threads, so the bare
-        check-then-set this replaces let several threads each construct their
-        own copy of a model several hundred megabytes in size.
+        DescryService shares one searcher across worker threads; the lock
+        keeps them from each constructing their own copy of a model several
+        hundred megabytes in size.
         """
         if self.model is not None:
             return self.model
@@ -636,18 +717,27 @@ class SemanticSearcher:
                 self.model = _load_sentence_transformer(self.model_name)
         return self.model
 
-    def _node_text(self, node: dict) -> str:
-        return node_text(node)
-
     def _generate_embeddings(self):
         """Encode one composite text per node in a single pass."""
+        if not self.nodes:
+            # An empty batch encodes to an array with no second axis to norm.
+            self.node_texts = []
+            self.embeddings = np.zeros((0, 0), dtype="float32")
+            self._document_prompt = None
+            return
+
         logger.info("Loading embedding model...")
         self.ensure_model()
 
-        self.node_texts = [self._node_text(n) for n in self.nodes]
+        self.node_texts = [
+            node_text(n, code=code_excerpt(n, self.source_root)) for n in self.nodes
+        ]
         logger.info(f"Generating embeddings for {len(self.node_texts)} nodes...")
 
         prompt_name = self._prompt_name("document")
+        # Recorded in the sidecar: the cache key cannot hold the prompt an
+        # unregistered model resolves to, which is only known once it loads.
+        self._document_prompt = prompt_name
         if prompt_name:
             logger.info(f"  Using document prompt {prompt_name!r}")
         kwargs = {"show_progress_bar": False, "convert_to_numpy": True}
@@ -680,7 +770,18 @@ class SemanticSearcher:
         """
         import math
 
+        if limit <= 0 or not self.nodes:
+            return []
+
         self.ensure_model()
+
+        document_prompt = self._prompt_name("document")
+        if document_prompt != self._document_prompt:
+            raise EmbeddingCacheMismatch(
+                f"Cached embeddings were encoded through document prompt "
+                f"{self._document_prompt!r} but {self.model_name} now resolves "
+                f"{document_prompt!r}; re-index to rebuild them."
+            )
 
         # Encode query through the model's query prompt when it has one, to
         # match the document prompt used when the index was built.
@@ -703,10 +804,9 @@ class SemanticSearcher:
         )
 
         # Take a candidate pool by base score, then apply min_score to the
-        # FINAL score. Cutting on the raw cosine first discarded nodes whose
-        # boosts (worth up to +0.17) would have put them above the threshold
-        # and above results that were returned.
-        pool = min(len(similarities), max(limit * 3, limit))
+        # final score, so a node whose boosts (worth up to +0.17) lift it over
+        # the threshold is kept.
+        pool = min(len(similarities), limit * 3)
         top_indices = np.argpartition(-similarities, pool - 1)[:pool]
         top_indices = top_indices[np.argsort(-similarities[top_indices])]
 
@@ -735,7 +835,8 @@ class SemanticSearcher:
             }.get(node_type, 0.01)
 
             final_score = base_score + in_degree_boost + type_boost
-            if final_score < min_score:
+            # NaN compares False to everything; written so it is dropped.
+            if not (final_score >= min_score):
                 continue
             results.append((node, final_score))
 
@@ -744,44 +845,11 @@ class SemanticSearcher:
         return results[:limit]
 
 
-# Convenience function for one-off searches (with thread safety)
-_cached_searcher = None
-_searcher_lock = threading.Lock()
-
-
-def _semantic_search(
-    query: str,
-    graph_path: str = ".descry_cache/codebase_graph.json",
-    limit: int = 10,
-) -> list:
-    """Convenience function for semantic search (thread-safe).
-
-    Args:
-        query: Natural language search query
-        graph_path: Path to graph file
-        limit: Maximum results
-
-    Returns:
-        List of (node, score) tuples
-    """
-    global _cached_searcher
-
-    if not EMBEDDINGS_AVAILABLE:
-        logger.warning("Embeddings not available, falling back to keyword search")
-        return []
-
-    with _searcher_lock:
-        if _cached_searcher is None or str(_cached_searcher.graph_path) != graph_path:
-            _cached_searcher = SemanticSearcher(graph_path)
-        searcher = _cached_searcher
-
-    return searcher.search(query, limit=limit)
-
-
 def get_embeddings_status(
     graph_path: str = ".descry_cache/codebase_graph.json",
     model_name: str | None = None,
     cache_dir: str | None = None,
+    source_root: str | None = None,
 ) -> dict:
     """Report embedding cache state for diagnostics.
 
@@ -789,6 +857,9 @@ def get_embeddings_status(
     an older graph or a different model is reported as stale rather than as
     Ready. Reads only the JSON sidecar - never np.load of a user-controlled
     .npz.
+
+    Pass the `model_name`, `cache_dir` and `source_root` the searcher is
+    constructed with, or the key will not match.
     """
     graph_path = Path(graph_path).resolve()
 
@@ -807,60 +878,34 @@ def get_embeddings_status(
     if not resolved_cache_dir.is_dir():
         return status
 
-    try:
-        probe = SemanticSearcher.__new__(SemanticSearcher)
-        probe.graph_path = graph_path
-        probe.model_name = model_name or SemanticSearcher.MODEL_NAME
-        expected_key = probe._cache_key()
-    except OSError:
-        return status
-    status["expected_key"] = expected_key
-
-    expected_npz = resolved_cache_dir / f"embeddings_{expected_key}.npz"
-    expected_json = expected_npz.with_suffix(".json")
-    if expected_npz.exists() and expected_json.exists():
-        status["cached"] = True
-        status["cache_path"] = str(expected_npz)
+    # With no model configured, the fallback model may have built the index.
+    candidates = [model_name or SemanticSearcher.MODEL_NAME]
+    if model_name is None:
+        candidates.append(FALLBACK_MODEL_ALIAS)
+    probe = SemanticSearcher.__new__(SemanticSearcher)
+    probe.graph_path = graph_path
+    probe.cache_dir = resolved_cache_dir
+    probe.source_root = source_root
+    for probe.model_name in candidates:
         try:
-            with open(expected_json, encoding="utf-8") as f:
-                status["node_count"] = len(json.load(f).get("texts", []))
-        except (OSError, json.JSONDecodeError, KeyError):
-            pass
-        return status
+            expected_npz, expected_json = probe._cache_paths()
+        except OSError:
+            return status
+
+        if expected_npz.exists() and expected_json.exists():
+            status["cached"] = True
+            status["model"] = probe._resolved_repo_id()
+            status["cache_path"] = str(expected_npz)
+            try:
+                with open(expected_json, encoding="utf-8") as f:
+                    status["node_count"] = json.load(f).get("node_count", 0)
+            except (OSError, json.JSONDecodeError, KeyError):
+                pass
+            return status
 
     # Something is cached, but not for this graph/model/recipe combination.
-    others = [
-        f
-        for f in resolved_cache_dir.glob("embeddings_*.npz")
-        if not f.name.startswith(".")
-    ]
+    others = list(resolved_cache_dir.glob("embeddings_*.npz"))
     if others:
         status["stale"] = True
         status["cache_path"] = str(max(others, key=lambda p: p.stat().st_mtime))
     return status
-
-
-if __name__ == "__main__":
-    # Test the embeddings module
-    import sys
-
-    if not EMBEDDINGS_AVAILABLE:
-        print("Embeddings not available. Install with:")
-        print("  pip install descry-codegraph[embeddings]")
-        sys.exit(1)
-
-    if len(sys.argv) < 2:
-        print("Usage: python embeddings.py <query>")
-        sys.exit(1)
-
-    query = " ".join(sys.argv[1:])
-    results = _semantic_search(query)
-
-    print(f"\nSemantic search results for: '{query}'")
-    print("-" * 50)
-    for node, score in results:
-        meta = node.get("metadata", {})
-        print(f"[{score:.3f}] [{node['type'][:3]}] {meta.get('name', node['id'])}")
-        if meta.get("docstring"):
-            doc = meta["docstring"].split("\n")[0][:60]
-            print(f"         {doc}...")

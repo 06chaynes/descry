@@ -16,6 +16,7 @@ import pytest
 np = pytest.importorskip("numpy")
 
 from descry import embeddings as E
+from descry._graph import GraphSchemaError
 from descry.embeddings import (
     EmbeddingCacheMismatch,
     SemanticSearcher,
@@ -61,11 +62,10 @@ class FakeSentenceTransformer:
 @pytest.fixture
 def fake_model(monkeypatch):
     """Patch the model factory; yields a recorder of loads and encode calls."""
-    rec = {"loads": 0, "encodes": [], "dim": 8, "prompts": None, "delay": 0.0}
+    rec = {"loads": 0, "encodes": [], "prompts": None, "delay": 0.0}
 
     def factory(model_name, revision=None):
         return FakeSentenceTransformer(
-            dim=rec["dim"],
             prompts=rec["prompts"],
             recorder=rec,
             load_delay=rec["delay"],
@@ -114,6 +114,69 @@ def graph_writer(tmp_path):
     return write
 
 
+PY_SOURCE = '''def alpha(a, b):
+    """Add two numbers together.
+
+    Both must be ints.
+    """
+    return a + b
+'''
+PY_DOCSTRING = "Add two numbers together.\n\nBoth must be ints."
+PY_EXCERPT = 'def alpha(a, b):\n\n    """\n    return a + b'
+
+RS_SOURCE = """/// Strip credentials from the environment.
+/// Returns the clean map.
+fn scrub(env: &Env) -> Env {
+    env.filter()
+}
+"""
+RS_DOCSTRING = "Strip credentials from the environment.\nReturns the clean map."
+RS_EXCERPT = "fn scrub(env: &Env) -> Env {\n    env.filter()\n}"
+
+
+def _node(node_id, lineno=None, end_lineno=None, docstring=""):
+    meta = {"name": node_id.split("::")[-1], "docstring": docstring}
+    if lineno is not None:
+        meta["lineno"] = lineno
+    if end_lineno is not None:
+        meta["end_lineno"] = end_lineno
+    return {"id": node_id, "type": "Function", "metadata": meta}
+
+
+@pytest.fixture
+def source_nodes(tmp_path):
+    """Write a Python and a Rust file under tmp_path; returns their nodes."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "mod.py").write_text(PY_SOURCE)
+    (tmp_path / "src" / "lib.rs").write_text(RS_SOURCE)
+    return [
+        _node("FILE:src/mod.py::alpha", 1, 6, PY_DOCSTRING),
+        _node("FILE:src/lib.rs::scrub", 3, 5, RS_DOCSTRING),
+        {"id": "FILE:src/mod.py", "type": "File", "metadata": {}},
+    ]
+
+
+def _peak_lock_holders(lock_path):
+    """Most of four contending threads ever inside `_file_lock` at once."""
+    inside, peak, guard = [0], [0], threading.Lock()
+
+    def worker():
+        with _file_lock(lock_path, timeout=10.0):
+            with guard:
+                inside[0] += 1
+                peak[0] = max(peak[0], inside[0])
+            time.sleep(0.05)
+            with guard:
+                inside[0] -= 1
+
+    ts = [threading.Thread(target=worker) for _ in range(4)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(20.0)
+    return peak[0]
+
+
 class TestFileLock:
     def test_lock_file_survives_release(self, tmp_path):
         p = tmp_path / "x.lock"
@@ -147,24 +210,7 @@ class TestFileLock:
         t.join(5.0)
 
     def test_mutual_exclusion_under_contention(self, tmp_path):
-        p = tmp_path / "x.lock"
-        inside, peak, guard = [0], [0], threading.Lock()
-
-        def worker():
-            with _file_lock(p, timeout=10.0):
-                with guard:
-                    inside[0] += 1
-                    peak[0] = max(peak[0], inside[0])
-                time.sleep(0.05)
-                with guard:
-                    inside[0] -= 1
-
-        ts = [threading.Thread(target=worker) for _ in range(4)]
-        for t in ts:
-            t.start()
-        for t in ts:
-            t.join(20.0)
-        assert peak[0] == 1, f"{peak[0]} threads held the lock at once"
+        assert _peak_lock_holders(tmp_path / "x.lock") == 1
 
 
 class TestCacheKeyIdentity:
@@ -203,6 +249,22 @@ class TestCacheKeyIdentity:
         before = SemanticSearcher(str(g))._cache_key()
         monkeypatch.setattr(E, "DOCSTRING_CHAR_LIMIT", 123)
         assert SemanticSearcher(str(g))._cache_key() != before
+
+    def test_key_changes_with_code_inclusion(self, fake_model, graph_writer, tmp_path):
+        g = graph_writer()
+        with_code = SemanticSearcher(str(g), source_root=str(tmp_path))._cache_key()
+        assert SemanticSearcher(str(g))._cache_key() != with_code
+
+    def test_key_changes_with_code_limit_only_when_code_is_included(
+        self, fake_model, graph_writer, tmp_path, monkeypatch
+    ):
+        g = graph_writer()
+        root = str(tmp_path)
+        with_code = SemanticSearcher(str(g), source_root=root)._cache_key()
+        without = SemanticSearcher(str(g))._cache_key()
+        monkeypatch.setattr(E, "CODE_CHAR_LIMIT", 123)
+        assert SemanticSearcher(str(g), source_root=root)._cache_key() != with_code
+        assert SemanticSearcher(str(g))._cache_key() == without
 
     def test_local_model_dir_contents_are_part_of_key(
         self, fake_model, graph_writer, tmp_path
@@ -300,10 +362,10 @@ class TestCorruptCacheRecovery:
         SemanticSearcher(str(g))
         assert fake_model["encodes"]
 
-    def test_text_count_mismatch_regenerates(self, fake_model, graph_writer):
+    def test_node_count_mismatch_regenerates(self, fake_model, graph_writer):
         g, (_, js) = self._build(graph_writer)
         d = json.loads(js.read_text())
-        d["texts"] = d["texts"][:1]
+        d["node_count"] = 1
         js.write_text(json.dumps(d))
         fake_model["encodes"].clear()
         SemanticSearcher(str(g))
@@ -324,8 +386,8 @@ class TestCleanup:
         g = graph_writer()
         s = SemanticSearcher(str(g))
         npz, js = s._cache_paths()
-        # Named the way the previous implementation named its temporaries,
-        # so this fails against a cleanup whose glob still matches them.
+        # The undotted temporary name of descry 0.2, which the cleanup glob
+        # matches.
         temp = s.cache_dir / "embeddings_otherkey.tmp.npz"
         temp.write_bytes(b"in flight")
         s._cleanup_old_embeddings(keep={npz, js})
@@ -386,20 +448,11 @@ class TestConcurrency:
         fake_model["loads"] = 0
         fake_model["delay"] = 0.2  # widen the race window deterministically
 
-        errors = []
-
-        def go():
-            try:
-                s.ensure_model()
-            except (RuntimeError, OSError, ValueError) as exc:  # pragma: no cover
-                errors.append(exc)
-
-        ts = [threading.Thread(target=go) for _ in range(4)]
+        ts = [threading.Thread(target=s.ensure_model) for _ in range(4)]
         for t in ts:
             t.start()
         for t in ts:
             t.join(20.0)
-        assert not errors
         assert fake_model["loads"] == 1, f"{fake_model['loads']} concurrent model loads"
 
 
@@ -445,12 +498,28 @@ class TestNodeText:
     def test_empty_node_falls_back_to_id(self):
         assert E.node_text({"id": "weird", "metadata": {}}) == "weird"
 
-    def test_harness_delegates_to_this_function(self):
-        """tests/eval must not carry its own copy."""
-        import sys
+    def test_code_is_appended_after_the_docstring(self):
+        n = {
+            "id": "f.py::alpha",
+            "metadata": {
+                "name": "alpha",
+                "signature": "def alpha(a)",
+                "docstring": "Adds.",
+            },
+        }
+        assert E.node_text(n, code="return a") == "alpha def alpha(a) Adds. return a"
+        assert (
+            E.node_text(n, include_docstring=False, code="return a")
+            == "alpha def alpha(a) return a"
+        )
 
-        sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-        from eval.corpus import doc_text
+    def test_empty_code_leaves_the_text_unchanged(self):
+        n = {"id": "f.py::alpha", "metadata": {"name": "alpha", "docstring": "Adds."}}
+        assert E.node_text(n, code="") == E.node_text(n) == "alpha Adds."
+
+    def test_harness_delegates_to_this_function(self, source_nodes, tmp_path):
+        """tests/eval must not carry its own copy, with or without code."""
+        from tests.eval.corpus import doc_text
 
         n = {
             "id": "a::b",
@@ -460,6 +529,205 @@ class TestNodeText:
         assert doc_text(n, with_docstring=False) == E.node_text(
             n, include_docstring=False
         )
+
+        alpha = source_nodes[0]
+        full = doc_text(alpha, source_root=tmp_path)
+        nodoc = doc_text(alpha, with_docstring=False, source_root=tmp_path)
+        assert full == E.node_text(alpha, code=PY_EXCERPT)
+        assert nodoc == E.node_text(alpha, include_docstring=False, code=PY_EXCERPT)
+        assert nodoc == f"alpha {PY_EXCERPT}"
+
+
+class TestEvalHarness:
+    def test_a_graph_of_another_schema_is_rejected(self, tmp_path):
+        from tests.eval.corpus import load_nodes
+
+        g = tmp_path / "codebase_graph.json"
+        g.write_text(json.dumps({"schema_version": 0, "nodes": [], "edges": []}))
+        with pytest.raises(GraphSchemaError):
+            load_nodes(g)
+
+    def test_a_run_without_the_baseline_config_writes_no_comparisons(
+        self, graph_writer, tmp_path, monkeypatch
+    ):
+        import sys
+        import types
+
+        from tests.eval import compare
+
+        fake = types.ModuleType("sentence_transformers")
+        fake.SentenceTransformer = lambda repo_id, **kw: FakeSentenceTransformer()
+        monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+        monkeypatch.setattr(compare, "__file__", str(tmp_path / "compare.py"))
+        node = _node("f.py::alpha", docstring="Add two numbers together and return it.")
+
+        out = compare.main(str(graph_writer([node])), "qwen3_plain")
+
+        assert out["metrics"]["qwen3_plain"]["R@1"] == 1.0
+        assert out["comparisons"] == {}
+        assert list((tmp_path / "results").iterdir())
+
+
+class TestCodeExcerpt:
+    def test_python_function_without_its_docstring_lines(self, source_nodes, tmp_path):
+        assert E.code_excerpt(source_nodes[0], tmp_path) == PY_EXCERPT
+
+    def test_function_with_doc_comments_above_it(self, source_nodes, tmp_path):
+        assert E.code_excerpt(source_nodes[1], tmp_path) == RS_EXCERPT
+
+    @pytest.mark.parametrize(
+        ("source", "docstring"),
+        [
+            (RS_SOURCE, RS_DOCSTRING),
+            ("//! Strip it.\n// Twice.\nfn scrub() {}\n", "Strip it.\nTwice."),
+            ("/**\n * Strip it.\n * Twice. */\nfn scrub() {}\n", "Strip it.\nTwice."),
+            ("# Strip it.\n#   Twice.\ndef scrub; end\n", "Strip it.\nTwice."),
+            ("def scrub():\n    '''Strip it.'''\n", "Strip it."),
+            ('def scrub():\n    r"""Strip \\d+."""\n', "Strip \\d+."),
+        ],
+    )
+    def test_docstring_lines_are_removed_whatever_markers_surround_them(
+        self, tmp_path, source, docstring
+    ):
+        (tmp_path / "f.txt").write_text(source)
+        node = _node("FILE:f.txt::scrub", 1, len(source.splitlines()), docstring)
+        excerpt = E.code_excerpt(node, tmp_path)
+        assert "scrub" in excerpt
+        for line in docstring.splitlines():
+            assert line not in excerpt
+
+    def test_a_code_line_that_contains_a_docstring_line_is_kept(self, tmp_path):
+        (tmp_path / "f.py").write_text('def f():\n    """Go."""\n    print("Go.")\n')
+        node = _node("FILE:f.py::f", 1, 3, "Go.")
+        assert E.code_excerpt(node, tmp_path) == 'def f():\n    print("Go.")'
+
+    def test_truncated_to_the_limit(self, tmp_path):
+        source = "def big():\n" + "    total += 1\n" * 400
+        (tmp_path / "big.py").write_text(source)
+        excerpt = E.code_excerpt(_node("FILE:big.py::big", 1, 401), tmp_path)
+        assert len(excerpt) == E.CODE_CHAR_LIMIT
+        assert source.startswith(excerpt)
+
+    @pytest.mark.parametrize(
+        "node",
+        [
+            {"id": "FILE:src/mod.py", "type": "File", "metadata": {}},
+            {"id": "FILE:src/mod.py", "metadata": {"lineno": 1, "end_lineno": 6}},
+            _node("FILE:src/mod.py::alpha", lineno=1),
+            _node("FILE:src/mod.py::alpha", end_lineno=6),
+            _node("src/mod.py::alpha", 1, 6),
+            _node("FILE:src/missing.py::alpha", 1, 6),
+            _node("FILE:src::alpha", 1, 6),
+            _node("FILE:src/\0.py::alpha", 1, 6),
+            _node("FILE:" + "x" * 300 + "::alpha", 1, 6),
+        ],
+    )
+    def test_no_excerpt_without_a_readable_file_and_both_line_numbers(
+        self, source_nodes, tmp_path, node
+    ):
+        assert E.code_excerpt(node, tmp_path) == ""
+
+    def test_no_excerpt_without_a_source_root(self, source_nodes):
+        assert E.code_excerpt(source_nodes[0], None) == ""
+
+    @pytest.mark.parametrize(
+        "node_id",
+        [
+            "FILE:../secret.py::x",
+            "FILE:src/../../secret.py::x",
+            "FILE:{outside}/secret.py::x",
+            "FILE:link.py::x",
+            "FILE:linkdir/secret.py::x",
+        ],
+    )
+    def test_a_path_leaving_the_root_is_not_read(self, tmp_path, monkeypatch, node_id):
+        root = tmp_path / "proj"
+        (root / "src").mkdir(parents=True)
+        (root / "inside.py").write_text("token = 1\n")
+        (tmp_path / "secret.py").write_text("token = 2\n")
+        os.symlink(tmp_path / "secret.py", root / "link.py")
+        os.symlink(tmp_path, root / "linkdir")
+        reads = []
+
+        def read(path):
+            reads.append(path)
+            return ("token = 1\n",)
+
+        monkeypatch.setattr(E, "_read_file_cached", read)
+        node = _node(node_id.format(outside=tmp_path), 1, 1)
+        assert E.code_excerpt(node, root) == ""
+        assert reads == []
+        assert E.code_excerpt(_node("FILE:inside.py::x", 1, 1), root) == "token = 1"
+        assert reads == [str(root / "inside.py")]
+
+
+class TestSourceRoot:
+    """Code enters the index only through `source_root`."""
+
+    def test_texts_include_code_when_given(
+        self, fake_model, graph_writer, source_nodes, tmp_path
+    ):
+        g = graph_writer(source_nodes)
+        s = SemanticSearcher(str(g), source_root=str(tmp_path))
+        ((texts, _prompt),) = fake_model["encodes"]
+        assert texts == s.node_texts
+        assert texts == [
+            f"alpha {PY_DOCSTRING} {PY_EXCERPT}",
+            f"scrub {RS_DOCSTRING} {RS_EXCERPT}",
+            "FILE:src/mod.py",
+        ]
+
+    def test_texts_have_no_code_otherwise(self, fake_model, graph_writer, source_nodes):
+        g = graph_writer(source_nodes)
+        SemanticSearcher(str(g))
+        ((texts, _prompt),) = fake_model["encodes"]
+        assert texts == [
+            f"alpha {PY_DOCSTRING}",
+            f"scrub {RS_DOCSTRING}",
+            "FILE:src/mod.py",
+        ]
+
+    def test_an_index_without_code_is_not_loaded_when_code_is_expected(
+        self, fake_model, graph_writer, source_nodes, tmp_path
+    ):
+        g = graph_writer(source_nodes)
+        SemanticSearcher(str(g))
+        s = SemanticSearcher(str(g), source_root=str(tmp_path))
+        assert len(fake_model["encodes"]) == 2
+        assert PY_EXCERPT in s.node_texts[0]
+
+    def test_an_index_with_code_is_not_loaded_when_none_is_expected(
+        self, fake_model, graph_writer, source_nodes, tmp_path
+    ):
+        g = graph_writer(source_nodes)
+        SemanticSearcher(str(g), source_root=str(tmp_path))
+        s = SemanticSearcher(str(g))
+        assert len(fake_model["encodes"]) == 2
+        assert PY_EXCERPT not in s.node_texts[0]
+
+    def test_warm_load_with_the_same_source_root_skips_encoding(
+        self, fake_model, graph_writer, source_nodes, tmp_path
+    ):
+        g = graph_writer(source_nodes)
+        SemanticSearcher(str(g), source_root=str(tmp_path))
+        SemanticSearcher(str(g), source_root=str(tmp_path))
+        assert len(fake_model["encodes"]) == 1
+
+    @pytest.mark.parametrize("built_with_code", [True, False])
+    def test_status_agrees_with_the_searcher(
+        self, fake_model, graph_writer, source_nodes, tmp_path, built_with_code
+    ):
+        g = graph_writer(source_nodes)
+        root = {True: str(tmp_path), False: None}
+        s = SemanticSearcher(str(g), source_root=root[built_with_code])
+
+        same = get_embeddings_status(str(g), source_root=root[built_with_code])
+        assert same["cached"] is True and same["stale"] is False
+        assert same["cache_path"] == str(s._cache_paths()[0])
+        assert same["node_count"] == 3
+
+        other = get_embeddings_status(str(g), source_root=root[not built_with_code])
+        assert other["cached"] is False and other["stale"] is True
 
 
 class TestModelRegistry:
@@ -481,10 +749,12 @@ class TestModelRegistry:
             assert spec.revision, f"{alias} has no pinned revision"
             assert spec.alias == alias
 
-    def test_default_is_embeddinggemma(self):
+    def test_default_and_its_fallback(self):
         """Chosen on measured retrieval; see tests/eval."""
         assert E.DEFAULT_MODEL_ALIAS == "embeddinggemma"
         assert SemanticSearcher.MODEL_NAME == "google/embeddinggemma-300m"
+        assert E.FALLBACK_MODEL_ALIAS == "f2llm-v2-0.6b"
+        assert E.FALLBACK_MODEL_ALIAS in E.MODEL_REGISTRY
 
     def test_default_alias_is_registered(self):
         assert E.DEFAULT_MODEL_ALIAS in E.MODEL_REGISTRY
@@ -493,68 +763,52 @@ class TestModelRegistry:
             == E.MODEL_REGISTRY[E.DEFAULT_MODEL_ALIAS].repo_id
         )
 
-    def test_remote_code_is_never_granted_to_unregistered_models(self, monkeypatch):
-        seen = {}
+    @pytest.fixture
+    def constructions(self, monkeypatch):
+        """Stand a recorder in for SentenceTransformer; lists the arguments of
+        each construction."""
+        calls = []
 
         class Recorder:
+            max_seq_length = 2048
+
             def __init__(self, name, **kw):
-                seen["name"] = name
-                seen.update(kw)
+                calls.append({"name": name, **kw})
 
         monkeypatch.setattr(E, "SentenceTransformer", Recorder)
+        return calls
+
+    def test_remote_code_is_never_granted_to_unregistered_models(self, constructions):
         E._load_sentence_transformer("evil/model")
+        (seen,) = constructions
         assert seen["trust_remote_code"] is False
         assert "revision" not in seen, "an unvetted model must not be given a pin"
 
-    def test_no_model_is_ever_loaded_with_remote_code(self, monkeypatch):
+    def test_no_model_is_ever_loaded_with_remote_code(self, constructions):
         """Nothing can turn it on: no registry field, no loader parameter."""
         import dataclasses
         import inspect
 
-        seen = []
-
-        class Recorder:
-            max_seq_length = 0
-
-            def __init__(self, name, **kw):
-                seen.append(kw["trust_remote_code"])
-
-        monkeypatch.setattr(E, "SentenceTransformer", Recorder)
         for alias in E.MODEL_REGISTRY:
             E._load_sentence_transformer(alias)
+        seen = [c["trust_remote_code"] for c in constructions]
         assert seen == [False] * len(E.MODEL_REGISTRY)
         fields = {f.name for f in dataclasses.fields(E.EmbeddingModelSpec)}
         assert "trust_remote_code" not in fields
         params = inspect.signature(E._load_sentence_transformer).parameters
         assert "trust_remote_code" not in params
 
-    def test_registered_model_supplies_its_pin(self, monkeypatch):
-        seen = {}
-
-        class Recorder:
-            def __init__(self, name, **kw):
-                seen["name"] = name
-                seen.update(kw)
-
-        monkeypatch.setattr(E, "SentenceTransformer", Recorder)
+    def test_registered_model_supplies_its_pin(self, constructions):
         E._load_sentence_transformer("jina-code")
+        (seen,) = constructions
         spec = E.MODEL_REGISTRY["jina-code"]
         assert seen["name"] == spec.repo_id
         assert seen["trust_remote_code"] is False
         assert seen["revision"] == spec.revision
 
-    def test_embeddinggemma2_loads_text_only_with_a_token_cap(self, monkeypatch):
-        seen = {}
-
-        class Recorder:
-            max_seq_length = 10**30
-
-            def __init__(self, name, **kw):
-                seen["name"] = name
-                seen.update(kw)
-
-        monkeypatch.setattr(E, "SentenceTransformer", Recorder)
+    def test_embeddinggemma2_loads_text_only_with_a_token_cap(self, constructions):
         model = E._load_sentence_transformer("embeddinggemma-2")
+        (seen,) = constructions
         spec = E.MODEL_REGISTRY["embeddinggemma-2"]
         assert seen["name"] == "google/embeddinggemma-2"
         assert seen["trust_remote_code"] is False
@@ -562,17 +816,9 @@ class TestModelRegistry:
         assert seen["config_kwargs"] == {"vision_config": None, "audio_config": None}
         assert model.max_seq_length == 8192
 
-    def test_models_without_loading_options_get_none(self, monkeypatch):
-        seen = {}
-
-        class Recorder:
-            max_seq_length = 2048
-
-            def __init__(self, name, **kw):
-                seen.update(kw)
-
-        monkeypatch.setattr(E, "SentenceTransformer", Recorder)
+    def test_models_without_loading_options_get_none(self, constructions):
         model = E._load_sentence_transformer("embeddinggemma")
+        (seen,) = constructions
         assert "config_kwargs" not in seen
         assert model.max_seq_length == 2048
 
@@ -618,8 +864,7 @@ class TestModelRegistry:
             E._load_sentence_transformer("embeddinggemma")
         msg = str(err.value)
         assert "https://huggingface.co/google/embeddinggemma-300m" in msg
-        assert f'model = "{E.UNGATED_FALLBACK_ALIAS}"' in msg
-        assert E.UNGATED_FALLBACK_ALIAS in E.MODEL_REGISTRY
+        assert f'model = "{E.FALLBACK_MODEL_ALIAS}"' in msg
 
     def test_other_load_failures_are_not_relabelled(self, monkeypatch):
         def refuse(name, **kw):
@@ -662,6 +907,77 @@ class TestModelRegistry:
         assert a == b, "selecting the same model two ways must not re-encode"
 
 
+class TestGatedDefaultFallback:
+    @pytest.fixture
+    def gate(self, monkeypatch):
+        """Model factory that refuses the default model while `closed` is set."""
+        state = {"closed": True, "loads": []}
+
+        def factory(model_name, revision=None):
+            state["loads"].append(model_name)
+            spec = E.resolve_model_spec(model_name)
+            if state["closed"] and spec.alias == E.DEFAULT_MODEL_ALIAS:
+                raise E.EmbeddingModelGated(f"{model_name} is gated")
+            return FakeSentenceTransformer()
+
+        monkeypatch.setattr(E, "_load_sentence_transformer", factory)
+        monkeypatch.setattr(E, "EMBEDDINGS_AVAILABLE", True)
+        return state
+
+    def test_unconfigured_model_falls_back_with_a_warning(
+        self, gate, graph_writer, caplog
+    ):
+        with caplog.at_level("WARNING", logger=E.logger.name):
+            s = SemanticSearcher(str(graph_writer()))
+
+        assert s.model_name == E.FALLBACK_MODEL_ALIAS
+        assert gate["loads"] == [SemanticSearcher.MODEL_NAME, E.FALLBACK_MODEL_ALIAS]
+        assert "hf auth login" in caplog.text
+        assert f'model = "{E.FALLBACK_MODEL_ALIAS}"' in caplog.text
+        assert len(s.search("add numbers", min_score=-1.0)) > 0
+
+    def test_a_model_named_explicitly_does_not_fall_back(self, gate, graph_writer):
+        with pytest.raises(E.EmbeddingModelGated):
+            SemanticSearcher(str(graph_writer()), model_name="embeddinggemma")
+
+    def test_searches_reuse_the_fallback_index_without_retrying_the_default(
+        self, gate, graph_writer
+    ):
+        g = graph_writer()
+        SemanticSearcher(str(g))
+        gate["loads"].clear()
+
+        s = SemanticSearcher(str(g))
+
+        assert s.model_name == E.FALLBACK_MODEL_ALIAS
+        assert gate["loads"] == []
+        s.search("add numbers")
+        assert gate["loads"] == [E.FALLBACK_MODEL_ALIAS]
+
+    def test_a_rebuild_retries_the_default(self, gate, graph_writer):
+        g = graph_writer()
+        SemanticSearcher(str(g))
+        gate["closed"] = False
+
+        s = SemanticSearcher(str(g), force_rebuild=True)
+
+        assert s.model_name == SemanticSearcher.MODEL_NAME
+        assert SemanticSearcher(str(g)).model_name == SemanticSearcher.MODEL_NAME
+
+    def test_status_names_the_model_that_built_the_index(self, gate, graph_writer):
+        g = graph_writer()
+        SemanticSearcher(str(g))
+
+        st = get_embeddings_status(str(g))
+
+        assert st["cached"] is True
+        assert st["model"] == E.MODEL_REGISTRY[E.FALLBACK_MODEL_ALIAS].repo_id
+        assert (
+            get_embeddings_status(str(g), model_name="embeddinggemma")["cached"]
+            is False
+        )
+
+
 class TestStatus:
     def test_reports_cached_for_current_graph(self, fake_model, graph_writer):
         g = graph_writer()
@@ -678,20 +994,9 @@ class TestStatus:
         assert st["cached"] is False and st["stale"] is True
 
     def test_finds_cache_when_graph_sits_outside_descry_cache(
-        self, fake_model, tmp_path
+        self, fake_model, graph_writer
     ):
-        g = tmp_path / "codebase_graph.json"
-        g.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "nodes": [
-                        {"id": "a::b", "type": "Function", "metadata": {"name": "b"}}
-                    ],
-                    "edges": [],
-                }
-            )
-        )
+        g = graph_writer(dirname="elsewhere")
         SemanticSearcher(str(g))
         assert get_embeddings_status(str(g))["cached"] is True
 
@@ -722,25 +1027,128 @@ class TestCacheDirPropagation:
         src = pathlib.Path("src/descry/generate.py").read_text(encoding="utf-8")
         i = src.index("SemanticSearcher(")
         assert "cache_dir=" in src[i : i + 300]
+        assert "source_root=" in src[i : i + 300]
 
-    def test_embeddings_land_in_the_configured_dir(self, fake_model, tmp_path):
+    def test_embeddings_land_in_the_configured_dir(self, fake_model, graph_writer):
         """Graph outside a .descry_cache-named dir must not split the cache."""
-        import json
-
-        cache = tmp_path / "custom-cache"
-        cache.mkdir()
-        graph = cache / "codebase_graph.json"
-        graph.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "nodes": [
-                        {"id": "a.py::f", "type": "Function", "metadata": {"name": "f"}}
-                    ],
-                    "edges": [],
-                }
-            )
-        )
+        graph = graph_writer(dirname="custom-cache")
+        cache = graph.parent
         SemanticSearcher(str(graph), cache_dir=str(cache))
         assert list(cache.glob("embeddings_*.npz")), "no index in the configured dir"
         assert not (cache / ".descry_cache").exists(), "cache split into a subdirectory"
+
+
+class TestFileLockWithoutFcntl:
+    """The msvcrt branch, with `msvcrt.locking` stood in for by `fcntl.flock`:
+    both lock an open descriptor, refuse a held lock with OSError, and are
+    dropped by the OS when the descriptor closes."""
+
+    @pytest.fixture(autouse=True)
+    def msvcrt_branch(self, monkeypatch):
+        import sys
+        import types
+
+        fcntl = pytest.importorskip("fcntl")
+        fake = types.ModuleType("msvcrt")
+        fake.LK_NBLCK, fake.LK_UNLCK = 2, 0
+
+        def locking(fd, mode, _nbytes):
+            op = fcntl.LOCK_UN if mode == fake.LK_UNLCK else fcntl.LOCK_EX
+            fcntl.flock(fd, op | fcntl.LOCK_NB)
+
+        fake.locking = locking
+        monkeypatch.setitem(sys.modules, "msvcrt", fake)
+        monkeypatch.setattr(E, "_fcntl", None)
+
+    def test_lock_file_left_by_a_dead_holder_does_not_block(self, tmp_path):
+        p = tmp_path / "embeddings.lock"
+        p.write_text("")
+        start = time.monotonic()
+        with _file_lock(p, timeout=5.0):
+            pass
+        assert time.monotonic() - start < 1.0
+
+    def test_lock_file_is_never_unlinked(self, tmp_path):
+        p = tmp_path / "embeddings.lock"
+        inodes = []
+        for _ in range(2):
+            with _file_lock(p):
+                inodes.append(os.stat(p).st_ino)
+        assert p.exists()
+        assert inodes[0] == inodes[1]
+
+    def test_mutual_exclusion_under_contention(self, tmp_path):
+        assert _peak_lock_holders(tmp_path / "embeddings.lock") == 1
+
+
+class TestDegenerateInputs:
+    def test_empty_graph_builds_and_searches_without_a_model(
+        self, fake_model, graph_writer
+    ):
+        g = graph_writer(nodes=[])
+        s = SemanticSearcher(str(g))
+        assert s.embeddings.shape[0] == 0
+        assert s.search("anything") == []
+        assert fake_model["loads"] == 0
+        assert SemanticSearcher(str(g)).search("anything") == []
+
+    @pytest.mark.parametrize("limit", [0, -1])
+    def test_non_positive_limit_returns_nothing(self, fake_model, graph_writer, limit):
+        s = SemanticSearcher(str(graph_writer()))
+        assert s.search("alpha", limit=limit, min_score=-1.0) == []
+
+    @pytest.mark.parametrize("degenerate", [0.0, np.nan])
+    def test_nan_similarity_never_passes_min_score(
+        self, fake_model, graph_writer, degenerate
+    ):
+        s = SemanticSearcher(str(graph_writer()))
+        s.embeddings = s.embeddings.copy()
+        s.embeddings[1] = degenerate
+        with np.errstate(invalid="ignore"):
+            hits = s.search("alpha", limit=10, min_score=-1.0)
+        assert "f.py::Beta" not in [n["id"] for n, _ in hits]
+        assert not any(np.isnan(score) for _, score in hits)
+
+
+class TestRecipeFingerprintInputs:
+    def test_key_changes_with_config_kwargs(
+        self, fake_model, graph_writer, monkeypatch
+    ):
+        import dataclasses
+
+        g = graph_writer()
+        before = SemanticSearcher(str(g), model_name="embeddinggemma-2")._cache_key()
+        spec = E.MODEL_REGISTRY["embeddinggemma-2"]
+        changed = dataclasses.replace(
+            spec, config_kwargs={**spec.config_kwargs, "audio_config": {}}
+        )
+        monkeypatch.setitem(E.MODEL_REGISTRY, "embeddinggemma-2", changed)
+        after = SemanticSearcher(str(g), model_name="embeddinggemma-2")._cache_key()
+        assert before != after
+
+    def test_key_changes_with_the_prompts_probed_for_unregistered_models(
+        self, fake_model, graph_writer, monkeypatch
+    ):
+        g = graph_writer()
+        before = SemanticSearcher(str(g), model_name="unknown/model")._cache_key()
+        monkeypatch.setattr(E, "DOCUMENT_PROMPT_CANDIDATES", ("passage",))
+        after = SemanticSearcher(str(g), model_name="unknown/model")._cache_key()
+        assert before != after
+
+    def test_warm_cache_is_refused_when_the_model_resolves_another_document_prompt(
+        self, fake_model, graph_writer
+    ):
+        g = graph_writer()
+        SemanticSearcher(str(g), model_name="unknown/model")
+        fake_model["prompts"] = {}
+        warm = SemanticSearcher(str(g), model_name="unknown/model")
+        with pytest.raises(EmbeddingCacheMismatch, match="re-index"):
+            warm.search("alpha")
+
+    def test_warm_cache_is_searched_when_the_document_prompt_is_unchanged(
+        self, fake_model, graph_writer
+    ):
+        g = graph_writer()
+        SemanticSearcher(str(g), model_name="unknown/model")
+        warm = SemanticSearcher(str(g), model_name="unknown/model")
+        assert warm.search("alpha", min_score=-1.0)

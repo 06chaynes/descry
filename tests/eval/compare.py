@@ -1,8 +1,12 @@
 """Run the embedding model comparison on this repo's own graph.
 
-    .venv/bin/python tests/eval/compare.py [graph_path]
+    .venv/bin/python tests/eval/compare.py [graph_path [configs [source_root]]]
 
-Writes tests/eval/results/results.json and prints a table.
+Document texts include each symbol's source, read from `source_root`. It
+defaults to the directory holding the graph's `.descry_cache`; pass it for a
+graph kept anywhere else.
+
+Writes tests/eval/results/results-<project>.json and prints a table.
 """
 
 import json
@@ -27,23 +31,15 @@ from eval.metrics import (
 
 warnings.filterwarnings("ignore")
 
-JINA = "jinaai/jina-code-embeddings-0.5b"
-JINA_REV = "4db235132dafbe56a8b9c5f59b59795ecf58a4a7"
-QWEN = "Qwen/Qwen3-Embedding-0.6B"
-
-
-def norm(a: np.ndarray) -> np.ndarray:
-    n = np.linalg.norm(a, axis=1, keepdims=True)
-    return a / np.where(n == 0, 1, n)
-
 
 def encode(model, texts, prompt_name=None):
     kw = {"show_progress_bar": False, "convert_to_numpy": True}
     if prompt_name:
         kw["prompt_name"] = prompt_name
     t0 = time.time()
-    v = model.encode(texts, **kw)
-    return norm(v.astype("float32")), time.time() - t0
+    v = model.encode(texts, **kw).astype("float32")
+    n = np.linalg.norm(v, axis=1, keepdims=True)
+    return v / np.where(n == 0, 1, n), time.time() - t0
 
 
 def rank_of_gold(doc_emb, loo_rows, queries, q_emb):
@@ -64,16 +60,20 @@ def rank_of_gold(doc_emb, loo_rows, queries, q_emb):
     return ranks
 
 
-def main(graph_path=".descry_cache/codebase_graph.json", only=None):
+def main(graph_path=".descry_cache/codebase_graph.json", only=None, source_root=None):
     from eval.registry import CONFIGS
     from sentence_transformers import SentenceTransformer
 
+    source_root = source_root or Path(graph_path).resolve().parent.parent
     nodes = load_nodes(graph_path)
     queries = build_queries(nodes)
     qtexts = [q["query"] for q in queries]
-    full = [doc_text(n, with_docstring=True) for n in nodes]
+    full = [doc_text(n, with_docstring=True, source_root=source_root) for n in nodes]
     gold_idx = sorted({q["gold_index"] for q in queries})
-    nodoc = [doc_text(nodes[i], with_docstring=False) for i in gold_idx]
+    nodoc = [
+        doc_text(nodes[i], with_docstring=False, source_root=source_root)
+        for i in gold_idx
+    ]
     print(f"nodes={len(nodes)} queries={len(queries)}", flush=True)
 
     results, ranks_by_cfg, timings = {}, {}, {}
@@ -108,7 +108,7 @@ def main(graph_path=".descry_cache/codebase_graph.json", only=None):
         # is to see whether a ranking holds outside the language it was tuned on.
         by_lang: dict[str, list[int]] = {}
         for q, r in zip(queries, ranks, strict=True):
-            by_lang.setdefault(q.get("lang", "?"), []).append(r)
+            by_lang.setdefault(q["lang"], []).append(r)
         results[cfg.key]["by_lang"] = {
             lang: dict(ranks_to_metrics(rs), n=len(rs))
             for lang, rs in sorted(by_lang.items())
@@ -131,7 +131,7 @@ def main(graph_path=".descry_cache/codebase_graph.json", only=None):
     baseline = "jina_prompted"
     out["comparisons"] = {}
     for key, ranks in ranks_by_cfg.items():
-        if key == baseline:
+        if key == baseline or baseline not in ranks_by_cfg:
             continue
         e = {}
         for metric in ("R@1", "R@10", "MRR", "nDCG@10"):
@@ -156,4 +156,4 @@ def main(graph_path=".descry_cache/codebase_graph.json", only=None):
 
 
 if __name__ == "__main__":
-    main(*(sys.argv[1:] or []))
+    main(*sys.argv[1:])
