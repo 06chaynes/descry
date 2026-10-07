@@ -522,6 +522,37 @@ class TestModelRegistry:
         assert seen["trust_remote_code"] is True
         assert seen["revision"] == spec.revision
 
+    def test_gated_repo_refusal_names_the_fix(self, monkeypatch):
+        """HF's bare 401 becomes an error that says how to get past it."""
+
+        class GatedRepoError(OSError):
+            pass
+
+        def refuse(name, **kw):
+            # transformers re-raises the hub's refusal wrapped in an OSError.
+            try:
+                raise GatedRepoError("401 Client Error")
+            except GatedRepoError as e:
+                raise OSError("cannot access gated repo") from e
+
+        monkeypatch.setattr(E, "SentenceTransformer", refuse)
+        with pytest.raises(E.EmbeddingModelGated) as err:
+            E._load_sentence_transformer("embeddinggemma")
+        msg = str(err.value)
+        assert "https://huggingface.co/google/embeddinggemma-300m" in msg
+        assert f'model = "{E.UNGATED_FALLBACK_ALIAS}"' in msg
+        # The model the error steers people to must not itself need remote code.
+        assert E.MODEL_REGISTRY[E.UNGATED_FALLBACK_ALIAS].trust_remote_code is False
+
+    def test_other_load_failures_are_not_relabelled(self, monkeypatch):
+        def refuse(name, **kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(E, "SentenceTransformer", refuse)
+        with pytest.raises(OSError, match="disk full") as err:
+            E._load_sentence_transformer("embeddinggemma")
+        assert not isinstance(err.value, E.EmbeddingModelGated)
+
     def test_spec_prompts_are_authoritative_over_probing(
         self, fake_model, graph_writer
     ):

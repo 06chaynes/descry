@@ -166,6 +166,8 @@ MODEL_REGISTRY: dict[str, EmbeddingModelSpec] = {
 }
 
 DEFAULT_MODEL_ALIAS = "embeddinggemma"
+# Named in the error a gated default produces, so the fix is one line of toml.
+UNGATED_FALLBACK_ALIAS = "qwen3"
 
 
 def resolve_model_spec(name: str | None) -> EmbeddingModelSpec | None:
@@ -218,6 +220,23 @@ def node_text(node: dict, *, include_docstring: bool = True) -> str:
 
 class EmbeddingCacheMismatch(RuntimeError):
     """Cached vectors are incompatible with the currently loaded model."""
+
+
+class EmbeddingModelGated(RuntimeError):
+    """The model's HuggingFace repo needs a licence acceptance and a login."""
+
+
+def _is_gated_repo_error(exc: BaseException | None) -> bool:
+    """True if `exc`, or anything it was raised from, is HF's gated-repo refusal.
+
+    Matched by name: huggingface_hub is only a transitive dependency, and
+    transformers re-raises the hub's error wrapped in a plain OSError.
+    """
+    while exc is not None:
+        if type(exc).__name__ == "GatedRepoError":
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 def _resolve_cache_dir(graph_path: Path, cache_dir: str | None = None) -> Path:
@@ -286,7 +305,18 @@ def _load_sentence_transformer(
     kwargs: dict = {"trust_remote_code": trust_remote_code}
     if revision:
         kwargs["revision"] = revision
-    return SentenceTransformer(target, **kwargs)
+    try:
+        return SentenceTransformer(target, **kwargs)
+    except OSError as e:
+        if not _is_gated_repo_error(e):
+            raise
+        raise EmbeddingModelGated(
+            f"{target} is a gated HuggingFace model. Accept its licence at "
+            f"https://huggingface.co/{target}, then authenticate with "
+            "`hf auth login` (or set HF_TOKEN). To use an ungated model "
+            f'instead, set [embeddings] model = "{UNGATED_FALLBACK_ALIAS}" in '
+            ".descry.toml."
+        ) from e
 
 
 class SemanticSearcher:
@@ -296,10 +326,8 @@ class SemanticSearcher:
     cosine similarity for semantic search.
     """
 
-    # Code-optimized embedding model (896-dim, 494M params)
-    # Significantly better code search quality than general-purpose models.
-    # This model requires `trust_remote_code=True`; revision is pinned for
-    # supply-chain integrity (A.3 Option B).
+    # The default model, by repo id. Its dimensionality, licence, prompts and
+    # trust setting live on its MODEL_REGISTRY entry, not here.
     MODEL_NAME = MODEL_REGISTRY[DEFAULT_MODEL_ALIAS].repo_id
     # Pinned HF revision (git sha) for the default model. The revision is part
     # of the cache key, so bumping it invalidates existing caches; the model
@@ -564,7 +592,7 @@ class SemanticSearcher:
 
         DescryService shares one searcher across worker threads, so the bare
         check-then-set this replaces let several threads each construct their
-        own copy of a 494M-parameter model.
+        own copy of a model several hundred megabytes in size.
         """
         if self.model is not None:
             return self.model
