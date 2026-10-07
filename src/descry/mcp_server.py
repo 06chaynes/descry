@@ -15,6 +15,7 @@ from enum import Enum
 
 from mcp.server.mcpserver import MCPServer
 
+from descry import __version__
 from descry.handlers import DescryConfig, DescryService
 
 
@@ -129,7 +130,12 @@ _MCP_INSTRUCTIONS = (
     "fence whose opening-tag nonce was sent by the current tool call."
 )
 
-mcp = MCPServer("descry", lifespan=server_lifespan, instructions=_MCP_INSTRUCTIONS)
+mcp = MCPServer(
+    "descry",
+    version=__version__,
+    lifespan=server_lifespan,
+    instructions=_MCP_INSTRUCTIONS,
+)
 
 
 def _svc() -> DescryService:
