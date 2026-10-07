@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-06
+
+Semantic search is rebuilt and the MCP server runs again. Embeddings move
+to one prompted encode per symbol behind a pinned model registry, with a
+new default model chosen by measurement; the MCP server is ported to the
+MCP Python SDK v2, without which `descry-mcp` no longer started on a fresh
+install.
+
+**Upgrading:** the first `descry index` re-embeds, and the new default
+model is gated on HuggingFace — see the registry entry below. The `mcp`
+extra now requires `mcp>=2`. Graph schema stays at v1.
+
 ### Changed
 
 - **Semantic search now encodes one text per symbol instead of averaging
@@ -31,9 +43,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   **This invalidates existing embedding caches: the first index after
   upgrading re-embeds.** Set `model = "jina-code"` to keep the old
   default.
+- **The new default model is gated on HuggingFace.**
+  `google/embeddinggemma-300m` downloads only for an account that has
+  accepted Google's Gemma licence (`hf auth login` or `HF_TOKEN`); the
+  previous default needed neither. Without access, indexing still succeeds
+  and everything except semantic search works. `qwen3` and `jina-code` are
+  ungated.
 - **`trust_remote_code` is now reachable only through the registry.** It
   previously keyed off a single hard-coded model name; a model named in
   `.descry.toml` is loaded unpinned with remote code disabled.
+
+- **MCP server now targets the MCP Python SDK v2.** `FastMCP` became
+  `MCPServer` (`mcp.server.mcpserver`) in mcp 2.0; the `mcp` extra now
+  floors at `mcp>=2` so the new import path cannot resolve against a v1
+  SDK. Server construction, the `@mcp.tool()` decorator and `mcp.run()`
+  are unchanged, so the 19 tool definitions carry over as-is.
+- **The MCP server reports descry's version in its handshake.** SDK v2
+  defaults `serverInfo.version` to an empty string where v1 filled it in.
+- **ruff is pinned to an exact version** (`ruff==0.16.4`) in both the dev
+  extra and the CI lint job. It was floored at `>=0.1.0` and installed
+  unpinned in CI, so every ruff release silently widened enforcement —
+  181 findings had accumulated in the stable rule set. All are resolved:
+  32 blind `except Exception` handlers were triaged individually (13
+  narrowed to the exceptions actually raised, 19 kept as tool/route
+  boundaries and suppressed with a reason), all 12 `subprocess.run` calls
+  are explicit about `check=`, and the generated protobuf module is
+  excluded rather than edited.
 
 ### Fixed
 
@@ -69,6 +104,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   numpy shape error from `np.dot`; it now raises `EmbeddingCacheMismatch`.
 - **The background pre-warm reported "embeddings ready" without loading
   the model**, so the first real query still paid the full load.
+- **A gated model failed with HuggingFace's bare `401 … Please log in`.**
+  The loader now raises `EmbeddingModelGated`, naming the licence page,
+  the login command and the one-line `.descry.toml` change that selects an
+  ungated model instead.
 
 ### Added
 
@@ -79,24 +118,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   leakage control, paired bootstrap, per-language breakdown). Leakage is
   not a minor bias here: uncontrolled, Recall@1 reads 0.933 instead of
   0.360.
-- `tests/test_embeddings.py` — 43 tests covering the cache lifecycle,
+- `tests/test_embeddings.py` — 56 tests covering the cache lifecycle,
   lock semantics, prompt application, scoring and the registry. No model
   download and no GPU required.
-
-- **MCP server now targets the MCP Python SDK v2.** `FastMCP` became
-  `MCPServer` (`mcp.server.mcpserver`) in mcp 2.0; the `mcp` extra now
-  floors at `mcp>=2` so the new import path cannot resolve against a v1
-  SDK. Server construction, the `@mcp.tool()` decorator and `mcp.run()`
-  are unchanged, so the 19 tool definitions carry over as-is.
-- **ruff is pinned to an exact version** (`ruff==0.16.4`) in both the dev
-  extra and the CI lint job. It was floored at `>=0.1.0` and installed
-  unpinned in CI, so every ruff release silently widened enforcement —
-  181 findings had accumulated in the stable rule set. All are resolved:
-  32 blind `except Exception` handlers were triaged individually (13
-  narrowed to the exceptions actually raised, 19 kept as tool/route
-  boundaries and suppressed with a reason), all 12 `subprocess.run` calls
-  are explicit about `check=`, and the generated protobuf module is
-  excluded rather than edited.
 
 ## [0.2.0] — 2026-04-20
 
