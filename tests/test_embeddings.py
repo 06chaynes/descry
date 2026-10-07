@@ -522,6 +522,63 @@ class TestModelRegistry:
         assert seen["trust_remote_code"] is True
         assert seen["revision"] == spec.revision
 
+    def test_embeddinggemma2_loads_text_only_with_a_token_cap(self, monkeypatch):
+        seen = {}
+
+        class Recorder:
+            max_seq_length = 10**30
+
+            def __init__(self, name, **kw):
+                seen["name"] = name
+                seen.update(kw)
+
+        monkeypatch.setattr(E, "SentenceTransformer", Recorder)
+        model = E._load_sentence_transformer("embeddinggemma-2")
+        spec = E.MODEL_REGISTRY["embeddinggemma-2"]
+        assert seen["name"] == "google/embeddinggemma-2"
+        assert seen["trust_remote_code"] is False
+        assert seen["revision"] == spec.revision
+        assert seen["config_kwargs"] == {"vision_config": None, "audio_config": None}
+        assert model.max_seq_length == 8192
+
+    def test_models_without_loading_options_get_none(self, monkeypatch):
+        seen = {}
+
+        class Recorder:
+            max_seq_length = 2048
+
+            def __init__(self, name, **kw):
+                seen.update(kw)
+
+        monkeypatch.setattr(E, "SentenceTransformer", Recorder)
+        model = E._load_sentence_transformer("embeddinggemma")
+        assert "config_kwargs" not in seen
+        assert model.max_seq_length == 2048
+
+    def test_missing_extra_names_the_install_command(self, monkeypatch):
+        def refuse(name, **kw):
+            raise ImportError("requires the PIL library")
+
+        monkeypatch.setattr(E, "SentenceTransformer", refuse)
+        with pytest.raises(E.EmbeddingModelDependencyMissing) as err:
+            E._load_sentence_transformer("embeddinggemma-2")
+        assert "descry-codegraph[embeddinggemma-2]" in str(err.value)
+        # A model with no extra of its own keeps the plain ImportError.
+        with pytest.raises(ImportError) as plain:
+            E._load_sentence_transformer("embeddinggemma")
+        assert not isinstance(plain.value, E.EmbeddingModelDependencyMissing)
+
+    def test_every_extra_a_model_names_is_declared(self):
+        import pathlib
+        import tomllib
+
+        declared = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"][
+            "optional-dependencies"
+        ]
+        for spec in E.MODEL_REGISTRY.values():
+            if spec.extra:
+                assert spec.extra in declared
+
     def test_gated_repo_refusal_names_the_fix(self, monkeypatch):
         """HF's bare 401 becomes an error that says how to get past it."""
 

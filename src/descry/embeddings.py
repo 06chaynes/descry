@@ -118,6 +118,12 @@ class EmbeddingModelSpec:
     query_prompt: str | None
     document_prompt: str | None
     summary: str
+    # `config_kwargs` for the SentenceTransformer constructor.
+    config_kwargs: dict | None = None
+    # Token cap set after loading, for a model that ships without one.
+    max_seq_length: int | None = None
+    # The descry extra that installs what this model needs beyond `embeddings`.
+    extra: str | None = None
 
 
 MODEL_REGISTRY: dict[str, EmbeddingModelSpec] = {
@@ -163,6 +169,23 @@ MODEL_REGISTRY: dict[str, EmbeddingModelSpec] = {
         document_prompt="document",
         summary="Default. Best measured retrieval; smallest index. 2K context.",
     ),
+    "embeddinggemma-2": EmbeddingModelSpec(
+        alias="embeddinggemma-2",
+        repo_id="google/embeddinggemma-2",
+        revision="914f7f89142e33e77833254d9c9b90c3cef7303b",
+        trust_remote_code=False,
+        dim=768,
+        license="Apache-2.0",
+        context_tokens=8192,
+        query_prompt="CodeRetrieval",
+        document_prompt="Document",
+        summary="Ungated, Apache-2.0. Needs the embeddinggemma-2 extra.",
+        # Multimodal; without the vision and audio towers it is the 270M text
+        # model and produces identical text vectors.
+        config_kwargs={"vision_config": None, "audio_config": None},
+        max_seq_length=8192,
+        extra="embeddinggemma-2",
+    ),
 }
 
 DEFAULT_MODEL_ALIAS = "embeddinggemma"
@@ -192,6 +215,7 @@ def list_models() -> list[dict]:
             "license": spec.license,
             "context_tokens": spec.context_tokens,
             "trust_remote_code": spec.trust_remote_code,
+            "extra": spec.extra,
             "default": spec.alias == DEFAULT_MODEL_ALIAS,
             "summary": spec.summary,
         }
@@ -224,6 +248,10 @@ class EmbeddingCacheMismatch(RuntimeError):
 
 class EmbeddingModelGated(RuntimeError):
     """The model's HuggingFace repo needs a licence acceptance and a login."""
+
+
+class EmbeddingModelDependencyMissing(RuntimeError):
+    """The model needs packages that its descry extra installs."""
 
 
 def _is_gated_repo_error(exc: BaseException | None) -> bool:
@@ -305,8 +333,22 @@ def _load_sentence_transformer(
     kwargs: dict = {"trust_remote_code": trust_remote_code}
     if revision:
         kwargs["revision"] = revision
+    if spec and spec.config_kwargs:
+        kwargs["config_kwargs"] = dict(spec.config_kwargs)
     try:
-        return SentenceTransformer(target, **kwargs)
+        model = SentenceTransformer(target, **kwargs)
+        if spec and spec.max_seq_length:
+            model.max_seq_length = spec.max_seq_length
+        return model
+    except ImportError as e:
+        if not (spec and spec.extra):
+            raise
+        # Not re-raised as ImportError: callers treat that as "embeddings are
+        # not installed" and skip silently.
+        raise EmbeddingModelDependencyMissing(
+            f"{spec.alias} needs packages that are not installed ({e}). "
+            f"Install them with: pip install 'descry-codegraph[{spec.extra}]'"
+        ) from e
     except OSError as e:
         if not _is_gated_repo_error(e):
             raise
@@ -389,6 +431,9 @@ class SemanticSearcher:
             str(spec.query_prompt if (spec := self.spec) else None),
             str(spec.document_prompt if spec else None),
         ]
+        # Appended only when set, so models without a cap keep their key.
+        if spec and spec.max_seq_length:
+            parts.append(f"max_seq_length={spec.max_seq_length}")
         # A local checkpoint can change under a stable path, so fold in the
         # directory's file sizes and mtimes rather than just its name.
         local = Path(self.model_name)

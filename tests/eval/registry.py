@@ -4,7 +4,7 @@ Revisions are the snapshot shas actually exercised, so a rerun scores the same
 weights. Keep in step with descry.embeddings.MODEL_REGISTRY.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,11 @@ class EvalModel:
     trust_remote_code: bool
     query_prompt: str | None
     document_prompt: str | None
+    # Extra SentenceTransformer constructor arguments, e.g. `config_kwargs`.
+    load_kwargs: dict = field(default_factory=dict)
 
+
+_GEMMA2_TEXT_ONLY = {"config_kwargs": {"vision_config": None, "audio_config": None}}
 
 CONFIGS = [
     EvalModel(
@@ -75,5 +79,34 @@ CONFIGS = [
         False,
         "InstructionRetrieval",
         "document",
+    ),
+    # EmbeddingGemma 2 is multimodal (740M); dropping the vision and audio
+    # towers leaves the 270M text model and produces identical text vectors.
+    EvalModel(
+        "gemma2_plain",
+        "google/embeddinggemma-2",
+        "914f7f89142e33e77833254d9c9b90c3cef7303b",
+        False,
+        None,
+        None,
+        _GEMMA2_TEXT_ONLY,
+    ),
+    EvalModel(
+        "gemma2_search",
+        "google/embeddinggemma-2",
+        "914f7f89142e33e77833254d9c9b90c3cef7303b",
+        False,
+        "SearchQuery",
+        "Document",
+        _GEMMA2_TEXT_ONLY,
+    ),
+    EvalModel(
+        "gemma2_code",
+        "google/embeddinggemma-2",
+        "914f7f89142e33e77833254d9c9b90c3cef7303b",
+        False,
+        "CodeRetrieval",
+        "Document",
+        _GEMMA2_TEXT_ONLY,
     ),
 ]

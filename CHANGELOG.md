@@ -116,12 +116,15 @@ extra now requires `mcp>=2`. Graph schema stays at v1.
 
 - `descry embedding-models` lists the registry with each entry's
   dimensionality, licence and remote-code requirement.
+- `embeddinggemma-2` (`google/embeddinggemma-2`) is selectable: not
+  gated, Apache-2.0, loaded text-only. Its dependencies come from the new
+  `descry-codegraph[embeddinggemma-2]` extra.
 - `tests/eval/` — a retrieval-evaluation harness scoring candidate models
   on a project's own graph (docstring→symbol queries, leave-one-out
   leakage control, paired bootstrap, per-language breakdown). Leakage is
   not a minor bias here: uncontrolled, Recall@1 reads 0.933 instead of
   0.360.
-- `tests/test_embeddings.py` — 56 tests covering the cache lifecycle,
+- `tests/test_embeddings.py` — 60 tests covering the cache lifecycle,
   lock semantics, prompt application, scoring and the registry. No model
   download and no GPU required.
 
