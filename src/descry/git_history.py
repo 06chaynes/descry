@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Git History Analysis Module
 
@@ -17,7 +16,6 @@ import re
 import subprocess
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
 
 from descry._env import safe_env
 
@@ -187,6 +185,7 @@ class GitHistoryAnalyzer:
                 cwd=str(self.project_root),
                 timeout=timeout,
                 env=safe_env(),
+                check=False,
             )
             if result.returncode != 0:
                 stderr = result.stderr.strip()
@@ -215,7 +214,7 @@ class GitHistoryAnalyzer:
         """Check if the repo is a shallow clone."""
         return (self.project_root / ".git" / "shallow").exists()
 
-    def _parse_time_range(self, time_range: Optional[str]) -> list[str]:
+    def _parse_time_range(self, time_range: str | None) -> list[str]:
         """Convert human-readable time range to git flags.
 
         Supported formats:
@@ -278,13 +277,16 @@ class GitHistoryAnalyzer:
         # Collect function/method spans in this file
         spans = []
         for node in nodes:
-            if node["id"].startswith(file_id + "::"):
-                if node["type"] in ("Function", "Method", "Class"):
-                    start = node["metadata"].get("lineno", 0)
-                    end = node["metadata"].get("end_lineno", start)
-                    if start > 0:
-                        span_size = end - start
-                        spans.append((span_size, start, end, node["id"]))
+            if node["id"].startswith(file_id + "::") and node["type"] in (
+                "Function",
+                "Method",
+                "Class",
+            ):
+                start = node["metadata"].get("lineno", 0)
+                end = node["metadata"].get("end_lineno", start)
+                if start > 0:
+                    span_size = end - start
+                    spans.append((span_size, start, end, node["id"]))
 
         # Sort by span size descending so outer spans are written first and inner spans overwrite them
         spans.sort(key=lambda x: -x[0])
@@ -381,8 +383,8 @@ class GitHistoryAnalyzer:
 
     def get_churn(
         self,
-        time_range: Optional[str] = None,
-        path_filter: Optional[str] = None,
+        time_range: str | None = None,
+        path_filter: str | None = None,
         limit: int = 20,
         mode: str = "symbols",
         exclude_generated: bool = True,
@@ -573,8 +575,8 @@ class GitHistoryAnalyzer:
 
     def get_churn_structured(
         self,
-        time_range: Optional[str] = None,
-        path_filter: Optional[str] = None,
+        time_range: str | None = None,
+        path_filter: str | None = None,
         limit: int = 20,
         mode: str = "symbols",
         exclude_generated: bool = True,
@@ -833,7 +835,7 @@ class GitHistoryAnalyzer:
         self,
         symbol_commits: dict[str, set[str]],
         limit: int,
-        file_commits: Optional[dict[str, set[str]]] = None,
+        file_commits: dict[str, set[str]] | None = None,
     ) -> str:
         """Format co-change analysis showing symbol pairs that change together.
 
@@ -950,10 +952,10 @@ class GitHistoryAnalyzer:
     def get_evolution(
         self,
         name: str,
-        time_range: Optional[str] = None,
+        time_range: str | None = None,
         limit: int = 10,
         show_diff: bool = False,
-        crate: Optional[str] = None,
+        crate: str | None = None,
     ) -> str:
         """Track the evolution of a specific symbol over time.
 
@@ -1110,7 +1112,7 @@ class GitHistoryAnalyzer:
         output: str,
         symbol_name: str,
         file_path: str,
-        node_id: Optional[str],
+        node_id: str | None,
         limit: int,
         show_diff: bool,
     ) -> str:
@@ -1208,7 +1210,7 @@ class GitHistoryAnalyzer:
         output: str,
         symbol_name: str,
         file_path: str,
-        node_id: Optional[str],
+        node_id: str | None,
         limit: int,
         show_diff: bool,
     ) -> str:
@@ -1258,11 +1260,48 @@ class GitHistoryAnalyzer:
 
         return "\n".join(lines)
 
+    def _attribute_hunks_to_symbols(self, hunks) -> dict[str, dict]:
+        """Attribute added/removed diff lines to the symbols containing them.
+
+        Removed lines are attributed using new-side line numbers; old-side
+        attribution would need a line map built from the pre-change state, so
+        per-symbol +N/-M counts are approximate. Commit-level attribution is
+        exact.
+        """
+        file_hunks: dict[str, list[dict]] = defaultdict(list)
+        for hunk in hunks:
+            file_hunks[hunk["file"]].append(hunk)
+
+        modified_symbols: dict[str, dict] = {}
+        for file_path, fhunks in file_hunks.items():
+            line_map = self._build_file_line_map(file_path)
+            if not line_map:
+                continue
+            for hunk in fhunks:
+                line = hunk["new_start"]
+                for diff_line in hunk["lines"]:
+                    if diff_line.startswith("+"):
+                        symbol = line_map.get(line)
+                        if symbol:
+                            modified_symbols.setdefault(
+                                symbol, {"added": 0, "removed": 0}
+                            )["added"] += 1
+                        line += 1
+                    elif diff_line.startswith("-"):
+                        symbol = line_map.get(line)
+                        if symbol:
+                            modified_symbols.setdefault(
+                                symbol, {"added": 0, "removed": 0}
+                            )["removed"] += 1
+                    else:
+                        line += 1
+        return modified_symbols
+
     def get_changes(
         self,
-        commit_range: Optional[str] = None,
-        time_range: Optional[str] = None,
-        path_filter: Optional[str] = None,
+        commit_range: str | None = None,
+        time_range: str | None = None,
+        path_filter: str | None = None,
         show_callers: bool = True,
         limit: int = 50,
     ) -> str:
@@ -1363,37 +1402,7 @@ class GitHistoryAnalyzer:
         # Attribute changes to symbols
         modified_symbols: dict[str, dict] = {}  # node_id -> {added, removed}
 
-        # Group hunks by file
-        file_hunks: dict[str, list[dict]] = defaultdict(list)
-        for hunk in hunks:
-            file_hunks[hunk["file"]].append(hunk)
-
-        for file_path, fhunks in file_hunks.items():
-            line_map = self._build_file_line_map(file_path)
-            if not line_map:
-                continue
-
-            for hunk in fhunks:
-                line = hunk["new_start"]
-                for diff_line in hunk["lines"]:
-                    if diff_line.startswith("+"):
-                        symbol = line_map.get(line)
-                        if symbol:
-                            if symbol not in modified_symbols:
-                                modified_symbols[symbol] = {"added": 0, "removed": 0}
-                            modified_symbols[symbol]["added"] += 1
-                        line += 1
-                    elif diff_line.startswith("-"):
-                        # NOTE: For removed lines, symbol attribution uses new-side line numbers
-                        # (approximate — old-side would require building line map from pre-change state).
-                        # The +N/-M stats may be slightly inaccurate but commit-level attribution is correct.
-                        symbol = line_map.get(line)
-                        if symbol:
-                            if symbol not in modified_symbols:
-                                modified_symbols[symbol] = {"added": 0, "removed": 0}
-                            modified_symbols[symbol]["removed"] += 1
-                    else:
-                        line += 1
+        modified_symbols = self._attribute_hunks_to_symbols(hunks)
 
         # Format output
         lines = []
@@ -1456,9 +1465,9 @@ class GitHistoryAnalyzer:
 
     def get_changes_structured(
         self,
-        commit_range: Optional[str] = None,
-        time_range: Optional[str] = None,
-        path_filter: Optional[str] = None,
+        commit_range: str | None = None,
+        time_range: str | None = None,
+        path_filter: str | None = None,
         show_callers: bool = True,
         limit: int = 50,
     ) -> dict:
@@ -1536,33 +1545,7 @@ class GitHistoryAnalyzer:
 
         hunks = self._parse_diff_hunks(diff_output) if diff_output else []
 
-        modified_symbols: dict[str, dict] = {}
-        file_hunks: dict[str, list[dict]] = defaultdict(list)
-        for hunk in hunks:
-            file_hunks[hunk["file"]].append(hunk)
-
-        for file_path, fhunks in file_hunks.items():
-            line_map = self._build_file_line_map(file_path)
-            if not line_map:
-                continue
-            for hunk in fhunks:
-                line = hunk["new_start"]
-                for diff_line in hunk["lines"]:
-                    if diff_line.startswith("+"):
-                        symbol = line_map.get(line)
-                        if symbol:
-                            if symbol not in modified_symbols:
-                                modified_symbols[symbol] = {"added": 0, "removed": 0}
-                            modified_symbols[symbol]["added"] += 1
-                        line += 1
-                    elif diff_line.startswith("-"):
-                        symbol = line_map.get(line)
-                        if symbol:
-                            if symbol not in modified_symbols:
-                                modified_symbols[symbol] = {"added": 0, "removed": 0}
-                            modified_symbols[symbol]["removed"] += 1
-                    else:
-                        line += 1
+        modified_symbols = self._attribute_hunks_to_symbols(hunks)
 
         range_display = commit_range or time_range or "HEAD~1..HEAD"
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import tomllib
 from pathlib import Path
 
 from descry.scip.adapter import (
@@ -28,11 +29,9 @@ def _parse_workspace_members(root_cargo: Path) -> list[Path]:
     list so discovery falls through to the single-level glob fallback.
     """
     try:
-        import tomllib
-
         with open(root_cargo, "rb") as f:
             data = tomllib.load(f)
-    except Exception as e:
+    except (OSError, tomllib.TOMLDecodeError) as e:
         logger.debug(f"Cargo.toml parse failed at {root_cargo}: {e}")
         return []
 

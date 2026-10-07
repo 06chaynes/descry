@@ -7,7 +7,6 @@ from unittest.mock import patch
 from descry.handlers import DescryConfig
 from descry.scip.cache import ScipCacheManager
 
-
 # --- Default field values ---
 
 
@@ -16,7 +15,7 @@ class TestNewFieldDefaults:
 
     def test_embedding_model_default(self):
         config = DescryConfig()
-        assert config.embedding_model == "jinaai/jina-code-embeddings-0.5b"
+        assert config.embedding_model == "google/embeddinggemma-300m"
 
     def test_test_path_patterns_default(self):
         config = DescryConfig()
@@ -171,7 +170,7 @@ max_callers_shown = 30
         config = DescryConfig(project_root=tmp_path)
         config._apply_toml(data)
         # Should keep all defaults
-        assert config.embedding_model == "jinaai/jina-code-embeddings-0.5b"
+        assert config.embedding_model == "google/embeddinggemma-300m"
         assert config.max_depth == 3
         assert config.git_timeout == 30
 
@@ -193,7 +192,7 @@ timeout = 45
         assert config.git_timeout == 45
         # Other fields stay default
         assert config.max_nodes == 100
-        assert config.embedding_model == "jinaai/jina-code-embeddings-0.5b"
+        assert config.embedding_model == "google/embeddinggemma-300m"
 
     def test_from_toml_invalid(self, tmp_path, caplog):
         """Malformed TOML falls back to defaults with warning."""
@@ -405,14 +404,14 @@ class TestScipCacheManagerConfig:
         )
 
         mgr = ScipCacheManager(tmp_path, scip_skip_crates=["beta"])
-        crates = mgr.get_rust_crates()
-        assert "beta" in crates  # get_rust_crates still discovers it
+        crates = mgr.get_project_names("rust")
+        assert "beta" in crates  # get_project_names still discovers it
 
         # But update_changed_rust should filter it out
         # We can't run the full generation (no rust-analyzer), but we can
         # verify the filtering logic by checking what needs_update sees
         # after filtering
-        all_crates = mgr.get_rust_crates()
+        all_crates = mgr.get_project_names("rust")
         filtered = [c for c in all_crates if c not in mgr._scip_skip_crates]
         assert "beta" not in filtered
         assert "alpha" in filtered

@@ -1,10 +1,10 @@
 import logging
-import os
 import math
+import os
+import re
 import time
 from collections import defaultdict
 from functools import lru_cache
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ def _estimate_tokens(text: str) -> int:
 @lru_cache(maxsize=128)
 def _read_file_cached_inner(
     file_path: str,
-    mtime_ns: int,  # noqa: ARG001 — forms lru_cache key so mtime changes invalidate the entry
+    mtime_ns: int,
 ) -> tuple[str, ...]:
     """Inner cache keyed on (path, mtime_ns) so edits invalidate the entry.
 
@@ -228,7 +228,7 @@ class GraphQuerier:
             start = max(0, start_line - 1)
             end = min(len(lines), end_line)
             return "".join(lines[start:end])
-        except Exception as e:
+        except OSError as e:
             return f"<Error reading file: {e}>"
 
     def _ensure_filter_indices(self):
@@ -409,7 +409,7 @@ class GraphQuerier:
                 + "".join(tail)
             )
 
-        except Exception as e:
+        except OSError as e:
             return f"<Error reading file: {e}>"
 
     def get_context_prompt(
@@ -1377,6 +1377,27 @@ class GraphQuerier:
 
         return results, budget
 
+    def _resolve_flow_start(self, start_name, depth):
+        """Clamp depth to the configured ceiling and resolve the start symbol.
+
+        Returns ``(func_nodes, depth)``; ``func_nodes`` is empty when nothing
+        matched, leaving each caller to raise its own error shape.
+        """
+        # Respect the project's `[query] max_depth` ceiling, falling back to
+        # the legacy limit of 5.
+        effective_max = self._max_depth if self._max_depth else 5
+        depth = min(depth, effective_max)
+
+        start_nodes = self.find_nodes_by_name(start_name)
+        if not start_nodes:
+            start_nodes = self.find_nodes_by_name(start_name, fuzzy=True)
+
+        func_nodes = [n for n in start_nodes if n["type"] in ("Function", "Method")]
+        if not func_nodes and start_nodes:
+            # Fall back to the first match even when it is not a function.
+            func_nodes = start_nodes[:1]
+        return func_nodes, depth
+
     def trace_flow(
         self,
         start_name: str,
@@ -1401,24 +1422,9 @@ class GraphQuerier:
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
-        # Respect the project's configured `[query] max_depth` ceiling, with
-        # a fallback of 5 for the legacy hard limit. Previously this method
-        # hardcoded `min(depth, 5)` and silently ignored `.descry.toml`.
-        effective_max = self._max_depth if self._max_depth else 5
-        depth = min(depth, effective_max)
-
-        # Resolve start node
-        start_nodes = self.find_nodes_by_name(start_name)
-        if not start_nodes:
-            # Try fuzzy match
-            start_nodes = self.find_nodes_by_name(start_name, fuzzy=True)
-
-        func_nodes = [n for n in start_nodes if n["type"] in ("Function", "Method")]
+        func_nodes, depth = self._resolve_flow_start(start_name, depth)
         if not func_nodes:
-            if start_nodes:
-                func_nodes = start_nodes[:1]  # Use first match even if not function
-            else:
-                return f"No function '{start_name}' found."
+            return f"No function '{start_name}' found."
 
         start_node = func_nodes[0]
         start_id = start_node["id"]
@@ -1535,20 +1541,9 @@ class GraphQuerier:
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
-        effective_max = self._max_depth if self._max_depth else 5
-        depth = min(depth, effective_max)
-
-        # Resolve start node
-        start_nodes = self.find_nodes_by_name(start_name)
-        if not start_nodes:
-            start_nodes = self.find_nodes_by_name(start_name, fuzzy=True)
-
-        func_nodes = [n for n in start_nodes if n["type"] in ("Function", "Method")]
+        func_nodes, depth = self._resolve_flow_start(start_name, depth)
         if not func_nodes:
-            if start_nodes:
-                func_nodes = start_nodes[:1]
-            else:
-                return {"error": f"No function '{start_name}' found."}
+            return {"error": f"No function '{start_name}' found."}
 
         start_node = func_nodes[0]
         start_id = start_node["id"]
@@ -1605,11 +1600,10 @@ class GraphQuerier:
 
             # Inline small functions
             code = None
-            if tokens <= inline_threshold and tokens > 0:
-                if os.path.exists(file_path):
-                    start_line = meta.get("lineno", 1)
-                    end_line = meta.get("end_lineno", start_line + 10)
-                    code = self.get_source_segment(file_path, start_line, end_line)
+            if tokens <= inline_threshold and tokens > 0 and os.path.exists(file_path):
+                start_line = meta.get("lineno", 1)
+                end_line = meta.get("end_lineno", start_line + 10)
+                code = self.get_source_segment(file_path, start_line, end_line)
 
             # Recurse into children
             if direction == "forward":
@@ -2047,10 +2041,8 @@ class GraphQuerier:
 
             # Check if this is a trait implementation
             impl_trait = meta.get("trait_impl")
-            if impl_trait:
-                # If trait_name filter is specified, check it matches
-                if trait_name is None or impl_trait == trait_name:
-                    results.append(node)
+            if impl_trait and (trait_name is None or impl_trait == trait_name):
+                results.append(node)
 
         return results
 
@@ -2114,7 +2106,7 @@ class GraphQuerier:
 
         # Build additional targets from existing nodes/edges that end with our name
         # This catches cases like REF:Foo::Bar when searching for "Bar"
-        for node_id in self.nodes.keys():
+        for node_id in self.nodes:
             if node_id.endswith((f"::{func_name}", f"::{base_name}")):
                 target_ids.add(node_id)
 
@@ -2124,12 +2116,19 @@ class GraphQuerier:
             if target_id.startswith("REF:"):
                 ref_name = target_id.replace("REF:", "")
                 # Exact match
-                if ref_name == func_name or ref_name == base_name:
-                    target_ids.add(target_id)
-                # Suffix match
-                elif ref_name.endswith((f"::{func_name}", f".{func_name}")):
-                    target_ids.add(target_id)
-                elif ref_name.endswith((f"::{base_name}", f".{base_name}")):
+                # Exact or suffix match
+                if (
+                    ref_name == func_name
+                    or ref_name == base_name
+                    or ref_name.endswith(
+                        (
+                            f"::{func_name}",
+                            f".{func_name}",
+                            f"::{base_name}",
+                            f".{base_name}",
+                        )
+                    )
+                ):
                     target_ids.add(target_id)
                 # Fuzzy prefix match
                 elif fuzzy and len(func_name) >= 3:

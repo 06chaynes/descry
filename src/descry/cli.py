@@ -12,7 +12,7 @@ import argparse
 import asyncio
 import sys
 
-from descry.handlers import DescryService, DescryConfig
+from descry.handlers import DescryConfig, DescryService
 
 
 def _make_service() -> DescryService:
@@ -120,6 +120,11 @@ def cmd_structure(args):
 def cmd_flatten(args):
     svc = _make_service()
     _print_result(svc.flatten(class_node_id=args.class_node_id))
+
+
+def cmd_embedding_models(_args):
+    svc = _make_service()
+    _print_result(svc.embedding_models())
 
 
 def cmd_semantic(args):
@@ -339,6 +344,13 @@ def main():
     sub.add_argument("query", help="Natural language query")
     sub.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     sub.set_defaults(func=cmd_semantic)
+
+    # embedding-models
+    sub = subparsers.add_parser(
+        "embedding-models",
+        help="List embedding models descry ships pinned configurations for",
+    )
+    sub.set_defaults(func=cmd_embedding_models)
 
     # quick
     sub = subparsers.add_parser(

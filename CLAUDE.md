@@ -23,7 +23,7 @@ just test tests/test_handlers.py::test_index     # one test
 just test -k "cross_lang and not slow"           # by expression
 ```
 
-Python 3.11+ required (enforced by `pyproject.toml`). Pre-commit gate: `just lint && just fmt && just test` all pass (497 tests currently — a drop is a regression signal).
+Python 3.11+ required (enforced by `pyproject.toml`). Pre-commit gate: `just lint && just fmt && just test` all pass (566 tests currently — a drop is a regression signal).
 
 Invoke the tool while developing:
 
@@ -62,7 +62,10 @@ These are load-bearing — see `SECURITY.md` and the `## Security` section of `C
 - **TOML-sourced subprocess args are validated.** `_validate_toolchain`, `_validate_scip_extra_arg`, `_validate_embedding_model` in `handlers.py` reject short flags, shell metacharacters, and out-of-root local paths. New TOML → subprocess plumbing must validate.
 - **Web UI is local-only by design.** `descry-web` binds `127.0.0.1`, has no auth, and deliberately omits `CORSMiddleware` so browsers enforce same-origin — a tab on `evil.com` cannot read `/api/source` or trigger `/api/index`. `TrustedHostMiddleware` rejects non-loopback `Host` headers to defeat DNS-rebinding that would otherwise bypass the 127.0.0.1 bind. `/api/source` enforces project-root containment, rejects non-regular files / non-text content / >10 MiB, and uses `O_NOFOLLOW` on the final open. `/api/index` (and `/api/index/stream`) take no path parameter (always indexes the configured root). Don't add a `--host 0.0.0.0` flag, don't add `CORSMiddleware`, and don't expose network listeners.
 - **MCP `index(path=...)`** is restricted to the configured project root.
-- **Embedding cache** uses numpy safe-mode load + JSON sidecar + atomic writes + content-addressed keys. Default embedding model revision is pinned for supply-chain integrity; `trust_remote_code` defaults to `False` for user-supplied models.
+- **Embedding cache** uses numpy safe-mode load + JSON sidecar + atomic writes + content-addressed keys. `MODEL_REGISTRY` in `embeddings.py` is the single source of truth for which models descry ships pinned configurations for — each entry carries its revision, its `trust_remote_code` setting and its task prompts. **`trust_remote_code` is only ever `True` for a registry entry**; a model named in `.descry.toml` that is not registered is loaded unpinned with remote code disabled. Adding a model means adding a registry entry, not editing the loader.
+- **The cache key is the embedding recipe's identity.** `_recipe_fingerprint()` folds in the resolved repo id, the pinned revision, `RECIPE_VERSION`, `DOCSTRING_CHAR_LIMIT` and the chosen prompt names. Anything that changes the vectors without changing the graph must be added there and `RECIPE_VERSION` bumped, or a stale cache is served against freshly-encoded queries — comparing two different embedding spaces.
+- **`node_text()` is shared with the eval harness.** `tests/eval/corpus.doc_text` delegates to it so the harness's leave-one-out substitute cannot drift from the index rows it replaces. Change the text assembly there, not in a copy, and bump `RECIPE_VERSION`.
+- **Retrieval changes need numbers.** `tests/eval/` scores candidate models on this repo's own graph (405 docstring→symbol queries, leave-one-out leakage control, paired bootstrap). Run `python tests/eval/compare.py` before changing the default model, the text assembly, or the prompts. Uncontrolled, docstring leakage inflates R@1 from 0.36 to 0.93, so do not evaluate without the leave-one-out swap.
 
 ## Versioning
 

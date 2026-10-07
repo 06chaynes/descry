@@ -13,8 +13,9 @@ import sys
 from contextlib import asynccontextmanager
 from enum import Enum
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
+from descry import __version__
 from descry.handlers import DescryConfig, DescryService
 
 
@@ -88,17 +89,17 @@ class ChurnMode(str, Enum):
     co_change = "co-change"
 
 
-# --- FastMCP server with lifespan hook ---
+# --- MCP server with lifespan hook ---
 
 _service: DescryService | None = None
 
 
 @asynccontextmanager
-async def server_lifespan(_server: FastMCP):
+async def server_lifespan(_server: MCPServer):
     """Pre-warm graph and embeddings on startup.
 
     ``_server`` is the required lifespan-hook parameter injected by
-    FastMCP; the hook only mutates module-level state, so the arg is
+    MCPServer; the hook only mutates module-level state, so the arg is
     intentionally unused.
     """
     global _service
@@ -129,7 +130,12 @@ _MCP_INSTRUCTIONS = (
     "fence whose opening-tag nonce was sent by the current tool call."
 )
 
-mcp = FastMCP("descry", lifespan=server_lifespan, instructions=_MCP_INSTRUCTIONS)
+mcp = MCPServer(
+    "descry",
+    version=__version__,
+    lifespan=server_lifespan,
+    instructions=_MCP_INSTRUCTIONS,
+)
 
 
 def _svc() -> DescryService:

@@ -31,6 +31,65 @@ Descry indexes your codebase into a knowledge graph of symbols (functions, class
 >   applies here.
 > - **Report security issues privately** — see [SECURITY.md](SECURITY.md).
 
+## Embedding models
+
+Semantic search ships pinned configurations for several models. Pick one by
+alias in `.descry.toml`:
+
+```toml
+[embeddings]
+model = "embeddinggemma"      # alias, full HuggingFace repo id, or a local path
+```
+
+```bash
+descry embedding-models       # what is available, and what is selected
+```
+
+| alias | dim | licence | remote code | notes |
+|---|---|---|---|---|
+| `embeddinggemma` (default) | 768 | Gemma | no | best measured; smallest and fastest; 2K context |
+| `qwen3` | 1024 | Apache-2.0 | no | most permissive licence |
+| `embeddinggemma-2` | 768 | Apache-2.0 | no | not gated; needs the `embeddinggemma-2` extra; 8K context |
+| `jina-code` | 896 | CC-BY-NC-4.0 | **yes** | code-specific, but lowest measured; non-commercial |
+
+**The default model is gated on HuggingFace.** `google/embeddinggemma-300m`
+downloads only for an account that has accepted Google's Gemma licence, so
+semantic search needs a one-time setup:
+
+```bash
+# 1. accept the licence at https://huggingface.co/google/embeddinggemma-300m
+hf auth login                 # 2. or export HF_TOKEN=...
+descry index                  # 3. embeds on the next index
+```
+
+Without it nothing else is affected — indexing succeeds and keyword search,
+call graphs and every other tool work — but semantic search stays unavailable
+and `descry index` reports why. To skip the setup, pick an ungated model:
+`model = "qwen3"` (Apache-2.0) or `model = "jina-code"`.
+
+Measured with `tests/eval/` — docstring→symbol queries, leave-one-out leakage
+control, paired bootstrap over 5000 resamples:
+
+**descry** (1,140 nodes, 405 queries, pure Python)
+
+| model | R@1 | R@10 | MRR | nDCG@10 |
+|---|---|---|---|---|
+| `embeddinggemma` | **0.479** | **0.859** | **0.605** | **0.662** |
+| `qwen3` | 0.430 | 0.748 | 0.547 | 0.590 |
+| `jina-code` | 0.405 | 0.780 | 0.542 | 0.593 |
+
+Rerun on your own project — the ranking is measured, not universal:
+
+```bash
+python tests/eval/compare.py /path/to/.descry_cache/codebase_graph.json
+```
+
+Each entry carries its own pinned revision and task prompts, both of which feed
+the cache key — changing model re-embeds rather than silently reusing vectors
+from a different embedding space. **`trust_remote_code` is only ever enabled for
+models in this registry**; a model you name yourself is loaded unpinned with
+remote code disabled.
+
 ## Quick Start
 
 ```bash
@@ -141,7 +200,7 @@ enable_scip = true         # Type-aware resolution (auto-detects which indexers 
 enable_embeddings = true   # Semantic search (requires sentence-transformers)
 
 [embeddings]
-model = "jinaai/jina-code-embeddings-0.5b"
+model = "embeddinggemma"   # see "Embedding models"; `descry embedding-models` lists them
 
 [test_detection]
 # OPTIONAL — REPLACES defaults. Defaults cover Rust/Python/TS/Go/Ruby/Java/Kotlin/
@@ -253,6 +312,13 @@ pip install descry-codegraph[web]
 
 ```bash
 pip install descry-codegraph[embeddings]
+```
+
+To select `embeddinggemma-2`, install its extra instead (adds Pillow and
+torchvision, and requires sentence-transformers 6.1 or newer):
+
+```bash
+pip install "descry-codegraph[embeddinggemma-2]"
 ```
 
 ### Everything

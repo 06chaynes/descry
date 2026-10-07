@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
-      - run: uv pip install --system ruff
+      - run: uv pip install --system ruff==0.16.4
       - run: ruff check src/ tests/
       - run: ruff format --check src/ tests/
 
@@ -73,9 +73,4 @@ jobs:
       - name: Audit resolved environment
         run: |
           . .venv/bin/activate
-          # CVE-2026-3219 (GHSA-58qw-9mgm-455v): concatenated tar/ZIP
-          # interpretation conflict in pip itself. Affects pip <= 26.0.1
-          # with no patched version upstream. pip is a build-time
-          # installer in the venv, not a runtime dep we ship.
-          # Re-evaluate when pip ships a fix.
-          pip-audit --skip-editable --ignore-vuln CVE-2026-3219
+          pip-audit --skip-editable

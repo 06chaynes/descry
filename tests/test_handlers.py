@@ -1,18 +1,18 @@
 """Tests for descry.handlers — DescryConfig, DescryService, and format helpers."""
 
 import json
-import pytest
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from descry.handlers import (
     DescryConfig,
     DescryService,
-    format_search_result,
     format_compact_result,
+    format_search_result,
     is_natural_language_query,
 )
-
 
 # --- DescryConfig ---
 
@@ -250,3 +250,59 @@ class TestDescryServiceSearch:
         result = await svc_with_graph.quick("main")
         assert "main" in result
         assert "Application entry point" in result or "fn main()" in result
+
+
+class TestDescryServiceIndex:
+    """The child process embeds; the parent must not encode the graph again."""
+
+    @pytest.fixture
+    def indexed(self, tmp_path):
+        config = DescryConfig(
+            project_root=tmp_path, enable_embeddings=False, enable_scip=False
+        )
+        config.cache_dir.mkdir(parents=True, exist_ok=True)
+        config.graph_path.write_text('{"schema_version": 1, "nodes": [], "edges": []}')
+        svc = DescryService(config)
+        built = []
+
+        class Searcher:
+            nodes: tuple = ()
+
+            def __init__(self, graph_path, **kwargs):
+                self.kwargs = kwargs
+                self.model_loads = 0
+                built.append(self)
+
+            def ensure_model(self):
+                self.model_loads += 1
+
+        svc._semantic_available = True
+        svc._SemanticSearcher = Searcher
+        return svc, built
+
+    @staticmethod
+    def _child_succeeded(*_args, **_kwargs):
+        import subprocess
+
+        return subprocess.CompletedProcess([], 0, stdout="indexed", stderr="")
+
+    @pytest.mark.asyncio
+    async def test_index_loads_the_childs_embeddings_instead_of_rebuilding(
+        self, indexed
+    ):
+        svc, built = indexed
+        with patch("descry.handlers.subprocess.run", self._child_succeeded):
+            result = await svc.index()
+        assert "Index complete" in result
+        assert len(built) == 1
+        assert not built[0].kwargs.get("force_rebuild")
+        assert built[0].model_loads == 0, "a one-shot index must not load the model"
+        assert svc._semantic_cache["instance"] is built[0]
+
+    @pytest.mark.asyncio
+    async def test_index_keeps_a_loaded_model_loaded(self, indexed):
+        svc, built = indexed
+        svc._semantic_cache["instance"] = object()
+        with patch("descry.handlers.subprocess.run", self._child_succeeded):
+            await svc.index()
+        assert built[0].model_loads == 1

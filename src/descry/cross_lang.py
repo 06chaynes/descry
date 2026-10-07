@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Cross-Language Tracing Module
 
@@ -21,7 +20,8 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+
+from descry._graph import GraphSchemaError, load_graph_with_schema
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ class CrossLangTracer:
     def __init__(
         self,
         openapi_path: str,
-        graph_path: Optional[str] = None,
+        graph_path: str | None = None,
         backend_handler_patterns: list[str] | None = None,
         frontend_api_patterns: list[str] | None = None,
         api_prefixes: list[str] | None = None,
@@ -124,10 +124,8 @@ class CrossLangTracer:
             return
 
         try:
-            from descry._graph import load_graph_with_schema
-
             graph = load_graph_with_schema(self.graph_path)
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, GraphSchemaError) as e:
             logger.error(f"Failed to load graph: {e}")
             return
 
@@ -139,9 +137,10 @@ class CrossLangTracer:
                 continue
             node_id = node["id"]
             # If patterns are configured, filter to matching files only
-            if self.backend_handler_patterns:
-                if not any(pat in node_id for pat in self.backend_handler_patterns):
-                    continue
+            if self.backend_handler_patterns and not any(
+                pat in node_id for pat in self.backend_handler_patterns
+            ):
+                continue
             name = node.get("metadata", {}).get("name", "")
             if name:
                 handler_index[name] = node_id
@@ -156,7 +155,7 @@ class CrossLangTracer:
             f"Linked {len(self.operation_to_handler)} operationIds to graph nodes"
         )
 
-    def _strip_api_prefix(self, path: str) -> Optional[str]:
+    def _strip_api_prefix(self, path: str) -> str | None:
         """Strip known API version prefix from a path for matching against OpenAPI spec paths.
 
         Returns the stripped path, or None if no prefix matched.
@@ -167,7 +166,7 @@ class CrossLangTracer:
                 return stripped if stripped else "/"
         return None
 
-    def endpoint_to_handler(self, method: str, path: str) -> Optional[str]:
+    def endpoint_to_handler(self, method: str, path: str) -> str | None:
         """Find the backend handler for an API endpoint.
 
         Args:
@@ -197,7 +196,7 @@ class CrossLangTracer:
 
         return None
 
-    def get_handler_info(self, method: str, path: str) -> Optional[dict]:
+    def get_handler_info(self, method: str, path: str) -> dict | None:
         """Get full information about an endpoint's handler.
 
         Returns dict with operationId, path, method, summary, tags, node_id.
@@ -225,7 +224,7 @@ class CrossLangTracer:
 
         return None
 
-    def list_endpoints(self, tag: Optional[str] = None) -> list[dict]:
+    def list_endpoints(self, tag: str | None = None) -> list[dict]:
         """List all endpoints, optionally filtered by tag.
 
         Args:

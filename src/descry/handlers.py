@@ -16,9 +16,9 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from descry._env import safe_env
-
 from descry import __version__
+from descry._env import safe_env
+from descry._graph import GraphSchemaError, load_graph_with_schema
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +240,16 @@ def _env(key: str, default: str = "") -> str:
 
 _TOOLCHAIN_REGEX = re.compile(r"^[A-Za-z0-9._\-]+$")
 _MODEL_HF_REGEX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]*$")
+
+
+def _default_embedding_model() -> str:
+    """Default model as a repo id, sourced from the embeddings registry."""
+    from descry.embeddings import DEFAULT_MODEL_ALIAS, MODEL_REGISTRY
+
+    return MODEL_REGISTRY[DEFAULT_MODEL_ALIAS].repo_id
+
+
+_DEFAULT_EMBEDDING_MODEL = _default_embedding_model()
 _SHELL_METACHARS = set("\x00;|&`$\n\r\t<>")
 
 
@@ -274,6 +284,21 @@ def _validate_embedding_model(value: str, project_root: Path) -> str:
     """
     if not value:
         raise ValueError("Empty embeddings.model")
+
+    from descry.embeddings import MODEL_REGISTRY
+
+    if value in MODEL_REGISTRY:
+        return value
+    if "/" not in value and not value.startswith("."):
+        # A bare name is almost always a mistyped alias. HuggingFace does host
+        # a few single-segment repo ids, so this stays a warning rather than an
+        # error - but say what the aliases are, since that is the likely intent.
+        logger.warning(
+            "embeddings.model %r is not a known alias (%s) and has no org prefix; "
+            "treating it as a HuggingFace repo id",
+            value,
+            ", ".join(sorted(MODEL_REGISTRY)),
+        )
     if value.startswith("/") or ".." in value.split("/"):
         resolved = Path(value).resolve()
         root = project_root.resolve()
@@ -303,7 +328,7 @@ class DescryConfig:
     excluded_dirs: set[str] = field(default_factory=lambda: set(_DEFAULT_EXCLUDED_DIRS))
 
     # Embeddings
-    embedding_model: str = "jinaai/jina-code-embeddings-0.5b"
+    embedding_model: str = _DEFAULT_EMBEDDING_MODEL
 
     # Test detection
     test_path_patterns: tuple[str, ...] = field(
@@ -406,7 +431,7 @@ class DescryConfig:
                 return {}
             with open(toml_path, "rb") as f:
                 return tomllib.load(f)
-        except Exception as e:
+        except (OSError, tomllib.TOMLDecodeError) as e:
             logger.warning(f"Failed to parse .descry.toml: {e}")
             return {}
 
@@ -759,8 +784,8 @@ def _try_import_embeddings(enabled: bool):
         return False, None, None
     try:
         from descry.embeddings import (
-            embeddings_available,
             SemanticSearcher,
+            embeddings_available,
             get_embeddings_status,
         )
 
@@ -773,7 +798,7 @@ def _try_import_scip(enabled: bool):
     if not enabled:
         return False, None, None
     try:
-        from descry.scip.support import scip_available, get_scip_status
+        from descry.scip.support import get_scip_status, scip_available
 
         return scip_available(), scip_available, get_scip_status
     except ImportError:
@@ -782,7 +807,7 @@ def _try_import_scip(enabled: bool):
 
 def _try_import_git_history():
     try:
-        from descry.git_history import GitHistoryAnalyzer, GitError
+        from descry.git_history import GitError, GitHistoryAnalyzer
 
         return True, GitHistoryAnalyzer, GitError
     except ImportError:
@@ -851,15 +876,13 @@ class DescryService:
                 mtime = gp.stat().st_mtime
                 if mtime != self._graph_cache["mtime"]:
                     try:
-                        from descry._graph import load_graph_with_schema
-
                         data = load_graph_with_schema(gp)
                         self._graph_cache = {
                             "mtime": mtime,
                             "nodes": len(data.get("nodes", [])),
                             "edges": len(data.get("edges", [])),
                         }
-                    except Exception as e:
+                    except (OSError, json.JSONDecodeError, GraphSchemaError) as e:
                         logger.warning(f"Failed to update graph cache: {e}")
 
     async def _get_querier(self):
@@ -971,9 +994,18 @@ class DescryService:
         try:
 
             def load_sync():
-                return self._SemanticSearcher(
-                    str(self.config.graph_path), model_name=self.config.embedding_model
+                searcher = self._SemanticSearcher(
+                    str(self.config.graph_path),
+                    cache_dir=str(self.config.cache_dir),
+                    model_name=self.config.embedding_model,
                 )
+                # On a warm cache the constructor never touches the model, so
+                # without this the pre-warm reports "ready" while the first
+                # real query still pays the full model load.
+                ensure = getattr(searcher, "ensure_model", None)
+                if callable(ensure):
+                    ensure()
+                return searcher
 
             searcher = await asyncio.wait_for(
                 asyncio.to_thread(load_sync), timeout=60.0
@@ -985,11 +1017,11 @@ class DescryService:
                 self._semantic_cache["mtime"] = mtime
                 self._semantic_cache["instance"] = searcher
                 logger.info("Pre-warm: embeddings ready")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             async with self._semantic_cache_lock:
                 self._semantic_cache["error"] = "Timeout loading embeddings (60s)"
             logger.warning("Pre-warm: embeddings load timed out")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and logged
             async with self._semantic_cache_lock:
                 self._semantic_cache["error"] = str(e)
             logger.warning(f"Pre-warm: embeddings failed: {e}")
@@ -1032,7 +1064,9 @@ class DescryService:
 
             def load_sync():
                 return self._SemanticSearcher(
-                    str(gp), model_name=self.config.embedding_model
+                    str(gp),
+                    cache_dir=str(self.config.cache_dir),
+                    model_name=self.config.embedding_model,
                 )
 
             searcher = await asyncio.wait_for(
@@ -1043,14 +1077,14 @@ class DescryService:
                 self._semantic_cache["instance"] = searcher
                 self._semantic_cache["error"] = None
             return searcher
-        except asyncio.TimeoutError:
+        except TimeoutError:
             async with self._semantic_cache_lock:
                 self._semantic_cache["error"] = (
                     f"Timeout loading embeddings ({self.config.embedding_timeout}s)"
                 )
             logger.warning("Embeddings load timed out")
             return None
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and returned
             async with self._semantic_cache_lock:
                 self._semantic_cache["error"] = str(e)
             logger.warning(f"Embeddings load failed: {e}")
@@ -1060,6 +1094,19 @@ class DescryService:
                 self._semantic_cache["loading"] = False
 
     # --- Public API (handle_* → service methods) ---
+
+    async def embedding_models(self) -> str:
+        """List the embedding models descry ships pinned configurations for."""
+        from descry.embeddings import list_models
+
+        models = list_models()
+        for m in models:
+            m["selected"] = m["alias"] == self.config.embedding_model or (
+                m["repo_id"] == self.config.embedding_model
+            )
+        return json.dumps(
+            {"configured": self.config.embedding_model, "models": models}, indent=2
+        )
 
     async def health(self) -> str:
         """Quick diagnostic check."""
@@ -1087,7 +1134,7 @@ class DescryService:
         async with self._querier_cache_lock:
             health["warm"] = self._querier_cache["instance"] is not None
 
-        exists, age_str, age_hours = self._get_graph_status()
+        exists, _, age_hours = self._get_graph_status()
         health["graph"]["exists"] = exists
         health["graph"]["age_hours"] = age_hours
         if exists:
@@ -1212,6 +1259,9 @@ class DescryService:
             except (OSError, ValueError) as e:
                 return f"Invalid index path {path!r}: {e}"
 
+        # Read before reset_caches() below discards it.
+        model_was_loaded = self._semantic_cache["instance"] is not None
+
         try:
             timeout = (
                 self.config.index_timeout_minutes * 60
@@ -1261,8 +1311,8 @@ class DescryService:
                     and self.config.graph_path.exists()
                 ):
                     try:
-                        # Force-rebuild: reset cache then construct in a thread
-                        # so model load doesn't block the event loop (C.1).
+                        # Reset the cache, then construct in a thread so the
+                        # event loop is not blocked (C.1).
                         async with self._semantic_cache_lock:
                             self._semantic_cache = {
                                 "mtime": 0,
@@ -1273,11 +1323,25 @@ class DescryService:
                         logger.info("Generating embeddings for semantic search...")
 
                         def _build_searcher():
-                            return self._SemanticSearcher(
+                            # No force_rebuild: the child process has just
+                            # embedded this graph and cached the vectors under
+                            # a key derived from the graph's content, so this
+                            # loads them. Forcing a rebuild here encoded every
+                            # node a second time. It still encodes when the
+                            # child could not, since no cache then matches.
+                            searcher = self._SemanticSearcher(
                                 str(self.config.graph_path),
-                                force_rebuild=True,
+                                cache_dir=str(self.config.cache_dir),
                                 model_name=self.config.embedding_model,
                             )
+                            # Loading from cache never touches the model. A
+                            # server that had it loaded keeps it loaded, so
+                            # the first search after a reindex does not pay
+                            # for the load; a one-shot `descry index` skips it.
+                            ensure = getattr(searcher, "ensure_model", None)
+                            if model_was_loaded and callable(ensure):
+                                ensure()
+                            return searcher
 
                         searcher = await asyncio.to_thread(_build_searcher)
                         # Seed the cache with the freshly-built instance so
@@ -1290,7 +1354,7 @@ class DescryService:
                         embeddings_status = (
                             f"\nEmbeddings: {len(searcher.nodes):,} nodes indexed"
                         )
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch; reported in the index summary
                         embeddings_status = f"\nEmbeddings: Failed ({e})"
                         logger.warning(f"Embeddings generation failed: {e}")
 
@@ -1301,30 +1365,86 @@ class DescryService:
         except subprocess.TimeoutExpired:
             mins = self.config.index_timeout_minutes
             return f"Index timed out after {mins} minutes. Set [timeouts] index_minutes in .descry.toml to increase."
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — tool boundary: every failure must come back as an error payload
             return f"Index error: {e}"
+
+    async def callers_data(self, name: str, limit: int = 20) -> dict:
+        """Callers of a symbol, as data. An exact miss retries with fuzzy=True."""
+        q = await self._get_querier()
+        if not q:
+            return {"ok": False, "error": "Graph not found. Run descry ensure first."}
+
+        all_callers = q.get_callers(name)
+        fuzzy = False
+        if not all_callers:
+            all_callers = q.get_callers(name, fuzzy=True)
+            fuzzy = bool(all_callers)
+
+        return {
+            "ok": True,
+            "error": None,
+            "symbol": name,
+            "fuzzy": fuzzy,
+            "total": len(all_callers),
+            "callers": sorted(all_callers)[:limit],
+        }
+
+    async def callees_data(self, name: str, limit: int = 20) -> dict:
+        """Callees of a symbol, as data. Same fuzzy fallback as callers_data."""
+        q = await self._get_querier()
+        if not q:
+            return {"ok": False, "error": "Graph not found. Run descry ensure first."}
+
+        matches = q.find_nodes_by_name(name)
+        func_matches = [m for m in matches if m["type"] in ("Function", "Method")]
+        fuzzy = False
+        if not func_matches:
+            matches = q.find_nodes_by_name(name, fuzzy=True)
+            func_matches = [m for m in matches if m["type"] in ("Function", "Method")]
+            fuzzy = bool(func_matches)
+
+        if not func_matches:
+            return {
+                "ok": True,
+                "error": None,
+                "found": False,
+                "symbol": name,
+                "fuzzy": False,
+                "node": None,
+                "total": 0,
+                "callees": [],
+            }
+
+        node = func_matches[0]
+        callees = sorted(q.get_callees(node["id"]))
+        return {
+            "ok": True,
+            "error": None,
+            "found": True,
+            "symbol": name,
+            "fuzzy": fuzzy,
+            "node": node,
+            "total": len(callees),
+            "callees": callees[:limit],
+        }
 
     async def callers(self, name: str, limit: int = 20) -> str:
         """Find all callers of a symbol."""
+        data = await self.callers_data(name, limit=limit)
+        if not data["ok"]:
+            return f"ERROR: {data['error']}"
         q = await self._get_querier()
-        if not q:
-            return "ERROR: Graph not found. Run descry ensure first."
 
-        all_callers = q.get_callers(name)
-        fuzzy_note = ""
-
-        if not all_callers:
-            all_callers = q.get_callers(name, fuzzy=True)
-            if all_callers:
-                fuzzy_note = " (fuzzy match)"
+        all_callers = data["callers"]
+        total_count = data["total"]
+        fuzzy_note = " (fuzzy match)" if data["fuzzy"] else ""
 
         if not all_callers:
             result = (
                 f"No callers of '{name}'. Try descry search to verify symbol exists."
             )
         else:
-            total_count = len(all_callers)
-            callers = sorted(all_callers)[:limit]
+            callers = all_callers
             lines = [f"{len(callers)} caller(s) of '{name}'{fuzzy_note}:"]
             for caller in callers:
                 node_info = q.get_node_info(caller)
@@ -1347,27 +1467,16 @@ class DescryService:
 
     async def callees(self, name: str, limit: int = 20) -> str:
         """Find what a symbol calls."""
-        q = await self._get_querier()
-        if not q:
-            return "ERROR: Graph not found. Run descry ensure first."
-
-        matches = q.find_nodes_by_name(name)
-        func_matches = [m for m in matches if m["type"] in ("Function", "Method")]
-        fuzzy_note = ""
-
-        if not func_matches:
-            matches = q.find_nodes_by_name(name, fuzzy=True)
-            func_matches = [m for m in matches if m["type"] in ("Function", "Method")]
-            if func_matches:
-                fuzzy_note = " (fuzzy match)"
-
-        if not func_matches:
+        data = await self.callees_data(name, limit=limit)
+        if not data["ok"]:
+            return f"ERROR: {data['error']}"
+        if not data["found"]:
             return f"No function '{name}' found. Try descry search."
+        q = await self._get_querier()
 
-        node = func_matches[0]
-        callees = q.get_callees(node["id"])
-        callees = sorted(callees)[:limit]
-
+        node = data["node"]
+        callees = data["callees"]
+        fuzzy_note = " (fuzzy match)" if data["fuzzy"] else ""
         display_name = node.get("metadata", {}).get("name", name)
         if not callees:
             result = f"'{display_name}'{fuzzy_note} calls no tracked functions."
@@ -1484,6 +1593,76 @@ class DescryService:
         )
         return await self._format_response(result, include_header=True, max_lines=300)
 
+    async def search_data(
+        self,
+        terms: list[str],
+        limit: int = 10,
+        lang: str | None = None,
+        crate: str | None = None,
+        symbol_type: str | None = None,
+        exclude_tests: bool = False,
+    ) -> dict:
+        """Hybrid keyword + semantic search, as data.
+
+        The ranking rules live here so every interface ranks identically.
+        Returns `{"ok", "error", "results", "method"}`; `method` is "keyword"
+        or "hybrid".
+        """
+        q = await self._get_querier()
+        if not q:
+            return {
+                "ok": False,
+                "error": "Graph not found. Run descry ensure first.",
+                "results": [],
+                "method": "keyword",
+            }
+
+        # "all" is the web UI's wildcard; normalise it once, here.
+        lang = None if lang == "all" else lang
+        symbol_type = None if symbol_type == "all" else symbol_type
+
+        tfidf_results = q.search_docs(
+            terms,
+            lang=lang,
+            crate=crate,
+            symbol_type=symbol_type,
+            exclude_tests=exclude_tests,
+        )[: limit * 2]
+
+        semantic_results = []
+        method = "keyword"
+
+        if (
+            self._semantic_available
+            and self._SemanticSearcher
+            and self.config.graph_path.exists()
+            and (is_natural_language_query(terms) or len(tfidf_results) < 3)
+        ):
+            try:
+                # E.1/C.1: single-flight async helper (runs in asyncio.to_thread
+                # and respects the cache lock).
+                searcher = await self._get_semantic_searcher()
+                if searcher is not None:
+                    semantic_results = await asyncio.to_thread(
+                        searcher.search,
+                        " ".join(terms),
+                        limit=limit * 2,
+                        min_score=0.25,
+                    )
+            except Exception as e:  # noqa: BLE001 — boundary over the embedding backend; search degrades to keyword-only
+                logger.warning(f"Semantic search failed, using keyword only: {e}")
+
+        if semantic_results and tfidf_results:
+            combined = reciprocal_rank_fusion(tfidf_results, semantic_results)
+            results = [node for node, _ in combined[:limit]]
+            method = "hybrid"
+        elif tfidf_results:
+            results = tfidf_results[:limit]
+        else:
+            results = []
+
+        return {"ok": True, "error": None, "results": results, "method": method}
+
     async def search(
         self,
         terms: list[str],
@@ -1495,11 +1674,17 @@ class DescryService:
         exclude_tests: bool = False,
     ) -> str:
         """Search symbol names and docstrings."""
-        q = await self._get_querier()
-        if not q:
+        data = await self.search_data(
+            terms,
+            limit=limit,
+            lang=lang,
+            crate=crate,
+            symbol_type=symbol_type,
+            exclude_tests=exclude_tests,
+        )
+        if not data["ok"]:
             return await self._format_response(
-                "ERROR: Graph not found. Run descry ensure first.",
-                include_header=True,
+                f"ERROR: {data['error']}", include_header=True
             )
 
         filters = []
@@ -1515,46 +1700,8 @@ class DescryService:
             filters.append("compact")
         filter_note = f" [{', '.join(filters)}]" if filters else ""
 
-        tfidf_results = q.search_docs(
-            terms,
-            lang=lang,
-            crate=crate,
-            symbol_type=symbol_type,
-            exclude_tests=exclude_tests,
-        )[: limit * 2]
-
-        semantic_results = []
-        search_method = "keyword"
-
-        if (
-            self._semantic_available
-            and self._SemanticSearcher
-            and self.config.graph_path.exists()
-        ):
-            use_semantic = is_natural_language_query(terms) or len(tfidf_results) < 3
-            if use_semantic:
-                try:
-                    # E.1/C.1: use the single-flight async helper (runs in
-                    # asyncio.to_thread and respects the cache lock).
-                    searcher = await self._get_semantic_searcher()
-                    if searcher is not None:
-                        query = " ".join(terms)
-                        # searcher.search is CPU-bound; wrap in to_thread.
-                        semantic_results = await asyncio.to_thread(
-                            searcher.search, query, limit=limit * 2, min_score=0.25
-                        )
-                        search_method = "hybrid"
-                except Exception as e:
-                    logger.warning(f"Semantic search failed, using keyword only: {e}")
-
-        if semantic_results and tfidf_results:
-            combined = reciprocal_rank_fusion(tfidf_results, semantic_results)
-            results = [node for node, _ in combined[:limit]]
-            search_method = "hybrid"
-        elif tfidf_results:
-            results = tfidf_results[:limit]
-        else:
-            results = []
+        results = data["results"]
+        search_method = data["method"]
 
         if not results:
             result = f"No matches for '{' '.join(terms)}'{filter_note}."
@@ -1674,7 +1821,7 @@ class DescryService:
 
         try:
             results = await asyncio.to_thread(searcher.search, query, limit=limit)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — tool boundary: every failure must come back as an error payload
             return f"Semantic search error: {e}"
 
         if not results:

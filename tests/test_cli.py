@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from typing import ClassVar
 
 import pytest
 
@@ -9,7 +10,7 @@ import pytest
 class TestCliHelp:
     """All subcommands have working --help."""
 
-    COMMANDS = [
+    COMMANDS: ClassVar[list[list[str]]] = [
         [],
         ["health"],
         ["status"],
@@ -37,7 +38,9 @@ class TestCliHelp:
         cmd = [sys.executable, "-m", "descry.cli"] + (
             ["--help"] if len(args) <= 1 else args
         )
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=10, check=False
+        )
         assert result.returncode == 0
         assert "descry" in result.stdout.lower() or "usage" in result.stdout.lower()
 
@@ -49,6 +52,7 @@ class TestCliNoCommand:
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
         )
         assert result.returncode == 1
 
@@ -60,6 +64,7 @@ class TestCliHealth:
             capture_output=True,
             text=True,
             timeout=30,
+            check=False,
         )
         assert result.returncode == 0
         assert '"version"' in result.stdout

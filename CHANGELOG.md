@@ -6,6 +6,128 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-06
+
+Semantic search is rebuilt and the MCP server runs again. Embeddings move
+to one prompted encode per symbol behind a pinned model registry, with a
+new default model chosen by measurement; the MCP server is ported to the
+MCP Python SDK v2, without which `descry-mcp` no longer started on a fresh
+install.
+
+**Upgrading:** the first `descry index` re-embeds, and the new default
+model is gated on HuggingFace — see the registry entry below. The `mcp`
+extra now requires `mcp>=2`. Graph schema stays at v1.
+
+### Changed
+
+- **Semantic search now encodes one text per symbol instead of averaging
+  three.** Names, signatures and docstrings were encoded separately and
+  combined `0.2/0.3/0.5`, which pulled every symbol toward the centroid of
+  its own parts; the `signature or name` / `docstring or name` fallbacks
+  also collapsed the weighting toward name-only for symbols without a
+  docstring (658 of 1140 in this repo). Measured on this repo's graph,
+  replacing it with a single concatenated encode plus the model's task
+  prompts raises Recall@1 from 0.185 to 0.405 and nDCG@10 from 0.390 to
+  0.593, and drops index time from three passes to one.
+- **Embedding models are now a registry, and the default is
+  `embeddinggemma`.** `MODEL_REGISTRY` in `embeddings.py` carries each
+  model's pinned revision, `trust_remote_code` setting and task prompts;
+  `.descry.toml` accepts an alias (`model = "qwen3"`) as well as a repo id
+  or local path, and `descry embedding-models` lists them. The default
+  moves from `jinaai/jina-code-embeddings-0.5b` to
+  `google/embeddinggemma-300m`, which measured better on this repo's graph —
+  Recall@1 0.479 vs 0.405 (405 queries) — while producing a smaller index,
+  building faster, requiring no remote code, and carrying a licence that permits
+  commercial use. Its 2K context is narrower than the previous default's
+  32K, which is not binding at the 500-character docstring truncation.
+  **This invalidates existing embedding caches: the first index after
+  upgrading re-embeds.** Set `model = "jina-code"` to keep the old
+  default.
+- **The new default model is gated on HuggingFace.**
+  `google/embeddinggemma-300m` downloads only for an account that has
+  accepted Google's Gemma licence (`hf auth login` or `HF_TOKEN`); the
+  previous default needed neither. Without access, indexing still succeeds
+  and everything except semantic search works. `qwen3` and `jina-code` are
+  ungated.
+- **`trust_remote_code` is now reachable only through the registry.** It
+  previously keyed off a single hard-coded model name; a model named in
+  `.descry.toml` is loaded unpinned with remote code disabled.
+
+- **MCP server now targets the MCP Python SDK v2.** `FastMCP` became
+  `MCPServer` (`mcp.server.mcpserver`) in mcp 2.0; the `mcp` extra now
+  floors at `mcp>=2` so the new import path cannot resolve against a v1
+  SDK. Server construction, the `@mcp.tool()` decorator and `mcp.run()`
+  are unchanged, so the 19 tool definitions carry over as-is.
+- **The MCP server reports descry's version in its handshake.** SDK v2
+  defaults `serverInfo.version` to an empty string where v1 filled it in.
+- **ruff is pinned to an exact version** (`ruff==0.16.4`) in both the dev
+  extra and the CI lint job. It was floored at `>=0.1.0` and installed
+  unpinned in CI, so every ruff release silently widened enforcement —
+  181 findings had accumulated in the stable rule set. All are resolved:
+  32 blind `except Exception` handlers were triaged individually (13
+  narrowed to the exceptions actually raised, 19 kept as tool/route
+  boundaries and suppressed with a reason), all 12 `subprocess.run` calls
+  are explicit about `check=`, and the generated protobuf module is
+  excluded rather than edited.
+
+### Fixed
+
+- **The embeddings lock did not provide mutual exclusion.** `_file_lock`
+  unlinked the lock file on release, so a waiter blocked on the old inode
+  and a newcomer that recreated the path could both enter the critical
+  section. The documented `timeout` was also ignored on Unix, where
+  `flock(LOCK_EX)` blocks indefinitely.
+- **The embedding cache key ignored things that change the vectors.** It
+  hashed the graph and the model *name* only, so bumping the pinned
+  revision, editing the composition, or swapping a local checkpoint under
+  a stable path all left the key unchanged — serving cached vectors
+  against queries encoded by a different model. The key now covers the
+  resolved repo id, revision, recipe version, truncation limit and prompt
+  names, and the sidecar records them for validation on load.
+- **Cache cleanup could delete another process's in-flight temporary.**
+  The `embeddings_*.npz` glob matched `embeddings_<key>.tmp.npz`, so a
+  concurrent reader could unlink the file a writer was renaming into
+  place, failing that index with `FileNotFoundError`. Temporaries are now
+  dot-prefixed and pid-tagged, and pruning no longer runs on the
+  lock-free read path.
+- **Concurrent first searches each loaded their own copy of the model.**
+  The lazy load was an unguarded check-then-set on a searcher shared
+  across worker threads.
+- **`min_score` was applied before re-ranking**, discarding symbols whose
+  in-degree and type boosts (worth up to +0.17) would have placed them
+  above the threshold and above results that were returned.
+- **`get_embeddings_status` never detected a stale cache.** It reported
+  any `embeddings_*.npz` with a sidecar as ready without recomputing the
+  current key, and looked in `graph_path.parent` rather than the
+  directory the searcher actually writes to.
+- **A dimensionality mismatch between cache and model** surfaced as a raw
+  numpy shape error from `np.dot`; it now raises `EmbeddingCacheMismatch`.
+- **The background pre-warm reported "embeddings ready" without loading
+  the model**, so the first real query still paid the full load.
+- **`descry index` encoded every symbol twice.** The indexing child
+  process embedded the graph and cached the vectors, then the parent
+  rebuilt them from scratch. The parent now loads the child's cache.
+- **A gated model failed with HuggingFace's bare `401 … Please log in`.**
+  The loader now raises `EmbeddingModelGated`, naming the licence page,
+  the login command and the one-line `.descry.toml` change that selects an
+  ungated model instead.
+
+### Added
+
+- `descry embedding-models` lists the registry with each entry's
+  dimensionality, licence and remote-code requirement.
+- `embeddinggemma-2` (`google/embeddinggemma-2`) is selectable: not
+  gated, Apache-2.0, loaded text-only. Its dependencies come from the new
+  `descry-codegraph[embeddinggemma-2]` extra.
+- `tests/eval/` — a retrieval-evaluation harness scoring candidate models
+  on a project's own graph (docstring→symbol queries, leave-one-out
+  leakage control, paired bootstrap, per-language breakdown). Leakage is
+  not a minor bias here: uncontrolled, Recall@1 reads 0.933 instead of
+  0.360.
+- `tests/test_embeddings.py` — 60 tests covering the cache lifecycle,
+  lock semantics, prompt application, scoring and the registry. No model
+  download and no GPU required.
+
 ## [0.2.0] — 2026-04-20
 
 A large feature + resolution-quality release. Seven new SCIP language

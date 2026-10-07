@@ -62,8 +62,12 @@ def web_project(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(web_project):  # noqa: ARG001 — pytest resolves fixtures by name; renaming breaks dependency
-    """TestClient that defaults to a loopback Host header."""
+def client(web_project):
+    """TestClient that defaults to a loopback Host header.
+
+    ``web_project`` is requested for its chdir side effect; pytest resolves
+    fixtures by name, so renaming it breaks the dependency.
+    """
     return TestClient(web_server.app, base_url="http://127.0.0.1")
 
 
@@ -208,3 +212,73 @@ class TestLoopbackHostFlag:
     def test_non_loopback_rejected(self, host):
         with pytest.raises(argparse.ArgumentTypeError):
             web_server._loopback_host(host)
+
+
+class TestServiceDelegation:
+    """The web layer must not carry its own copy of DescryService's logic.
+
+    CLAUDE.md: "DescryService owns all business logic. cli.py, mcp_server.py
+    and web/server.py are thin wrappers."
+    """
+
+    def test_search_ranking_lives_only_in_the_service(self):
+        """Referencing the ranking helpers here means the algorithm is being rebuilt."""
+        import pathlib
+
+        src = pathlib.Path("src/descry/web/server.py").read_text(encoding="utf-8")
+        assert "is_natural_language_query" not in src
+        assert "reciprocal_rank_fusion" not in src
+
+    def test_web_defines_no_function_that_handlers_also_defines(self):
+        """Structural guard: fails if someone re-copies a function into web."""
+        import ast
+        import pathlib
+
+        def top_level_funcs(rel):
+            src = pathlib.Path(rel).read_text(encoding="utf-8")
+            return {
+                n.name
+                for n in ast.parse(src).body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+
+        overlap = top_level_funcs("src/descry/web/server.py") & top_level_funcs(
+            "src/descry/handlers.py"
+        )
+        assert overlap == set(), (
+            f"web/server.py redefines handlers functions: {overlap}"
+        )
+
+    @pytest.mark.parametrize(
+        ("endpoint", "method"),
+        [
+            ("api_search", "search_data"),
+            ("api_callers", "callers_data"),
+            ("api_callees", "callees_data"),
+        ],
+    )
+    def test_endpoint_delegates_to_service(self, endpoint, method):
+        """Each endpoint's source must call the service method, not rebuild it."""
+        import ast
+        import inspect
+
+        src = inspect.getsource(getattr(web_server, endpoint))
+        calls = {
+            n.func.attr
+            for n in ast.walk(ast.parse(src.lstrip()))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        }
+        assert method in calls, f"{endpoint} does not call {method}"
+
+    def test_run_index_delegates_and_does_not_spawn_its_own_subprocess(self):
+        import inspect
+
+        src = inspect.getsource(web_server._run_index)
+        assert "index()" in src
+        assert "subprocess" not in src, "web must not run the indexer itself"
+
+    def test_service_exposes_a_data_method_for_each_shared_concern(self):
+        from descry.handlers import DescryService
+
+        for name in ("search_data", "callers_data", "callees_data"):
+            assert callable(getattr(DescryService, name, None)), name

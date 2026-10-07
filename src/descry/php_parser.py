@@ -10,10 +10,8 @@ transfers directly.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 from descry.generate import BaseParser, is_generated_source, is_non_project_call
-
 
 # namespace App\\Foo;  (one-line) or  namespace App\\Foo { ... }  (block)
 _RE_NAMESPACE = re.compile(r"^\s*namespace\s+([A-Za-z_\\][A-Za-z0-9_\\]*)\s*[;{]")
@@ -147,14 +145,7 @@ class PhpParser(BaseParser):
     """Regex-driven PHP parser."""
 
     def parse(self, _file_path, rel_path, content):
-        file_id = f"FILE:{rel_path}"
-        self.builder.add_node(
-            file_id,
-            "File",
-            path=rel_path,
-            name=Path(rel_path).name,
-            token_count=len(content) // 4,
-        )
+        file_id = self.add_file_node(rel_path, content)
 
         lines = content.splitlines()
         skip_calls = is_generated_source(content)

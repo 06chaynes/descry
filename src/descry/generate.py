@@ -1,9 +1,9 @@
 """Generate codebase knowledge graph with optional SCIP-based type-aware resolution."""
 
 import ast
+import json
 import logging
 import os
-import json
 import re
 from pathlib import Path
 
@@ -32,9 +32,9 @@ except ImportError:
 
 # Try to import SCIP support for type-aware call resolution
 try:
-    from descry.scip.support import scip_available, get_scip_status
     from descry.scip.cache import ScipCacheManager
     from descry.scip.parser import ScipIndex
+    from descry.scip.support import get_scip_status, scip_available
 
     SCIP_SUPPORT_LOADED = True
 except ImportError:
@@ -5940,12 +5940,14 @@ def build_line_to_context_map(nodes: list, file_id: str) -> dict:
     # Collect all function/method spans in this file
     spans = []
     for node in nodes:
-        if node["id"].startswith(file_id + "::"):
-            if node["type"] in ("Function", "Method"):
-                start = node["metadata"].get("lineno", 0)
-                end = node["metadata"].get("end_lineno", start + 100)
-                span_size = end - start
-                spans.append((span_size, start, end, node["id"]))
+        if node["id"].startswith(file_id + "::") and node["type"] in (
+            "Function",
+            "Method",
+        ):
+            start = node["metadata"].get("lineno", 0)
+            end = node["metadata"].get("end_lineno", start + 100)
+            span_size = end - start
+            spans.append((span_size, start, end, node["id"]))
 
     # Sort by span size DESCENDING (largest first)
     # This way, smaller (inner) spans override larger (outer) spans
@@ -6185,6 +6187,47 @@ class BaseParser:
     def parse(self, file_path, rel_path, content):
         raise NotImplementedError
 
+    def add_config_node(
+        self,
+        file_id,
+        config_id,
+        name,
+        *,
+        signature,
+        docstring,
+        config_type,
+        lineno,
+        end_lineno,
+        token_count,
+        **extra,
+    ):
+        """Register a Configuration node and the DEFINES edge from its file."""
+        self.builder.add_node(
+            config_id,
+            "Configuration",
+            name=name,
+            signature=signature,
+            lineno=lineno,
+            end_lineno=end_lineno,
+            token_count=token_count,
+            docstring=docstring,
+            config_type=config_type,
+            **extra,
+        )
+        self.builder.add_edge(file_id, config_id, "DEFINES")
+
+    def add_file_node(self, rel_path, content):
+        """Register the File node for a source file and return its id."""
+        file_id = f"FILE:{rel_path}"
+        self.builder.add_node(
+            file_id,
+            "File",
+            path=rel_path,
+            name=Path(rel_path).name,
+            token_count=len(content) // 4,
+        )
+        return file_id
+
     def get_leading_docstring(self, lines, start_idx):
         doc_lines = []
         j = start_idx - 1
@@ -6238,17 +6281,11 @@ class PythonParser(BaseParser):
         except SyntaxError as e:
             logger.warning(f"Syntax error in {rel_path}:{e.lineno}: {e.msg}")
             return
-        except Exception as e:
+        except (ValueError, RecursionError) as e:
             logger.warning(f"Parse error in {rel_path}: {e}")
             return
 
-        self.builder.add_node(
-            file_id,
-            "File",
-            path=rel_path,
-            name=Path(rel_path).name,
-            token_count=len(content) // 4,
-        )
+        self.add_file_node(rel_path, content)
         self.visit_node(tree, file_id)
 
     def _get_type_annotation(self, annotation):
@@ -6416,16 +6453,17 @@ class PythonParser(BaseParser):
                                 "metadata": {"lineno": decorator.lineno},
                             }
                         )
-                elif isinstance(decorator, ast.Name):
-                    if not is_non_project_call(decorator.id):
-                        self.builder.edges.append(
-                            {
-                                "source": func_id,
-                                "target": f"REF:{decorator.id}",
-                                "relation": "CALLS",
-                                "metadata": {"lineno": decorator.lineno},
-                            }
-                        )
+                elif isinstance(decorator, ast.Name) and not is_non_project_call(
+                    decorator.id
+                ):
+                    self.builder.edges.append(
+                        {
+                            "source": func_id,
+                            "target": f"REF:{decorator.id}",
+                            "relation": "CALLS",
+                            "metadata": {"lineno": decorator.lineno},
+                        }
+                    )
 
             self.visit_body_for_calls(node.body, func_id)
 
@@ -6502,14 +6540,7 @@ class PythonParser(BaseParser):
 
 class RustParser(BaseParser):
     def parse(self, file_path, rel_path, content):
-        file_id = f"FILE:{rel_path}"
-        self.builder.add_node(
-            file_id,
-            "File",
-            path=rel_path,
-            name=Path(rel_path).name,
-            token_count=len(content) // 4,
-        )
+        file_id = self.add_file_node(rel_path, content)
 
         lines = content.splitlines()
         current_context = [file_id]  # Stack of IDs
@@ -6611,16 +6642,16 @@ class RustParser(BaseParser):
                 token_count = (end_lineno - lineno + 1) * 10
 
                 # Build metadata dict, only include trait_impl if set
-                node_kwargs = dict(
-                    name=name,
-                    signature=sig,
-                    lineno=lineno,
-                    end_lineno=end_lineno,
-                    token_count=token_count,
-                    docstring=docstring,
-                    return_type=ret,
-                    param_types=param_types,
-                )
+                node_kwargs = {
+                    "name": name,
+                    "signature": sig,
+                    "lineno": lineno,
+                    "end_lineno": end_lineno,
+                    "token_count": token_count,
+                    "docstring": docstring,
+                    "return_type": ret,
+                    "param_types": param_types,
+                }
                 if current_trait_impl and node_type == "Method":
                     node_kwargs["trait_impl"] = current_trait_impl
 
@@ -7064,14 +7095,7 @@ class RustParser(BaseParser):
 
 class ProtoParser(BaseParser):
     def parse(self, _file_path, rel_path, content):
-        file_id = f"FILE:{rel_path}"
-        self.builder.add_node(
-            file_id,
-            "File",
-            path=rel_path,
-            name=Path(rel_path).name,
-            token_count=len(content) // 4,
-        )
+        file_id = self.add_file_node(rel_path, content)
 
         lines = content.splitlines()
         current_context = [file_id]
@@ -7140,14 +7164,7 @@ class ProtoParser(BaseParser):
 
 class TSParser(BaseParser):
     def parse(self, file_path, rel_path, content):
-        file_id = f"FILE:{rel_path}"
-        self.builder.add_node(
-            file_id,
-            "File",
-            path=rel_path,
-            name=Path(rel_path).name,
-            token_count=len(content) // 4,
-        )
+        file_id = self.add_file_node(rel_path, content)
 
         lines = content.splitlines()
         current_context = [file_id]
@@ -7162,7 +7179,7 @@ class TSParser(BaseParser):
             try:
                 import_data = extract_imports_typescript(str(file_path))
                 self.symbol_table.load_imports(import_data)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — boundary over the external ast-grep binary; falls back to unqualified calls
                 # Fall back to unqualified calls — debug-level so it's
                 # traceable without spamming INFO on every parser failure.
                 logger.debug(
@@ -7216,9 +7233,8 @@ class TSParser(BaseParser):
             lineno = i + 1
 
             brace_balance += line.count("{") - line.count("}")
-            if brace_balance < len(current_context) - 1:
-                if len(current_context) > 1:
-                    current_context.pop()
+            if brace_balance < len(current_context) - 1 and len(current_context) > 1:
+                current_context.pop()
 
             parent_id = current_context[-1]
 
@@ -7458,20 +7474,19 @@ class TSParser(BaseParser):
                             break
                 token_count = max((end_lineno - lineno + 1) * 10, 50)
                 docstring = self.get_leading_docstring(lines, i)
-                self.builder.add_node(
+                self.add_config_node(
+                    file_id,
                     config_id,
-                    "Configuration",
-                    name=config_name,
+                    config_name,
                     signature=f"{client_name}.interceptors.{interceptor_type}.use(...)",
-                    lineno=lineno,
-                    end_lineno=end_lineno,
-                    token_count=token_count,
                     docstring=docstring
                     or f"Configures {interceptor_type} interceptor for {client_name}",
                     config_type="interceptor",
+                    lineno=lineno,
+                    end_lineno=end_lineno,
+                    token_count=token_count,
                     target=client_name,
                 )
-                self.builder.add_edge(file_id, config_id, "DEFINES")
             elif match := re_middleware.search(line):
                 middleware_name = match.group(2).strip()
                 if middleware_name and not middleware_name.startswith("("):
@@ -7481,18 +7496,17 @@ class TSParser(BaseParser):
                         self._find_block_end(lines, i) if "{" in line else lineno
                     )
                     token_count = max((end_lineno - lineno + 1) * 10, 30)
-                    self.builder.add_node(
+                    self.add_config_node(
+                        file_id,
                         config_id,
-                        "Configuration",
-                        name=config_name,
+                        config_name,
                         signature=f"app.use({middleware_name})",
+                        docstring=f"Registers middleware: {middleware_name}",
+                        config_type="middleware",
                         lineno=lineno,
                         end_lineno=end_lineno,
                         token_count=token_count,
-                        docstring=f"Registers middleware: {middleware_name}",
-                        config_type="middleware",
                     )
-                    self.builder.add_edge(file_id, config_id, "DEFINES")
             elif match := re_event_handler.search(line):
                 emitter_name = match.group(1)
                 event_name = match.group(2)
@@ -7505,21 +7519,20 @@ class TSParser(BaseParser):
                 )
                 token_count = max((end_lineno - lineno + 1) * 10, 30)
                 docstring = self.get_leading_docstring(lines, i)
-                self.builder.add_node(
+                self.add_config_node(
+                    file_id,
                     config_id,
-                    "Configuration",
-                    name=config_name,
+                    config_name,
                     signature=f"{emitter_name}.on('{event_name}', ...)",
-                    lineno=lineno,
-                    end_lineno=end_lineno,
-                    token_count=token_count,
                     docstring=docstring
                     or f"Handles '{event_name}' event on {emitter_name}",
                     config_type="event_handler",
+                    lineno=lineno,
+                    end_lineno=end_lineno,
+                    token_count=token_count,
                     target=emitter_name,
                     event=event_name,
                 )
-                self.builder.add_edge(file_id, config_id, "DEFINES")
 
             # Calls (regex fallback - only used if ast-grep unavailable)
             if not self.builder.use_ast_grep and parent_id != file_id:
@@ -7861,7 +7874,7 @@ class CodeGraphBuilder:
                 except OSError as e:
                     logger.warning(f"Cannot read {rel_path}: {e.strerror}")
                     continue
-                except Exception as e:
+                except ValueError as e:
                     logger.warning(f"Error reading {rel_path}: {e}")
                     continue
                 if file.endswith(".py"):
@@ -8078,8 +8091,7 @@ class CodeGraphBuilder:
 
                 # Normalize crate:: prefix (Rust-specific)
                 # crate::path::Symbol -> path::Symbol for matching
-                if ref_name.startswith("crate::"):
-                    ref_name = ref_name[7:]  # Remove "crate::"
+                ref_name = ref_name.removeprefix("crate::")  # Remove "crate::"
 
                 # Strip trailing method chains for resolution
                 # Handles: Type::new(&arg).unwrap -> Type::new
@@ -8369,7 +8381,7 @@ def main():
                     f"SCIP: Loaded {stats['definitions']} definitions, "
                     f"{stats['unique_names']} unique names from {len(scip_files)} files"
                 )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — boundary over external SCIP indexers; indexing continues regex-only
             logger.warning(f"SCIP: Failed to load ({e}), using regex only")
     elif SCIP_SUPPORT_LOADED:
         status = get_scip_status()
@@ -8390,13 +8402,14 @@ def main():
     # Generate embeddings for semantic search (if dependencies available and enabled)
     if config.enable_embeddings:
         try:
-            from descry.embeddings import embeddings_available, SemanticSearcher
+            from descry.embeddings import SemanticSearcher, embeddings_available
 
             if embeddings_available():
                 logger.info("Generating embeddings for semantic search...")
                 # B.3: respect config.embedding_model
                 searcher = SemanticSearcher(
                     str(graph_path),
+                    cache_dir=str(config.cache_dir),
                     force_rebuild=True,
                     model_name=config.embedding_model,
                 )
@@ -8409,7 +8422,7 @@ def main():
                 )
         except ImportError:
             logger.debug("Embeddings: module not available, skipping")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch; indexing continues without embeddings
             logger.warning(f"Embeddings: Failed to generate ({e})")
 
 
