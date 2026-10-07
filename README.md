@@ -45,12 +45,12 @@ model = "embeddinggemma"      # alias, full HuggingFace repo id, or a local path
 descry embedding-models       # what is available, and what is selected
 ```
 
-| alias | dim | licence | remote code | notes |
-|---|---|---|---|---|
-| `embeddinggemma` (default) | 768 | Gemma | no | best measured; smallest and fastest; 2K context |
-| `qwen3` | 1024 | Apache-2.0 | no | most permissive licence |
-| `embeddinggemma-2` | 768 | Apache-2.0 | no | not gated; needs the `embeddinggemma-2` extra; 8K context |
-| `jina-code` | 896 | CC-BY-NC-4.0 | **yes** | code-specific, but lowest measured; non-commercial |
+| alias | dim | licence | notes |
+|---|---|---|---|
+| `embeddinggemma` (default) | 768 | Gemma | best measured; smallest and fastest; 2K context |
+| `qwen3` | 1024 | Apache-2.0 | most permissive licence |
+| `embeddinggemma-2` | 768 | Apache-2.0 | not gated; needs the `embeddinggemma-2` extra; 8K context |
+| `jina-code` | 896 | CC-BY-NC-4.0 | code-specific, but lowest measured; non-commercial |
 
 **The default model is gated on HuggingFace.** `google/embeddinggemma-300m`
 downloads only for an account that has accepted Google's Gemma licence, so
@@ -86,9 +86,9 @@ python tests/eval/compare.py /path/to/.descry_cache/codebase_graph.json
 
 Each entry carries its own pinned revision and task prompts, both of which feed
 the cache key — changing model re-embeds rather than silently reusing vectors
-from a different embedding space. **`trust_remote_code` is only ever enabled for
-models in this registry**; a model you name yourself is loaded unpinned with
-remote code disabled.
+from a different embedding space. **descry never loads a model with
+`trust_remote_code`** — not for registry entries, and not for a model you name
+yourself, which is also loaded unpinned.
 
 ## Quick Start
 

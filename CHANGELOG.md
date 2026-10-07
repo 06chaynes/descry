@@ -31,14 +31,13 @@ extra now requires `mcp>=2`. Graph schema stays at v1.
   0.593, and drops index time from three passes to one.
 - **Embedding models are now a registry, and the default is
   `embeddinggemma`.** `MODEL_REGISTRY` in `embeddings.py` carries each
-  model's pinned revision, `trust_remote_code` setting and task prompts;
+  model's pinned revision and task prompts;
   `.descry.toml` accepts an alias (`model = "qwen3"`) as well as a repo id
   or local path, and `descry embedding-models` lists them. The default
   moves from `jinaai/jina-code-embeddings-0.5b` to
   `google/embeddinggemma-300m`, which measured better on this repo's graph —
   Recall@1 0.479 vs 0.405 (405 queries) — while producing a smaller index,
-  building faster, requiring no remote code, and carrying a licence that permits
-  commercial use. Its 2K context is narrower than the previous default's
+  building faster, and carrying a licence that permits commercial use. Its 2K context is narrower than the previous default's
   32K, which is not binding at the 500-character docstring truncation.
   **This invalidates existing embedding caches: the first index after
   upgrading re-embeds.** Set `model = "jina-code"` to keep the old
@@ -49,10 +48,10 @@ extra now requires `mcp>=2`. Graph schema stays at v1.
   previous default needed neither. Without access, indexing still succeeds
   and everything except semantic search works. `qwen3` and `jina-code` are
   ungated.
-- **`trust_remote_code` is now reachable only through the registry.** It
-  previously keyed off a single hard-coded model name; a model named in
-  `.descry.toml` is loaded unpinned with remote code disabled.
-
+- **descry no longer loads any model with `trust_remote_code`.** It was
+  enabled for the default model; none of the shipped models' repositories
+  contains code to run, so the option, and every way of turning it on, is
+  removed.
 - **MCP server now targets the MCP Python SDK v2.** `FastMCP` became
   `MCPServer` (`mcp.server.mcpserver`) in mcp 2.0; the `mcp` extra now
   floors at `mcp>=2` so the new import path cannot resolve against a v1
@@ -115,7 +114,7 @@ extra now requires `mcp>=2`. Graph schema stays at v1.
 ### Added
 
 - `descry embedding-models` lists the registry with each entry's
-  dimensionality, licence and remote-code requirement.
+  dimensionality and licence.
 - `embeddinggemma-2` (`google/embeddinggemma-2`) is selectable: not
   gated, Apache-2.0, loaded text-only. Its dependencies come from the new
   `descry-codegraph[embeddinggemma-2]` extra.

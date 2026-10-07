@@ -101,17 +101,16 @@ DOCUMENT_PROMPT_CANDIDATES = ("nl2code_document", "document")
 
 @dataclass(frozen=True)
 class EmbeddingModelSpec:
-    """A model descry has vetted: pinned, prompt-aware, and load-safe.
+    """A model descry has vetted: pinned and prompt-aware.
 
-    `trust_remote_code` is only ever True for entries in this registry. A model
-    named in `.descry.toml` that is not registered is loaded with remote code
-    disabled and no pinned revision, because descry cannot vouch for it.
+    A model named in `.descry.toml` that is not registered is loaded with no
+    pinned revision. No model, registered or not, is loaded with
+    `trust_remote_code`: descry never executes code from a model repository.
     """
 
     alias: str
     repo_id: str
     revision: str | None
-    trust_remote_code: bool
     dim: int
     license: str
     context_tokens: int
@@ -131,19 +130,17 @@ MODEL_REGISTRY: dict[str, EmbeddingModelSpec] = {
         alias="jina-code",
         repo_id="jinaai/jina-code-embeddings-0.5b",
         revision="4db235132dafbe56a8b9c5f59b59795ecf58a4a7",
-        trust_remote_code=True,
         dim=896,
         license="CC-BY-NC-4.0",
         context_tokens=32768,
         query_prompt="nl2code_query",
         document_prompt="nl2code_document",
-        summary="Code-specific. Non-commercial licence; needs remote code.",
+        summary="Code-specific. Non-commercial licence.",
     ),
     "qwen3": EmbeddingModelSpec(
         alias="qwen3",
         repo_id="Qwen/Qwen3-Embedding-0.6B",
         revision="97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
-        trust_remote_code=False,
         dim=1024,
         license="Apache-2.0",
         context_tokens=32768,
@@ -157,7 +154,6 @@ MODEL_REGISTRY: dict[str, EmbeddingModelSpec] = {
         alias="embeddinggemma",
         repo_id="google/embeddinggemma-300m",
         revision="57c266a740f537b4dc058e1b0cda161fd15afa75",
-        trust_remote_code=False,
         dim=768,
         license="Gemma",
         context_tokens=2048,
@@ -173,7 +169,6 @@ MODEL_REGISTRY: dict[str, EmbeddingModelSpec] = {
         alias="embeddinggemma-2",
         repo_id="google/embeddinggemma-2",
         revision="914f7f89142e33e77833254d9c9b90c3cef7303b",
-        trust_remote_code=False,
         dim=768,
         license="Apache-2.0",
         context_tokens=8192,
@@ -214,7 +209,6 @@ def list_models() -> list[dict]:
             "dim": spec.dim,
             "license": spec.license,
             "context_tokens": spec.context_tokens,
-            "trust_remote_code": spec.trust_remote_code,
             "extra": spec.extra,
             "default": spec.alias == DEFAULT_MODEL_ALIAS,
             "summary": spec.summary,
@@ -307,30 +301,26 @@ def embeddings_available() -> bool:
     return EMBEDDINGS_AVAILABLE
 
 
-def _load_sentence_transformer(
-    model_name: str,
-    revision: str | None = None,
-    trust_remote_code: bool | None = None,
-):
-    """Construct a SentenceTransformer with explicit trust/revision semantics.
+def _load_sentence_transformer(model_name: str, revision: str | None = None):
+    """Construct a SentenceTransformer, pinned where descry has a pin.
 
-    Registered models supply their own pinned revision and trust setting.
-    Anything else - an arbitrary repo id or a local path from
-    `.descry.toml` [embeddings] model - is loaded unpinned and with remote code
-    disabled, since descry cannot vouch for code it has not reviewed.
+    Registered models supply their own pinned revision. Anything else - an
+    arbitrary repo id or a local path from `.descry.toml` [embeddings] model -
+    is loaded unpinned.
+
+    `trust_remote_code` is always False. There is deliberately no parameter,
+    registry field or config key that turns it on: descry never executes code
+    shipped inside a model repository.
 
     Args:
         model_name: Registry alias, HuggingFace repo id, or local path.
         revision: Overrides the registry's pinned revision.
-        trust_remote_code: Overrides the registry's trust setting.
     """
     spec = resolve_model_spec(model_name)
     target = spec.repo_id if spec else model_name
-    if trust_remote_code is None:
-        trust_remote_code = bool(spec and spec.trust_remote_code)
     if revision is None and spec:
         revision = spec.revision
-    kwargs: dict = {"trust_remote_code": trust_remote_code}
+    kwargs: dict = {"trust_remote_code": False}
     if revision:
         kwargs["revision"] = revision
     if spec and spec.config_kwargs:

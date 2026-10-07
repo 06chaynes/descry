@@ -89,7 +89,7 @@ def main(graph_path=".descry_cache/codebase_graph.json", only=None):
             model = SentenceTransformer(
                 cfg.repo_id,
                 revision=cfg.revision,
-                trust_remote_code=cfg.trust_remote_code,
+                trust_remote_code=False,
                 **cfg.load_kwargs,
             )
             loaded = (cfg.repo_id, cfg.load_kwargs)

@@ -63,7 +63,7 @@ def fake_model(monkeypatch):
     """Patch the model factory; yields a recorder of loads and encode calls."""
     rec = {"loads": 0, "encodes": [], "dim": 8, "prompts": None, "delay": 0.0}
 
-    def factory(model_name, revision=None, trust_remote_code=None):
+    def factory(model_name, revision=None):
         return FakeSentenceTransformer(
             dim=rec["dim"],
             prompts=rec["prompts"],
@@ -494,7 +494,6 @@ class TestModelRegistry:
         )
 
     def test_remote_code_is_never_granted_to_unregistered_models(self, monkeypatch):
-        """The registry is the only thing that can turn remote code on."""
         seen = {}
 
         class Recorder:
@@ -507,7 +506,29 @@ class TestModelRegistry:
         assert seen["trust_remote_code"] is False
         assert "revision" not in seen, "an unvetted model must not be given a pin"
 
-    def test_registered_model_supplies_pin_and_trust(self, monkeypatch):
+    def test_no_model_is_ever_loaded_with_remote_code(self, monkeypatch):
+        """Nothing can turn it on: no registry field, no loader parameter."""
+        import dataclasses
+        import inspect
+
+        seen = []
+
+        class Recorder:
+            max_seq_length = 0
+
+            def __init__(self, name, **kw):
+                seen.append(kw["trust_remote_code"])
+
+        monkeypatch.setattr(E, "SentenceTransformer", Recorder)
+        for alias in E.MODEL_REGISTRY:
+            E._load_sentence_transformer(alias)
+        assert seen == [False] * len(E.MODEL_REGISTRY)
+        fields = {f.name for f in dataclasses.fields(E.EmbeddingModelSpec)}
+        assert "trust_remote_code" not in fields
+        params = inspect.signature(E._load_sentence_transformer).parameters
+        assert "trust_remote_code" not in params
+
+    def test_registered_model_supplies_its_pin(self, monkeypatch):
         seen = {}
 
         class Recorder:
@@ -519,7 +540,7 @@ class TestModelRegistry:
         E._load_sentence_transformer("jina-code")
         spec = E.MODEL_REGISTRY["jina-code"]
         assert seen["name"] == spec.repo_id
-        assert seen["trust_remote_code"] is True
+        assert seen["trust_remote_code"] is False
         assert seen["revision"] == spec.revision
 
     def test_embeddinggemma2_loads_text_only_with_a_token_cap(self, monkeypatch):
@@ -598,8 +619,7 @@ class TestModelRegistry:
         msg = str(err.value)
         assert "https://huggingface.co/google/embeddinggemma-300m" in msg
         assert f'model = "{E.UNGATED_FALLBACK_ALIAS}"' in msg
-        # The model the error steers people to must not itself need remote code.
-        assert E.MODEL_REGISTRY[E.UNGATED_FALLBACK_ALIAS].trust_remote_code is False
+        assert E.UNGATED_FALLBACK_ALIAS in E.MODEL_REGISTRY
 
     def test_other_load_failures_are_not_relabelled(self, monkeypatch):
         def refuse(name, **kw):
