@@ -33,6 +33,14 @@ mcp = [
 ]
 web = ["starlette>=0.47.2", "uvicorn>=0.32.0"]
 embeddings = ["sentence-transformers>=3.0.0", "numpy>=1.24.0"]
+embeddinggemma-2 = [
+    # google/embeddinggemma-2 is multimodal: its processor imports Pillow and
+    # torchvision even when only text is embedded.
+    "descry-codegraph[embeddings]",
+    "sentence-transformers>=6.1.0",
+    "pillow",
+    "torchvision",
+]
 ast = [
     # Opt-in tree-sitter parsing for TS/TSX/JS. Falls back to regex when
     # missing, so users never pay this dep unless they install the extra.

@@ -83,15 +83,16 @@ def main(graph_path=".descry_cache/codebase_graph.json", only=None):
     for cfg in CONFIGS:
         if wanted and cfg.key not in wanted:
             continue
-        if loaded != cfg.repo_id:
+        if loaded != (cfg.repo_id, cfg.load_kwargs):
             print(f"\nloading {cfg.repo_id}", flush=True)
             del model
             model = SentenceTransformer(
                 cfg.repo_id,
                 revision=cfg.revision,
                 trust_remote_code=cfg.trust_remote_code,
+                **cfg.load_kwargs,
             )
-            loaded = cfg.repo_id
+            loaded = (cfg.repo_id, cfg.load_kwargs)
         dim = model.get_sentence_embedding_dimension()
 
         d_full, t1 = encode(model, full, cfg.document_prompt)

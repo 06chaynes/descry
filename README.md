@@ -49,6 +49,7 @@ descry embedding-models       # what is available, and what is selected
 |---|---|---|---|---|
 | `embeddinggemma` (default) | 768 | Gemma | no | best measured; smallest and fastest; 2K context |
 | `qwen3` | 1024 | Apache-2.0 | no | most permissive licence |
+| `embeddinggemma-2` | 768 | Apache-2.0 | no | not gated; needs the `embeddinggemma-2` extra; 8K context |
 | `jina-code` | 896 | CC-BY-NC-4.0 | **yes** | code-specific, but lowest measured; non-commercial |
 
 **The default model is gated on HuggingFace.** `google/embeddinggemma-300m`
@@ -311,6 +312,13 @@ pip install descry-codegraph[web]
 
 ```bash
 pip install descry-codegraph[embeddings]
+```
+
+To select `embeddinggemma-2`, install its extra instead (adds Pillow and
+torchvision, and requires sentence-transformers 6.1 or newer):
+
+```bash
+pip install "descry-codegraph[embeddinggemma-2]"
 ```
 
 ### Everything
