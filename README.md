@@ -51,6 +51,21 @@ descry embedding-models       # what is available, and what is selected
 | `qwen3` | 1024 | Apache-2.0 | no | most permissive licence |
 | `jina-code` | 896 | CC-BY-NC-4.0 | **yes** | code-specific, but lowest measured; non-commercial |
 
+**The default model is gated on HuggingFace.** `google/embeddinggemma-300m`
+downloads only for an account that has accepted Google's Gemma licence, so
+semantic search needs a one-time setup:
+
+```bash
+# 1. accept the licence at https://huggingface.co/google/embeddinggemma-300m
+hf auth login                 # 2. or export HF_TOKEN=...
+descry index                  # 3. embeds on the next index
+```
+
+Without it nothing else is affected — indexing succeeds and keyword search,
+call graphs and every other tool work — but semantic search stays unavailable
+and `descry index` reports why. To skip the setup, pick an ungated model:
+`model = "qwen3"` (Apache-2.0) or `model = "jina-code"`.
+
 Measured with `tests/eval/` — docstring→symbol queries, leave-one-out leakage
 control, paired bootstrap over 5000 resamples:
 
@@ -184,7 +199,7 @@ enable_scip = true         # Type-aware resolution (auto-detects which indexers 
 enable_embeddings = true   # Semantic search (requires sentence-transformers)
 
 [embeddings]
-model = "jinaai/jina-code-embeddings-0.5b"
+model = "embeddinggemma"   # see "Embedding models"; `descry embedding-models` lists them
 
 [test_detection]
 # OPTIONAL — REPLACES defaults. Defaults cover Rust/Python/TS/Go/Ruby/Java/Kotlin/
