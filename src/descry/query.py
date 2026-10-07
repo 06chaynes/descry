@@ -5,6 +5,7 @@ import re
 import time
 from collections import defaultdict
 from functools import lru_cache
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,20 @@ MAX_CALLERS_SHOWN = 15  # Maximum callers to show in context
 
 # Timeout (milliseconds)
 TIMEOUT_MS = 4000  # Wall-clock timeout for recursive operations
+
+# Hard ceiling on find_call_path_result's max_depth argument. The node budget and
+# the timeout bound the search itself.
+MAX_PATH_DEPTH = 50
+
+# Short spellings accepted by the `lang` search filter.
+_LANG_ALIASES = {
+    "ts": "typescript",
+    "js": "javascript",
+    "py": "python",
+    "rs": "rust",
+    "rb": "ruby",
+    "cs": "csharp",
+}
 
 
 def _estimate_tokens(text: str) -> int:
@@ -63,6 +78,22 @@ def _read_file_cached(file_path: str) -> tuple[str, ...]:
     except OSError:
         return ()
     return _read_file_cached_inner(file_path, mtime_ns)
+
+
+def source_path(root, rel_path: str) -> str:
+    """Where a graph-relative source file lives under `root`.
+
+    Empty unless it is a regular file inside `root`: a graph may be
+    hand-edited, so its paths are not trusted to stay in the project.
+    """
+    root = Path(root).resolve()
+    try:
+        path = (root / rel_path).resolve()
+        if path.is_relative_to(root) and path.is_file():
+            return str(path)
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return ""
 
 
 def _clear_file_cache():
@@ -181,6 +212,9 @@ class GraphQuerier:
 
         self.data = load_graph_with_schema(graph_file)
 
+        # Paths in node IDs are relative to the project root.
+        self._project_root = config.project_root if config else None
+
         self.nodes = {n["id"]: n for n in self.data["nodes"]}
         self.edges = self.data["edges"]
 
@@ -216,12 +250,18 @@ class GraphQuerier:
         self._indices_built = False
 
         # Memoization cache for recursive expansion
-        self._expansion_cache = {}  # {(node_id, depth): (results, token_cost)}
+        self._expansion_cache = {}  # {key: (results, token_cost, nodes_added)}
+
+    def _disk_path(self, file_path):
+        """Where a graph-relative source path lives on disk; see source_path."""
+        if self._project_root:
+            return source_path(self._project_root, file_path)
+        return file_path
 
     def get_source_segment(self, file_path, start_line, end_line):
         """Get source code segment using cached file content."""
         try:
-            lines = _read_file_cached(file_path)
+            lines = _read_file_cached(self._disk_path(file_path))
             if not lines:
                 return "<Error: file not found or empty>"
             # line numbers are 1-based
@@ -249,17 +289,6 @@ class GraphQuerier:
         self._index_by_lang = defaultdict(set)
         self._index_by_type = defaultdict(set)
         self._index_is_test = set()
-
-        lang_map = {
-            ".rs": "rust",
-            ".ts": "typescript",
-            ".tsx": "typescript",
-            ".js": "javascript",
-            ".jsx": "javascript",
-            ".svelte": "svelte",
-            ".py": "python",
-            ".proto": "protobuf",
-        }
 
         # Test detection patterns
         test_path_patterns = self._test_path_patterns or (
@@ -303,10 +332,9 @@ class GraphQuerier:
                     self._index_by_crate[crate].add(node_id)
 
                 # Extract language from extension
-                for ext, lang in lang_map.items():
-                    if path.endswith(ext):
-                        self._index_by_lang[lang].add(node_id)
-                        break
+                lang = _get_syntax_lang(path, self._syntax_lang_map)
+                if lang:
+                    self._index_by_lang[lang].add(node_id)
 
                 # Test detection: check path patterns and file suffixes
                 is_test_file = any(p in path for p in test_path_patterns) or any(
@@ -356,7 +384,7 @@ class GraphQuerier:
         Threshold of 1000 tokens (~100 lines) covers most middleware/interceptor patterns.
         """
         try:
-            all_lines = _read_file_cached(file_path)
+            all_lines = _read_file_cached(self._disk_path(file_path))
             if not all_lines:
                 return "<Error: file not found or empty>"
 
@@ -460,7 +488,7 @@ class GraphQuerier:
 
         # 1. Identify File
         file_path_rel = node["id"].split("::")[0].replace("FILE:", "")
-        if not os.path.exists(file_path_rel):
+        if not os.path.exists(self._disk_path(file_path_rel)):
             return f"ERROR: Source file '{file_path_rel}' not found on disk."
 
         # Determine syntax highlighting language
@@ -581,7 +609,9 @@ class GraphQuerier:
                     sig = c_meta.get("signature", f"{c_meta.get('name')}(...)")
 
                     # INLINING LOGIC: If small (< threshold tokens), show code.
-                    if c_tokens < inline_threshold and os.path.exists(c_file):
+                    if c_tokens < inline_threshold and os.path.exists(
+                        self._disk_path(c_file)
+                    ):
                         c_start = c_meta.get("lineno", 1)
                         c_end = c_meta.get("end_lineno", c_start)
                         c_code = self.get_source_segment(c_file, c_start, c_end)
@@ -754,7 +784,7 @@ class GraphQuerier:
         if candidates:
             for node in self.nodes.values():
                 if node["type"] in ("Function", "Method"):
-                    name = node["metadata"]["name"]
+                    name = node["metadata"].get("name", "")
                     # Check exact match or verify it starts with test_ and contains symbol
                     if name in candidates:
                         found_tests.append(f"{node['id']} (Direct match)")
@@ -933,7 +963,7 @@ class GraphQuerier:
         if current_tokens > max_tokens:
             # Apply aggressive head_lines truncation
             match = re.search(
-                r"(#### Source Code:\n```" + source_lang + r"\n)(.*?)(```)",
+                r"(#### Source Code:\n```" + re.escape(source_lang) + r"\n)(.*?)(```)",
                 result,
                 re.DOTALL,
             )
@@ -992,7 +1022,7 @@ class GraphQuerier:
 
             # Get file path and check it exists
             file_path = callee_id.split("::")[0].replace("FILE:", "")
-            if not os.path.exists(file_path):
+            if not os.path.exists(self._disk_path(file_path)):
                 continue
 
             # Get source code
@@ -1155,7 +1185,9 @@ class GraphQuerier:
         if not target_node:
             return []
 
-        target_name = target_node["metadata"]["name"]
+        target_name = target_node["metadata"].get("name")
+        if not target_name:
+            return []
         examples = []
 
         # We need to find edges that target REF:target_name or REF:parent.target_name
@@ -1192,7 +1224,7 @@ class GraphQuerier:
             file_path = source_id.split("::")[0].replace("FILE:", "")
             lineno = edge.get("metadata", {}).get("lineno")
 
-            if lineno and os.path.exists(file_path):
+            if lineno and os.path.exists(self._disk_path(file_path)):
                 # Get context around the call (e.g. -1 to +1 lines)
                 code = self.get_source_segment(file_path, lineno - 1, lineno + 2)
                 examples.append(
@@ -1293,15 +1325,26 @@ class GraphQuerier:
 
         # Check memoization cache. Key includes indent because rendered
         # output lines contain indentation prefixes; caching without the
-        # indent would produce wrong-depth whitespace on re-use.
-        cache_key = (node_id, depth - current_depth + 1, indent)
+        # indent would produce wrong-depth whitespace on re-use. It includes
+        # the budget and threshold because they decide what is inlined, and
+        # the already-expanded set because those nodes are skipped; the nodes
+        # an expansion adds are stored so a hit adds them too.
+        expanded_at_entry = frozenset(expanded)
+        budget_at_entry = budget
+        cache_key = (
+            node_id,
+            depth - current_depth + 1,
+            indent,
+            budget,
+            inline_threshold,
+            expanded_at_entry,
+        )
         if cache_key in self._expansion_cache:
-            cached_results, cached_cost = self._expansion_cache[cache_key]
-            if cached_cost <= budget:
-                return list(cached_results), budget - cached_cost
+            cached_results, cached_cost, cached_added = self._expansion_cache[cache_key]
+            expanded |= cached_added
+            return list(cached_results), budget - cached_cost
 
         results = []
-        tokens_used = 0
         callees = self.get_callees(node_id)[: self._max_children_per_level]
 
         for callee_id in callees:
@@ -1331,7 +1374,7 @@ class GraphQuerier:
                 if (
                     c_tokens <= inline_threshold
                     and c_tokens <= budget
-                    and os.path.exists(c_file)
+                    and os.path.exists(self._disk_path(c_file))
                 ):
                     c_start = c_meta.get("lineno", 1)
                     c_end = c_meta.get("end_lineno", c_start + 10)
@@ -1345,7 +1388,6 @@ class GraphQuerier:
                     results.append(f"{indent_str}  ```{c_lang}")
                     results.append(code_indented)
                     results.append(f"{indent_str}  ```")
-                    tokens_used += c_tokens
                     budget -= c_tokens
 
                     # Recurse if depth allows
@@ -1372,8 +1414,14 @@ class GraphQuerier:
                 clean_name = _clean_ref_name(raw_name)
                 results.append(f"{indent_str}- `{clean_name}` (External)")
 
-        # Cache results
-        self._expansion_cache[cache_key] = (results.copy(), tokens_used)
+        # Cache results, with the cost of the whole subtree, unless the
+        # timeout cut the expansion short.
+        if (time.time() - start_time) * 1000 <= self._timeout_ms:
+            self._expansion_cache[cache_key] = (
+                results.copy(),
+                budget_at_entry - budget,
+                expanded - expanded_at_entry,
+            )
 
         return results, budget
 
@@ -1383,8 +1431,7 @@ class GraphQuerier:
         Returns ``(func_nodes, depth)``; ``func_nodes`` is empty when nothing
         matched, leaving each caller to raise its own error shape.
         """
-        # Respect the project's `[query] max_depth` ceiling, falling back to
-        # the legacy limit of 5.
+        # The project's `[query] max_depth` is the ceiling, or 5 when unset.
         effective_max = self._max_depth if self._max_depth else 5
         depth = min(depth, effective_max)
 
@@ -1501,7 +1548,7 @@ class GraphQuerier:
             # Inline small functions
             if tokens <= inline_threshold and tokens > 0:
                 file_path = node_id.split("::")[0].replace("FILE:", "")
-                if os.path.exists(file_path):
+                if os.path.exists(self._disk_path(file_path)):
                     start_line = meta.get("lineno", 1)
                     end_line = meta.get("end_lineno", start_line + 10)
                     code = self.get_source_segment(file_path, start_line, end_line)
@@ -1531,13 +1578,16 @@ class GraphQuerier:
         start_name: str,
         direction: str = "forward",
         depth: int = 3,
+        target: str | None = None,
         inline_threshold: int = 100,
         timeout_ms: int | None = None,
     ) -> dict:
         """Trace call flow, returning a structured tree for UI rendering.
 
-        Returns dict with keys: root, alternatives (optional), note (optional).
+        Returns dict with keys: root, alternatives (optional), note (optional),
+        path_to_target (symbol names from the start to `target`, when reached).
         Each tree node has: id, name, type, tokens, file, line, code, lang, children.
+        The trace stops at the first node named `target`.
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
@@ -1569,10 +1619,11 @@ class GraphQuerier:
                 )
 
         visited = set()
+        path_to_target = []
         start_time = time.time()
         nodes_visited = 0
 
-        def build_tree(node_id: str, current_depth: int) -> dict | None:
+        def build_tree(node_id: str, current_depth: int, path: list) -> dict | None:
             nonlocal nodes_visited
 
             elapsed_ms = (time.time() - start_time) * 1000
@@ -1600,22 +1651,31 @@ class GraphQuerier:
 
             # Inline small functions
             code = None
-            if tokens <= inline_threshold and tokens > 0 and os.path.exists(file_path):
+            if (
+                tokens <= inline_threshold
+                and tokens > 0
+                and os.path.exists(self._disk_path(file_path))
+            ):
                 start_line = meta.get("lineno", 1)
                 end_line = meta.get("end_lineno", start_line + 10)
                 code = self.get_source_segment(file_path, start_line, end_line)
 
             # Recurse into children
-            if direction == "forward":
+            if target and name == target:
+                path_to_target.extend([*path, name])
+                next_ids = []
+            elif direction == "forward":
                 next_ids = self.get_callees(node_id)[: self._max_children_per_level]
             else:
                 next_ids = self.get_callers(name)[: self._max_children_per_level]
 
             children = []
             for next_id in next_ids:
-                child = build_tree(next_id, current_depth + 1)
+                child = build_tree(next_id, current_depth + 1, [*path, name])
                 if child:
                     children.append(child)
+                if path_to_target:
+                    break
 
             return {
                 "id": node_id,
@@ -1629,9 +1689,11 @@ class GraphQuerier:
                 "children": children,
             }
 
-        root = build_tree(start_id, 1)
+        root = build_tree(start_id, 1, [])
 
         result = {"root": root}
+        if path_to_target:
+            result["path_to_target"] = path_to_target
         if note:
             result["note"] = note
         if alternatives:
@@ -1688,11 +1750,16 @@ class GraphQuerier:
         methods = {}  # Name -> Node/Signature
 
         output = []
-        output.append(f"### Flattened View: `{class_node['metadata']['name']}`")
+        output.append(
+            f"### Flattened View: `{class_node['metadata'].get('name', class_node_id)}`"
+        )
         output.append("#### Inheritance Chain:")
         output.append(
             " -> ".join(
-                [c.get("metadata", {}).get("name", c.get("name")) for c in chain]
+                [
+                    c.get("metadata", {}).get("name") or c.get("name") or c["id"]
+                    for c in chain
+                ]
             )
         )
         output.append("\n#### Effective API:")
@@ -1707,7 +1774,7 @@ class GraphQuerier:
                 if edge["relation"] == "DEFINES":
                     child = self.nodes.get(edge["target"])
                     if child and child["type"] == "Method":
-                        name = child["metadata"]["name"]
+                        name = child["metadata"].get("name", "")
                         methods[name] = child
 
         # Output sorted methods
@@ -1792,8 +1859,9 @@ class GraphQuerier:
                 if crate not in self._index_by_crate:
                     return []
                 candidate_ids &= self._index_by_crate[crate]
-            if lang and lang != "all" and lang in self._index_by_lang:
-                candidate_ids &= self._index_by_lang[lang]
+            if lang and lang != "all":
+                lang = _LANG_ALIASES.get(lang.lower(), lang.lower())
+                candidate_ids &= self._index_by_lang.get(lang, set())
             if symbol_type and symbol_type != "all":
                 type_map = {
                     "function": "Function",
@@ -2115,7 +2183,6 @@ class GraphQuerier:
         for target_id in list(self.incoming.keys()):
             if target_id.startswith("REF:"):
                 ref_name = target_id.replace("REF:", "")
-                # Exact match
                 # Exact or suffix match
                 if (
                     ref_name == func_name
@@ -2171,13 +2238,13 @@ class GraphQuerier:
 
         return callees
 
-    def find_call_path(
+    def find_call_path_result(
         self,
         start_name: str,
         end_name: str,
         max_depth: int = 10,
         direction: str = "forward",
-    ) -> list:
+    ) -> dict:
         """Find shortest call path between two symbols using BFS.
 
         Much more focused than trace_flow which shows entire call trees.
@@ -2186,11 +2253,16 @@ class GraphQuerier:
         Args:
             start_name: Starting symbol name (e.g., 'handle_request')
             end_name: Target symbol name (e.g., 'validate_token')
-            max_depth: Maximum path length (default: 10)
+            max_depth: Maximum path length (default: 10, at most MAX_PATH_DEPTH)
             direction: 'forward' (start calls end) or 'backward' (end calls start)
 
         Returns:
-            List of hops, each containing:
+            Dict with:
+            - status: 'found'; 'not_found' when the search completed without
+              reaching the target; 'timeout' or 'node_budget' when it was cut
+              off first, so a path may still exist
+            - max_depth: the depth actually searched
+            - path: list of hops (empty unless found), each containing:
             - caller_id: Full node ID of the caller
             - caller_name: Short name
             - callee_id: Full node ID of the callee
@@ -2200,28 +2272,28 @@ class GraphQuerier:
             - file_path: File containing the call
 
         Example:
-            find_call_path("create_deployment", "dispatch_to_handler")
+            find_call_path_result("create_deployment", "dispatch_to_handler")
             # Returns the direct path with code snippets at each hop
         """
         from collections import deque
 
-        # Respect configured depth ceiling, and cap visited-node expansion
-        # and wall time so a pathological graph shape cannot stall the
-        # service. Previously this BFS had only `max_depth` and could chew
-        # through the entire call graph with no budget.
-        effective_max_depth = self._max_depth if self._max_depth else 10
-        max_depth = min(max_depth, effective_max_depth)
+        # Cap visited-node expansion and wall time so a pathological graph
+        # shape cannot stall the service however deep the caller asks to look.
+        max_depth = min(max_depth, MAX_PATH_DEPTH)
         node_budget = self._max_nodes if self._max_nodes else 2000
         deadline = time.time() + (self._timeout_ms / 1000.0)
+
+        def result(status, path=()):
+            return {"status": status, "max_depth": max_depth, "path": list(path)}
 
         # Resolve start and end to node IDs
         start_nodes = self.find_nodes_by_name(start_name)
         end_nodes = self.find_nodes_by_name(end_name)
 
         if not start_nodes:
-            return []
+            return result("not_found")
         if not end_nodes:
-            return []
+            return result("not_found")
 
         start_id = start_nodes[0]["id"]
         end_ids = {n["id"] for n in end_nodes}
@@ -2235,8 +2307,10 @@ class GraphQuerier:
         ref_cache: dict[str, str | None] = {}
 
         while queue:
-            if time.time() > deadline or len(visited) >= node_budget:
-                return []  # Budget exhausted — caller treats as "no path"
+            if time.time() > deadline:
+                return result("timeout")
+            if len(visited) >= node_budget:
+                return result("node_budget")
 
             current_id, path = queue.popleft()
 
@@ -2280,12 +2354,12 @@ class GraphQuerier:
 
                 # Check if we reached the target
                 if next_id in end_ids:
-                    return new_path
+                    return result("found", new_path)
 
                 if len(new_path) < max_depth:
                     queue.append((next_id, new_path))
 
-        return []  # No path found
+        return result("not_found")
 
     def _build_hop_info(
         self, edge: dict, caller_id: str, callee_id: str, direction: str
@@ -2316,7 +2390,7 @@ class GraphQuerier:
 
         # Get code snippet around call site (3 lines: before, call, after)
         snippet = ""
-        if call_line and os.path.exists(file_path):
+        if call_line and os.path.exists(self._disk_path(file_path)):
             snippet = self.get_source_segment(file_path, call_line - 1, call_line + 2)
 
         return {

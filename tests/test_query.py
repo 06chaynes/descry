@@ -3,10 +3,11 @@
 import json
 import os
 import tempfile
+from types import SimpleNamespace
 
 import pytest
 
-from descry.query import GraphQuerier
+from descry.query import MAX_PATH_DEPTH, GraphQuerier
 
 
 class TestGraphQuerier:
@@ -193,7 +194,7 @@ class TestFindTraitImpls:
 
 
 class TestFindCallPath:
-    """Tests for find_call_path() method."""
+    """Tests for find_call_path_result() method."""
 
     @pytest.fixture
     def call_path_graph(self):
@@ -253,10 +254,26 @@ class TestFindCallPath:
 
         os.unlink(f.name)
 
+    def test_structured_flow_stops_at_the_target_and_reports_the_path(
+        self, call_path_graph
+    ):
+        q = GraphQuerier(call_path_graph)
+
+        tree = q.trace_flow_structured("handle_request", target="validate_token")
+
+        assert tree["path_to_target"] == [
+            "handle_request",
+            "process_data",
+            "validate_token",
+        ]
+        process_data = tree["root"]["children"][0]
+        assert [c["name"] for c in process_data["children"]] == ["validate_token"]
+        assert "path_to_target" not in q.trace_flow_structured("handle_request")
+
     def test_find_direct_path(self, call_path_graph):
         """Should find direct call path."""
         q = GraphQuerier(call_path_graph)
-        path = q.find_call_path("handle_request", "process_data")
+        path = q.find_call_path_result("handle_request", "process_data")["path"]
 
         assert len(path) == 1
         assert path[0]["caller_name"] == "handle_request"
@@ -265,7 +282,7 @@ class TestFindCallPath:
     def test_find_two_hop_path(self, call_path_graph):
         """Should find multi-hop path."""
         q = GraphQuerier(call_path_graph)
-        path = q.find_call_path("handle_request", "validate_token")
+        path = q.find_call_path_result("handle_request", "validate_token")["path"]
 
         assert len(path) == 2
         assert path[0]["caller_name"] == "handle_request"
@@ -276,14 +293,14 @@ class TestFindCallPath:
     def test_path_includes_call_line(self, call_path_graph):
         """Should include call line information."""
         q = GraphQuerier(call_path_graph)
-        path = q.find_call_path("handle_request", "process_data")
+        path = q.find_call_path_result("handle_request", "process_data")["path"]
 
         assert path[0]["call_line"] == 15
 
     def test_no_path_returns_empty(self, call_path_graph):
         """Should return empty list when no path exists."""
         q = GraphQuerier(call_path_graph)
-        path = q.find_call_path("validate_token", "handle_request")
+        path = q.find_call_path_result("validate_token", "handle_request")["path"]
 
         # No forward path from validate_token to handle_request
         assert len(path) == 0
@@ -291,9 +308,9 @@ class TestFindCallPath:
     def test_backward_direction(self, call_path_graph):
         """Should find backward path (who calls me)."""
         q = GraphQuerier(call_path_graph)
-        path = q.find_call_path(
+        path = q.find_call_path_result(
             "validate_token", "handle_request", direction="backward"
-        )
+        )["path"]
 
         # Backward: validate_token is called by process_data is called by handle_request
         assert len(path) == 2
@@ -304,7 +321,9 @@ class TestFindCallPath:
     def test_max_depth_limit(self, call_path_graph):
         """Should respect max_depth limit."""
         q = GraphQuerier(call_path_graph)
-        path = q.find_call_path("handle_request", "validate_token", max_depth=1)
+        path = q.find_call_path_result("handle_request", "validate_token", max_depth=1)[
+            "path"
+        ]
 
         # Path requires 2 hops but max_depth is 1
         assert len(path) == 0
@@ -807,3 +826,276 @@ class TestFullSourceBypass:
         # With full=True, should not truncate
         context_full = q.get_context_prompt(node_id, full=True)
         assert "lines omitted" not in context_full
+
+
+def _fn(node_id, **meta):
+    return {
+        "id": node_id,
+        "type": "Function",
+        "metadata": {"name": node_id.split("::")[-1], **meta},
+    }
+
+
+def _calls(source, target):
+    return {"source": source, "target": target, "relation": "CALLS_RESOLVED"}
+
+
+def _querier(tmp_path, nodes, edges=(), **config):
+    graph_file = tmp_path / "graph.json"
+    graph_file.write_text(
+        json.dumps({"schema_version": 1, "nodes": nodes, "edges": list(edges)})
+    )
+    settings = {
+        "max_depth": 3,
+        "max_nodes": 100,
+        "max_children_per_level": 10,
+        "max_callers_shown": 15,
+        "query_timeout_ms": 4000,
+        "test_path_patterns": None,
+        "test_file_suffixes": None,
+        "syntax_lang_map": None,
+        "project_root": None,
+    }
+    settings.update(config)
+    return GraphQuerier(str(graph_file), config=SimpleNamespace(**settings))
+
+
+class TestSourcePathsResolveAgainstProjectRoot:
+    @pytest.fixture
+    def querier(self, tmp_path):
+        root = tmp_path / "project"
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "foo.py").write_text(
+            "def caller():\n    return helper()\n\n\ndef helper():\n    return 42\n"
+        )
+        (tmp_path / "elsewhere").mkdir()
+        nodes = [
+            _fn("FILE:src/foo.py::caller", lineno=1, end_lineno=2, token_count=10),
+            _fn("FILE:src/foo.py::helper", lineno=5, end_lineno=6, token_count=10),
+        ]
+        edges = [
+            {
+                **_calls("FILE:src/foo.py::caller", "FILE:src/foo.py::helper"),
+                "metadata": {"lineno": 2},
+            }
+        ]
+        return _querier(tmp_path, nodes, edges, project_root=root)
+
+    @pytest.mark.parametrize("cwd", ["elsewhere", "project/src"])
+    def test_source_is_read_whatever_the_working_directory(
+        self, querier, tmp_path, monkeypatch, cwd
+    ):
+        monkeypatch.chdir(tmp_path / cwd)
+
+        context = querier.get_context_prompt(
+            "FILE:src/foo.py::caller", expand_callees=True
+        )
+        assert "return helper()" in context
+        assert "return 42" in context
+
+        assert "return 42" in querier.trace_flow("caller", inline_threshold=100)
+        tree = querier.trace_flow_structured("caller", inline_threshold=100)
+        assert "return helper()" in tree["root"]["code"]
+
+        hop = querier.find_call_path_result("caller", "helper")["path"][0]
+        assert "return helper()" in hop["call_snippet"]
+        assert hop["file_path"] == "src/foo.py"
+
+    @pytest.mark.parametrize("link", [False, True])
+    def test_a_node_path_leaving_the_project_is_not_read(self, tmp_path, link):
+        root = tmp_path / "project"
+        root.mkdir()
+        (tmp_path / "secret.py").write_text("def leaked():\n    return 'TOP SECRET'\n")
+        rel = "../secret.py"
+        if link:
+            (root / "inside.py").symlink_to(tmp_path / "secret.py")
+            rel = "inside.py"
+        node_id = f"FILE:{rel}::leaked"
+        q = _querier(
+            tmp_path,
+            [_fn(node_id, lineno=1, end_lineno=2, token_count=10)],
+            [],
+            project_root=root,
+        )
+
+        assert "TOP SECRET" not in q.get_context_prompt(node_id)
+        assert "TOP SECRET" not in q.trace_flow("leaked", inline_threshold=100)
+        assert "TOP SECRET" not in q.get_source_segment(rel, 1, 2)
+
+
+class TestLanguageFilter:
+    FILES = (
+        "a/main.go",
+        "a/App.java",
+        "a/app.rb",
+        "a/index.php",
+        "a/Program.cs",
+        "a/engine.cpp",
+        "a/widget.dart",
+        "a/view.ts",
+        "a/tool.py",
+        "a/lib.rs",
+    )
+
+    @pytest.fixture
+    def querier(self, tmp_path):
+        from descry.handlers import _DEFAULT_SYNTAX_LANG_MAP
+
+        return _querier(
+            tmp_path,
+            [_fn(f"FILE:{f}::handler") for f in self.FILES],
+            syntax_lang_map=_DEFAULT_SYNTAX_LANG_MAP,
+        )
+
+    @pytest.mark.parametrize(
+        ("lang", "expected"),
+        [
+            ("go", "a/main.go"),
+            ("java", "a/App.java"),
+            ("ruby", "a/app.rb"),
+            ("php", "a/index.php"),
+            ("cs", "a/Program.cs"),
+            ("csharp", "a/Program.cs"),
+            ("cpp", "a/engine.cpp"),
+            ("dart", "a/widget.dart"),
+            ("ts", "a/view.ts"),
+            ("typescript", "a/view.ts"),
+            ("py", "a/tool.py"),
+            ("Python", "a/tool.py"),
+            ("rust", "a/lib.rs"),
+        ],
+    )
+    def test_lang_keeps_only_that_languages_files(self, querier, lang, expected):
+        hits = querier.search_docs(["handler"], lang=lang)
+        assert [n["id"] for n in hits] == [f"FILE:{expected}::handler"]
+
+    @pytest.mark.parametrize("lang", ["kotlin", "klingon"])
+    def test_lang_with_no_files_matches_nothing(self, querier, lang):
+        assert querier.search_docs(["handler"], lang=lang) == []
+
+    @pytest.mark.parametrize("lang", ["all", None])
+    def test_all_and_none_do_not_filter(self, querier, lang):
+        assert len(querier.search_docs(["handler"], lang=lang)) == len(self.FILES)
+
+
+class TestCallPathDepthAndOutcome:
+    def _chain(self, tmp_path, length, **config):
+        nodes = [_fn(f"FILE:x.py::n{i}") for i in range(length)]
+        nodes.append(_fn("FILE:x.py::island"))
+        edges = [
+            _calls(f"FILE:x.py::n{i}", f"FILE:x.py::n{i + 1}")
+            for i in range(length - 1)
+        ]
+        return _querier(tmp_path, nodes, edges, **config)
+
+    def test_max_depth_argument_bounds_the_search_not_the_tree_depth_config(
+        self, tmp_path
+    ):
+        q = self._chain(tmp_path, 9, max_depth=3)
+        assert len(q.find_call_path_result("n0", "n8", max_depth=10)["path"]) == 8
+        assert q.find_call_path_result("n0", "n8", max_depth=7)["path"] == []
+
+    def test_max_depth_is_capped_at_the_hard_ceiling(self, tmp_path):
+        q = self._chain(tmp_path, MAX_PATH_DEPTH + 5, max_nodes=10_000)
+        at_ceiling = q.find_call_path_result(
+            "n0", f"n{MAX_PATH_DEPTH}", max_depth=10**9
+        )
+        assert at_ceiling["status"] == "found"
+        assert at_ceiling["max_depth"] == MAX_PATH_DEPTH
+        beyond = q.find_call_path_result(
+            "n0", f"n{MAX_PATH_DEPTH + 1}", max_depth=10**9
+        )
+        assert beyond["status"] == "not_found"
+
+    def test_status_tells_a_miss_from_a_search_that_was_cut_off(self, tmp_path):
+        q = self._chain(tmp_path, 30)
+        assert q.find_call_path_result("n0", "n5")["status"] == "found"
+        assert q.find_call_path_result("n0", "island")["status"] == "not_found"
+        assert q.find_call_path_result("nope", "n5")["status"] == "not_found"
+
+        tight = self._chain(tmp_path, 30, max_nodes=5)
+        cut_off = tight.find_call_path_result("n0", "n29", max_depth=40)
+        assert cut_off == {"status": "node_budget", "max_depth": 40, "path": []}
+
+        slow = self._chain(tmp_path, 30, query_timeout_ms=-1)
+        assert slow.find_call_path_result("n0", "n29")["status"] == "timeout"
+
+
+class TestExpansionMemo:
+    @pytest.fixture
+    def querier(self, tmp_path):
+        (tmp_path / "m.py").write_text("".join(f"def f{i}(): pass\n" for i in range(4)))
+        nodes = [
+            _fn(f"FILE:m.py::{name}", lineno=i + 1, end_lineno=i + 1, token_count=10)
+            for i, name in enumerate(("root", "mid", "leaf", "other"))
+        ]
+        edges = [
+            _calls("FILE:m.py::root", "FILE:m.py::mid"),
+            _calls("FILE:m.py::mid", "FILE:m.py::leaf"),
+            _calls("FILE:m.py::root", "FILE:m.py::other"),
+        ]
+        return _querier(tmp_path, nodes, edges, project_root=tmp_path)
+
+    def _expand(self, querier, expanded, budget=1000):
+        return querier._expand_callees_recursive(
+            "FILE:m.py::root", depth=3, budget=budget, expanded=expanded
+        )
+
+    def test_memoized_cost_includes_nested_callees(self, querier):
+        first_lines, first_left = self._expand(querier, {"FILE:m.py::root"})
+        again_lines, again_left = self._expand(querier, {"FILE:m.py::root"})
+        # mid, leaf and other are inlined at 10 tokens each.
+        assert first_left == again_left == 1000 - 30
+        assert again_lines == first_lines
+
+    def test_memo_hit_marks_the_same_nodes_expanded(self, querier):
+        fresh, cached = {"FILE:m.py::root"}, {"FILE:m.py::root"}
+        self._expand(querier, fresh)
+        self._expand(querier, cached)
+        assert cached == fresh
+        assert "FILE:m.py::leaf" in cached
+
+    def test_memo_is_keyed_on_the_already_expanded_nodes(self, querier):
+        self._expand(querier, {"FILE:m.py::root"})
+        lines, _ = self._expand(querier, {"FILE:m.py::root", "FILE:m.py::leaf"})
+        assert not any("**leaf**" in line for line in lines)
+        assert any("**mid**" in line for line in lines)
+
+    def test_memo_is_keyed_on_the_budget(self, querier):
+        tight, _ = self._expand(querier, {"FILE:m.py::root"}, budget=15)
+        roomy, _ = self._expand(querier, {"FILE:m.py::root"}, budget=1000)
+        inlined = [line for line in roomy if "toks):" in line]
+        assert len(inlined) == 3
+        assert roomy != tight
+
+    def test_expansion_cut_short_by_the_timeout_is_not_memoized(
+        self, querier, monkeypatch
+    ):
+        import itertools
+
+        import descry.query
+
+        # A clock that advances one second per reading runs out mid-expansion.
+        ticks = itertools.count()
+        with monkeypatch.context() as patched:
+            patched.setattr(
+                descry.query, "time", SimpleNamespace(time=lambda: next(ticks))
+            )
+            querier._timeout_ms = 2500
+            cut_short, _ = self._expand(querier, {"FILE:m.py::root"})
+        assert any("timeout" in line for line in cut_short)
+
+        querier._timeout_ms = 4000
+        complete, _ = self._expand(querier, {"FILE:m.py::root"})
+        assert not any("timeout" in line for line in complete)
+
+
+class TestLangMapValueInTruncation:
+    @pytest.mark.parametrize("lang", ["(", "c++", "[a-"])
+    def test_source_block_is_truncated_whatever_the_fence_tag(self, tmp_path, lang):
+        q = _querier(tmp_path, [_fn("FILE:x.py::f")])
+        body = "\n".join(f"line {i}" for i in range(200))
+        text = f"### Context\n#### Source Code:\n```{lang}\n{body}\n```\n"
+        out = q._truncate_output_progressively(text, max_tokens=50, source_lang=lang)
+        assert "lines omitted, max_output_tokens limit" in out
+        assert "line 199" not in out
