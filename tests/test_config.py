@@ -2,6 +2,8 @@
 
 import logging
 import os
+import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 from descry.handlers import DescryConfig
@@ -15,7 +17,7 @@ class TestNewFieldDefaults:
 
     def test_embedding_model_default(self):
         config = DescryConfig()
-        assert config.embedding_model == "google/embeddinggemma-300m"
+        assert config.embedding_model is None
 
     def test_test_path_patterns_default(self):
         config = DescryConfig()
@@ -47,7 +49,7 @@ class TestNewFieldDefaults:
 
     def test_scip_timeout_minutes_default(self):
         config = DescryConfig()
-        assert config.scip_timeout_minutes == 0
+        assert config.scip_timeout_minutes == 30
 
     def test_embedding_timeout_default(self):
         config = DescryConfig()
@@ -170,7 +172,7 @@ max_callers_shown = 30
         config = DescryConfig(project_root=tmp_path)
         config._apply_toml(data)
         # Should keep all defaults
-        assert config.embedding_model == "google/embeddinggemma-300m"
+        assert config.embedding_model is None
         assert config.max_depth == 3
         assert config.git_timeout == 30
 
@@ -192,7 +194,7 @@ timeout = 45
         assert config.git_timeout == 45
         # Other fields stay default
         assert config.max_nodes == 100
-        assert config.embedding_model == "google/embeddinggemma-300m"
+        assert config.embedding_model is None
 
     def test_from_toml_invalid(self, tmp_path, caplog):
         """Malformed TOML falls back to defaults with warning."""
@@ -273,7 +275,6 @@ extra_args = []
         (tmp_path / ".descry.toml").write_text(
             'openapi_path = "spec.json"\n'
             'backend_handler_patterns = ["handlers/"]\n'
-            'frontend_api_patterns = ["src/api/"]\n'
             'api_prefixes = ["/api/v1", "/api/v2"]\n'.replace(
                 "openapi_path", "[cross_lang]\nopenapi_path"
             )
@@ -283,7 +284,6 @@ extra_args = []
 
         assert config.openapi_path == (tmp_path / "spec.json").resolve()
         assert config.backend_handler_patterns == ["handlers/"]
-        assert config.frontend_api_patterns == ["src/api/"]
         assert config.api_prefixes == ["/api/v1", "/api/v2"]
 
     def test_cross_lang_openapi_path_outside_root_rejected(self, tmp_path, caplog):
@@ -407,15 +407,16 @@ class TestScipCacheManagerConfig:
         crates = mgr.get_project_names("rust")
         assert "beta" in crates  # get_project_names still discovers it
 
-        # But update_changed_rust should filter it out
-        # We can't run the full generation (no rust-analyzer), but we can
-        # verify the filtering logic by checking what needs_update sees
-        # after filtering
-        all_crates = mgr.get_project_names("rust")
-        filtered = [c for c in all_crates if c not in mgr._scip_skip_crates]
-        assert "beta" not in filtered
-        assert "alpha" in filtered
-        assert "gamma" in filtered
+        # But the indexer is only run on the crates that are not skipped.
+        with patch("descry.scip.cache.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 1, "", "")
+            mgr.update_all()
+        indexed = sorted(
+            Path(argv[argv.index("scip") + 1]).name
+            for argv in (call.args[0] for call in run.call_args_list)
+            if "scip" in argv
+        )
+        assert indexed == ["alpha", "gamma"]
 
     def test_default_toolchain(self, tmp_path):
         mgr = ScipCacheManager(tmp_path)
@@ -427,8 +428,13 @@ class TestScipCacheManagerConfig:
 
     def test_toolchain_builds_rustup_command(self, tmp_path):
         """When toolchain is set, command starts with rustup run."""
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "solo"')
+        (tmp_path / "src").mkdir()
         mgr = ScipCacheManager(tmp_path, scip_toolchain="1.92.0")
-        # Verify the toolchain is stored — the actual command construction
-        # happens in _generate_rust_scip which we can't easily test without
-        # rust-analyzer, but we can verify the config is wired through
-        assert mgr._scip_toolchain == "1.92.0"
+
+        with patch("descry.scip.cache.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 1, "", "")
+            mgr.update_all()
+
+        (call,) = run.call_args_list
+        assert call.args[0][:5] == ["rustup", "run", "1.92.0", "rust-analyzer", "scip"]

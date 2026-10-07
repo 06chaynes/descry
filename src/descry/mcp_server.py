@@ -8,12 +8,19 @@ Usage:
 
 import asyncio
 import logging
+import re
 import secrets
 import sys
 from contextlib import asynccontextmanager
 from enum import Enum
 
-from mcp.server.mcpserver import MCPServer
+try:
+    from mcp.server.mcpserver import MCPServer
+except ImportError:
+    sys.exit(
+        "descry-mcp needs the MCP SDK, which is not installed. "
+        "Install it with: pip install 'descry-codegraph[mcp]'"
+    )
 
 from descry import __version__
 from descry.handlers import DescryConfig, DescryService
@@ -26,11 +33,14 @@ def _fenced(content: str) -> str:
     tag is a canonical `</descry:repo_content>` (no attributes — valid XML
     form). Protection against fence-escape relies on the LLM checking that
     the nonce in the *opening* tag matches what it saw issued; a malicious
-    docstring cannot guess the 12-hex-char nonce.
+    docstring cannot guess the 12-hex-char nonce. The closing tag has no
+    nonce, so any closing tag inside the content is escaped to keep it from
+    ending the fence early.
     """
     if not content:
         return content
     nonce = secrets.token_hex(6)
+    content = re.sub(r"(?i)<(?=\s*/\s*descry:repo_content)", "&lt;", content)
     return f'<descry:repo_content id="{nonce}">\n{content}\n</descry:repo_content>'
 
 
@@ -71,6 +81,18 @@ class Language(str, Enum):
     python = "python"
     svelte = "svelte"
     javascript = "javascript"
+    go = "go"
+    java = "java"
+    kotlin = "kotlin"
+    scala = "scala"
+    ruby = "ruby"
+    php = "php"
+    csharp = "csharp"
+    vbnet = "vbnet"
+    c = "c"
+    cpp = "cpp"
+    dart = "dart"
+    protobuf = "protobuf"
     all = "all"
 
 
@@ -154,9 +176,10 @@ async def descry_health() -> str:
 
 
 @mcp.tool()
-async def descry_ensure(max_age_hours: float = 24) -> str:
-    """Ensure the codebase graph exists and is fresh. Call this FIRST before other descry queries. Regenerates if missing or older than max_age_hours. Returns graph status with node/edge counts. WARNING: May take 30-60 seconds if regeneration is needed."""
-    return await _svc().ensure(max_age_hours)
+async def descry_ensure(max_age_hours: float | None = None) -> str:
+    """Ensure the codebase graph exists and is fresh. Call this FIRST before other descry queries. Regenerates if missing or older than max_age_hours (default: the project's configured max_stale_hours). Returns graph status with node/edge counts. WARNING: May take 30-60 seconds if regeneration is needed."""
+    # Fenced like descry_index: a regeneration returns the indexer's output.
+    return _fenced(await _svc().ensure(max_age_hours))
 
 
 @mcp.tool()

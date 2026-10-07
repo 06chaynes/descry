@@ -12,7 +12,7 @@ import argparse
 import asyncio
 import sys
 
-from descry.handlers import DescryConfig, DescryService
+from descry.handlers import DescryConfig, DescryService, ServiceError
 
 
 def _make_service() -> DescryService:
@@ -28,10 +28,15 @@ def _print_result(coro):
     """Run a service coroutine, print the result, and translate service-side
     errors to a nonzero exit code so shell chains like `descry callers X &&
     next_step` don't silently advance on "ERROR: Graph not found".
+
+    A failure is a `ServiceError`, whatever its text; the `ERROR:` prefix
+    marks one in text that arrives as a plain string.
     """
     result = _run(coro)
     print(result)
-    if isinstance(result, str) and result.lstrip().upper().startswith("ERROR:"):
+    if isinstance(result, ServiceError) or (
+        isinstance(result, str) and result.lstrip().upper().startswith("ERROR:")
+    ):
         sys.exit(2)
 
 
@@ -225,8 +230,8 @@ def main():
     sub.add_argument(
         "--max-age-hours",
         type=float,
-        default=24,
-        help="Max graph age in hours (default: 24)",
+        default=None,
+        help="Max graph age in hours (default: [project] max_stale_hours)",
     )
     sub.set_defaults(func=cmd_ensure)
 
