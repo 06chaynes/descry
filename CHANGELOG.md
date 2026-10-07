@@ -104,6 +104,9 @@ extra now requires `mcp>=2`. Graph schema stays at v1.
   numpy shape error from `np.dot`; it now raises `EmbeddingCacheMismatch`.
 - **The background pre-warm reported "embeddings ready" without loading
   the model**, so the first real query still paid the full load.
+- **`descry index` encoded every symbol twice.** The indexing child
+  process embedded the graph and cached the vectors, then the parent
+  rebuilt them from scratch. The parent now loads the child's cache.
 - **A gated model failed with HuggingFace's bare `401 … Please log in`.**
   The loader now raises `EmbeddingModelGated`, naming the licence page,
   the login command and the one-line `.descry.toml` change that selects an
