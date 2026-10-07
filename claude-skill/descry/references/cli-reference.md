@@ -34,7 +34,8 @@ descry quick <name>
     [--brief]                    # minimal; signature + location + counts
 ```
 
-- `search` is keyword + TF-IDF; fast, deterministic.
+- `search` is keyword + TF-IDF, merged with semantic results when
+  embeddings are available.
 - `semantic` is embedding-based; best for behavior-worded queries.
 - `quick` is search + `context` in one call. Prefer it when you know the name.
 
@@ -56,7 +57,7 @@ descry path <start> <end>
 ```
 
 - `flow` = full tree; `path` = shortest chain. Both are bounded by
-  `[query] max_nodes` / `timeout_ms` from `.descry.toml`.
+  `[query] max_nodes` and `[timeouts] query_ms` from `.descry.toml`.
 
 ## Context and structure
 
@@ -128,17 +129,16 @@ Needs an OpenAPI spec. Configure in `.descry.toml`:
 [cross_lang]
 openapi_path             = "public/api/openapi.json"
 backend_handler_patterns = ["handlers/", "routes/"]
-frontend_api_patterns    = ["src/api/"]
 api_prefixes             = ["/api/v1", "/api/v2", "/api"]
 ```
 
-All four are optional — `api_prefixes` defaults to `["/api/v1", "/api/v2",
+All three are optional — `api_prefixes` defaults to `["/api/v1", "/api/v2",
 "/api"]`; the pattern lists default to empty (no filtering).
 
 ## Exit codes
 
 - `0` on success.
-- `2` when the service returns `ERROR: ...` (most commonly: graph missing).
+- `2` when the service reports a failure (most commonly: graph missing).
   Useful in shell chains — `descry callers X && next_step` no longer silently
   advances on a missing graph.
 

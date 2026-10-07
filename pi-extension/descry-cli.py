@@ -29,7 +29,7 @@ def main():
 
     # ensure
     p = subparsers.add_parser("ensure")
-    p.add_argument("--max-age-hours", type=float, default=24)
+    p.add_argument("--max-age-hours", type=float, default=None)
 
     # status
     subparsers.add_parser("status")
@@ -85,7 +85,7 @@ def main():
     p.add_argument("--path-filter", default=None)
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--mode", default="symbols")
-    p.add_argument("--exclude-generated", action="store_true", default=True)
+    p.add_argument("--include-generated", dest="exclude_generated", action="store_false")
 
     # quick
     p = subparsers.add_parser("quick")

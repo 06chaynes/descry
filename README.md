@@ -33,12 +33,14 @@ Descry indexes your codebase into a knowledge graph of symbols (functions, class
 
 ## Embedding models
 
-Semantic search ships pinned configurations for several models. Pick one by
-alias in `.descry.toml`:
+Semantic search embeds one text per symbol: its name, signature, docstring and
+the first 1,500 characters of its source. With no model configured, descry uses
+`embeddinggemma`; if HuggingFace refuses that download because the account has
+not accepted its licence, it warns and uses `f2llm-v2-0.6b` instead.
 
 ```toml
 [embeddings]
-model = "embeddinggemma"      # alias, full HuggingFace repo id, or a local path
+model = "f2llm-v2-0.6b"       # alias, full HuggingFace repo id, or a local path
 ```
 
 ```bash
@@ -47,36 +49,46 @@ descry embedding-models       # what is available, and what is selected
 
 | alias | dim | licence | notes |
 |---|---|---|---|
-| `embeddinggemma` (default) | 768 | Gemma | best measured; smallest and fastest; 2K context |
-| `qwen3` | 1024 | Apache-2.0 | most permissive licence |
+| `embeddinggemma` (default) | 768 | Gemma | gated on HuggingFace; 2K context |
+| `f2llm-v2-0.6b` (fallback) | 1024 | Apache-2.0 | not gated; index is a third larger |
+| `qwen3` | 1024 | Apache-2.0 | not gated |
 | `embeddinggemma-2` | 768 | Apache-2.0 | not gated; needs the `embeddinggemma-2` extra; 8K context |
-| `jina-code` | 896 | CC-BY-NC-4.0 | code-specific, but lowest measured; non-commercial |
+| `jina-code` | 896 | CC-BY-NC-4.0 | not gated; non-commercial licence |
 
-**The default model is gated on HuggingFace.** `google/embeddinggemma-300m`
-downloads only for an account that has accepted Google's Gemma licence, so
-semantic search needs a one-time setup:
+To use the default model, accept its licence once and authenticate:
 
 ```bash
 # 1. accept the licence at https://huggingface.co/google/embeddinggemma-300m
 hf auth login                 # 2. or export HF_TOKEN=...
-descry index                  # 3. embeds on the next index
+descry index                  # 3. each index tries the default first
 ```
 
-Without it nothing else is affected — indexing succeeds and keyword search,
-call graphs and every other tool work — but semantic search stays unavailable
-and `descry index` reports why. To skip the setup, pick an ungated model:
-`model = "qwen3"` (Apache-2.0) or `model = "jina-code"`.
+Searches use whichever model built the current index, so the switch happens at
+the next `descry index`. A model named in `.descry.toml` is used as given: it
+never falls back, and naming `f2llm-v2-0.6b` skips the attempt and the warning.
 
 Measured with `tests/eval/` — docstring→symbol queries, leave-one-out leakage
-control, paired bootstrap over 5000 resamples:
+control, paired bootstrap:
 
-**descry** (1,140 nodes, 405 queries, pure Python)
+**descry** (2,129 nodes, 733 queries, Python)
 
 | model | R@1 | R@10 | MRR | nDCG@10 |
 |---|---|---|---|---|
-| `embeddinggemma` | **0.479** | **0.859** | **0.605** | **0.662** |
-| `qwen3` | 0.430 | 0.748 | 0.547 | 0.590 |
-| `jina-code` | 0.405 | 0.780 | 0.542 | 0.593 |
+| `embeddinggemma` | **0.638** | **0.914** | **0.736** | **0.776** |
+| `jina-code` | 0.508 | 0.842 | 0.624 | 0.671 |
+| `f2llm-v2-0.6b` | 0.486 | 0.862 | 0.621 | 0.675 |
+| `qwen3` | 0.462 | 0.842 | 0.596 | 0.650 |
+| `embeddinggemma-2` | 0.432 | 0.794 | 0.560 | 0.612 |
+
+**ripgrep** at `3fce3b5` (3,820 nodes, 691 queries, Rust)
+
+| model | R@1 | R@10 | MRR | nDCG@10 |
+|---|---|---|---|---|
+| `embeddinggemma` | **0.569** | **0.903** | **0.694** | **0.743** |
+| `f2llm-v2-0.6b` | 0.420 | 0.857 | 0.576 | 0.639 |
+| `qwen3` | 0.411 | 0.845 | 0.561 | 0.626 |
+| `jina-code` | 0.369 | 0.829 | 0.531 | 0.598 |
+| `embeddinggemma-2` | 0.356 | 0.810 | 0.515 | 0.582 |
 
 Rerun on your own project — the ranking is measured, not universal:
 
@@ -221,7 +233,7 @@ model = "embeddinggemma"   # see "Embedding models"; `descry embedding-models` l
 timeout = 30
 
 [timeouts]
-scip_minutes = 0       # 0 = unlimited
+scip_minutes = 30      # per indexer; 0 = unlimited
 embedding_seconds = 60
 query_ms = 4000
 index_minutes = 30     # Timeout for `descry index` subprocess
@@ -248,7 +260,6 @@ toolchain = "1.92.0"     # Pin rust-analyzer version via rustup
 # Frontend -> backend handler tracing via OpenAPI spec.
 openapi_path = "public/api/openapi.json"   # must resolve inside project_root
 backend_handler_patterns = ["backend/src/routes"]  # path substrings; empty = no filter
-frontend_api_patterns = ["webapp/src/lib/api"]     # same
 api_prefixes = ["/api/v1", "/api/v2", "/api"]      # stripped when matching spec paths
 ```
 
@@ -284,9 +295,9 @@ Configuration precedence: defaults < `.descry.toml` < environment variables.
 | C / C++ | Regex | Yes | `scip-clang` binary + `compile_commands.json` (CMake `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, Meson+Ninja, or `bear -- make`) |
 | Dart / Flutter | Regex | Yes | `scip-dart` via `dart pub global activate scip_dart`; requires `dart pub get` at project root |
 
-`ast-grep` is the `sg` Rust binary (install via Homebrew or `cargo install ast-grep`) — when present on `PATH`, descry uses it for higher-fidelity call extraction in Rust, TypeScript, and JavaScript files. It's auto-disabled on TS/JS corpora over `DESCRY_AST_GREP_MAX_FILES` (default 5,000) where per-file subprocess overhead would dominate. The `descry-codegraph[ast]` Python extra installs `tree-sitter*` packages that are scaffolding for a future AST-driven parser at `src/descry/tree_sitter_parser.py` — currently not wired into the active pipeline.
+`ast-grep` is the `sg` Rust binary (install via Homebrew or `cargo install ast-grep`) — when present on `PATH`, descry uses it for higher-fidelity call extraction in Rust, TypeScript, and JavaScript files. It's auto-disabled on TS/JS corpora over `DESCRY_AST_GREP_MAX_FILES` (default 5,000) where per-file subprocess overhead would dominate. JavaScript and TypeScript cover `.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.mts` and `.cts`.
 
-SCIP provides precise call-graph resolution (resolving which specific function is called through traits, generics, etc.). Without SCIP, Descry falls back to regex-based name matching which handles most cases but may produce false positives on overloaded names.
+Each call is resolved from evidence: imports (including `go.mod`, `Cargo.toml`, `package.json` and `tsconfig.json`), declared and returned types, lexical scope and the class hierarchy. A call ends as *resolved* to one definition, *unresolved* when several project definitions could be meant, or *external* when no project symbol has that name; the index summary reports all three. SCIP adds type-aware resolution through traits and generics, and is verified for Rust workspaces; the other indexers' output is used only where it names a node in the graph.
 
 ## Installation
 
@@ -348,19 +359,20 @@ Requires [uv](https://github.com/astral-sh/uv) and [just](https://github.com/cas
 
 3. **Query** — All tools query the cached graph. Keyword search uses TF-IDF scoring. Semantic search uses sentence-transformer embeddings. Call-graph traversal follows edges in the graph.
 
-4. **Freshness** — `ensure` regenerates the graph when its age exceeds the `--max-age-hours` flag (CLI) / `max_age_hours` argument (MCP), defaulting to 24 hours. The `[project] max_stale_hours` config drives the "STALE" badge in `descry status` output but does not by itself trigger regeneration. The MCP server pre-warms the graph on startup.
+4. **Freshness** — `ensure` regenerates the graph when its age exceeds `[project] max_stale_hours` (default 24), or the `--max-age-hours` flag (CLI) / `max_age_hours` argument (MCP) when one is given. The same setting drives the "STALE" badge in `descry status`. The MCP server pre-warms the graph on startup.
 
 ## Design Notes
 
 ### Web UI is local-only — same-origin + DNS-rebind defenses
 
-`descry-web` is designed as a single-user local development tool. It binds to `127.0.0.1` by default, has no authentication, and **deliberately omits `CORSMiddleware`** so browsers enforce same-origin by default — a tab on `evil.com` cannot read `/api/source` or trigger `/api/index`. This is deliberate:
+`descry-web` is designed as a single-user local development tool. It binds to `127.0.0.1` by default, has no authentication, and **deliberately omits `CORSMiddleware`** so browsers enforce same-origin by default — a tab on `evil.com` cannot read `/api/source`. Requests that change state (`/api/index`, `/api/index/stream`, `/api/ensure`) are refused unless they come from the page's own origin, so it cannot trigger a reindex either. This is deliberate:
 
 - The UI is served by the same process that reads your repository; any authentication layer would be a shared-secret between your browser and your own terminal.
 - `TrustedHostMiddleware` rejects requests whose `Host` header isn't loopback (`127.0.0.1`, `localhost`, `::1`), defeating DNS-rebinding attacks that would otherwise bypass the 127.0.0.1 bind.
 - The `--host` flag is validated by `_loopback_host` and rejects non-loopback values with a clear error pointing at the reverse-proxy guidance.
-- Path-traversal hardening on `/api/source` is independent of any CORS posture: it enforces project-root containment, rejects non-regular files, caps size at 10 MiB, refuses non-text content, and uses `O_NOFOLLOW` on the final open to defeat symlink swaps.
-- The reindex endpoints (`/api/index`, `/api/index/stream`) accept no path parameter; they always index the configured project root.
+- Path-traversal hardening on `/api/source` is independent of any CORS posture: it enforces project-root containment, rejects non-regular files, caps size at 10 MiB, refuses non-text content, and opens every path component with `O_NOFOLLOW` to defeat symlink swaps.
+- The page's scripts are pinned with Subresource Integrity hashes and a Content-Security-Policy is sent with every response; rendered repository markdown cannot load remote images.
+- The reindex endpoints (`/api/index`, `/api/index/stream`) accept no path parameter; they always index the configured project root, one run at a time (a second request gets `409`).
 
 **Do not expose `descry-web` to an untrusted network.** If you need remote access, put it behind your own authenticated reverse proxy.
 

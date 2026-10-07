@@ -10,10 +10,13 @@
  * - descry package installed (pip install -e ~/Documents/descry)
  */
 
+import { fileURLToPath } from "node:url";
+
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 
-const DESCRY_CLI = new URL("./descry-cli.py", import.meta.url).pathname;
+const DESCRY_CLI = fileURLToPath(new URL("./descry-cli.py", import.meta.url));
+const PYTHON = process.platform === "win32" ? "python" : "python3";
 
 export default function (pi: ExtensionAPI) {
 	async function runDescry(
@@ -22,7 +25,7 @@ export default function (pi: ExtensionAPI) {
 		signal?: AbortSignal,
 	): Promise<string> {
 		const fullArgs = [DESCRY_CLI, subcommand, ...args];
-		const result = await pi.exec("python", fullArgs, {
+		const result = await pi.exec(PYTHON, fullArgs, {
 			signal,
 			timeout: 120_000,
 		});
@@ -41,7 +44,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			ctx.ui.notify("Checking descry prerequisites...", "info");
 
-			const python = await pi.exec("python3", ["--version"], { timeout: 5000 });
+			const python = await pi.exec(PYTHON, ["--version"], { timeout: 5000 });
 			if (python.code !== 0) {
 				ctx.ui.notify("Python 3 not found. Please install Python 3.11+.", "error");
 				return;
@@ -49,7 +52,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`Found: ${python.stdout.trim()}`, "info");
 
 			// Check if descry is installed
-			const descryCheck = await pi.exec("python", ["-c", "import descry; print(descry.__version__)"], { timeout: 10000 });
+			const descryCheck = await pi.exec(PYTHON, ["-c", "import descry; print(descry.__version__)"], { timeout: 10000 });
 			if (descryCheck.code !== 0) {
 				ctx.ui.notify("descry not installed. Install with: pip install -e ~/Documents/descry", "error");
 				return;
@@ -72,7 +75,7 @@ export default function (pi: ExtensionAPI) {
 			"Regenerates if missing or older than max_age_hours. Returns graph status with node/edge counts. " +
 			"WARNING: May take 30-60 seconds if regeneration is needed.",
 		parameters: Type.Object({
-			max_age_hours: Type.Optional(Type.Number({ description: "Max graph age in hours before regeneration", default: 24 })),
+			max_age_hours: Type.Optional(Type.Number({ description: "Max graph age in hours before regeneration (default: the project's max_stale_hours)" })),
 		}),
 		async execute(_toolCallId, params, signal) {
 			const args: string[] = [];

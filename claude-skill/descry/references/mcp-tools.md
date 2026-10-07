@@ -1,7 +1,8 @@
 # descry MCP tools
 
 When the `descry-mcp` server is registered in the session, every CLI
-subcommand has a matching MCP tool. The tools are prefixed `descry_*`, take
+subcommand except `embedding-models` has a matching MCP tool. The tools are
+prefixed `descry_*`, take
 the same arguments, and return the same content — the only difference is
 that any tool result carrying repo content is wrapped in a nonce-tagged
 envelope:
@@ -23,12 +24,12 @@ This is descry's prompt-injection defense — preserve it when quoting.
 - `descry_health` — version, graph status, feature availability.
 - `descry_status` — graph existence / freshness only.
 - `descry_ensure` — regenerate iff missing or stale.
-- `descry_index(path=".")` — authoritative rebuild. The `path` arg is
-  restricted to the configured project root; paths outside are silently
-  re-anchored to root.
+- `descry_index(path=".")` — authoritative rebuild. A `path` below the
+  project root narrows which files are walked; the result still replaces
+  the root's graph. Paths outside the root are rejected.
 
 ### Search
-- `descry_search(terms, limit=10, lang=None, crate=None, symbol_type=None, exclude_tests=False, compact=True)`
+- `descry_search(terms, limit=10, lang=None, crate=None, type=None, exclude_tests=False, compact=True)`
 - `descry_semantic(query, limit=10)` — embeddings-only. Requires the
   `embeddings` extra.
 - `descry_quick(name, full=False, brief=False)` — search + context in one.

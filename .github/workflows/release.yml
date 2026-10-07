@@ -31,7 +31,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Verify tag matches pyproject version
-        if: github.event_name == 'push'
+        # A manual run that targets PyPI must be dispatched from the release tag.
+        if: github.event_name == 'push' || inputs.target == 'pypi'
         env:
           GIT_TAG: ${{ github.ref_name }}
         run: |
