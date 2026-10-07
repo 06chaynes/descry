@@ -1259,6 +1259,9 @@ class DescryService:
             except (OSError, ValueError) as e:
                 return f"Invalid index path {path!r}: {e}"
 
+        # Read before reset_caches() below discards it.
+        model_was_loaded = self._semantic_cache["instance"] is not None
+
         try:
             timeout = (
                 self.config.index_timeout_minutes * 60
@@ -1308,8 +1311,8 @@ class DescryService:
                     and self.config.graph_path.exists()
                 ):
                     try:
-                        # Force-rebuild: reset cache then construct in a thread
-                        # so model load doesn't block the event loop (C.1).
+                        # Reset the cache, then construct in a thread so the
+                        # event loop is not blocked (C.1).
                         async with self._semantic_cache_lock:
                             self._semantic_cache = {
                                 "mtime": 0,
@@ -1320,12 +1323,25 @@ class DescryService:
                         logger.info("Generating embeddings for semantic search...")
 
                         def _build_searcher():
-                            return self._SemanticSearcher(
+                            # No force_rebuild: the child process has just
+                            # embedded this graph and cached the vectors under
+                            # a key derived from the graph's content, so this
+                            # loads them. Forcing a rebuild here encoded every
+                            # node a second time. It still encodes when the
+                            # child could not, since no cache then matches.
+                            searcher = self._SemanticSearcher(
                                 str(self.config.graph_path),
                                 cache_dir=str(self.config.cache_dir),
-                                force_rebuild=True,
                                 model_name=self.config.embedding_model,
                             )
+                            # Loading from cache never touches the model. A
+                            # server that had it loaded keeps it loaded, so
+                            # the first search after a reindex does not pay
+                            # for the load; a one-shot `descry index` skips it.
+                            ensure = getattr(searcher, "ensure_model", None)
+                            if model_was_loaded and callable(ensure):
+                                ensure()
+                            return searcher
 
                         searcher = await asyncio.to_thread(_build_searcher)
                         # Seed the cache with the freshly-built instance so
