@@ -58,15 +58,6 @@ class TestClangAdapterBuildCommand:
         compdb_arg = next(a for a in spec.argv if a.startswith("--compdb-path="))
         assert "build/compile_commands.json" in compdb_arg
 
-    def test_compdb_override(self, tmp_path):
-        (tmp_path / "custom").mkdir()
-        (tmp_path / "custom" / "cc.json").write_text("[]")
-        project = DiscoveredProject(name="app", root=tmp_path, language="clang")
-        config = AdapterConfig(options={"compdb_path": "custom/cc.json"})
-        spec = ClangAdapter().build_command(project, tmp_path / "app.scip", config)
-        compdb_arg = next(a for a in spec.argv if a.startswith("--compdb-path="))
-        assert "custom/cc.json" in compdb_arg
-
     def test_index_output_path_flag(self, tmp_path):
         project = DiscoveredProject(name="app", root=tmp_path, language="clang")
         spec = ClangAdapter().build_command(

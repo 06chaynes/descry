@@ -248,7 +248,6 @@ class DotnetAdapter:
             raise RuntimeError(f"scip-dotnet incompatibility: {reason}")
 
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
-        argv.extend(config.extra_args)
 
         env_extras: dict[str, str] = {"DOTNET_ROLL_FORWARD": "LatestMajor"}
         if dotnet_root:

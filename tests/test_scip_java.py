@@ -110,16 +110,6 @@ class TestJavaAdapterBuildCommand:
         assert spec.cwd == tmp_path / "myapp"
         assert spec.env_extras == {}
 
-    def test_extra_args_forwarded_after_separator(self, tmp_path):
-        project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
-        config = AdapterConfig(extra_args=("--batch-mode", "-DskipTests"))
-        spec = JavaAdapter().build_command(project, tmp_path / "out.scip", config)
-
-        assert "--" in spec.argv
-        # Extras are appended AFTER the shipped compat flags
-        # (--init-script=..., clean, scipPrintDependencies, scipCompileAll).
-        assert spec.argv[-2:] == ["--batch-mode", "-DskipTests"]
-
     def test_compat_init_script_included_by_default(self, tmp_path):
         """Descry ships a Gradle init-script that strips -Werror from
         JavaCompile tasks so scip-java works out of the box on Kafka-style
@@ -137,13 +127,6 @@ class TestJavaAdapterBuildCommand:
         assert "clean" in spec.argv
         assert "scipPrintDependencies" in spec.argv
         assert "scipCompileAll" in spec.argv
-
-    def test_toolchain_sets_jvm_version_env(self, tmp_path):
-        project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
-        config = AdapterConfig(toolchain="17")
-        spec = JavaAdapter().build_command(project, tmp_path / "out.scip", config)
-
-        assert spec.env_extras == {"JVM_VERSION": "17"}
 
 
 class TestJavaAdapterKotlinDslPreflight:

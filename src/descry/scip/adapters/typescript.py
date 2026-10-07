@@ -47,10 +47,12 @@ def _parse_ts_workspace_packages(root: Path) -> list[Path]:
     - **yarn berry** — same ``workspaces`` array in ``package.json``.
 
     Glob entries like ``"packages/*"`` are expanded against ``root``.
-    Invalid / missing configs yield an empty list.
+    Invalid / missing configs yield an empty list; entries that resolve
+    outside ``root`` are dropped.
     """
     result: list[Path] = []
     seen: set[Path] = set()
+    root_resolved = root.resolve()
 
     def _expand(entries: list) -> None:
         for entry in entries:
@@ -62,10 +64,13 @@ def _parse_ts_workspace_packages(root: Path) -> list[Path]:
                 else:
                     matches = [root / entry]
                 for m in matches:
+                    if not m.resolve().is_relative_to(root_resolved):
+                        continue
                     if m.is_dir() and m not in seen:
                         seen.add(m)
                         result.append(m)
-            except (OSError, ValueError):
+            except (OSError, ValueError, NotImplementedError):
+                # pathlib raises NotImplementedError for an absolute pattern.
                 continue
 
     pnpm_yaml = root / "pnpm-workspace.yaml"
@@ -285,7 +290,6 @@ class TypeScriptAdapter:
             argv.append("--infer-tsconfig")
             logger.debug(f"SCIP: Using --infer-tsconfig for {project.name}")
 
-        argv.extend(config.extra_args)
         return CommandSpec(argv=argv, cwd=project.root)
 
     def parse_descriptors(self, raw: str) -> list[str]:

@@ -258,7 +258,6 @@ class PhpAdapter:
                 raise RuntimeError(f"scip-php incompatibility: {reason}")
 
         argv: list[str] = [self.binary]
-        argv.extend(config.extra_args)
         return CommandSpec(argv=argv, cwd=project.root, output_mode="rename")
 
     def parse_descriptors(self, raw: str) -> list[str]:

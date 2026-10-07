@@ -1,8 +1,11 @@
 """Tests for descry.scip — SCIP parsing, import resolution, and cache performance."""
 
+import json
 import multiprocessing
 import os
 from pathlib import Path
+
+import pytest
 
 from descry.generate import TypeScriptSymbolTable
 from descry.scip.adapters.typescript import parse_backtick_descriptors
@@ -367,7 +370,7 @@ class TestGenerateScipRenameMode:
         ok = mgr._generate_scip(adapter, project)
 
         assert ok is True
-        expected = mgr.cache_dir / "stubproj.scip"
+        expected = mgr._index_path("stublang", "stubproj")
         assert expected.exists()
         assert expected.read_bytes() == b"stub-scip-payload"
         assert not (tmp_path / "index.scip").exists()
@@ -411,6 +414,293 @@ class TestGenerateScipRenameMode:
         ok = mgr._generate_scip(_DirectStubAdapter(), project)
 
         assert ok is True
-        assert (mgr.cache_dir / "directproj.scip").read_bytes() == b"payload"
+        assert mgr._index_path("directlang", "directproj").read_bytes() == b"payload"
         # Stray index.scip untouched by direct mode.
         assert stray.read_bytes() == b"pre-existing stray file"
+
+
+def _write_scip(path, documents, project_root="", position_encoding=0):
+    """Write a .scip file.
+
+    ``documents`` maps a relative path to ``(zero_based_line, symbol,
+    is_definition)`` occurrences, as an indexer would emit them; a fourth
+    item is the occurrence's start column, 4 without one. ``project_root``
+    is the URI the index states its document paths are relative to, and
+    ``position_encoding`` the unit it counts columns in.
+    """
+    from descry.scip import pb2
+
+    index = pb2.Index()
+    index.metadata.project_root = project_root
+    for relative_path, occurrences in documents.items():
+        doc = index.documents.add()
+        doc.relative_path = relative_path
+        doc.position_encoding = position_encoding
+        for line, symbol, is_definition, *column in occurrences:
+            occ = doc.occurrences.add()
+            start = column[0] if column else 4
+            occ.range.extend([line, start, start + 3])
+            occ.symbol = symbol
+            occ.symbol_roles = 1 if is_definition else 0
+            if is_definition:
+                doc.symbols.add().symbol = symbol
+    path.write_bytes(index.SerializeToString())
+    return path
+
+
+class TestScipIndexResolveLineSemantics:
+    """resolve() takes 1-based descry linenos against 0-based SCIP ranges.
+
+    Two types define ``run``. Name-only resolution returns the first one
+    indexed (``Alpha``), so a result of ``Beta#run`` proves the exact
+    (file, line) lookup matched.
+    """
+
+    ALPHA_RUN = "rust-analyzer cargo app 0.1.0 alpha/Alpha#run()."
+    BETA_RUN = "rust-analyzer cargo app 0.1.0 beta/Beta#run()."
+    BETA_NODE = "FILE:app/src/beta.rs::Beta::run"
+
+    @pytest.fixture
+    def index(self, tmp_path):
+        documents = {
+            "src/alpha.rs": [(0, self.ALPHA_RUN, True)],
+            "src/beta.rs": [(0, self.BETA_RUN, True)],
+            # Source line 5 references Beta#run, line 6 Alpha#run.
+            "src/main.rs": [(4, self.BETA_RUN, False), (5, self.ALPHA_RUN, False)],
+        }
+        return ScipIndex([_write_scip(tmp_path / "app.scip", documents)])
+
+    def test_reference_resolves_on_its_one_based_line(self, index):
+        assert index.resolve("run", "app/src/main.rs", 5) == self.BETA_NODE
+
+    def test_qualified_reference_matches_on_exact_line(self, index):
+        assert index.resolve("Self::run", "app/src/main.rs", 5) == self.BETA_NODE
+        assert index.resolve("worker.run", "app/src/main.rs", 5) == self.BETA_NODE
+
+    def test_line_without_occurrence_falls_back_to_name(self, index):
+        assert index.resolve("run", "app/src/main.rs", 40) == (
+            "FILE:app/src/alpha.rs::Alpha::run"
+        )
+
+    def test_definition_at_does_not_fall_back_to_name(self, index):
+        assert index.definition_at("run", "app/src/main.rs", 5) == (
+            self.BETA_NODE,
+            "src/beta.rs",
+            1,
+        )
+        assert index.definition_at("run", "app/src/main.rs", 40) is None
+
+    def test_project_dirs_make_document_paths_root_relative(self, tmp_path):
+        """An index of a crate at `crates/app` whose package is named
+        differently is keyed, and yields node IDs, by repository paths."""
+        scip_file = _write_scip(
+            tmp_path / "app.scip",
+            {
+                "src/beta.rs": [(0, self.BETA_RUN, True)],
+                "src/main.rs": [(4, self.BETA_RUN, False)],
+            },
+        )
+        index = ScipIndex([scip_file], {scip_file: "crates/app-dir"})
+        assert index.definition_at("run", "crates/app-dir/src/main.rs", 5) == (
+            "FILE:crates/app-dir/src/beta.rs::Beta::run",
+            "crates/app-dir/src/beta.rs",
+            1,
+        )
+
+    def test_column_is_read_in_the_unit_the_document_states(self, tmp_path):
+        """After non-ASCII text a column differs by unit. A document that
+        counts UTF-8 code units is asked with that offset; one that does not
+        say is matched by any of them."""
+        documents = {
+            "src/alpha.rs": [(0, self.ALPHA_RUN, True)],
+            "src/beta.rs": [(0, self.BETA_RUN, True)],
+            "src/main.rs": [
+                (4, self.ALPHA_RUN, False, 9),
+                (4, self.BETA_RUN, False, 18),
+            ],
+        }
+        for encoding in (1, 0):
+            scip_file = _write_scip(
+                tmp_path / f"app{encoding}.scip", documents, position_encoding=encoding
+            )
+            index = ScipIndex([scip_file])
+            # (UTF-8, UTF-16, UTF-32) offsets of a name after one `é`.
+            found = index.definition_at("a.run", "app/src/main.rs", 5, (9, 8, 8))
+            assert found[0] == "FILE:app/src/alpha.rs::Alpha::run"
+            found = index.definition_at("b.run", "app/src/main.rs", 5, (18, 17, 17))
+            assert found[0] == self.BETA_NODE
+        # In the UTF-8 document the UTF-16 offset names nothing.
+        utf8 = ScipIndex([tmp_path / "app1.scip"])
+        assert utf8.definition_at("a.run", "app/src/main.rs", 5, (10, 9, 9)) is None
+
+    def test_stated_project_root_makes_document_paths_root_relative(self, tmp_path):
+        """An index that names `<root>/packages/app` as its project root is
+        keyed, and yields node IDs, by repository paths."""
+        documents = {
+            "src/beta.rs": [(0, self.BETA_RUN, True)],
+            "src/main.rs": [(4, self.BETA_RUN, False)],
+        }
+        scip_file = _write_scip(
+            tmp_path / "app.scip",
+            documents,
+            (tmp_path / "packages" / "app").as_uri(),
+        )
+        index = ScipIndex([scip_file], root=tmp_path)
+        assert index.definition_at("run", "packages/app/src/main.rs", 5) == (
+            "FILE:packages/app/src/beta.rs::Beta::run",
+            "packages/app/src/beta.rs",
+            1,
+        )
+
+    def test_project_root_outside_the_repository_is_not_used(self, tmp_path):
+        scip_file = _write_scip(
+            tmp_path / "app.scip",
+            {"src/beta.rs": [(0, self.BETA_RUN, True)]},
+            (tmp_path / "elsewhere" / "app").as_uri(),
+        )
+        index = ScipIndex([scip_file], root=tmp_path / "repo")
+        assert index.definitions[self.BETA_RUN] == ("src/beta.rs", 1)
+
+    def test_column_tells_same_named_references_on_a_line_apart(self, tmp_path):
+        """`a.run(); b.run();` on one line: each call gets the symbol whose
+        occurrence starts at its own column."""
+        documents = {
+            "src/alpha.rs": [(0, self.ALPHA_RUN, True)],
+            "src/beta.rs": [(0, self.BETA_RUN, True)],
+            "src/main.rs": [
+                (4, self.ALPHA_RUN, False, 6),
+                (4, self.BETA_RUN, False, 15),
+            ],
+        }
+        index = ScipIndex([_write_scip(tmp_path / "app.scip", documents)])
+        first = index.definition_at("a.run", "app/src/main.rs", 5, 6)
+        second = index.definition_at("b.run", "app/src/main.rs", 5, 15)
+        assert (first[0], second[0]) == (
+            "FILE:app/src/alpha.rs::Alpha::run",
+            self.BETA_NODE,
+        )
+        assert index.definition_at("c.run", "app/src/main.rs", 5, 30) is None
+
+
+def test_protobuf_runtime_mismatch_loads_nothing(tmp_path, monkeypatch):
+    """A VersionError from importing the pb2 bindings is not raised to the caller."""
+    import sys
+
+    from google.protobuf import runtime_version
+
+    import descry.scip
+
+    scip_file = _write_scip(tmp_path / "app.scip", {"src/a.rs": []})
+
+    def _mismatch(*_args, **_kwargs):
+        raise runtime_version.VersionError("gencode is newer than runtime")
+
+    # Drop the cached module so the import in _load_scip re-runs the check.
+    monkeypatch.delitem(sys.modules, "descry.scip.pb2")
+    monkeypatch.delattr(descry.scip, "pb2")
+    monkeypatch.setattr(runtime_version, "ValidateProtobufRuntimeVersion", _mismatch)
+
+    assert ScipIndex([scip_file]).definitions == {}
+
+
+def test_typescript_workspace_entries_outside_root_are_dropped(tmp_path):
+    from descry.scip.adapters.typescript import TypeScriptAdapter
+
+    for pkg in (tmp_path / "outside", tmp_path / "repo" / "packages" / "a"):
+        (pkg / "src").mkdir(parents=True)
+        (pkg / "package.json").write_text("{}")
+        (pkg / "src" / "index.ts").write_text("export const x = 1;\n")
+    root = tmp_path / "repo"
+    (root / "package.json").write_text(
+        json.dumps({"workspaces": ["packages/*", "../outside", "../*"]})
+    )
+
+    projects = TypeScriptAdapter().discover(root, set())
+
+    assert [p.name for p in projects] == ["packages/a"]
+
+
+def test_typescript_absolute_glob_entry_is_skipped(tmp_path):
+    from descry.scip.adapters.typescript import TypeScriptAdapter
+
+    (tmp_path / "package.json").write_text(
+        json.dumps({"workspaces": [f"{tmp_path}/*"]})
+    )
+
+    assert TypeScriptAdapter().discover(tmp_path, set()) == []
+
+
+@pytest.mark.parametrize("member", ["../*", "{parent}/*"])
+def test_rust_glob_members_outside_root_are_dropped(tmp_path, member):
+    from descry.scip.adapters.rust import RustAdapter
+
+    for crate in (tmp_path / "outside", tmp_path / "repo" / "inner"):
+        (crate / "src").mkdir(parents=True)
+        (crate / "Cargo.toml").write_text("[package]\n")
+    root = tmp_path / "repo"
+    members = ["inner", member.format(parent=tmp_path)]
+    (root / "Cargo.toml").write_text(f"[workspace]\nmembers = {json.dumps(members)}\n")
+
+    assert [p.name for p in RustAdapter().discover(root, set())] == ["inner"]
+
+
+def test_rust_manifest_that_is_not_utf8_falls_back_to_crate_globbing(tmp_path):
+    from descry.scip.adapters.rust import RustAdapter
+
+    (tmp_path / "inner" / "src").mkdir(parents=True)
+    (tmp_path / "inner" / "Cargo.toml").write_text("[package]\n")
+    (tmp_path / "Cargo.toml").write_bytes(b'[workspace]\nmembers = ["\xff"]\n')
+
+    assert [p.name for p in RustAdapter().discover(tmp_path, set())] == ["inner"]
+
+
+class TestNoScipEnvParsing:
+    """DESCRY_NO_SCIP is read the same way as in DescryConfig.from_env()."""
+
+    @pytest.fixture(autouse=True)
+    def _every_indexer_installed(self, monkeypatch):
+        from descry.scip import adapter as adapter_mod
+
+        monkeypatch.setattr(
+            adapter_mod, "_probe_binary", lambda _adapter: {"available": True}
+        )
+
+    @pytest.mark.parametrize("value", ["1", "true", "YES"])
+    def test_opt_out_values_disable_scip(self, monkeypatch, value):
+        from descry.scip import support
+
+        monkeypatch.setenv("DESCRY_NO_SCIP", value)
+
+        assert support.scip_available() is False
+        assert support.get_scip_status()["disabled_by_env"] is True
+
+    @pytest.mark.parametrize("value", ["", "0", "false", "no"])
+    def test_other_values_leave_scip_enabled(self, monkeypatch, value):
+        from descry.handlers import DescryConfig
+        from descry.scip import support
+
+        monkeypatch.setenv("DESCRY_NO_SCIP", value)
+
+        assert support.scip_available() is True
+        assert support.get_scip_status()["disabled_by_env"] is False
+        assert DescryConfig.from_env().enable_scip is True
+
+
+@pytest.mark.parametrize(
+    "lang",
+    ["typescript", "python", "java", "go", "ruby", "php", "dotnet", "clang", "dart"],
+)
+def test_non_rust_adapters_ignore_adapter_config(tmp_path, lang):
+    from descry.scip.adapter import ADAPTERS, AdapterConfig, DiscoveredProject
+
+    adapter = ADAPTERS[lang]
+    project = DiscoveredProject(name="app", root=tmp_path, language=lang)
+    out = tmp_path / "app.scip"
+
+    plain = adapter.build_command(project, out, AdapterConfig())
+    loaded = adapter.build_command(
+        project, out, AdapterConfig(toolchain="17", extra_args=("--output=/x",))
+    )
+
+    assert loaded.argv == plain.argv
+    assert loaded.env_extras == plain.env_extras

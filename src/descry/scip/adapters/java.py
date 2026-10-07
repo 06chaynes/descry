@@ -258,10 +258,6 @@ class JavaAdapter:
         scip-java Gradle tasks (``clean scipPrintDependencies
         scipCompileAll``) because ``--`` replaces scip-java's default
         task list.
-
-        Additional user extras from ``config.extra_args`` are appended
-        AFTER the compat flags, so users can override or add to the
-        default tasks.
         """
         # Pre-flight: scip-java's SemanticdbGradlePlugin applies to
         # allprojects (incl. :buildSrc and includeBuild participants).
@@ -298,19 +294,12 @@ class JavaAdapter:
                     "scipCompileAll",
                 ]
             )
-        pass_through.extend(config.extra_args)
 
         if pass_through:
             argv.append("--")
             argv.extend(pass_through)
 
-        env_extras: dict[str, str] = {}
-        # scip-java honors JVM_VERSION; the AdapterConfig.toolchain slot is
-        # the natural home for that override when set.
-        if config.toolchain:
-            env_extras["JVM_VERSION"] = config.toolchain
-
-        return CommandSpec(argv=argv, cwd=project.root, env_extras=env_extras)
+        return CommandSpec(argv=argv, cwd=project.root)
 
     def parse_descriptors(self, raw: str) -> list[str]:
         """Parse scip-java path-descriptor strings into name components.

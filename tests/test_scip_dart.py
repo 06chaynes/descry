@@ -67,12 +67,6 @@ class TestDartAdapterBuildCommand:
         )
         assert spec.output_mode == "rename"
 
-    def test_extra_args_appended(self, tmp_path):
-        project = DiscoveredProject(name="app", root=tmp_path, language="dart")
-        config = AdapterConfig(extra_args=("--foo", "bar"))
-        spec = DartAdapter().build_command(project, tmp_path / "app.scip", config)
-        assert "--foo" in spec.argv and "bar" in spec.argv
-
 
 class TestScipDartHealthStatus:
     def test_dart_listed_in_scip_status(self):

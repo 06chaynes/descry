@@ -11,6 +11,7 @@ from descry.scip.adapter import (
     AdapterConfig,
     CommandSpec,
     DiscoveredProject,
+    project_dir,
     register,
 )
 
@@ -20,18 +21,24 @@ logger = logging.getLogger(__name__)
 _RUST_DESCRIPTOR_PATTERN = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)(\([^)]*\)|[#./\[\]])?")
 
 
+def crate_dir(workspace_root: Path, name: str) -> Path:
+    """Directory of the crate that ``discover()`` reported as ``name``."""
+    return project_dir(workspace_root, name, "Cargo.toml", "src")
+
+
 def _parse_workspace_members(root_cargo: Path) -> list[Path]:
     """Parse ``[workspace] members = [...]`` entries from ``root_cargo``.
 
     Glob patterns like ``"crates/*"`` are expanded against the workspace
-    root. Returns absolute paths; invalid/missing entries are silently
-    dropped. Uses ``tomllib`` (3.11+); on parse error returns an empty
-    list so discovery falls through to the single-level glob fallback.
+    root. Returns absolute paths; invalid/missing entries and entries
+    outside the root are silently dropped. Uses ``tomllib`` (3.11+); on
+    parse error returns an empty list so discovery falls through to the
+    single-level glob fallback.
     """
     try:
         with open(root_cargo, "rb") as f:
             data = tomllib.load(f)
-    except (OSError, tomllib.TOMLDecodeError) as e:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         logger.debug(f"Cargo.toml parse failed at {root_cargo}: {e}")
         return []
 
@@ -47,8 +54,13 @@ def _parse_workspace_members(root_cargo: Path) -> list[Path]:
             continue
         if "*" in member or "?" in member or "[" in member:
             try:
-                result.extend(p for p in root.glob(member) if p.is_dir())
-            except (OSError, ValueError):
+                result.extend(
+                    p
+                    for p in root.glob(member)
+                    if p.is_dir() and p.resolve().is_relative_to(root.resolve())
+                )
+            except (OSError, ValueError, NotImplementedError):
+                # pathlib raises NotImplementedError for an absolute pattern.
                 pass
         else:
             candidate = (root / member).resolve()
@@ -164,7 +176,7 @@ class RustAdapter:
         passed as the positional argument, so rust-analyzer can share its
         workspace analysis cache across invocations.
         """
-        crate_path = project.root / project.name
+        crate_path = crate_dir(project.root, project.name)
         argv: list[str] = []
         if config.toolchain:
             argv.extend(["rustup", "run", config.toolchain])

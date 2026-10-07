@@ -67,31 +67,6 @@ class TestGoAdapterBuildCommand:
         assert spec.cwd == tmp_path
         assert spec.output_mode == "direct"
 
-    def test_options_forwarded(self, tmp_path):
-        project = DiscoveredProject(name="svc", root=tmp_path, language="go")
-        config = AdapterConfig(
-            options={
-                "module_name": "example.com/svc",
-                "module_version": "v1.0.0",
-                "go_version": "go1.21",
-            }
-        )
-        spec = GoAdapter().build_command(project, tmp_path / "svc.scip", config)
-
-        assert "--module-name" in spec.argv
-        assert "example.com/svc" in spec.argv
-        assert "--module-version" in spec.argv
-        assert "v1.0.0" in spec.argv
-        assert "--go-version" in spec.argv
-        assert "go1.21" in spec.argv
-
-    def test_extra_args_appended(self, tmp_path):
-        project = DiscoveredProject(name="svc", root=tmp_path, language="go")
-        config = AdapterConfig(extra_args=("--skip-tests", "--skip-implementations"))
-        spec = GoAdapter().build_command(project, tmp_path / "svc.scip", config)
-
-        assert spec.argv[-2:] == ["--skip-tests", "--skip-implementations"]
-
 
 class TestGoAdapterDescriptorParsing:
     def test_method_on_type(self):

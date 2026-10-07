@@ -58,15 +58,6 @@ class TestDotnetAdapterBuildCommand:
         # Roll-forward env so scip-dotnet (net9.0) runs on newer SDKs.
         assert spec.env_extras.get("DOTNET_ROLL_FORWARD") == "LatestMajor"
 
-    def test_extra_args_forwarded(self, tmp_path):
-        project = DiscoveredProject(name="app", root=tmp_path, language="dotnet")
-        spec = DotnetAdapter().build_command(
-            project,
-            tmp_path / "app.scip",
-            AdapterConfig(extra_args=("--skip-dotnet-restore",)),
-        )
-        assert spec.argv[-1] == "--skip-dotnet-restore"
-
 
 class TestScipDotnetHealthStatus:
     def test_dotnet_listed_in_scip_status(self):

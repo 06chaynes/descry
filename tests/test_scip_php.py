@@ -47,15 +47,6 @@ class TestPhpAdapterBuildCommand:
         assert spec.cwd == tmp_path
         assert spec.output_mode == "rename"
 
-    def test_extra_args_forwarded(self, tmp_path):
-        project = DiscoveredProject(name="app", root=tmp_path, language="php")
-        spec = PhpAdapter().build_command(
-            project,
-            tmp_path / "app.scip",
-            AdapterConfig(extra_args=("--memory-limit=2G",)),
-        )
-        assert spec.argv == ["scip-php", "--memory-limit=2G"]
-
 
 class TestScipPhpHealthStatus:
     def test_php_listed_in_scip_status(self):

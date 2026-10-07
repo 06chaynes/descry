@@ -125,7 +125,6 @@ class PythonAdapter:
             "--cwd",
             str(project.root),
         ]
-        argv.extend(config.extra_args)
         return CommandSpec(argv=argv, cwd=project.root)
 
     def parse_descriptors(self, raw: str) -> list[str]:

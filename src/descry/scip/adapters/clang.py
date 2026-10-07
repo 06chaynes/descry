@@ -15,9 +15,8 @@ supports:
 - Make:  ``bear -- make``
 
 The adapter looks for the compdb at (in order):
-1. ``config.options["compdb_path"]`` (user override).
-2. ``{project.root}/compile_commands.json`` (in-place).
-3. ``{project.root}/build/compile_commands.json`` (conventional
+1. ``{project.root}/compile_commands.json`` (in-place).
+2. ``{project.root}/build/compile_commands.json`` (conventional
    out-of-tree build dir).
 
 If none is found the adapter still returns a CommandSpec but logs a
@@ -52,16 +51,8 @@ def _has_c_sources(pkg_dir: Path) -> bool:
     return False
 
 
-def _find_compdb(project_root: Path, config: AdapterConfig) -> Path | None:
+def _find_compdb(project_root: Path) -> Path | None:
     """Locate compile_commands.json with precedence rules from the adapter docstring."""
-    override = config.options.get("compdb_path") if config.options else None
-    if override:
-        candidate = Path(override)
-        if not candidate.is_absolute():
-            candidate = project_root / candidate
-        if candidate.exists():
-            return candidate
-        logger.warning(f"scip-clang: configured compdb_path {override!r} not found")
     for rel in ("compile_commands.json", "build/compile_commands.json"):
         candidate = project_root / rel
         if candidate.exists():
@@ -165,7 +156,7 @@ class ClangAdapter:
         can surface its own "missing compdb" error; the shared runner
         reports the exit code and moves on.
         """
-        compdb = _find_compdb(project.root, config)
+        compdb = _find_compdb(project.root)
         compdb_arg = (
             str(compdb) if compdb else str(project.root / "compile_commands.json")
         )
@@ -175,7 +166,6 @@ class ClangAdapter:
             f"--compdb-path={compdb_arg}",
             f"--index-output-path={out_path}",
         ]
-        argv.extend(config.extra_args)
 
         return CommandSpec(argv=argv, cwd=project.root, output_mode="direct")
 

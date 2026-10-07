@@ -128,7 +128,6 @@ class DartAdapter:
         the exit code and moves on to other adapters.
         """
         argv: list[str] = [self.binary, "./"]
-        argv.extend(config.extra_args)
         return CommandSpec(argv=argv, cwd=project.root, output_mode="rename")
 
     def parse_descriptors(self, raw: str) -> list[str]:

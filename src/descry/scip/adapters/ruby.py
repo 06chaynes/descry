@@ -122,7 +122,6 @@ class RubyAdapter:
             "--silence-dev-message",
             ".",
         ]
-        argv.extend(config.extra_args)
         return CommandSpec(argv=argv, cwd=project.root, output_mode="rename")
 
     def parse_descriptors(self, raw: str) -> list[str]:
