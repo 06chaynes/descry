@@ -10,32 +10,44 @@ Usage:
 
 import argparse
 import asyncio
+import base64
+import contextlib
 import errno
+import hashlib
 import json
 import logging
 import os
 import re
 import stat
 import sys
+import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
-import uvicorn
-from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.middleware.trustedhost import TrustedHostMiddleware
-from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, StreamingResponse
-from starlette.routing import Mount, Route
-from starlette.staticfiles import StaticFiles
+try:
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.datastructures import Headers
+    from starlette.middleware import Middleware
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
+    from starlette.requests import Request
+    from starlette.responses import FileResponse, JSONResponse, StreamingResponse
+    from starlette.routing import Mount, Route
+    from starlette.staticfiles import StaticFiles
+except ModuleNotFoundError as e:
+    # The descry-web console script imports this module before main() runs.
+    sys.exit(
+        f"descry-web needs the 'web' extra ({e.name} is not installed). "
+        "Install it with: pip install 'descry-codegraph[web]'"
+    )
 
 from descry import __version__
-from descry._env import safe_env
 
 # Configure logging
 _log_level = os.environ.get("DESCRY_LOG_LEVEL", "INFO")
 logging.basicConfig(
-    level=getattr(logging, _log_level.upper(), logging.INFO),
+    level=getattr(logging, _log_level.upper(), logging.WARNING),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("descry_web")
@@ -44,60 +56,10 @@ SERVER_VERSION = __version__
 
 # --- Import shared modules ---
 
+from descry.handlers import DescryConfig, DescryService
 from descry.query import GraphQuerier, _get_syntax_lang
 
-try:
-    from descry.cross_lang import CrossLangTracer
-
-    CROSS_LANG_AVAILABLE = True
-except ImportError:
-    CROSS_LANG_AVAILABLE = False
-    CrossLangTracer = None
-
-try:
-    from descry.embeddings import (
-        SemanticSearcher,
-        embeddings_available,
-        get_embeddings_status,
-    )
-
-    SEMANTIC_AVAILABLE = embeddings_available()
-except ImportError:
-    SEMANTIC_AVAILABLE = False
-    SemanticSearcher = None
-
-    def get_embeddings_status(*_args, **_kwargs):
-        return {"available": False}
-
-
-try:
-    from descry.scip.support import get_scip_status, scip_available
-except ImportError:
-
-    def scip_available():
-        return False
-
-    def get_scip_status():
-        return {"available": False}
-
-
-try:
-    from descry.git_history import GitError, GitHistoryAnalyzer
-
-    GIT_HISTORY_AVAILABLE = True
-except ImportError:
-    GIT_HISTORY_AVAILABLE = False
-    GitHistoryAnalyzer = None
-    GitError = Exception
-
-
 # --- Project config (lazy-loaded via DescryConfig) ---
-
-from descry.handlers import (
-    DescryConfig,
-    DescryService,
-    symbol_type_priority,
-)
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -119,9 +81,6 @@ def _get_service() -> DescryService:
     return _service
 
 
-# --- Helper functions (pure functions) ---
-
-
 # --- Cached instances (delegate to DescryService) ---
 
 _graph_meta = {"mtime": 0, "nodes": 0, "edges": 0}
@@ -130,16 +89,6 @@ _graph_meta = {"mtime": 0, "nodes": 0, "edges": 0}
 async def _get_querier() -> GraphQuerier | None:
     """Get GraphQuerier via DescryService (lock-disciplined, async)."""
     return await _get_service()._get_querier()
-
-
-async def _get_semantic_searcher() -> "SemanticSearcher | None":
-    return await _get_service()._get_semantic_searcher()
-
-
-async def _get_git_analyzer() -> "GitHistoryAnalyzer | None":
-    if not GIT_HISTORY_AVAILABLE:
-        return None
-    return await _get_service()._get_git_analyzer()
 
 
 def _int_param(request: Request, name: str, default: int) -> int:
@@ -157,6 +106,32 @@ def _int_param(request: Request, name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _bad_direction(request: Request) -> JSONResponse | None:
+    """A 400 if `direction` is given and is neither "forward" nor "backward"."""
+    direction = request.query_params.get("direction", "forward")
+    if direction in ("forward", "backward"):
+        return None
+    return JSONResponse(
+        {"error": "'direction' must be 'forward' or 'backward'"}, status_code=400
+    )
+
+
+async def _service_error(result: str) -> JSONResponse | None:
+    """An error response if `result` is rendered text reporting `ERROR:`, else None."""
+    if not result.startswith("ERROR:"):
+        return None
+    status = 404 if await _get_querier() else 503
+    return JSONResponse(
+        {"error": result.removeprefix("ERROR:").strip()}, status_code=status
+    )
+
+
+def _git_failure(data: dict) -> JSONResponse:
+    """The error response for a failed git-history result from the service."""
+    status = 503 if data["reason"] == "unavailable" else 500
+    return JSONResponse({"error": data["error"]}, status_code=status)
 
 
 def _update_graph_meta():
@@ -251,49 +226,20 @@ def _caller_to_dict(caller_id: str, q: GraphQuerier) -> dict:
     return result
 
 
-def _resolve_openapi_path() -> Path | None:
-    """Locate the project's OpenAPI spec, if any.
-
-    Order of precedence:
-    1. `[cross_lang] openapi_path` in .descry.toml (absolute or project-
-       relative; resolved by DescryConfig with a containment check).
-    2. `public/api/latest.json` under the project root.
-    3. `public/api/openapi.json` under the project root.
-    """
-    cfg = _get_config()
-    if cfg.openapi_path and cfg.openapi_path.exists():
-        return cfg.openapi_path
-    for name in ("latest.json", "openapi.json"):
-        candidate = cfg.project_root / "public" / "api" / name
-        if candidate.exists():
-            return candidate
-    return None
-
-
-def _openapi_path_exists() -> bool:
-    """Check if an OpenAPI spec file exists in the project."""
-    return _resolve_openapi_path() is not None
-
-
 # --- API Endpoint Handlers ---
 
 
 async def api_health(_request: Request) -> JSONResponse:
-    status = _graph_status()
+    health = json.loads(await _get_service().health())
+    features = health["features"]
+    features["cross_lang"] = _get_service().cross_lang_error() is None
     return JSONResponse(
         {
-            "status": "ok"
-            if status["exists"] and not status.get("stale")
-            else ("stale" if status.get("stale") else "no_graph"),
+            "status": health["status"],
             "version": SERVER_VERSION,
             "project_root": str(_get_config().project_root),
-            "graph": status,
-            "features": {
-                "scip": scip_available(),
-                "embeddings": SEMANTIC_AVAILABLE,
-                "git_history": GIT_HISTORY_AVAILABLE,
-                "cross_lang": CROSS_LANG_AVAILABLE and _openapi_path_exists(),
-            },
+            "graph": _graph_status(),
+            "features": features,
         }
     )
 
@@ -303,19 +249,47 @@ async def api_status(_request: Request) -> JSONResponse:
     return JSONResponse(status)
 
 
-async def api_ensure(request: Request) -> JSONResponse:
-    body = await request.json() if request.method == "POST" else {}
-    max_age = body.get("max_age_hours", 24)
-    status = _graph_status()
+# /api/index, /api/index/stream and /api/ensure write the same cache
+# directory, so only one of them indexes at a time; the others are refused
+# rather than queued.
+_index_lock = threading.Lock()
+_INDEX_BUSY = "An index run is already in progress"
 
-    if not status["exists"]:
+
+def _index_busy() -> JSONResponse:
+    return JSONResponse({"error": _INDEX_BUSY}, status_code=409)
+
+
+async def api_ensure(request: Request) -> JSONResponse:
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"error": "Request body must be a JSON object"}, status_code=400
+        )
+    max_age = body.get("max_age_hours", _get_config().max_stale_hours)
+    if isinstance(max_age, bool) or not isinstance(max_age, (int, float)):
+        return JSONResponse(
+            {"error": "'max_age_hours' must be a number"}, status_code=400
+        )
+    status = _graph_status()
+    health = json.loads(await _get_service().health())
+
+    if not status["exists"] or health["status"] == "invalid_graph":
         result = await _run_index()
+        if result is None:
+            return _index_busy()
         return JSONResponse(
             {"action": "generated", "result": result, "graph": _graph_status()}
         )
 
     if status["age_hours"] and status["age_hours"] > max_age:
         result = await _run_index()
+        if result is None:
+            return _index_busy()
         return JSONResponse(
             {"action": "refreshed", "result": result, "graph": _graph_status()}
         )
@@ -323,20 +297,24 @@ async def api_ensure(request: Request) -> JSONResponse:
     return JSONResponse({"action": "ready", "graph": status})
 
 
-async def _run_index() -> str:
-    """Regenerate the graph via DescryService, which applies `[timeouts] index_minutes`."""
-    return await _get_service().index()
+async def _run_index() -> str | None:
+    """Regenerate the graph via DescryService, which applies `[timeouts] index_minutes`.
 
-
-def _reset_caches():
-    """Reset all caches after reindexing."""
-    _get_service().reset_caches()
+    Returns None, without indexing, if another run is in progress.
+    """
+    if not _index_lock.acquire(blocking=False):
+        return None
+    try:
+        return await _get_service().index()
+    finally:
+        _index_lock.release()
 
 
 async def api_index(_request: Request) -> JSONResponse:
     # H.2: path body param removed; always index cfg.project_root.
     result = await _run_index()
-    _reset_caches()
+    if result is None:
+        return _index_busy()
     return JSONResponse({"result": result, "graph": _graph_status()})
 
 
@@ -344,45 +322,20 @@ async def api_index_stream(_request: Request) -> StreamingResponse:
     """Streaming reindex endpoint using Server-Sent Events for live output."""
 
     async def event_stream():
-        yield f"data: {json.dumps({'type': 'start', 'message': 'Starting reindex...'})}\n\n"
-
-        cfg = _get_config()
-        env = {**safe_env(), "PYTHONUNBUFFERED": "1"}
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "descry.generate",
-            str(cfg.project_root),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=str(cfg.project_root),
-            env=env,
-            limit=10 * 1024 * 1024,  # 10MB line buffer (indexer can emit large lines)
-        )
-
-        try:
-            while True:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout=660)
-                if not line:
-                    break
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    yield f"data: {json.dumps({'type': 'output', 'line': text})}\n\n"
-        except TimeoutError:
-            proc.kill()
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Timed out after 11 minutes'})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'success': False})}\n\n"
+        if not _index_lock.acquire(blocking=False):
+            yield f"data: {json.dumps({'type': 'done', 'success': False, 'message': _INDEX_BUSY})}\n\n"
             return
-
-        await proc.wait()
-        success = proc.returncode == 0
-
-        if success:
-            _reset_caches()
-            graph = _graph_status()
-            yield f"data: {json.dumps({'type': 'done', 'success': True, 'graph': graph})}\n\n"
-        else:
-            yield f"data: {json.dumps({'type': 'done', 'success': False, 'message': f'Process exited with code {proc.returncode}'})}\n\n"
+        try:
+            yield f"data: {json.dumps({'type': 'start', 'message': 'Starting reindex...'})}\n\n"
+            # Closing this generator (the client went away) closes the
+            # service's stream, which kills the indexer.
+            async with contextlib.aclosing(_get_service().index_stream()) as events:
+                async for event in events:
+                    if event["type"] == "done" and event["success"]:
+                        event["graph"] = _graph_status()
+                    yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            _index_lock.release()
 
     return StreamingResponse(
         event_stream(),
@@ -424,17 +377,10 @@ async def api_semantic(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Missing 'query' parameter"}, status_code=400)
     limit = _int_param(request, "limit", 10)
 
-    if not SEMANTIC_AVAILABLE:
-        return JSONResponse({"error": "Semantic search not available"}, status_code=503)
-
-    searcher = await _get_semantic_searcher()
-    if not searcher:
-        return JSONResponse({"error": "Graph not found"}, status_code=503)
-
-    try:
-        results = await asyncio.to_thread(searcher.search, query, limit=limit)
-    except Exception as e:  # noqa: BLE001 — route boundary: every failure must come back as a response body
-        return JSONResponse({"error": str(e)}, status_code=500)
+    data = await _get_service().semantic_data(query, limit=limit)
+    if not data["ok"]:
+        return JSONResponse({"error": data["error"]}, status_code=503)
+    results = data["results"]
 
     return JSONResponse(
         {
@@ -460,6 +406,8 @@ async def api_callers(request: Request) -> JSONResponse:
         return JSONResponse({"error": data["error"]}, status_code=503)
 
     q = await _get_querier()
+    if not q:
+        return JSONResponse({"error": "Graph not found"}, status_code=503)
     return JSONResponse(
         {
             "symbol": data["symbol"],
@@ -492,6 +440,8 @@ async def api_callees(request: Request) -> JSONResponse:
         )
 
     q = await _get_querier()
+    if not q:
+        return JSONResponse({"error": "Graph not found"}, status_code=503)
     node = data["node"]
     return JSONResponse(
         {
@@ -515,11 +465,7 @@ async def api_context(request: Request) -> JSONResponse:
     depth = _int_param(request, "depth", 1)
     max_tokens = _int_param(request, "max_tokens", 2000)
 
-    q = await _get_querier()
-    if not q:
-        return JSONResponse({"error": "Graph not found"}, status_code=503)
-
-    result = q.get_context_prompt(
+    result = await _get_service().context(
         node_id,
         depth=depth,
         max_tokens=max_tokens,
@@ -528,7 +474,9 @@ async def api_context(request: Request) -> JSONResponse:
         expand_callees=expand_callees,
     )
 
-    return JSONResponse({"node_id": node_id, "markdown": result})
+    return await _service_error(result) or JSONResponse(
+        {"node_id": node_id, "markdown": result}
+    )
 
 
 async def api_structure(request: Request) -> JSONResponse:
@@ -536,42 +484,22 @@ async def api_structure(request: Request) -> JSONResponse:
     if not filename:
         return JSONResponse({"error": "Missing 'filename' parameter"}, status_code=400)
 
-    q = await _get_querier()
-    if not q:
-        return JSONResponse({"error": "Graph not found"}, status_code=503)
-
-    matches = q.find_nodes_by_name(filename)
-    file_matches = [m for m in matches if m["type"] == "File"]
-
-    if not file_matches:
+    data = await _get_service().structure_data(filename)
+    if not data["ok"]:
+        return JSONResponse({"error": data["error"]}, status_code=503)
+    if not data["found"]:
         return JSONResponse({"error": f"File '{filename}' not found"}, status_code=404)
-
-    node_id = file_matches[0]["id"]
-    defs = []
-    imports = set()
-    for edge in q.outgoing[node_id]:
-        if edge["relation"] == "DEFINES":
-            target = q.nodes.get(edge["target"])
-            if target:
-                defs.append(target)
-        elif edge["relation"] == "IMPORTS":
-            target = edge["target"]
-            imports.add(
-                target.replace("MODULE:", "")
-                if target.startswith("MODULE:")
-                else target
-            )
 
     grouped = {}
     for type_name in ["Constant", "Class", "Function", "Configuration"]:
         items = [
             {
-                "name": d["metadata"]["name"],
+                "name": d["metadata"].get("name", ""),
                 "lineno": d["metadata"].get("lineno"),
                 "signature": d["metadata"].get("signature", ""),
                 "id": d.get("id", ""),
             }
-            for d in defs
+            for d in data["definitions"]
             if d["type"] == type_name
         ]
         if items:
@@ -581,8 +509,8 @@ async def api_structure(request: Request) -> JSONResponse:
 
     return JSONResponse(
         {
-            "file": node_id,
-            "imports": sorted(imports),
+            "file": data["file"],
+            "imports": data["imports"],
             "definitions": grouped,
         }
     )
@@ -595,12 +523,10 @@ async def api_flatten(request: Request) -> JSONResponse:
             {"error": "Missing 'class_node_id' parameter"}, status_code=400
         )
 
-    q = await _get_querier()
-    if not q:
-        return JSONResponse({"error": "Graph not found"}, status_code=503)
-
-    result = q.flatten_class(class_node_id)
-    return JSONResponse({"class_node_id": class_node_id, "markdown": result})
+    result = await _get_service().flatten(class_node_id)
+    return await _service_error(result) or JSONResponse(
+        {"class_node_id": class_node_id, "markdown": result}
+    )
 
 
 async def api_impls(request: Request) -> JSONResponse:
@@ -609,13 +535,12 @@ async def api_impls(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Missing 'method' parameter"}, status_code=400)
     trait_name = request.query_params.get("trait_name") or None
 
-    q = await _get_querier()
-    if not q:
-        return JSONResponse({"error": "Graph not found"}, status_code=503)
+    data = await _get_service().impls_data(method, trait_name)
+    if not data["ok"]:
+        return JSONResponse({"error": data["error"]}, status_code=503)
 
-    results = q.find_trait_impls(method, trait_name)
     impls = []
-    for node in results:
+    for node in data["implementations"]:
         meta = node.get("metadata", {})
         node_id = node.get("id", "")
         parts = node_id.split("::")
@@ -651,35 +576,33 @@ async def api_flow(request: Request) -> JSONResponse:
     if not start:
         return JSONResponse({"error": "Missing 'start' parameter"}, status_code=400)
 
+    if bad_direction := _bad_direction(request):
+        return bad_direction
     direction = request.query_params.get("direction", "forward")
     depth = _int_param(request, "depth", 3)
     target = request.query_params.get("target") or None
     inline_threshold = _int_param(request, "inline_threshold", 100)
-    fmt = request.query_params.get("format", "markdown")
+    structured = request.query_params.get("format", "markdown") == "tree"
 
-    q = await _get_querier()
-    if not q:
-        return JSONResponse({"error": "Graph not found"}, status_code=503)
-
-    base = {"start": start, "direction": direction, "depth": depth}
-
-    if fmt == "tree":
-        tree = q.trace_flow_structured(
-            start_name=start,
-            direction=direction,
-            depth=depth,
-            inline_threshold=inline_threshold,
-        )
-        return JSONResponse({**base, "tree": tree})
-
-    result = q.trace_flow(
-        start_name=start,
+    data = await _get_service().flow_data(
+        start,
         direction=direction,
         depth=depth,
         target=target,
         inline_threshold=inline_threshold,
+        structured=structured,
     )
-    return JSONResponse({**base, "markdown": result})
+    if not data["ok"]:
+        return JSONResponse({"error": data["error"]}, status_code=503)
+
+    return JSONResponse(
+        {
+            "start": start,
+            "direction": direction,
+            "depth": depth,
+            "tree" if structured else "markdown": data["result"],
+        }
+    )
 
 
 async def api_path(request: Request) -> JSONResponse:
@@ -691,24 +614,29 @@ async def api_path(request: Request) -> JSONResponse:
         )
 
     max_depth = _int_param(request, "max_depth", 10)
+    if bad_direction := _bad_direction(request):
+        return bad_direction
     direction = request.query_params.get("direction", "forward")
 
-    q = await _get_querier()
-    if not q:
-        return JSONResponse({"error": "Graph not found"}, status_code=503)
+    data = await _get_service().path_data(
+        start, end, max_depth=max_depth, direction=direction
+    )
+    if not data["ok"]:
+        return JSONResponse({"error": data["error"]}, status_code=503)
 
-    path = q.find_call_path(start, end, max_depth=max_depth, direction=direction)
-    if not path:
+    if data["status"] != "found":
         return JSONResponse(
             {
                 "start": start,
                 "end": end,
+                "status": data["status"],
                 "hops": 0,
                 "path": [],
-                "markdown": f"No path found from '{start}' to '{end}'",
+                "markdown": data["message"],
             }
         )
 
+    path = data["path"]
     # Build structured path + markdown
     hops = []
     md_lines = [
@@ -744,6 +672,7 @@ async def api_path(request: Request) -> JSONResponse:
         {
             "start": start,
             "end": end,
+            "status": data["status"],
             "hops": len(path),
             "path": hops,
             "markdown": "\n".join(md_lines),
@@ -752,68 +681,28 @@ async def api_path(request: Request) -> JSONResponse:
 
 
 async def api_cross_lang(request: Request) -> JSONResponse:
-    if not CROSS_LANG_AVAILABLE:
-        return JSONResponse(
-            {
-                "not_configured": True,
-                "message": "Cross-language tracing module not available. Install the descry cross_lang dependency.",
-            }
-        )
-
     mode = request.query_params.get("mode", "endpoint")
     method = request.query_params.get("method")
     path = request.query_params.get("path")
     tag = request.query_params.get("tag")
 
-    cfg = _get_config()
-    openapi_path = _resolve_openapi_path()
-    if openapi_path is None:
-        return JSONResponse(
-            {
-                "not_configured": True,
-                "message": (
-                    "No OpenAPI spec found. Set [cross_lang] openapi_path in "
-                    ".descry.toml, or place a spec at public/api/openapi.json "
-                    "or public/api/latest.json relative to the project root."
-                ),
-            }
-        )
+    data = await _get_service().cross_lang_data(mode, method=method, path=path, tag=tag)
+    if not data["ok"]:
+        if data["reason"] == "invalid":
+            return JSONResponse({"error": data["error"]}, status_code=400)
+        return JSONResponse({"not_configured": True, "message": data["error"]})
 
-    graph_path = str(cfg.graph_path) if cfg.graph_path.exists() else None
-    tracer = CrossLangTracer(
-        str(openapi_path),
-        graph_path,
-        backend_handler_patterns=cfg.backend_handler_patterns or None,
-        frontend_api_patterns=cfg.frontend_api_patterns or None,
-        api_prefixes=cfg.api_prefixes or None,
-    )
-
-    if mode == "stats":
-        return JSONResponse(tracer.get_stats())
-    elif mode == "list":
-        endpoints = tracer.list_endpoints(tag=tag)
+    result = data["result"]
+    if mode == "list":
+        return JSONResponse({"tag": tag, "total": len(result), "endpoints": result})
+    if result is None:
         return JSONResponse(
-            {"tag": tag, "total": len(endpoints), "endpoints": endpoints}
+            {"error": f"No handler for {method.upper()} {path}"}, status_code=404
         )
-    elif mode == "endpoint":
-        if not method or not path:
-            return JSONResponse(
-                {"error": "Endpoint mode requires 'method' and 'path'"}, status_code=400
-            )
-        info = tracer.get_handler_info(method.upper(), path)
-        if not info:
-            return JSONResponse(
-                {"error": f"No handler for {method.upper()} {path}"}, status_code=404
-            )
-        return JSONResponse(info)
-    else:
-        return JSONResponse({"error": f"Unknown mode '{mode}'"}, status_code=400)
+    return JSONResponse(result)
 
 
 async def api_churn(request: Request) -> JSONResponse:
-    if not GIT_HISTORY_AVAILABLE:
-        return JSONResponse({"error": "Git history not available"}, status_code=503)
-
     time_range = request.query_params.get("time_range")
     path_filter = request.query_params.get("path_filter")
     limit = _int_param(request, "limit", 20)
@@ -821,33 +710,21 @@ async def api_churn(request: Request) -> JSONResponse:
     exclude_generated = (
         request.query_params.get("exclude_generated", "true").lower() == "true"
     )
+    structured = request.query_params.get("format", "markdown") == "structured"
 
-    fmt = request.query_params.get("format", "markdown")
-
-    try:
-        analyzer = await _get_git_analyzer()
-        if fmt == "structured":
-            result = await asyncio.to_thread(
-                analyzer.get_churn_structured,
-                time_range=time_range,
-                path_filter=path_filter,
-                limit=limit,
-                mode=mode,
-                exclude_generated=exclude_generated,
-            )
-            return JSONResponse({"data": result})
-        else:
-            result = await asyncio.to_thread(
-                analyzer.get_churn,
-                time_range=time_range,
-                path_filter=path_filter,
-                limit=limit,
-                mode=mode,
-                exclude_generated=exclude_generated,
-            )
-            return JSONResponse({"mode": mode, "markdown": result})
-    except Exception as e:  # noqa: BLE001 — route boundary: every failure must come back as a response body
-        return JSONResponse({"error": str(e)}, status_code=500)
+    data = await _get_service().churn_data(
+        time_range=time_range,
+        path_filter=path_filter,
+        limit=limit,
+        mode=mode,
+        exclude_generated=exclude_generated,
+        structured=structured,
+    )
+    if not data["ok"]:
+        return _git_failure(data)
+    if structured:
+        return JSONResponse({"data": data["result"]})
+    return JSONResponse({"mode": mode, "markdown": data["result"]})
 
 
 async def api_evolution(request: Request) -> JSONResponse:
@@ -855,65 +732,40 @@ async def api_evolution(request: Request) -> JSONResponse:
     if not name:
         return JSONResponse({"error": "Missing 'name' parameter"}, status_code=400)
 
-    if not GIT_HISTORY_AVAILABLE:
-        return JSONResponse({"error": "Git history not available"}, status_code=503)
-
     time_range = request.query_params.get("time_range")
     limit = _int_param(request, "limit", 10)
     show_diff = request.query_params.get("show_diff", "").lower() == "true"
     crate = request.query_params.get("crate")
 
-    try:
-        analyzer = await _get_git_analyzer()
-        result = await asyncio.to_thread(
-            analyzer.get_evolution,
-            name=name,
-            time_range=time_range,
-            limit=limit,
-            show_diff=show_diff,
-            crate=crate,
-        )
-        return JSONResponse({"name": name, "markdown": result})
-    except Exception as e:  # noqa: BLE001 — route boundary: every failure must come back as a response body
-        return JSONResponse({"error": str(e)}, status_code=500)
+    data = await _get_service().evolution_data(
+        name, time_range=time_range, limit=limit, show_diff=show_diff, crate=crate
+    )
+    if not data["ok"]:
+        return _git_failure(data)
+    return JSONResponse({"name": name, "markdown": data["result"]})
 
 
 async def api_changes(request: Request) -> JSONResponse:
-    if not GIT_HISTORY_AVAILABLE:
-        return JSONResponse({"error": "Git history not available"}, status_code=503)
-
     commit_range = request.query_params.get("commit_range")
     time_range = request.query_params.get("time_range")
     path_filter = request.query_params.get("path_filter")
     show_callers = request.query_params.get("show_callers", "true").lower() == "true"
     limit = _int_param(request, "limit", 50)
+    structured = request.query_params.get("format", "markdown") == "structured"
 
-    fmt = request.query_params.get("format", "markdown")
-
-    try:
-        analyzer = await _get_git_analyzer()
-        if fmt == "structured":
-            result = await asyncio.to_thread(
-                analyzer.get_changes_structured,
-                commit_range=commit_range,
-                time_range=time_range,
-                path_filter=path_filter,
-                show_callers=show_callers,
-                limit=limit,
-            )
-            return JSONResponse({"data": result})
-        else:
-            result = await asyncio.to_thread(
-                analyzer.get_changes,
-                commit_range=commit_range,
-                time_range=time_range,
-                path_filter=path_filter,
-                show_callers=show_callers,
-                limit=limit,
-            )
-            return JSONResponse({"markdown": result})
-    except Exception as e:  # noqa: BLE001 — route boundary: every failure must come back as a response body
-        return JSONResponse({"error": str(e)}, status_code=500)
+    data = await _get_service().changes_data(
+        commit_range=commit_range,
+        time_range=time_range,
+        path_filter=path_filter,
+        show_callers=show_callers,
+        limit=limit,
+        structured=structured,
+    )
+    if not data["ok"]:
+        return _git_failure(data)
+    if structured:
+        return JSONResponse({"data": data["result"]})
+    return JSONResponse({"markdown": data["result"]})
 
 
 async def api_quick(request: Request) -> JSONResponse:
@@ -924,28 +776,17 @@ async def api_quick(request: Request) -> JSONResponse:
     full = request.query_params.get("full", "").lower() == "true"
     brief = request.query_params.get("brief", "").lower() == "true"
 
-    q = await _get_querier()
-    if not q:
-        return JSONResponse({"error": "Graph not found"}, status_code=503)
-
-    matches = q.find_nodes_by_name(name)
-    matches.sort(key=symbol_type_priority)
-    if not matches:
-        matches = q.find_nodes_by_name(name, fuzzy=True)
-        matches.sort(key=symbol_type_priority)
-
-    if not matches:
+    data = await _get_service().quick_data(name, full=full, brief=brief)
+    if not data["ok"]:
+        return JSONResponse({"error": data["error"]}, status_code=503)
+    if not data["found"]:
         return JSONResponse({"error": f"No symbol found for '{name}'"}, status_code=404)
 
-    best = matches[0]
-    node_id = best["id"]
-    context = q.get_context_prompt(node_id, full=full, brief=brief)
-
-    return JSONResponse(
+    return await _service_error(data["context"]) or JSONResponse(
         {
-            "symbol": _node_to_dict(best),
-            "other_matches": len(matches) - 1,
-            "markdown": context,
+            "symbol": _node_to_dict(data["node"]),
+            "other_matches": data["other_matches"],
+            "markdown": data["context"],
         }
     )
 
@@ -959,9 +800,9 @@ _MAX_SOURCE_BYTES = 10 * 1024 * 1024  # 10 MiB
 # worst-case blast radius smaller than "every text file in the repo".
 _SENSITIVE_NAME_RE = re.compile(
     r"(?ix)"
-    r"(^|/)\.env(\.|$)"
+    r"(^|/)\.env(\.|/|$)"
     r"|(^|/)\.envrc$"
-    r"|(^|/)\.git/"
+    r"|(^|/)\.git(/|$)"
     r"|(^|/)\.ssh/"
     r"|(^|/)\.aws/"
     r"|(^|/)\.gnupg/"
@@ -1006,6 +847,30 @@ def _is_text_sample(sample: bytes) -> bool:
             return False
 
 
+def _open_beneath(root: Path, parts: tuple[str, ...]) -> int:
+    """Open `root/parts...` read-only, following no symlink below `root`.
+
+    `O_NOFOLLOW` on a single open only covers the last component, so each
+    directory on the way down is opened relative to its parent's fd.
+    `O_NONBLOCK` keeps the open from waiting on a FIFO.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    if os.open not in os.supports_dir_fd:  # Windows has no openat()
+        return os.open(root.joinpath(*parts), flags)
+
+    dir_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd
+            )
+            os.close(dir_fd)
+            dir_fd = next_fd
+        return os.open(parts[-1], flags, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 async def api_source(request: Request) -> JSONResponse:
     file_param = request.query_params.get("file", "")
     if not file_param:
@@ -1017,7 +882,7 @@ async def api_source(request: Request) -> JSONResponse:
     cfg = _get_config()
     try:
         file_path = (cfg.project_root / file_param).resolve(strict=False)
-    except (OSError, RuntimeError) as e:
+    except (OSError, RuntimeError, ValueError) as e:
         return JSONResponse({"error": f"Invalid path: {e}"}, status_code=400)
 
     try:
@@ -1051,22 +916,28 @@ async def api_source(request: Request) -> JSONResponse:
     if st.st_size > _MAX_SOURCE_BYTES:
         return JSONResponse({"error": "File too large"}, status_code=413)
 
-    # Use O_NOFOLLOW on the final open so a symlink swap between the earlier
-    # containment check and this read cannot redirect us outside the project.
+    # Open without following symlinks so a swap between the earlier
+    # containment check and this read cannot redirect us outside the project,
+    # then hold the opened file itself to the type and size limits.
+    root = cfg.resolved_project_root
     try:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(str(file_path), flags)
+        fd = _open_beneath(root, file_path.relative_to(root).parts)
     except OSError as e:
         return JSONResponse({"error": f"Cannot open file: {e}"}, status_code=400)
     try:
         with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return JSONResponse({"error": "Not a regular file"}, status_code=400)
             sample = f.read(8192)
             if not _is_text_sample(sample):
                 return JSONResponse({"error": "Not a text file"}, status_code=415)
             f.seek(0)
-            content = f.read().decode("utf-8", errors="replace")
+            raw = f.read(_MAX_SOURCE_BYTES + 1)
     except OSError as e:
         return JSONResponse({"error": f"Cannot read file: {e}"}, status_code=500)
+    if len(raw) > _MAX_SOURCE_BYTES:
+        return JSONResponse({"error": "File too large"}, status_code=413)
+    content = raw.decode("utf-8", errors="replace")
 
     lang = _get_syntax_lang(str(file_path))
     lines = content.split("\n")
@@ -1249,6 +1120,33 @@ async def api_examples(_request: Request) -> JSONResponse:
 # --- App entrypoint ---
 
 
+def _content_security_policy(html: str) -> str:
+    """Content-Security-Policy for the page whose source is `html`.
+
+    Scripts load only from the two CDNs the page pins its assets on, and
+    inline scripts run only if they hash to one of the page's own blocks.
+    Alpine.js compiles directive expressions with the Function constructor,
+    hence 'unsafe-eval'. Styles allow 'unsafe-inline' for the page's style
+    attributes and the <style> element Mermaid puts in each diagram.
+    """
+    hashes = " ".join(
+        f"'sha256-{base64.b64encode(hashlib.sha256(block.encode()).digest()).decode()}'"
+        for block in re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
+    )
+    return (
+        "default-src 'none'; "
+        "script-src https://cdn.jsdelivr.net https://cdnjs.cloudflare.com "
+        f"'unsafe-eval' {hashes}; "
+        "style-src 'self' https://cdnjs.cloudflare.com 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; "
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    )
+
+
+# read_text() normalizes newlines to LF, as a browser does before hashing.
+_CSP = _content_security_policy((WEB_DIR / "index.html").read_text(encoding="utf-8"))
+
+
 async def index_page(_request: Request) -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")
 
@@ -1282,13 +1180,88 @@ routes = [
 
 # The UI is same-origin with its API — no CORS headers are needed. Omitting
 # CORSMiddleware means browsers enforce same-origin by default, so a tab on
-# evil.com cannot read /api/source or trigger /api/index. TrustedHostMiddleware
-# rejects requests whose Host header isn't loopback, defeating DNS-rebinding
-# attacks that would otherwise bypass the 127.0.0.1 bind.
-_ALLOWED_HOSTS = ["127.0.0.1", "localhost", "[::1]"]
+# evil.com cannot read /api/source or any other response. It can still send
+# requests, so _SameOriginMiddleware refuses cross-origin writes such as
+# POST /api/index. TrustedHostMiddleware rejects requests whose Host header
+# isn't loopback, defeating DNS-rebinding attacks that would otherwise bypass
+# the 127.0.0.1 bind.
+_ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+
+
+class _LoopbackHostMiddleware(TrustedHostMiddleware):
+    """TrustedHostMiddleware that also accepts the IPv6 loopback literal.
+
+    The base class takes the host to be whatever precedes the first colon, so
+    `[::1]:8787` is read as `[` and no allowed-hosts entry can match it.
+    """
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and re.fullmatch(
+            r"\[::1\](:\d+)?", Headers(scope=scope).get("host", "")
+        ):
+            await self.app(scope, receive, send)
+        else:
+            await super().__call__(scope, receive, send)
+
+
+class _SameOriginMiddleware:
+    """Refuse state-changing requests that a browser sent from another origin.
+
+    Browsers label them: `Sec-Fetch-Site` is set on every request and `Origin`
+    on every cross-origin or non-GET one, and page script can forge neither.
+    Clients that send neither header (curl, scripts) are let through.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] not in (
+            "GET",
+            "HEAD",
+            "OPTIONS",
+        ):
+            headers = Headers(scope=scope)
+            site = headers.get("sec-fetch-site", "same-origin")
+            origin = headers.get("origin")
+            if site not in ("same-origin", "none") or (
+                origin is not None
+                and urlsplit(origin).netloc != headers.get("host", "")
+            ):
+                response = JSONResponse(
+                    {"error": "Cross-origin request refused"}, status_code=403
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+class _ContentSecurityPolicyMiddleware:
+    """Send the page's CSP on every response.
+
+    The page is reachable at `/` and through the static mount; the policy is
+    inert on the JSON responses.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        async def send_with_policy(message):
+            if message["type"] == "http.response.start":
+                message["headers"] = [
+                    *message["headers"],
+                    (b"content-security-policy", _CSP.encode()),
+                ]
+            await send(message)
+
+        await self.app(scope, receive, send_with_policy)
+
 
 middleware = [
-    Middleware(TrustedHostMiddleware, allowed_hosts=_ALLOWED_HOSTS),
+    Middleware(_ContentSecurityPolicyMiddleware),
+    Middleware(_LoopbackHostMiddleware, allowed_hosts=_ALLOWED_HOSTS),
+    Middleware(_SameOriginMiddleware),
 ]
 
 app = Starlette(routes=routes, middleware=middleware)
@@ -1330,8 +1303,7 @@ def main():
     logger.info(f"Project root: {cfg.project_root}")
     logger.info(f"Graph path: {cfg.graph_path}")
 
-    # GraphQuerier resolves source file paths relative to CWD, so we must
-    # run from the project root (same as the MCP server does).
+    # Paths in the graph and in requests are relative to the project root.
     os.chdir(cfg.project_root)
 
     # Pre-warm the graph via a one-off event loop (main() is sync; uvicorn

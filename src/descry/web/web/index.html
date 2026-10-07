@@ -5,15 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Descry Explorer</title>
     <link rel="stylesheet" href="/static/style.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/rust.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <!-- Each third-party asset is pinned to an exact version and its sha384.
+         To change one, recompute the hash with
+         curl -s URL | openssl dgst -sha384 -binary | openssl base64 -A
+         The server's Content-Security-Policy allows only these two CDNs. -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" integrity="sha384-wH75j6z1lH97ZOpMOInqhgKzFkAInZPPSPlZpYKYTOqsaizPvhQZmAtLcPKXpLyH" crossorigin="anonymous">
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js" integrity="sha384-X9kJyAubVxnP0hcA+AMMs21U445qsnqhnUF8EBlEpP3a42Kh/JwWjlv2ZcvGfphb" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" integrity="sha384-F/bZzf7p3Joyp5psL90p/p89AZJsndkSoGwRpXcZhleCWhd8SnRuoYo4d0yirjJp" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/rust.min.js" integrity="sha384-h29HWMYGysZp5v7HMfLgfj7PMRyj5l0/KqKdXWYxGfcfh4GxKPNGM/Ria90QFqoZ" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/typescript.min.js" integrity="sha384-ORwtVEfrCZ0gzGacgmfv1wOtxcPIaVfHKwq8dKQjObRwx3qpKjsSg1ldTu1PEgXd" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js" integrity="sha384-FWJTgPmIGm1+zpNhubuHRC/ulS1UK7hAZ7qiUUmKD8yGfPcn5ZXYBd2qRgi6L8Tu" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js" integrity="sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js" integrity="sha384-eEu5CTj3qGvu9PdJuS+YlkNi7d2XxQROAFYOr59zgObtlcux1ae1Il3u7jvdCSWu" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.min.js" integrity="sha384-EOXBFmc3gx5mb+vn0vPvvGqACToJD24hhacX5Yx+8NUUQrHIle/Qi5Bg9o3zKwW2" crossorigin="anonymous"></script>
     <script>document.addEventListener('DOMContentLoaded', () => { mermaid.initialize({ startOnLoad: false, theme: 'dark', themeVariables: { primaryColor: '#3b82f6', primaryTextColor: '#e2e8f0', lineColor: '#64748b', secondaryColor: '#1e293b', tertiaryColor: '#0f172a' }}); });</script>
 </head>
 <body x-data="app()" x-init="init()">
@@ -571,6 +575,7 @@
                 </div>
                 <!-- Disambiguation note -->
                 <div class="flow-note" x-show="results.flow?.tree?.note" x-text="results.flow?.tree?.note"></div>
+                <div class="flow-note" x-show="results.flow?.tree?.path_to_target" x-text="'Path to target: ' + (results.flow?.tree?.path_to_target || []).join(' → ')"></div>
                 <!-- Alternatives -->
                 <div class="flow-alternatives" x-show="results.flow?.tree?.alternatives?.length">
                     <span class="flow-alt-label">Alternatives:</span>
@@ -815,6 +820,8 @@
             <div class="results" x-show="results.churn?.data">
                 <!-- Error -->
                 <div class="flow-error" x-show="results.churn?.data?.error" x-text="results.churn?.data?.error"></div>
+                <!-- Partial-result note -->
+                <div class="flow-note" x-show="results.churn?.data?.truncation_note" x-text="results.churn?.data?.truncation_note"></div>
                 <!-- Symbols mode -->
                 <template x-if="results.churn?.data?.symbols">
                     <div>
@@ -1489,8 +1496,18 @@ function app() {
             return this._renderNode(node, depth);
         },
 
+        // Escape a value for use as HTML text or inside a quoted attribute.
+        _esc(value) {
+            return String(value).replace(/[&<>"']/g, c => (
+                {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]
+            ));
+        },
+
+        // Builds markup for x-html from strings that come from the indexed
+        // repository, so each one is escaped where it is interpolated.
         _renderNode(node, depth) {
-            const typeClass = node.type.toLowerCase();
+            const type = this._esc(node.type);
+            const typeClass = type.toLowerCase();
             const hasChildren = node.children && node.children.length > 0;
             const hasCode = !!node.code;
             const expandable = hasChildren || hasCode;
@@ -1499,7 +1516,7 @@ function app() {
             const shortFile = node.file
                 ? node.file.replace(/^FILE:/, '')
                 : '';
-            const fileLoc = shortFile + (node.line ? ':' + node.line : '');
+            const fileLoc = this._esc(shortFile + (node.line ? ':' + node.line : ''));
 
             // Escape code for safe embedding
             const escapedCode = node.code
@@ -1523,10 +1540,10 @@ function app() {
             }
 
             // Type badge
-            html += `<span class="rc-type ${typeClass}">${node.type}</span>`;
+            html += `<span class="rc-type ${typeClass}">${type}</span>`;
 
             // Function name - navigates to Context
-            html += `<span class="flow-fn-name" data-action="context" data-node-id="${safeId}">${node.name}</span>`;
+            html += `<span class="flow-fn-name" data-action="context" data-node-id="${safeId}">${this._esc(node.name)}</span>`;
 
             // Token count
             html += `<span class="flow-tokens">${node.tokens.toLocaleString()} toks</span>`;
@@ -1541,7 +1558,7 @@ function app() {
             // Inline code block (for small functions)
             if (hasCode) {
                 html += `<div class="flow-code">`;
-                html += `<pre><code class="language-${node.lang || 'rust'}">${escapedCode}</code></pre>`;
+                html += `<pre><code class="language-${this._esc(node.lang || 'rust')}">${escapedCode}</code></pre>`;
                 html += `</div>`;
             }
 
