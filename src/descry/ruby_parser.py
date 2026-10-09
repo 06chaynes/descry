@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-from descry.generate import BaseParser, is_generated_source
+from descry.generate import BaseParser, _strip_parens, is_generated_source
 
 _CONST = r"(?:::)?[A-Z]\w*(?:::[A-Z]\w*)*"
 # A method name: an identifier, a setter, or an operator
@@ -343,8 +343,13 @@ def _code_lines(lines):
                 heredocs.append(found[3])
                 code.append('""' + " " * (len(found.group()) - 2))
                 k = found.end()
-            elif char == "?" and re.match(r"\?[\"'`#/%](?!\w)", line[k:]):
-                # A character literal of what would open a literal or comment.
+            elif char == "?" and (
+                re.match(r"\?[\"'`#/%](?!\w)", line[k:])
+                or re.match(r"\?\w(?!\w)", line[k:])
+                and _RE_OPERAND_EXPECTED.search("".join(code))
+            ):
+                # A character literal: of what would open a literal or
+                # comment, or of a letter where an operand is expected.
                 code.append("  ")
                 k += 2
             elif char == "$" and not re.match(r"\$\w", line[k:]):
@@ -380,9 +385,11 @@ def _blocks(code_lines):
     opened = [[] for _ in code_lines]
     levels = []
     stack = []  # (the entry of a block listed in `opened` or None, is a brace)
+    loop = False  # a `while`, `until` or `for` whose `do` is still to come
     for index, line in enumerate(code_lines):
         levels.append(len(stack))
-        loop = False  # a `while`, `until` or `for` whose `do` is still to come
+        # The `do` is on the loop's line or starts the next.
+        loop = loop and bool(re.match(r"\s*do\b", line))
         position = 0
         while found := _RE_BLOCK_WORD.search(line, position):
             word, column = found.group(), found.start()
@@ -563,7 +570,7 @@ class RubyParser(BaseParser):
             self.builder.add_edge(parent_id, node_id, "DEFINES")
             if node_type == "Class":
                 self._types[node_id] = self.builder.nodes[-1]["metadata"]
-        elif known and known["end_lineno"] == known["lineno"] < end_lineno - lineno:
+        elif known and known["end_lineno"] == known["lineno"] and lineno < end_lineno:
             # A type first named on one line, `module Empty; end`, spans the
             # first body that reopens it.
             known.update(span, docstring=metadata["docstring"])
@@ -1179,12 +1186,10 @@ class RubyParser(BaseParser):
             bound = _RE_ASSIGNMENT.match(code)
             if bound:
                 value = code[bound.end() :]
-                flat, wider = value, None
-                while flat != wider:
-                    wider, flat = flat, re.sub(r"\([^()]*\)", "", flat)
                 origin = _constructed(_continued(code_lines, index, value))
                 edge = self._closes.get(len(code.rstrip()) - 1)
-                if not origin and edge is not None and _RE_CHAIN.fullmatch(flat):
+                chain = _RE_CHAIN.fullmatch(_strip_parens(value))
+                if not origin and edge is not None and chain:
                     origin = f"#{edge}"
                 self._declare(bound["name"], lineno, since, origin or "?", outer_scopes)
                 del assigned[bound["name"]]

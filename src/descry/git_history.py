@@ -32,7 +32,7 @@ class PartialCloneError(GitError):
     """Raised when git needs objects a partial clone has not downloaded."""
 
 
-# --- Git argument validators (A.1) ---
+# --- Git argument validators ---
 # Accepts: HEAD, HEAD^, HEAD^^, HEAD~N, HEAD^{tree}, @, @{-1},
 #          branch@{upstream}, master@{yesterday}, branch names, sha prefixes,
 #          and the ~N / ^ / ^{type} suffixes on any of those names.

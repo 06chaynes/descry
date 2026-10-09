@@ -444,7 +444,7 @@ class SemanticSearcher:
         self.graph_path = Path(graph_path).resolve()
         self.cache_dir = _resolve_cache_dir(self.graph_path, cache_dir)
 
-        # Load graph (B.6: schema-checked)
+        # Load graph (schema-checked)
         from descry._graph import load_graph_with_schema
 
         self.data = load_graph_with_schema(self.graph_path)

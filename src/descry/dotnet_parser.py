@@ -45,7 +45,8 @@ _TYPE_MODIFIERS = (
 _RE_CLASS = re.compile(
     rf"^\s*(?:{_TYPE_MODIFIERS}\s+)*"
     r"(class|struct|record|interface|enum)\s+"
-    r"([A-Za-z_][A-Za-z0-9_]*)"
+    # `record name = ...` is a field of a type named `record`.
+    r"([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*=)"
 )
 # The type parameters and the opening `(` of a primary constructor, after
 # the name of a type
@@ -626,7 +627,7 @@ class DotnetParser(BaseParser):
                 # A method called with type arguments is `name<>`.
                 self.builder.edges[-1]["target"] += "<>"
             closed = self._pairs.get(call_match.end() - 1)
-            arguments = _flat(code[call_match.end() : closed or 0])
+            arguments = _flat(code[call_match.end() : closed or len(code)])
             if closed:
                 # A literal, blank in the code, is an argument too.
                 passed = lines[index][call_match.end() : closed].strip()

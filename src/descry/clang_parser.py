@@ -201,12 +201,7 @@ _DECLARATIONS = (
     ),
     # `Type name`, `Type* name`, `Type<Args>& name` where a statement starts
     re.compile(
-        r"(?:^|[;{}])\s*"
-        + _SPECIFIERS
-        + _TYPE
-        + r""
-        + _DECLARATOR
-        + r"\s*(?=[;,\[{]|=(?!=))"
+        r"(?:^|[;{}])\s*" + _SPECIFIERS + _TYPE + _DECLARATOR + r"\s*(?=[;,\[{]|=(?!=))"
     ),
     # `Type first, name`
     re.compile(
@@ -222,7 +217,6 @@ _DECLARATIONS = (
         r"\b(?:for|if|while|switch)\s*\(\s*"
         + _SPECIFIERS
         + _TYPE
-        + r""
         + _DECLARATOR
         + r"\s*(?==(?!=)|:(?!:))"
     ),
@@ -465,8 +459,9 @@ def _before(found: re.Match) -> str:
 
 
 class ClangParser(BaseParser):
-    language = "clang"
     """Brace-matching C/C++ parser."""
+
+    language = "clang"
 
     binding_re = re.compile(r"\bauto\b[\s*&]*(?P<name>\w+)\s*=(?!=)")
 
@@ -1212,15 +1207,18 @@ class ClangParser(BaseParser):
                     self._guarded[index]
                 )
         binding = self.binding_re.search(code)
-        if binding and self._closes:
-            # `auto name = call...` binds `name` to what the statement's
-            # last-closing call returns.
-            held = self._closes[max(self._closes)]
-            if binding.start() < next(
-                column for column, edge in self._closes.items() if edge == held
-            ):
+        if binding:
+            # `auto name = call...` binds `name` to what the last call to
+            # close in its statement returns.
+            ends = code.find(";", binding.end())
+            closes = [
+                column
+                for column in self._closes
+                if binding.end() <= column and (ends < 0 or column < ends)
+            ]
+            if closes:
                 self.declared.setdefault(binding["name"], []).append(
-                    (index + 1, f"#{held}", False)
+                    (index + 1, f"#{self._closes[max(closes)]}", False)
                 )
                 self.add_local(source_id, binding["name"])
 

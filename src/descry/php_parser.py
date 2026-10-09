@@ -645,7 +645,10 @@ class PhpParser(BaseParser):
                 tag = _RE_RETURN_TAG.search(docstring)
                 returns = self._type(_told(returns, tag[1] if tag else ""), owner)
                 if not returns and has_body:
-                    body = codes[last + 1 : end_lineno - 1]
+                    body = [
+                        codes[last].partition("{")[2],
+                        *codes[last + 1 : end_lineno],
+                    ]
                     returns = self._returned(body, context_id, owner)
                 # A function is looked up by its namespace.
                 space = {"namespace": self._namespace.replace("::", "\\")}

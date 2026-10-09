@@ -22,6 +22,7 @@ from descry.generate import (
     _TRAILING_PATH_RE,
     BaseParser,
     _strip_generics,
+    _strip_parens,
     blank_strings,
     is_generated_source,
 )
@@ -304,9 +305,7 @@ def _type_parameters(generics: str) -> list[str]:
 def _parameter_names(parameters: str) -> list[str]:
     """Names of the parameters in the text of a parameter list, but for
     those that initialise a field: `this.name`, `super.name`."""
-    flat, previous = _strip_generics(parameters), None
-    while flat != previous:
-        previous, flat = flat, re.sub(r"\([^()]*\)", "", flat)
+    flat = _strip_parens(_strip_generics(parameters))
     names = []
     for item in re.sub(r"[{}\[\]]", " ", flat).split(","):
         named = re.search(
@@ -345,7 +344,7 @@ class DartParser(BaseParser):
             # A cascade has the value of its target.
             at, origin, top = self.declared[name][-1]
             target = origin[1:].isdigit() and self._targets.get(int(origin[1:]))
-            if target and target.startswith("#"):
+            if target:
                 self.declared[name][-1] = (at, target, top)
         elif binding:
             # A copy has the type of what it copies, a literal its own; any

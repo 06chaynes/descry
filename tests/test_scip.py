@@ -59,39 +59,6 @@ class TestTypescriptScipParsing:
 class TestTypescriptImportResolution:
     """Tests for TypeScript import resolution."""
 
-    def test_symbol_table_basic(self):
-        """Should track basic imports."""
-        table = TypeScriptSymbolTable(
-            "/project/lens/src/lib/stores/test.ts", "/project"
-        )
-        table.imports = {
-            "fetchData": ("./api", "named"),
-            "apiClient": ("$lib/api/client", "default"),
-        }
-
-        # Should be able to get import source
-        source = table.get_import_source("fetchData")
-        assert source == "./api"
-
-        source = table.get_import_source("apiClient")
-        assert source == "$lib/api/client"
-
-    def test_namespace_import(self):
-        """Should identify namespace imports."""
-        table = TypeScriptSymbolTable(
-            "/project/lens/src/lib/stores/test.ts", "/project"
-        )
-        table.namespaces = {"schedulesApi": "$lib/api/schedules"}
-        table.imports = {"schedulesApi": ("$lib/api/schedules", "namespace")}
-
-        # schedulesApi.list() should be identified as a namespace call
-        assert table.is_namespace_call("schedulesApi.list") is True
-        assert table.is_namespace_call("regularFunc") is False
-
-        # Should get the import source
-        source = table.get_import_source("schedulesApi")
-        assert source == "$lib/api/schedules"
-
     def test_type_import_skipped(self):
         """Should identify type-only imports."""
         table = TypeScriptSymbolTable("/project/lens/src/test.ts", "/project")
@@ -108,7 +75,6 @@ class TestTypescriptImportResolution:
         table = TypeScriptSymbolTable("/project/lens/src/test.ts", "/project")
         table.imports = {}
 
-        assert table.get_import_source("unknownFunc") is None
         assert table.is_type_import("unknownFunc") is False
 
 

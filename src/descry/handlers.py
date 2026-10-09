@@ -437,7 +437,7 @@ class DescryConfig:
     def _load_toml(project_root: Path) -> dict:
         """Load .descry.toml from project root if it exists.
 
-        Rejects files > 1 MiB (TOML-parse DoS guard per A.4).
+        Rejects files > 1 MiB (TOML-parse DoS guard).
 
         Returns:
             Parsed TOML data as dict, or empty dict if not found/invalid.
@@ -1231,7 +1231,7 @@ class DescryService:
                 self._semantic_cache["loading"] = False
 
     async def _get_semantic_searcher(self):
-        """Single-flight accessor for the semantic searcher (E.1).
+        """Single-flight accessor for the semantic searcher.
 
         Returns the cached SemanticSearcher, rebuilding if
         codebase_graph.json mtime changed. Returns None if embeddings are
@@ -1549,7 +1549,7 @@ class DescryService:
     async def index(self, path: str = ".") -> str:
         """Regenerate the codebase graph.
 
-        A.9: `path` must resolve inside project_root. Prevents prompt-injected
+        `path` must resolve inside project_root. Prevents prompt-injected
         MCP clients from forcing indexing of arbitrary directories.
 
         A `path` below the root only narrows which files are walked. The graph
@@ -1633,7 +1633,7 @@ class DescryService:
                 ):
                     try:
                         # Reset the cache, then construct in a thread so the
-                        # event loop is not blocked (C.1).
+                        # event loop is not blocked.
                         async with self._semantic_cache_lock:
                             self._semantic_cache = {
                                 "mtime": 0,
@@ -2007,7 +2007,7 @@ class DescryService:
             and (is_natural_language_query(terms) or len(tfidf_results) < 3)
         ):
             try:
-                # E.1/C.1: single-flight async helper (runs in asyncio.to_thread
+                # Single-flight async helper (runs in asyncio.to_thread
                 # and respects the cache lock).
                 searcher = await self._get_semantic_searcher()
                 if searcher is not None:

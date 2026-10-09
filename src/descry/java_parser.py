@@ -67,8 +67,19 @@ _PARAMS_AND_THROWS = r"\([^()]*\)\s*(?:throws\s+[\w.,\s]+|default\s+[^;{]+)?"
 
 # Method declared without a modifier: `Type name(params) {` or, in an
 # interface, `Type name(params);`. A statement of that shape is never a call.
+_STATEMENT_WORDS = (
+    "return",
+    "new",
+    "throw",
+    "else",
+    "case",
+    "when",
+    "assert",
+    "yield",
+    "do",
+)
 _PACKAGE_METHOD = (
-    rf"^\s*(?:{_TYPE_ARGUMENTS}\s+)?(?!(?:return|new|throw|else|case|assert|yield|{_METHOD_MODIFIERS})\b)"
+    rf"^\s*(?:{_TYPE_ARGUMENTS}\s+)?(?!(?:{'|'.join(_STATEMENT_WORDS)}|{_METHOD_MODIFIERS})\b)"
     rf"(?P<returns>[\w.]+(?:{_TYPE_ARGUMENTS})?(?:\[\])*)\s+"
     r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*"
 )
@@ -98,7 +109,12 @@ _RE_PACKAGE_FIELD = re.compile(
     r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*(?:=(?!=)|;)"
 )
 # An enum constant, alone on its line: `NAME,`, `NAME(args),`, `NAME {`
-_RE_ENUM_CONSTANT = re.compile(r"^\s*([A-Z][A-Z0-9_]*)\s*(?:\(.*\))?\s*[,;{]?\s*$")
+_RE_ENUM_CONSTANT = re.compile(
+    r"^\s*([A-Z][A-Z0-9_]*)\s*(?:\(.*\))?\s*(?:\{.*\}\s*)?[,;{]?\s*$"
+)
+# The word before a name: `Type name(` declares `name` where it is no
+# statement's.
+_RE_WORD_BEFORE = re.compile(r"([\w$]+)\s+$")
 # `(Type) value` inside the parentheses before a member: a cast gives the
 # value that type
 _RE_CAST = re.compile(r"\(\s*([A-Z][\w.]*(?:<[^()]*>)?(?:\[\])*)\s*\)\s*[\w(\"]")
@@ -290,7 +306,7 @@ class JavaParser(BaseParser):
         """The type a lambda at the end of ``before`` is assigned to or
         cast as, as a `>` origin root — None where it is an argument of a
         call, whose parameters the callee's give it."""
-        cast = re.search(r"\(\s*([A-Z][\w.$]*)\s*(<[^<>;()]*>)?\s*\)\s*\(\s*$", before)
+        cast = re.search(r"\(\s*([A-Z][\w.$]*)\s*(<[^<>;()]*>)?\s*\)\s*\(?\s*$", before)
         if cast:
             written = "".join((cast[2] or "").split())
             return f">{cast[1].replace('.', '::')}{written}"
@@ -307,11 +323,7 @@ class JavaParser(BaseParser):
         interface it is for; arguments of calls go on to the shared path."""
         while self._closures and self._closures[0][0] < before:
             bar, params, _end = self._closures[0]
-            around = [o for o, c in self._pairs.items() if o < bar < c]
-            around += [o for o in self._opens if o < bar]
-            origin = (
-                None if around or self._open_calls else self._lambda_target(code[:bar])
-            )
+            origin = self._lambda_target(code[:bar])
             if origin is None:
                 break
             self._closures.pop(0)
@@ -330,7 +342,9 @@ class JavaParser(BaseParser):
         if "{" in code:
             return True
         brace = self.opening_brace_line(lines, index, code)
-        return brace is not None and not any(";" in text for text in lines[index:brace])
+        return brace is not None and not any(
+            ";" in strip_line_comment(text) for text in lines[index:brace]
+        )
 
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
@@ -473,7 +487,7 @@ class JavaParser(BaseParser):
                     signature = line.rstrip()
                     for following in map(str.strip, lines[i + 1 : i + 10]):
                         listed = signature.count("(") <= signature.count(")")
-                        if listed and not following.startswith("throws "):
+                        if listed and not following.startswith(("throws ", "{")):
                             break
                         signature += f" {following}"
                     m_method = _RE_PACKAGE_METHOD.match(signature)
@@ -515,7 +529,10 @@ class JavaParser(BaseParser):
                             token_count=(end_lineno - lineno + 1) * 10,
                             docstring=docstring,
                             return_type=returns,
-                            params=_param_writings(m_method.string, m_method.end() - 1),
+                            params=_param_writings(
+                                m_method.string,
+                                m_method.string.index("(", m_method.end("name")),
+                            ),
                             static=bool(re.search(r"\bstatic\b", head)),
                             default=bool(re.search(r"\bdefault\b", head)),
                             body=has_body,
@@ -603,14 +620,16 @@ class JavaParser(BaseParser):
                 if lineno in anonymous and code.lstrip().startswith("}"):
                     self.continue_chain(code.index("}"), anonymous.pop(lineno))
                 # The lambdas on the line whose parameters are still to be
-                # read: those in the parentheses of a call, and one the line
-                # starts with, an argument of a call left open.
+                # read: those in the parentheses of a call, one the line
+                # starts with, an argument of a call left open, and one
+                # assigned or cast to a type.
                 around = [*self._pairs.items(), *((o, len(code)) for o in self._opens)]
                 self._closures = [
                     (found.start(), found[1] or found[2], found.end())
                     for found in _RE_LAMBDA.finditer(code if "->" in code else "")
                     if not code[: found.start()].strip()
                     or any(o < found.start() < c for o, c in around)
+                    or self._lambda_target(code[: found.start()])
                 ]
                 self._bodies = []
                 for call_match in _RE_CALL.finditer(code, call_scan_start):
@@ -619,8 +638,12 @@ class JavaParser(BaseParser):
                     simple_name = callee.split(".")[-1]
                     if simple_name in _JAVA_CONTROL_KEYWORDS:
                         continue
-                    self._bind_closures(code, i, lines, call_match.start(1))
                     before = code[: call_match.start(1)]
+                    typed = _RE_WORD_BEFORE.search(before)
+                    if typed and typed[1] not in _STATEMENT_WORDS:
+                        # `Type name(...) {...}` in a body written on one line.
+                        continue
+                    self._bind_closures(code, i, lines, call_match.start(1))
                     paren = call_match.end() - 1
                     # The parentheses before the callee that end no call.
                     receiver = before.rstrip()

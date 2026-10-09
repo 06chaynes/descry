@@ -6151,9 +6151,6 @@ class TypeScriptSymbolTable:
         # import_type: "named", "default", "namespace", "type"
         self.imports: dict = {}
 
-        # namespace_alias -> module_path (for import * as alias from 'module')
-        self.namespaces: dict = {}
-
     def load_imports(self, import_data: dict):
         """Load import data from ast-grep extraction.
 
@@ -6161,7 +6158,6 @@ class TypeScriptSymbolTable:
             import_data: Dict with 'imports' and 'namespaces' keys
         """
         self.imports = import_data.get("imports", {})
-        self.namespaces = import_data.get("namespaces", {})
 
     def is_type_import(self, name: str) -> bool:
         """Check if a name was imported with 'import type'.
@@ -6173,34 +6169,6 @@ class TypeScriptSymbolTable:
             _, import_type = self.imports[root]
             return import_type == "type"
         return False
-
-    def is_namespace_call(self, name: str) -> bool:
-        """Check if name is a call on a namespace import (e.g., api.get).
-
-        Namespace calls like 'schedulesApi.list' are qualified names that
-        SCIP can resolve when given the full qualified form.
-        """
-        if "." not in name:
-            return False
-        root = name.split(".")[0]
-        return root in self.namespaces
-
-    def get_import_source(self, name: str) -> str | None:
-        """Get the import source for a name if it was imported.
-
-        Args:
-            name: Local name to look up
-
-        Returns:
-            Module path if imported, None otherwise
-        """
-        root = name.split(".")[0]
-        if root in self.imports:
-            module, _ = self.imports[root]
-            return module
-        if root in self.namespaces:
-            return self.namespaces[root]
-        return None
 
 
 _LICENSE_HEADER_RE = re.compile(r"copyright|licen[cs]e|spdx-", re.IGNORECASE)
@@ -6298,15 +6266,23 @@ _FIELD_MODIFIERS_RE = re.compile(
 _TRAILING_PATH_RE = re.compile(r"(?<![\w$.)\]])[A-Za-z_$][\w$]*(?:\.[\w$]+)*$")
 
 
+def _strip_parens(text: str) -> str:
+    """``text`` without its parentheses and what they hold."""
+    previous = None
+    while text != previous:
+        previous, text = text, re.sub(r"\([^()]*\)", "", text)
+    return text
+
+
 def _is_call_chain(expression: str) -> bool:
     """Whether ``expression``, once the arguments of its calls are taken
     out, is one chain of names: `a.b(x).c()`, `new T(x)`, `await f()`, or
     the `).c()` such a chain goes on with on a later line."""
-    flat, previous = expression, None
-    while flat != previous:
-        previous, flat = flat, re.sub(r"\([^()]*\)", "", flat)
     return bool(
-        re.fullmatch(r"[\s)]*(?:(?:await|new)\s+|&(?:mut\s+)?)*[\w$.:?\s]*;?\s*", flat)
+        re.fullmatch(
+            r"[\s)]*(?:(?:await|new)\s+|&(?:mut\s+)?)*[\w$.:?\s]*;?\s*",
+            _strip_parens(expression),
+        )
     )
 
 
@@ -7209,9 +7185,7 @@ class PythonParser(BaseParser):
 
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             func_id = f"{parent_id}::{node.name}"
-            # D.1: a function is a method iff its enclosing parent node is a Class.
-            # Previous logic used string matching on parent_id which incorrectly
-            # classified nested functions inside other functions as Methods.
+            # A function is a method iff its enclosing parent node is a Class.
             is_method = parent_id in self.class_ids
             node_type = "Method" if is_method else "Function"
 
@@ -14944,7 +14918,7 @@ class CodeGraphBuilder:
                     elif file.endswith(_JSTS_EXTENSIONS):
                         TSParser(self).parse(file_path, rel_path, content)
                     elif file.endswith(".svelte"):
-                        # D.2: iterate all <script> blocks and shift each block's
+                        # Iterate all <script> blocks and shift each block's
                         # parsed linenos by its offset within the .svelte file.
                         pos = 0
                         while True:
@@ -15377,11 +15351,10 @@ def main():
     # The root comes from the arguments, not from the working directory.
     config = DescryConfig.from_env(project_root)
 
-    # B.3: always pass config.excluded_dirs so non-TOML projects still get
-    # the full default exclusion set.
+    # Passed always, so non-TOML projects still get the full default
+    # exclusion set.
     config_excluded_dirs = config.excluded_dirs
 
-    # B.3: respect config.cache_dir instead of hardcoded ".descry_cache"
     cache_dir = config.cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -15451,7 +15424,6 @@ def main():
 
             if embeddings_available():
                 logger.info("Generating embeddings for semantic search...")
-                # B.3: respect config.embedding_model
                 searcher = SemanticSearcher(
                     str(graph_path),
                     cache_dir=str(config.cache_dir),

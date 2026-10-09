@@ -8520,6 +8520,11 @@ class TestJavaCallResolution:
                     public String tally() { return "x"; }
                 }
                 """,
+                "Other.java": """
+                public class Other {
+                    public String tally() { return "y"; }
+                }
+                """,
                 "Use.java": """
                 public class Use {
                     public void go() {
@@ -8547,6 +8552,11 @@ class TestJavaCallResolution:
                 "Item.java": """
                 public class Item {
                     public String tally() { return "x"; }
+                }
+                """,
+                "Other.java": """
+                public class Other {
+                    public String tally() { return "y"; }
                 }
                 """,
                 "Use.java": """
@@ -9725,6 +9735,85 @@ class TestJavaCallResolution:
         ]
         assert calls == ["FILE:app/Tree.java::Tree::Node"]
 
+    def test_lambda_of_a_method_declared_without_a_modifier(self, tmp_path):
+        """`Op r = (w) -> w.spin()`: `w` is the parameter `run` declares."""
+        builder = _index(
+            tmp_path,
+            {
+                "Op.java": """
+                interface Op {
+                    void run(Widget w);
+                }
+                """,
+                "Widget.java": """
+                class Widget {
+                    void spin() {}
+                }
+                """,
+                "Gadget.java": """
+                class Gadget {
+                    void spin() {}
+                }
+                """,
+                "Use.java": """
+                class Use {
+                    void go() {
+                        Op r = (w) -> w.spin();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Use.java::Use::go") == [
+            "FILE:Widget.java::Widget::spin"
+        ]
+
+    def test_method_without_a_modifier_whose_brace_is_on_the_next_line(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "Widget.java": """
+                class Widget {
+                    String spin() { return ""; }
+                    String plain(int a)
+                    {
+                        return spin();
+                    }
+                    String wrapped(
+                        int a)
+                    {
+                        return spin();
+                    }
+                    String noted() // not; a declaration
+                    {
+                        return spin();
+                    }
+                }
+                """,
+            },
+        )
+        spin = ["FILE:Widget.java::Widget::spin"]
+        for name in ("plain", "wrapped", "noted"):
+            assert _calls(builder, f"FILE:Widget.java::Widget::{name}") == spin
+        assert _calls(builder, "FILE:Widget.java::Widget") == []
+
+    def test_enum_constant_with_a_body_on_its_line(self, tmp_path):
+        """`A { void f() {} },` declares the constant, and calls nothing."""
+        builder = _index(
+            tmp_path,
+            {
+                "E.java": """
+                enum E {
+                    A { void f() {} },
+                    B;
+                    void f() {}
+                }
+                """,
+            },
+        )
+        assert "FILE:E.java::E::A" in builder.node_registry
+        assert _calls(builder, "FILE:E.java::E") == []
+
 
 class TestPhpCallResolution:
     def test_constructed_type_picks_the_method(self, tmp_path):
@@ -10539,6 +10628,29 @@ class TestPhpCallResolution:
         )
         assert _calls(builder, "FILE:tree.js::Node::total") == ["REF:parent.size"]
 
+    def test_return_on_the_line_of_the_opening_brace(self, tmp_path):
+        """`function make() { return new Widget; }` returns a `Widget`."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """
+                <?php
+                class Widget {
+                    function spin() {}
+                }
+                class Gadget {
+                    function spin() {}
+                }
+                function make() { return new Widget; }
+                function go() {
+                    $a = make();
+                    $a->spin();
+                }
+                """,
+            },
+        )
+        assert "FILE:a.php::Widget::spin" in _calls(builder, "FILE:a.php::go")
+
 
 class TestDotnetCallResolution:
     def test_declared_type_picks_the_method(self, tmp_path):
@@ -11291,6 +11403,50 @@ class TestDotnetCallResolution:
             "REF:Ship",
             "REF:Ship",
         ]
+
+    def test_out_variable_of_a_call_that_closes_on_a_later_line(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "a.cs": """
+                namespace N {
+                class Widget {
+                    public void Spin() {}
+                }
+                class Gadget {
+                    public void Spin() {}
+                }
+                class U {
+                    bool TryGet(int k, out Widget w, int z) { w = null; return true; }
+                    void Go() {
+                        TryGet(1, out var b,
+                            2);
+                        b.Spin();
+                    }
+                }
+                }
+                """,
+            },
+        )
+        assert "FILE:a.cs::Widget::Spin" in _calls(builder, "FILE:a.cs::U::Go")
+
+    def test_field_of_a_type_named_record(self, tmp_path):
+        """`record r = new();` declares the field `r`, not a type."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cs": """
+                namespace N {
+                class U {
+                    record r = new();
+                    void Go() {}
+                }
+                }
+                """,
+            },
+        )
+        kinds = {node["id"]: node["type"] for node in builder.nodes}
+        assert kinds["FILE:a.cs::U::r"] == "Constant"
 
 
 class TestClangCallResolution:
@@ -12097,6 +12253,28 @@ class TestClangCallResolution:
         )
         assert _calls(builder, "FILE:main.cc::main") == ["FILE:s.h::S::run"]
 
+    def test_auto_binds_what_a_call_of_its_own_statement_returns(self, tmp_path):
+        """`auto x = make(); other();`: `x` is what `make` returns."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cc": """
+                struct Widget { void spin(); };
+                struct Gadget { void spin(); };
+                void Widget::spin() {}
+                void Gadget::spin() {}
+                Widget make() { return Widget(); }
+                Gadget other() { return Gadget(); }
+                void go() {
+                  auto x = make(); other();
+                  x.spin();
+                }
+                """,
+            },
+        )
+        assert "FILE:a.cc::Widget::spin" in _calls(builder, "FILE:a.cc::go")
+        assert "FILE:a.cc::Gadget::spin" not in _calls(builder, "FILE:a.cc::go")
+
 
 class TestRubyCallResolution:
     def test_constructed_receiver_resolves_to_its_class_s_method(self, tmp_path):
@@ -12845,6 +13023,66 @@ class TestRubyCallResolution:
             "REF:ok?",
         ]
 
+    def test_type_named_on_one_line_spans_the_body_that_reopens_it(self, tmp_path):
+        padding = "# pad\n" * 30
+        builder = _index(
+            tmp_path,
+            {
+                "a.rb": padding
+                + "module Empty; end\nmodule Empty\n  def a\n  end\nend\n",
+            },
+        )
+        spans = {
+            node["id"]: (node["metadata"]["lineno"], node["metadata"]["end_lineno"])
+            for node in builder.nodes
+            if node["type"] != "File"
+        }
+        assert spans["FILE:a.rb::Empty"] == (32, 35)
+
+    def test_character_literal_is_no_call(self, tmp_path):
+        """`x = ?a` reads the character `a`, and calls no method `a`."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.rb": """
+                class K
+                  def a
+                  end
+                  def m
+                    x = ?a
+                    x ? a : nil
+                  end
+                end
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.rb::K::m") == ["FILE:a.rb::K::a"]
+
+    def test_do_on_the_line_after_its_loop_opens_no_block(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "a.rb": """
+                class K
+                  def m(x)
+                    while x
+                    do
+                      x = nil
+                    end
+                  end
+                  def after
+                  end
+                end
+                """,
+            },
+        )
+        spans = {
+            node["id"]: (node["metadata"]["lineno"], node["metadata"]["end_lineno"])
+            for node in builder.nodes
+            if node["type"] != "File"
+        }
+        assert spans["FILE:a.rb::K::m"] == (3, 8)
+
 
 class TestDartCallResolution:
     def test_bare_call_reaches_only_what_the_library_has_in_scope(self, tmp_path):
@@ -13506,6 +13744,29 @@ class TestDartCallResolution:
             twice,
         ]
         assert _calls(builder, "FILE:lib/jobs.dart::Jobs::run::nested") == [count]
+
+    def test_cascade_on_a_variable_of_a_declared_type(self, tmp_path):
+        """`var y = p..add(1)`: `y` is `p`, whatever `add` returns."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.dart": """
+                class Widget {
+                  void spin() {}
+                  void add(int a) {}
+                }
+                class Gadget {
+                  void spin() {}
+                  void add(int a) {}
+                }
+                void go(Widget p) {
+                  var y = p..add(1);
+                  y.spin();
+                }
+                """,
+            },
+        )
+        assert "FILE:a.dart::Widget::spin" in _calls(builder, "FILE:a.dart::go")
 
 
 class TestProcessDirectory:

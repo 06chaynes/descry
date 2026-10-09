@@ -1061,7 +1061,7 @@ class GraphQuerier:
 
         Returns list of candidate nodes with match quality scores.
         """
-        # D.3: skip when query is empty/whitespace (would "match" all nodes).
+        # Skip when query is empty/whitespace (would "match" all nodes).
         if not query or not query.strip():
             return []
         candidates = []
@@ -1099,7 +1099,7 @@ class GraphQuerier:
             elif node_name_normalized == query_normalized:
                 score += 80  # Naming convention variant
 
-            # Partial symbol match (D.3: require >= 2 chars to avoid
+            # Partial symbol match (require >= 2 chars to avoid
             # `"" in anything` being always True)
             elif len(query_normalized) >= 2 and (
                 query_normalized in node_name_normalized
@@ -1855,7 +1855,7 @@ class GraphQuerier:
         - Adjacent terms (phrase proximity): +20 bonus
         """
         results = []
-        # D.3: drop empty/whitespace-only terms before scoring — `"" in s` is
+        # Drop empty/whitespace-only terms before scoring — `"" in s` is
         # always True and would match every node.
         terms = [t.lower() for t in query_terms if t and t.strip()]
         num_terms = len(terms)
@@ -2018,7 +2018,7 @@ class GraphQuerier:
             name: Name or pattern to search for
             fuzzy: If True, also matches names that start with or contain the search term
         """
-        # D.3: empty/whitespace name would match every node (`"" in s` is True).
+        # Empty/whitespace name would match every node (`"" in s` is True).
         if not name or not name.strip():
             return []
         exact_matches = []

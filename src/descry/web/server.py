@@ -241,7 +241,7 @@ async def api_ensure(request: Request) -> JSONResponse:
 
 
 async def api_index(_request: Request) -> JSONResponse:
-    # H.2: path body param removed; always index cfg.project_root.
+    # Always indexes cfg.project_root.
     result = await _get_service().index()
     if isinstance(result, ServiceError):
         status = 409 if result.reason == "busy" else 500
@@ -752,7 +752,7 @@ async def api_source(request: Request) -> JSONResponse:
 
     target_line = _int_param(request, "line", 0) or None
 
-    # A.6 / H.1 pipeline: resolve → containment → S_ISREG → size → text-check → read
+    # Pipeline: resolve → containment → S_ISREG → size → text-check → read
     cfg = _get_config()
     try:
         file_path = (cfg.project_root / file_param).resolve(strict=False)
