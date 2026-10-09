@@ -70,15 +70,15 @@ never falls back, and naming `f2llm-v2-0.6b` skips the attempt and the warning.
 Measured with `tests/eval/` — docstring→symbol queries, leave-one-out leakage
 control, paired bootstrap:
 
-**descry** (2,129 nodes, 733 queries, Python)
+**descry** (3,014 nodes, 1,377 queries, Python)
 
 | model | R@1 | R@10 | MRR | nDCG@10 |
 |---|---|---|---|---|
-| `embeddinggemma` | **0.638** | **0.914** | **0.736** | **0.776** |
-| `jina-code` | 0.508 | 0.842 | 0.624 | 0.671 |
-| `f2llm-v2-0.6b` | 0.486 | 0.862 | 0.621 | 0.675 |
-| `qwen3` | 0.462 | 0.842 | 0.596 | 0.650 |
-| `embeddinggemma-2` | 0.432 | 0.794 | 0.560 | 0.612 |
+| `embeddinggemma` | **0.560** | **0.853** | **0.665** | **0.706** |
+| `f2llm-v2-0.6b` | 0.430 | 0.800 | 0.561 | 0.613 |
+| `jina-code` | 0.413 | 0.759 | 0.533 | 0.582 |
+| `qwen3` | 0.379 | 0.781 | 0.520 | 0.577 |
+| `embeddinggemma-2` | 0.373 | 0.698 | 0.488 | 0.533 |
 
 **ripgrep** at `3fce3b5` (3,820 nodes, 691 queries, Rust)
 
@@ -87,7 +87,7 @@ control, paired bootstrap:
 | `embeddinggemma` | **0.569** | **0.903** | **0.694** | **0.743** |
 | `f2llm-v2-0.6b` | 0.420 | 0.857 | 0.576 | 0.639 |
 | `qwen3` | 0.411 | 0.845 | 0.561 | 0.626 |
-| `jina-code` | 0.369 | 0.829 | 0.531 | 0.598 |
+| `jina-code` | 0.369 | 0.831 | 0.531 | 0.598 |
 | `embeddinggemma-2` | 0.356 | 0.810 | 0.515 | 0.582 |
 
 Rerun on your own project — the ranking is measured, not universal:
@@ -221,10 +221,14 @@ model = "embeddinggemma"   # see "Embedding models"; `descry embedding-models` l
 # file_suffixes = ["_test.rs", ".test.ts", ".spec.ts", "_test.py"]
 
 [code_files]
-# OPTIONAL — REPLACES the 30-element default (.rs/.py/.ts/.tsx/.js/.jsx/.svelte/
-# .go/.java/.kt/.scala/.rb/.rake/.gemspec/.php/.cs/.vb/.c/.cc/.cpp/.cxx/.cu/.h/
-# .hh/.hpp/.hxx/.dart/.css/.scss/.html). Leave unset to keep defaults.
+# OPTIONAL — REPLACES the 35-element default (.rs/.py/.ts/.tsx/.mts/.cts/.js/
+# .jsx/.mjs/.cjs/.svelte/.proto/.go/.java/.kt/.scala/.rb/.rake/.gemspec/.php/
+# .cs/.vb/.c/.cc/.cpp/.cxx/.cu/.h/.hh/.hpp/.hxx/.dart/.css/.scss/.html). Leave
+# unset to keep defaults.
 # extensions = [".rs", ".py", ".ts", ".tsx", ".go", ".java"]
+# OPTIONAL — larger files are skipped by the indexer (it logs each one) and
+# refused by the web source view. Default 10; 0 = no limit.
+# max_file_mb = 10
 
 [git]
 # OPTIONAL — REPLACES defaults (.descry_cache/, .beads/, Cargo.lock,
@@ -267,7 +271,7 @@ api_prefixes = ["/api/v1", "/api/v2", "/api"]      # stripped when matching spec
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DESCRY_LOG_LEVEL` | `WARNING` | Log level (DEBUG, INFO, WARNING, ERROR) |
+| `DESCRY_LOG_LEVEL` | `WARNING` (`INFO` for the indexer) | Log level (DEBUG, INFO, WARNING, ERROR) |
 | `DESCRY_CACHE_DIR` | `.descry_cache/` | Override cache directory location |
 | `DESCRY_NO_SCIP` | `false` | Disable SCIP indexing |
 | `DESCRY_NO_EMBEDDINGS` | `false` | Disable semantic search |
@@ -297,7 +301,25 @@ Configuration precedence: defaults < `.descry.toml` < environment variables.
 
 `ast-grep` is the `sg` Rust binary (install via Homebrew or `cargo install ast-grep`) — when present on `PATH`, descry uses it for higher-fidelity call extraction in Rust, TypeScript, and JavaScript files. It's auto-disabled on TS/JS corpora over `DESCRY_AST_GREP_MAX_FILES` (default 5,000) where per-file subprocess overhead would dominate. JavaScript and TypeScript cover `.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.mts` and `.cts`.
 
-Each call is resolved from evidence: imports (including `go.mod`, `Cargo.toml`, `package.json` and `tsconfig.json`), declared and returned types, lexical scope and the class hierarchy. A call ends as *resolved* to one definition, *unresolved* when several project definitions could be meant, or *external* when no project symbol has that name; the index summary reports all three. SCIP adds type-aware resolution through traits and generics, and is verified for Rust workspaces; the other indexers' output is used only where it names a node in the graph.
+Each call is resolved from evidence: imports (including `go.mod`, `Cargo.toml`, `package.json` and `tsconfig.json`), declared and returned types, lexical scope, the class hierarchy and the language's visibility rules. Names bound by loops, patterns, destructuring and closure parameters are typed from declarations, and each language's standard library is described by generated data (`src/descry/stdlib/`), so a chain through library types keeps its type. A call ends as *resolved* to one definition, *unresolved* when nothing in the source decides — the definitions that fit are kept on the edge as `candidates` — or *external* when it leaves the project; the index summary reports all three. Nothing is matched by name alone when more than one definition fits, and nothing by file path. SCIP adds type-aware resolution through traits and generics, and is verified for Rust workspaces; the other indexers' output is used only where it names a node in the graph.
+
+Share of project calls resolved without SCIP, measured on public repositories at the commits named:
+
+| Language | Repository | Resolved |
+|---|---|---|
+| Rust | ripgrep `3fce3b5` | 87% (93% with rust-analyzer) |
+| TypeScript | zod `0b216ef` | 93% |
+| Go | cobra `adbc881` | 100% |
+| Java | gson `845664b`, commons-lang `682a8ff` | 100%, 99% |
+| Python | httpx `b5addb6`, flask `d086db8` | 97%, 96% |
+| PHP | monolog `3bed304`, guzzle `9393947` | 95%, 93% |
+| C# | serilog `bebc771`, Newtonsoft.Json `52fa3ae` (`Src/Newtonsoft.Json`) | 94%, 91% |
+| C | jq `a19efdd`, libuv `954c1d1` | 99%, 79% |
+| C++ | leveldb `7ee830d`, fmt `c4927e6` | 98%, 86% |
+| Dart | shelf `b2cb503`, riverpod `1efba1c` (`packages/riverpod`) | 95%, 92% |
+| Ruby | rack `a9833c8`, sinatra `cb22afd` | 70%, 39% |
+
+The remainder is unresolved, not wrong: of 450 resolved edges drawn at random from these repositories and read against the source, 448 reach the definition the call reaches. Ruby is low because the language declares no types and calls inside DSL blocks run with another `self`; libuv because most of its functions exist once for Unix and once for Windows, and the build files, not the source, choose between them.
 
 ## Installation
 
@@ -370,7 +392,7 @@ Requires [uv](https://github.com/astral-sh/uv) and [just](https://github.com/cas
 - The UI is served by the same process that reads your repository; any authentication layer would be a shared-secret between your browser and your own terminal.
 - `TrustedHostMiddleware` rejects requests whose `Host` header isn't loopback (`127.0.0.1`, `localhost`, `::1`), defeating DNS-rebinding attacks that would otherwise bypass the 127.0.0.1 bind.
 - The `--host` flag is validated by `_loopback_host` and rejects non-loopback values with a clear error pointing at the reverse-proxy guidance.
-- Path-traversal hardening on `/api/source` is independent of any CORS posture: it enforces project-root containment, rejects non-regular files, caps size at 10 MiB, refuses non-text content, and opens every path component with `O_NOFOLLOW` to defeat symlink swaps.
+- Path-traversal hardening on `/api/source` is independent of any CORS posture: it enforces project-root containment, rejects non-regular files, caps size at `[code_files] max_file_mb`, refuses non-text content, and opens every path component with `O_NOFOLLOW` to defeat symlink swaps.
 - The page's scripts are pinned with Subresource Integrity hashes and a Content-Security-Policy is sent with every response; rendered repository markdown cannot load remote images.
 - The reindex endpoints (`/api/index`, `/api/index/stream`) accept no path parameter; they always index the configured project root, one run at a time (a second request gets `409`).
 

@@ -8,38 +8,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [0.3.0] — 2026-10-07
 
-Call resolution, semantic search and the SCIP integration are reworked,
-the MCP server is ported to the MCP Python SDK v2, and a full-tree review's
-findings are fixed.
+Call resolution is rebuilt for every supported language, semantic search
+and the SCIP integration are reworked, the MCP server is ported to the MCP
+Python SDK v2, and a full-tree review's findings are fixed.
 
 **Upgrading**
 
 - The first `descry index` re-embeds every symbol and regenerates every
   SCIP index. Embedding builds take longer than before, because each
   symbol's source is now embedded.
+- The graph schema is v2. An existing graph is rejected with a message to
+  run `descry index`; node IDs and node types change in most languages.
 - The CALLS resolution percentage is measured differently and is not
   comparable with earlier releases (see *Changed*).
 - The `mcp` extra requires `mcp>=2`; the `embeddings` extra requires
   `transformers>=4.51`.
 - The CLI exits `2` on every service failure, not only on `ERROR:` text.
+- The web API answers `500` for a failed index run, `404` for callees of
+  an unknown function and `400` for a negative `limit`; these were `200`.
 - `[timeouts] scip_minutes` defaults to 30 (was unlimited; `0` still means
   unlimited).
 - Removed: the `ast` extra, `[cross_lang] frontend_api_patterns`, and the
   per-adapter SCIP options of every adapter except Rust.
-- Graph schema stays at v1. Some node IDs change: a Java field that shares
-  its name with a method (`Type::field_<name>`), a Rust function nested in
-  a method (`Type::method::name`), and a TypeScript interface that shares
-  its name with a value (`interface_<name>`).
+- Subprocesses inherit the environment unfiltered, and `/api/source` no
+  longer refuses files by name (see *Removed*).
 
 ### Security
 
 - **Web UI.** Symbol and file names are escaped in the flow tree. Remote
   scripts carry Subresource Integrity hashes and every response carries a
-  Content-Security-Policy. State-changing requests are refused unless
-  same-origin. `/api/source` opens every path component with `O_NOFOLLOW`,
-  caps the read, and blocks `.env/` directories and bare `.git` files.
-  Index runs are serialised, and a streamed run's child process is killed
-  when the client disconnects.
+  Content-Security-Policy that allows exactly those asset URLs.
+  State-changing requests are refused unless same-origin. `/api/source`
+  opens every path component with `O_NOFOLLOW` and caps the read.
+- **Index runs.** One runs at a time per service, whichever interface
+  asks. The indexer and everything it started are stopped on timeout,
+  cancellation, client disconnect, and `SIGINT`/`SIGTERM`/`SIGHUP`.
 - **Indexer child process.** Spawned with `python -P`, so a `descry/`
   package inside the indexed repository cannot shadow the installed one.
 - **Git.** Hooks, fsmonitor, signature display, external diff, textconv
@@ -47,18 +50,14 @@ findings are fixed.
   fetched; diffs are forced to the plain `a/` `b/` format; log output is
   NUL-framed, so commit subjects and file names cannot forge a commit;
   argument validators match the whole value.
-- **Subprocess environment.** More credential-shaped names are stripped
-  (`*_PASS`, `*_PWD`, `*_PAT`, `*_KEY`, `*_JWT`, `*_COOKIE`, `*_AUTH`,
-  more database URLs and webhooks). `HF_TOKEN` reaches only the indexing
-  child, never an indexer or git.
 - **Source reads.** Paths in the graph are confined to the project root in
   the query engine and the embedder, so a hand-edited graph cannot make a
   tool return files from outside it.
 - **Embedding models.** No model is loaded with `trust_remote_code`; the
   option and every way of enabling it are removed.
-- **SCIP cache.** A symlinked cache directory or index file is refused,
-  the checksum file is written atomically, and Rust and TypeScript
-  workspace entries that resolve outside the project are dropped.
+- **SCIP cache.** The checksum file is written atomically, and Rust and
+  TypeScript workspace entries that resolve outside the project are
+  dropped.
 - **MCP.** `descry_ensure` output is fenced like `descry_index`, and a
   closing fence tag inside repository content is neutralised.
 - **Config.** `[syntax.lang_map]`, `[timeouts]`, `[query]` and
@@ -70,12 +69,48 @@ findings are fixed.
 
 - **Call resolution is decided from evidence.** Imports (including
   `go.mod`, `Cargo.toml`, `package.json` and `tsconfig.json`), declared and
-  returned types, lexical scope and the class hierarchy decide each call.
-  A call is *resolved*, left *unresolved* when several project definitions
-  fit, or dropped as *external*. Previously a call resolved to the first
-  symbol of that name, and a name list discarded most call sites before
-  counting. The summary line is now
+  returned types, lexical scope, the class hierarchy and each language's
+  visibility rules decide each call. Names bound by loops, patterns,
+  destructuring and closure or lambda parameters are typed from
+  declarations. A call is *resolved* to one definition, left *unresolved*
+  when nothing in the source decides, or dropped as *external*. Previously
+  a call resolved to the first symbol of that name, a name list discarded
+  most call sites before counting, and ties were broken by file path. The
+  summary line is now
   `CALLS Resolution: P% of N project calls (...); E external calls not counted`.
+- **Unresolved calls name their candidates.** A `CALLS` edge that could
+  reach several definitions carries them in `metadata.candidates`.
+  `callers` marks such a caller "one of N candidates" and `callees` lists
+  the call once; `flow`, `path` and `context` follow resolved edges only.
+- **Standard libraries are generated data.** `src/descry/stdlib/<lang>.json`
+  says which types and members a language's standard library has and what
+  they return, for Rust, TypeScript and JavaScript, Python, Go, Java, PHP,
+  C#, Ruby, Dart, C and C++. A call on a standard value is external, and
+  its result is typed for the next call in a chain. The files are written
+  by `tools/stdlib/` from each language's own machine-readable description
+  (rustdoc JSON, TypeScript's `lib.*.d.ts`, typeshed, Go's `api/*.txt`,
+  `javap`, phpstorm-stubs, .NET reflection, RBS, the Dart SDK, clang's AST)
+  and replace the hand-written name lists for those languages.
+- **C#, PHP, Ruby, Dart, C and C++ parsers are rewritten.** Every
+  definition is a node under its real parent with its line range
+  (overloads, constructors, properties, accessors, enum members, local
+  functions, out-of-class C++ members, Ruby singleton and generated
+  methods); a call belongs to the member it is written in; receivers are
+  typed from declarations. Ruby calls written without parentheses are
+  recorded. In C#, PHP and Ruby a call on a receiver of unknown type is
+  never matched by name.
+- **Conditional compilation.** In C, C++ and C#, a definition under `#if`
+  is chosen for a call only when the call sits under the same condition,
+  or when nothing else, in the project or the standard library, could be
+  meant. Go build constraints and `_test.go` visibility decide between
+  platform variants.
+- **Go, Java, Python, Rust, TypeScript.** Go interface methods, struct
+  fields, package-level variables and multi-value results; Java
+  inheritance edges, enum constants, lambdas and method references; Python
+  star re-exports, class attributes, `with`, properties and return types
+  read from bodies; Rust `#[derive]`, `?`, patterns and turbofish;
+  TypeScript signatures over several lines, overloads, type parameters and
+  re-exports.
 - **SCIP.** Rust workspace indexes map onto graph nodes (they did not
   before, and every SCIP-labelled edge fell back to name matching).
   Occurrences are matched by line and column. Index files are named
@@ -94,8 +129,8 @@ findings are fixed.
   descry's version in its handshake.
 - **The web UI delegates every operation to `DescryService`.** `/api/path`
   reports whether a search found a path, found none, timed out or ran out
-  of budget. `/api/health` and `/api/ensure` follow the service's view of
-  the graph.
+  of budget. `/api/health`, `/api/status`, `/api/ensure` and
+  `/api/examples` follow the service's view of the graph.
 - **CLI and tools.** `ensure` uses `[project] max_stale_hours` unless given
   an age. `index <subdir>` narrows the walk and writes the root's graph.
   `--lang` covers every indexed language and accepts `ts`, `js`, `py`,
@@ -119,14 +154,25 @@ findings are fixed.
   `#` docstrings; C# properties and verbatim strings; TypeScript and
   JavaScript `.jsx`/`.mjs`/`.cjs`/`.mts`/`.cts` files, `$` identifiers,
   typed arrow constants, file-level calls; calls in comments and string
-  literals; chained calls; declarations recorded as calls.
+  literals; chained calls; declarations recorded as calls; braces and
+  calls inside string literals in C#, PHP, Dart and C/C++; a licence notice
+  inside a file read as the next symbol's docstring; inheritance from a
+  project type named like a standard one; calls in a second Svelte
+  `<script>` block; calls in a nested Python function's default arguments.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer
   aborts the whole index. `index` no longer encodes every symbol twice.
+  `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root
+  when given `--project-root` alone, and refuses a path outside it.
 - **Service and query.** Source is read relative to the project root
   whatever the working directory. A missing, stale or corrupt graph no
   longer stops the MCP server from starting, and is reported by `health`
   and rebuilt by `ensure`. A malformed graph raises a schema error instead
-  of a traceback. An empty `api_prefixes` entry no longer recurses forever.
+  of a traceback, including for metadata of the wrong type. An empty
+  `api_prefixes` entry no longer recurses forever. A graph file removed
+  between two looks is reported as missing. A streamed index run always
+  ends with a `done` event. `ensure` refuses an age limit that is not a
+  finite, non-negative number, and a negative `limit` is an error in every
+  interface. Callers come back in a stable order.
 - **Embeddings.** The file lock now excludes; cache cleanup cannot delete
   another process's temporary; concurrent first searches load the model
   once; `min_score` applies after re-ranking; a stale or mismatched cache
@@ -139,10 +185,13 @@ findings are fixed.
   projects of one name in two languages sharing an index, and
   `DESCRY_NO_SCIP` parsed two ways.
 - **Web.** `/api/ensure` without a body, unvalidated `direction`, errors
-  returned as `200`, IPv6 loopback `Host`, and a NUL byte in `?file=`.
+  returned as `200`, IPv6 loopback `Host`, a NUL byte in `?file=`, an
+  `Origin` header that is not a URL, text files in other encodings refused
+  by `/api/source`, and no syntax language for most extensions in the
+  source view.
 - **Packaging.** `descry-mcp` and `descry-web` name the extra to install
   when it is missing. `pi-extension` uses one interpreter name and a
-  Windows-safe script path.
+  Windows-safe script path. Licence metadata uses the SPDX form.
 
 ### Added
 
@@ -153,12 +202,20 @@ findings are fixed.
   project's own graph (docstring→symbol queries, leave-one-out leakage
   control, paired bootstrap, per-language breakdown).
 - `descry-generate --project-root`.
+- `[code_files] max_file_mb` (default 10, `0` for no limit): the size above
+  which a file is skipped by the indexer and refused by `/api/source`.
+- `tools/stdlib/` — the generators of the standard-library data, one per
+  language, each reproducible from a pinned source.
 - `graph.error` in `health`, `invalid_graph` in `status`, and
   `truncation_note` in structured churn.
 
 ### Removed
 
 - The `ast` extra and the unwired `tree_sitter_parser` module.
+- Subprocess environment filtering (`safe_env`). Git, ast-grep, the SCIP
+  indexers and the indexing child inherit the environment as it is.
+- The credential-filename blocklist on `/api/source`. Reads stay confined
+  to regular text files inside the project root.
 - `[cross_lang] frontend_api_patterns`, which had no effect.
 - `GraphQuerier.find_call_path` (use `find_call_path_result`) and the
   `python -m descry.embeddings` entry point.

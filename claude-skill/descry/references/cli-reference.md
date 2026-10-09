@@ -11,6 +11,7 @@ descry health               # version, graph status, SCIP/embeddings/git state
 descry status               # just the graph: exists? nodes? edges? stale?
 descry ensure               # regenerate only if missing or stale
 descry index [path]         # force full rebuild (SCIP + embeddings)
+descry embedding-models     # registered embedding models, and the one selected
 ```
 
 `--max-age-hours N` on `ensure` overrides the config's `max_stale_hours`.
@@ -146,7 +147,7 @@ All three are optional — `api_prefixes` defaults to `["/api/v1", "/api/v2",
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `DESCRY_LOG_LEVEL` | `WARNING` | Logging verbosity |
+| `DESCRY_LOG_LEVEL` | `WARNING` (`INFO` for the indexer) | Logging verbosity |
 | `DESCRY_CACHE_DIR` | `.descry_cache/` | Override cache location |
 | `DESCRY_NO_SCIP` | unset | Disable SCIP indexing even if binaries exist |
 | `DESCRY_NO_EMBEDDINGS` | unset | Disable semantic search |
