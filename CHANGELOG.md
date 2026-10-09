@@ -80,8 +80,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   `CALLS Resolution: P% of N project calls (...); E external calls not counted`.
 - **Unresolved calls name their candidates.** A `CALLS` edge that could
   reach several definitions carries them in `metadata.candidates`.
-  `callers` marks such a caller "one of N candidates" and `callees` lists
-  the call once; `flow`, `path` and `context` follow resolved edges only.
+  `callers` and backward `flow` mark such a caller "one of N candidates"
+  and `callees` lists the call once. `path` goes through such a call only
+  when no path of resolved calls exists, and marks the hop. Forward `flow`
+  and `context` follow resolved edges only.
 - **Standard libraries are generated data.** `src/descry/stdlib/<lang>.json`
   says which types and members a language's standard library has and what
   they return, for Rust, TypeScript and JavaScript, Python, Go, Java, PHP,
@@ -146,7 +148,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
 ### Fixed
 
 - **Parsers.** Rust `pub(crate)`/`pub(super)` items, `const fn`,
-  `extern fn`, one-line blocks and `impl` edges; Python definitions under
+  `extern fn`, one-line blocks, calls in a body on the `fn` line and
+  `impl` edges; Python definitions under
   `if`/`try`/`with`/`for` and calls counted twice in nested functions;
   Java Allman braces, class scope ended by a `'}'` literal, calls
   attributed to the class instead of the method; Go unexported types,
@@ -172,7 +175,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   between two looks is reported as missing. A streamed index run always
   ends with a `done` event. `ensure` refuses an age limit that is not a
   finite, non-negative number, and a negative `limit` is an error in every
-  interface. Callers come back in a stable order.
+  interface. Callers come back in a stable order. `path` no longer follows
+  an unresolved call to the first definition of its name, and `flatten`
+  follows an unresolved base only when one class has the name.
 - **Embeddings.** The file lock now excludes; cache cleanup cannot delete
   another process's temporary; concurrent first searches load the model
   once; `min_score` applies after re-ranking; a stale or mismatched cache
@@ -203,9 +208,13 @@ Python SDK v2, and a full-tree review's findings are fixed.
   control, paired bootstrap, per-language breakdown).
 - `descry-generate --project-root`.
 - `[code_files] max_file_mb` (default 10, `0` for no limit): the size above
-  which a file is skipped by the indexer and refused by `/api/source`.
+  which a file is skipped by the indexer, not read for source snippets and
+  refused by `/api/source`.
 - `tools/stdlib/` — the generators of the standard-library data, one per
   language, each reproducible from a pinned source.
+- `THIRD-PARTY-NOTICES.md`, shipped in the wheel and the sdist: the source,
+  copyright holder and licence of each standard-library data file.
+- `descry_status` in the Pi extension.
 - `graph.error` in `health`, `invalid_graph` in `status`, and
   `truncation_note` in structured churn.
 

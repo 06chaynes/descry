@@ -356,7 +356,9 @@ class DescryConfig:
     code_extensions: set[str] = field(
         default_factory=lambda: set(_DEFAULT_CODE_EXTENSIONS)
     )
-    max_file_mb: float = 10  # larger files are not indexed or served; 0 = unlimited
+    max_file_mb: float = (
+        10  # larger files are not indexed, read or served; 0 = unlimited
+    )
 
     # Git
     churn_exclusions: list[str] = field(
@@ -507,9 +509,16 @@ class DescryConfig:
         if "extensions" in code_files:
             self.code_extensions = set(code_files["extensions"])
         if "max_file_mb" in code_files:
-            self.max_file_mb = _toml_number(
+            max_file_mb = _toml_number(
                 "code_files", "max_file_mb", code_files["max_file_mb"], self.max_file_mb
             )
+            if max_file_mb < 0:
+                logger.warning(
+                    f"Invalid [code_files] max_file_mb in .descry.toml: "
+                    f"{max_file_mb!r} is negative; keeping {self.max_file_mb!r}"
+                )
+            else:
+                self.max_file_mb = max_file_mb
 
         # [git]
         git = data.get("git", {})
@@ -1772,11 +1781,7 @@ class DescryService:
             lines = [f"{len(callers)} caller(s) of '{name}'{fuzzy_note}:"]
             for caller in callers:
                 node_info = q.get_node_info(caller)
-                one_of = (
-                    f" (one of {ambiguous[caller]} candidates)"
-                    if caller in ambiguous
-                    else ""
-                )
+                one_of = q.one_of(ambiguous.get(caller))
                 if node_info:
                     lineno = node_info.get("metadata", {}).get("lineno")
                     if lineno:
@@ -1815,11 +1820,7 @@ class DescryService:
         else:
             lines = [f"'{display_name}'{fuzzy_note} calls {len(callees)} function(s):"]
             for callee in callees:
-                one_of = (
-                    f" (one of {ambiguous[callee]} candidates)"
-                    if callee in ambiguous
-                    else ""
-                )
+                one_of = q.one_of(ambiguous.get(callee))
                 callee_info = q.get_node_info(callee)
                 if callee_info:
                     lineno = callee_info.get("metadata", {}).get("lineno")
@@ -2684,7 +2685,10 @@ class DescryService:
             call_line = hop.get("call_line")
             snippet = hop.get("call_snippet", "")
 
-            lines.append(f"**{i}. {caller_name}** -> **{callee_name}**")
+            lines.append(
+                f"**{i}. {caller_name}** -> **{callee_name}**"
+                f"{self._GraphQuerier.one_of(hop.get('candidates'))}"
+            )
             if file_path and call_line:
                 lines.append(f"   {file_path}:{call_line}")
             elif file_path:

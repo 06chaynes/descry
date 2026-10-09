@@ -294,16 +294,23 @@ class TestDescryServiceSearch:
         graph = json.loads(
             (Path(__file__).parent / "fixtures" / "small_graph.json").read_text()
         )
+        graph["nodes"].append(
+            {
+                "id": "FILE:src/other.rs::helper",
+                "type": "Function",
+                "metadata": {"name": "helper"},
+            }
+        )
         graph["edges"].append(
             {
-                "source": "FILE:src/server.rs::handle_request",
+                "source": "FILE:src/server.rs::run_server",
                 "target": "REF:ambiguous_call",
                 "relation": "CALLS",
                 "metadata": {
                     "lineno": 9,
                     "candidates": [
                         "FILE:src/auth.rs::validate_token",
-                        "FILE:src/other.rs::validate_token",
+                        "FILE:src/other.rs::helper",
                     ],
                 },
             }
@@ -312,7 +319,11 @@ class TestDescryServiceSearch:
         result = await svc_with_graph.callers("validate_token")
         assert "one of 2 candidates" in result
         data = await svc_with_graph.callers_data("validate_token")
-        assert data["ambiguous"] == {"FILE:src/server.rs::handle_request": 2}
+        assert data["ambiguous"] == {"FILE:src/server.rs::run_server": 2}
+        result = await svc_with_graph.path("run_server", "validate_token")
+        assert "one of" not in result
+        result = await svc_with_graph.path("run_server", "helper")
+        assert "**1. run_server** -> **helper** (one of 2 candidates)" in result
 
     @pytest.mark.asyncio
     async def test_callees(self, svc_with_graph):

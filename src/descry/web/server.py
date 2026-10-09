@@ -578,9 +578,13 @@ async def api_path(request: Request) -> JSONResponse:
                 "file_path": file_path,
                 "line": call_line,
                 "snippet": snippet,
+                "candidates": hop.get("candidates"),
             }
         )
-        md_lines.append(f"**{i}. {caller_name}** -> **{callee_name}**")
+        md_lines.append(
+            f"**{i}. {caller_name}** -> **{callee_name}**"
+            f"{GraphQuerier.one_of(hop.get('candidates'))}"
+        )
         if file_path and call_line:
             md_lines.append(f"   {file_path}:{call_line}")
         if snippet:

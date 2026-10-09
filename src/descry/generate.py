@@ -8391,6 +8391,9 @@ class RustParser(BaseParser):
                     current_context.append(func_id)
                     context_indent.append(indent)
                     fn_ids.add(func_id)
+                elif j == i and "{" in line:
+                    # A body on the signature's line: its calls are the function's.
+                    parent_id = func_id
                 i = j
 
             # 2. Structs/Traits

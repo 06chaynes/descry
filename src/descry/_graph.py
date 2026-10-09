@@ -76,6 +76,11 @@ def _check_shape(data: dict) -> None:
             raise _malformed(f"edge {i} has non-object 'metadata'")
         if not isinstance(edge.get("metadata", {}).get("lineno", 0), int):
             raise _malformed(f"edge {i} has a non-integer 'lineno'")
+        candidates = edge.get("metadata", {}).get("candidates", [])
+        if not isinstance(candidates, list) or not all(
+            isinstance(candidate, str) for candidate in candidates
+        ):
+            raise _malformed(f"edge {i} has 'candidates' that is not a list of strings")
 
 
 def load_graph_with_schema(path: Path | str) -> dict:

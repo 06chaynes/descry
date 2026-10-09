@@ -5,7 +5,7 @@ description = "Codebase knowledge graph: polyglot indexer, semantic search, call
 requires-python = ">=3.11"
 authors = [{name = "Christian Haynes"}]
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD-PARTY-NOTICES.md"]
 readme = "README.md"
 keywords = ["codegraph", "code-analysis", "mcp", "knowledge-graph", "scip", "call-graph"]
 classifiers = [

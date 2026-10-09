@@ -198,6 +198,14 @@ timeout = 45
         assert config.max_nodes == 100
         assert config.embedding_model is None
 
+    def test_negative_max_file_mb_is_refused(self, tmp_path, caplog):
+        (tmp_path / ".descry.toml").write_text("[code_files]\nmax_file_mb = -5\n")
+        with caplog.at_level(logging.WARNING):
+            config = DescryConfig()
+            config._apply_toml(DescryConfig._load_toml(tmp_path))
+        assert config.max_file_mb == 10
+        assert any("is negative" in r.message for r in caplog.records)
+
     def test_from_toml_invalid(self, tmp_path, caplog):
         """Malformed TOML falls back to defaults with warning."""
         (tmp_path / ".descry.toml").write_text("this is [[ not valid toml }{}")

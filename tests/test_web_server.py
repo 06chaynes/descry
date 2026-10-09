@@ -1181,6 +1181,7 @@ class TestPathEndpoint:
                 "file_path": "app.py",
                 "line": 1,
                 "snippet": "def hello():\n    return 'hi'",
+                "candidates": None,
             },
             {
                 "step": 2,
@@ -1189,9 +1190,34 @@ class TestPathEndpoint:
                 "file_path": "app.py",
                 "line": 1,
                 "snippet": "def hello():\n    return 'hi'",
+                "candidates": None,
             },
         ]
         assert body["markdown"].startswith("### Call Path: `n0` -> `n2` (2 hops)\n")
+
+    def test_hop_through_an_unresolved_call_names_its_candidates(
+        self, client, web_project
+    ):
+        _write_web_graph(
+            web_project,
+            nodes=[_fn("start"), _fn("helper"), _fn("helper", file="other.py")],
+            edges=[
+                {
+                    "source": "FILE:app.py::start",
+                    "target": "REF:helper",
+                    "relation": "CALLS",
+                    "metadata": {
+                        "lineno": 1,
+                        "candidates": ["FILE:app.py::helper", "FILE:other.py::helper"],
+                    },
+                }
+            ],
+        )
+
+        body = client.get("/api/path?start=start&end=FILE:other.py::helper").json()
+
+        assert (body["status"], body["path"][0]["candidates"]) == ("found", 2)
+        assert "**1. start** -> **helper** (one of 2 candidates)" in body["markdown"]
 
     def test_unreachable_target_is_not_found(self, client, chain):
         r = client.get("/api/path?start=n0&end=island")

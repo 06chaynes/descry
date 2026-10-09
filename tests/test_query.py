@@ -914,6 +914,7 @@ def _querier(tmp_path, nodes, edges=(), **config):
         "test_file_suffixes": None,
         "syntax_lang_map": None,
         "project_root": None,
+        "max_file_bytes": 0,
     }
     settings.update(config)
     return GraphQuerier(str(graph_file), config=SimpleNamespace(**settings))
@@ -959,6 +960,18 @@ class TestSourcePathsResolveAgainstProjectRoot:
         hop = querier.find_call_path_result("caller", "helper")["path"][0]
         assert "return helper()" in hop["call_snippet"]
         assert hop["file_path"] == "src/foo.py"
+
+    def test_a_file_over_the_size_limit_is_not_read(self, tmp_path):
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / "big.py").write_text("def big():\n    return 'BODY'\n")
+        nodes = [_fn("FILE:big.py::big", lineno=1, end_lineno=2, token_count=10)]
+
+        within = _querier(tmp_path, nodes, project_root=root, max_file_bytes=1024)
+        assert "BODY" in within.get_context_prompt("FILE:big.py::big")
+        over = _querier(tmp_path, nodes, project_root=root, max_file_bytes=8)
+        assert "BODY" not in over.get_context_prompt("FILE:big.py::big")
+        assert "BODY" not in over.trace_flow("big", inline_threshold=100)
 
     @pytest.mark.parametrize("link", [False, True])
     def test_a_node_path_leaving_the_project_is_not_read(self, tmp_path, link):
@@ -1174,6 +1187,94 @@ class TestLangMapValueInTruncation:
         out = q._truncate_output_progressively(text, max_tokens=50, source_lang=lang)
         assert "lines omitted, max_output_tokens limit" in out
         assert "line 199" not in out
+
+
+class TestUnresolvedCallsInPathsAndFlows:
+    """An unresolved call reaches one of the candidates its edge records,
+    and is shown as such; a definition the edge does not name is not reached."""
+
+    @pytest.fixture
+    def querier(self, tmp_path):
+        nodes = [
+            _fn("FILE:a.py::start"),
+            _fn("FILE:a.py::helper"),
+            _fn("FILE:b.py::helper"),
+            _fn("FILE:c.py::helper"),
+            _fn("FILE:b.py::leaf"),
+            _fn("FILE:a.py::bare"),
+        ]
+        edges = [
+            {
+                "source": "FILE:a.py::start",
+                "target": "REF:helper",
+                "relation": "CALLS",
+                "metadata": {
+                    "lineno": 2,
+                    "candidates": ["FILE:b.py::helper", "FILE:c.py::helper"],
+                },
+            },
+            _calls("FILE:b.py::helper", "FILE:b.py::leaf"),
+            {"source": "FILE:a.py::bare", "target": "REF:leaf", "relation": "CALLS"},
+        ]
+        return _querier(tmp_path, nodes, edges)
+
+    @pytest.mark.parametrize("direction", ["forward", "backward"])
+    def test_path_goes_through_a_candidate_and_says_so(self, querier, direction):
+        ends = ("start", "leaf") if direction == "forward" else ("leaf", "start")
+        found = querier.find_call_path_result(*ends, direction=direction)
+        assert found["status"] == "found"
+        hops = sorted(found["path"], key=lambda hop: hop["caller_id"])
+        assert [(hop["caller_id"], hop["callee_id"]) for hop in hops] == [
+            ("FILE:a.py::start", "FILE:b.py::helper"),
+            ("FILE:b.py::helper", "FILE:b.py::leaf"),
+        ]
+        assert [hop.get("candidates") for hop in hops] == [2, None]
+
+    def test_path_does_not_reach_a_definition_the_edge_leaves_out(self, querier):
+        found = querier.find_call_path_result("start", "FILE:a.py::helper")
+        assert found["status"] == "not_found"
+        assert querier.find_call_path_result("bare", "leaf")["status"] == "not_found"
+
+    def test_backward_flow_marks_a_candidate_caller(self, querier):
+        assert "**start** (0 toks) (one of 2 candidates)" in querier.trace_flow(
+            "FILE:b.py::helper", direction="backward"
+        )
+        tree = querier.trace_flow_structured("FILE:b.py::helper", direction="backward")
+        assert [(c["name"], c["candidates"]) for c in tree["root"]["children"]] == [
+            ("start", 2)
+        ]
+        assert "**helper** (0 toks)\n" in querier.trace_flow(
+            "leaf", direction="backward"
+        )
+
+    def test_flatten_follows_a_base_only_when_one_class_has_the_name(self, tmp_path):
+        def cls(node_id):
+            return {**_fn(node_id), "type": "Class"}
+
+        nodes = [
+            cls("FILE:a.py::Child"),
+            cls("FILE:b.py::Base"),
+            {**_fn("FILE:b.py::Base::run"), "type": "Method"},
+            cls("FILE:c.py::Base"),
+        ]
+        edges = [
+            {
+                "source": "FILE:a.py::Child",
+                "target": "REF:Base",
+                "relation": "INHERITS",
+            },
+            {
+                "source": "FILE:b.py::Base",
+                "target": "FILE:b.py::Base::run",
+                "relation": "DEFINES",
+            },
+        ]
+        assert "run" not in _querier(tmp_path, nodes, edges).flatten_class(
+            "FILE:a.py::Child"
+        )
+        assert "run" in _querier(tmp_path, nodes[:3], edges).flatten_class(
+            "FILE:a.py::Child"
+        )
 
 
 class TestCallerOrder:

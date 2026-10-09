@@ -131,6 +131,23 @@ class TestGraphShapeGuard:
         with pytest.raises(GraphSchemaError, match=field):
             load_graph_with_schema(bad)
 
+    @pytest.mark.parametrize("candidates", ["FILE:a.py::f", [7], None])
+    def test_edge_candidates_of_the_wrong_type_raise_schema_error(
+        self, tmp_path, candidates
+    ):
+        edge = {
+            "source": "FILE:a.py::f",
+            "target": "REF:g",
+            "relation": "CALLS",
+            "metadata": {"candidates": candidates},
+        }
+        bad = tmp_path / "codebase_graph.json"
+        bad.write_text(
+            json.dumps({"schema_version": CURRENT_SCHEMA, "nodes": [], "edges": [edge]})
+        )
+        with pytest.raises(GraphSchemaError, match="candidates"):
+            load_graph_with_schema(bad)
+
     def test_node_without_metadata_or_name_is_queryable(self, tmp_path):
         path = tmp_path / "codebase_graph.json"
         path.write_text(
@@ -325,6 +342,7 @@ class TestFindCallPathBounds:
             test_file_suffixes=None,
             syntax_lang_map=None,
             project_root=None,
+            max_file_bytes=0,
         )
         return GraphQuerier(path, config=config)
 

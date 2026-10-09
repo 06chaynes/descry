@@ -17,6 +17,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -127,17 +128,15 @@ def written(path, names):
 
 
 def build(origin):
-    script = Path(origin).parent / "_gen_dotnet_dump.ps1"
-    script.write_text(DUMP, encoding="utf-8")
-    try:
+    with tempfile.TemporaryDirectory() as tmp:
+        script = Path(tmp) / "dump.ps1"
+        script.write_text(DUMP, encoding="utf-8")
         dump = subprocess.run(
             ["pwsh", "-NoProfile", "-File", str(script), str(origin)],
             capture_output=True,
             text=True,
             check=True,
         ).stdout
-    finally:
-        script.unlink()
     raw = json.loads(dump)
     if isinstance(raw, dict):
         raw = [raw]

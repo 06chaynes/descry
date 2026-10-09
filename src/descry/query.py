@@ -80,16 +80,21 @@ def _read_file_cached(file_path: str) -> tuple[str, ...]:
     return _read_file_cached_inner(file_path, mtime_ns)
 
 
-def source_path(root, rel_path: str) -> str:
+def source_path(root, rel_path: str, max_bytes: int = 0) -> str:
     """Where a graph-relative source file lives under `root`.
 
     Empty unless it is a regular file inside `root`: a graph may be
     hand-edited, so its paths are not trusted to stay in the project.
+    Empty too for a file larger than `max_bytes`, when that is not 0.
     """
     root = Path(root).resolve()
     try:
         path = (root / rel_path).resolve()
-        if path.is_relative_to(root) and path.is_file():
+        if (
+            path.is_relative_to(root)
+            and path.is_file()
+            and not (max_bytes and path.stat().st_size > max_bytes)
+        ):
             return str(path)
     except (OSError, RuntimeError, ValueError):
         pass
@@ -201,6 +206,7 @@ class GraphQuerier:
 
         # Paths in node IDs are relative to the project root.
         self._project_root = config.project_root if config else None
+        self._max_file_bytes = config.max_file_bytes if config else 0
 
         self.nodes = {n["id"]: n for n in self.data["nodes"]}
         self.edges = self.data["edges"]
@@ -246,10 +252,11 @@ class GraphQuerier:
     def _disk_path(self, file_path):
         """Where a graph-relative source path lives on disk; see source_path.
 
-        Empty when the querier has no project root to resolve it against.
+        Empty when the querier has no project root to resolve it against,
+        and for a file over `[code_files] max_file_mb`.
         """
         if self._project_root:
-            return source_path(self._project_root, file_path)
+            return source_path(self._project_root, file_path, self._max_file_bytes)
         return ""
 
     def get_source_segment(self, file_path, start_line, end_line):
@@ -1497,7 +1504,9 @@ class GraphQuerier:
         start_time = time.time()
         nodes_visited = 0
 
-        def trace(node_id: str, current_depth: int, path: list) -> bool:
+        def trace(
+            node_id: str, current_depth: int, path: list, candidates=None
+        ) -> bool:
             nonlocal nodes_visited
 
             # Check limits
@@ -1529,15 +1538,20 @@ class GraphQuerier:
                 return True
 
             # Get next level
+            ambiguous = {}
             if direction == "forward":
                 next_ids = self.get_callees(node_id)[: self._max_children_per_level]
             else:
                 next_ids = self.get_callers(name)[: self._max_children_per_level]
+                ambiguous = self.get_ambiguous_callers(name)
 
             # Format node
             indent = "  " * (current_depth - 1)
             arrow = "├─" if current_depth > 1 else ""
-            output.append(f"{indent}{arrow}[{node_type}] **{name}** ({tokens} toks)")
+            output.append(
+                f"{indent}{arrow}[{node_type}] **{name}** ({tokens} toks)"
+                f"{self.one_of(candidates)}"
+            )
 
             # Inline small functions
             if tokens <= inline_threshold and tokens > 0:
@@ -1553,7 +1567,9 @@ class GraphQuerier:
 
             # Recurse (limit branching)
             for next_id in next_ids:
-                if trace(next_id, current_depth + 1, path + [node_id]):
+                if trace(
+                    next_id, current_depth + 1, path + [node_id], ambiguous.get(next_id)
+                ):
                     return True
             return False
 
@@ -1617,7 +1633,9 @@ class GraphQuerier:
         start_time = time.time()
         nodes_visited = 0
 
-        def build_tree(node_id: str, current_depth: int, path: list) -> dict | None:
+        def build_tree(
+            node_id: str, current_depth: int, path: list, candidates=None
+        ) -> dict | None:
             nonlocal nodes_visited
 
             elapsed_ms = (time.time() - start_time) * 1000
@@ -1655,6 +1673,7 @@ class GraphQuerier:
                 code = self.get_source_segment(file_path, start_line, end_line)
 
             # Recurse into children
+            ambiguous = {}
             if target and name == target:
                 path_to_target.extend([*path, name])
                 next_ids = []
@@ -1662,10 +1681,13 @@ class GraphQuerier:
                 next_ids = self.get_callees(node_id)[: self._max_children_per_level]
             else:
                 next_ids = self.get_callers(name)[: self._max_children_per_level]
+                ambiguous = self.get_ambiguous_callers(name)
 
             children = []
             for next_id in next_ids:
-                child = build_tree(next_id, current_depth + 1, [*path, name])
+                child = build_tree(
+                    next_id, current_depth + 1, [*path, name], ambiguous.get(next_id)
+                )
                 if child:
                     children.append(child)
                 if path_to_target:
@@ -1680,6 +1702,7 @@ class GraphQuerier:
                 "line": line,
                 "code": code,
                 "lang": lang,
+                "candidates": candidates,
                 "children": children,
             }
 
@@ -1720,10 +1743,10 @@ class GraphQuerier:
                 name = current_id.replace("REF:", "")
                 matches = self.find_nodes_by_name(name)
                 class_matches = [m for m in matches if m["type"] == "Class"]
-                if class_matches:
+                if len(class_matches) == 1:
                     current_node = class_matches[0]
                 else:
-                    # External class or not found
+                    # External, not found, or one of several classes of the name
                     chain.insert(
                         0, {"id": current_id, "name": name, "type": "External"}
                     )
@@ -2153,18 +2176,30 @@ class GraphQuerier:
 
         return sorted(callers)
 
+    @staticmethod
+    def one_of(candidates):
+        """The note on a call that is one of ``candidates`` definitions an
+        unresolved edge names; empty for a call that is certain."""
+        return f" (one of {candidates} candidates)" if candidates else ""
+
     def get_ambiguous_callers(self, func_name, fuzzy=False):
         """``{caller: number of candidates}`` of the calls that may reach a
         symbol matching ``func_name`` only through an unresolved edge's
         candidates — the call is one of N, not a caller for sure."""
         target_ids = self._resolve_target_ids(func_name, fuzzy)
         relations = {"CALLS", "INSTANTIATES"}
+        certain = {
+            edge["source"]
+            for target_id in target_ids
+            if not target_id.startswith("REF:")
+            for edge in self.incoming.get(target_id, [])
+        }
         ambiguous = {}
         for target_id in target_ids:
             if target_id.startswith("REF:"):
                 continue
             for edge in self.candidate_incoming.get(target_id, []):
-                if edge["relation"] in relations:
+                if edge["relation"] in relations and edge["source"] not in certain:
                     ambiguous[edge["source"]] = len(edge["metadata"]["candidates"])
         return ambiguous
 
@@ -2300,6 +2335,8 @@ class GraphQuerier:
             - call_line: Line number where call occurs
             - call_snippet: Code snippet around the call (3 lines)
             - file_path: File containing the call
+            - candidates: on a hop through an unresolved call, how many
+              definitions the call may reach; absent on a resolved call
 
         Example:
             find_call_path_result("create_deployment", "dispatch_to_handler")
@@ -2328,66 +2365,66 @@ class GraphQuerier:
         start_id = start_nodes[0]["id"]
         end_ids = {n["id"] for n in end_nodes}
 
-        # BFS with path tracking
-        queue = deque([(start_id, [])])  # (node_id, path_so_far)
-        visited = {start_id}
-        # Pre-index REF: name resolution once per call to avoid O(N) scans
-        # inside the inner loop — noticeably faster on large graphs and
-        # cheaper against the node_budget.
-        ref_cache: dict[str, str | None] = {}
+        # BFS with path tracking: first over the calls that are certain, then
+        # also through unresolved calls, each reaching one of its candidates.
+        passes = (False, True) if self.candidate_incoming else (False,)
+        for through_candidates in passes:
+            queue = deque([(start_id, [])])  # (node_id, path_so_far)
+            visited = {start_id}
 
-        while queue:
-            if time.time() > deadline:
-                return result("timeout")
-            if len(visited) >= node_budget:
-                return result("node_budget")
+            while queue:
+                if time.time() > deadline:
+                    return result("timeout")
+                if len(visited) >= node_budget:
+                    return result("node_budget")
 
-            current_id, path = queue.popleft()
+                current_id, path = queue.popleft()
 
-            # Get edges based on direction
-            if direction == "forward":
-                edges = [
-                    e
-                    for e in self.outgoing.get(current_id, [])
-                    if e["relation"] in ("CALLS", "CALLS_RESOLVED")
-                ]
-            else:
-                edges = [
-                    e
-                    for e in self.incoming.get(current_id, [])
-                    if e["relation"] in ("CALLS", "CALLS_RESOLVED")
-                ]
+                # Get edges based on direction
+                if direction == "forward":
+                    edges = [
+                        e
+                        for e in self.outgoing.get(current_id, [])
+                        if e["relation"] in ("CALLS", "CALLS_RESOLVED")
+                    ]
+                else:
+                    incoming = self.incoming.get(current_id, [])
+                    if through_candidates:
+                        incoming = incoming + self.candidate_incoming.get(
+                            current_id, []
+                        )
+                    edges = [
+                        e
+                        for e in incoming
+                        if e["relation"] in ("CALLS", "CALLS_RESOLVED")
+                    ]
 
-            for edge in edges:
-                next_id = edge["target"] if direction == "forward" else edge["source"]
-
-                # Try to resolve REF: nodes to actual nodes (memoized per call).
-                if next_id.startswith("REF:"):
-                    ref_name = next_id.replace("REF:", "")
-                    if ref_name in ref_cache:
-                        resolved_id = ref_cache[ref_name]
+                for edge in edges:
+                    if direction == "backward":
+                        reached = (edge["source"],)
+                    elif not edge["target"].startswith("REF:"):
+                        reached = (edge["target"],)
+                    elif through_candidates:
+                        # An unresolved call reaches one of its candidates.
+                        reached = edge.get("metadata", {}).get("candidates", ())
                     else:
-                        resolved = self.find_nodes_by_name(ref_name)
-                        resolved_id = resolved[0]["id"] if resolved else None
-                        ref_cache[ref_name] = resolved_id
-                    if resolved_id is None:
-                        continue
-                    next_id = resolved_id
+                        reached = ()
 
-                if next_id in visited:
-                    continue
-                visited.add(next_id)
+                    for next_id in reached:
+                        if next_id in visited:
+                            continue
+                        visited.add(next_id)
 
-                # Build hop info
-                hop = self._build_hop_info(edge, current_id, next_id, direction)
-                new_path = path + [hop]
+                        # Build hop info
+                        hop = self._build_hop_info(edge, current_id, next_id, direction)
+                        new_path = path + [hop]
 
-                # Check if we reached the target
-                if next_id in end_ids:
-                    return result("found", new_path)
+                        # Check if we reached the target
+                        if next_id in end_ids:
+                            return result("found", new_path)
 
-                if len(new_path) < max_depth:
-                    queue.append((next_id, new_path))
+                        if len(new_path) < max_depth:
+                            queue.append((next_id, new_path))
 
         return result("not_found")
 
@@ -2423,7 +2460,7 @@ class GraphQuerier:
         if call_line and os.path.exists(self._disk_path(file_path)):
             snippet = self.get_source_segment(file_path, call_line - 1, call_line + 2)
 
-        return {
+        hop = {
             "caller_id": caller_id,
             "caller_name": caller_meta.get("name", caller_id.split("::")[-1]),
             "callee_id": callee_id,
@@ -2432,3 +2469,6 @@ class GraphQuerier:
             "call_snippet": snippet.strip() if snippet else "",
             "file_path": file_path,
         }
+        if edge["target"].startswith("REF:"):
+            hop["candidates"] = len(edge["metadata"]["candidates"])
+        return hop

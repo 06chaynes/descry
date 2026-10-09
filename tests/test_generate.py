@@ -3127,6 +3127,33 @@ class TestRustCallResolution:
             "FILE:lib.rs::twice",
         ]
 
+    def test_body_on_the_signature_line(self, tmp_path):
+        """A body written on the line of its `fn` makes its calls from
+        that function, in a file and in an `impl` alike."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib.rs": """
+                fn one() {}
+                fn both() { one(); Text.raw(); }
+
+                pub struct Text;
+                impl Text {
+                    fn doubled(&self) -> usize { self.raw() }
+                    fn raw(&self) -> usize { 1 }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:lib.rs::both") == [
+            "FILE:lib.rs::Text::raw",
+            "FILE:lib.rs::one",
+        ]
+        assert _calls(builder, "FILE:lib.rs::Text::doubled") == [
+            "FILE:lib.rs::Text::raw"
+        ]
+        assert _calls(builder, "FILE:lib.rs::Text") == []
+
     def test_function_nested_in_a_method_is_not_a_method(self, tmp_path):
         """A `fn` inside a method body belongs to that method and is
         reached from it by a bare call."""

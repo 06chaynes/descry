@@ -192,7 +192,7 @@ def build(origin):
                 continue
             if current is None:
                 member = _MEMBER.match(stripped)
-                if member and member[4] and "(" in stripped:
+                if at_depth == 0 and member and member[4] and "(" in stripped:
                     functions[member[4]] = _written(member[2] or "", ())
                 continue
             if current == "_skipped" or at_depth != 1:

@@ -279,6 +279,19 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "descry_status",
+		label: "Descry Status",
+		description:
+			"Check if the codebase graph exists and its freshness. Returns existence, age, " +
+			"and node/edge counts.",
+		parameters: Type.Object({}),
+		async execute(_toolCallId, _params, signal) {
+			const result = await runDescry("status", [], signal);
+			return { content: [{ type: "text", text: result }] };
+		},
+	});
+
+	pi.registerTool({
 		name: "descry_index",
 		label: "Descry Index",
 		description:

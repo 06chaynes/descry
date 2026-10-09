@@ -411,4 +411,5 @@ The only stable public API in pre-1.0 releases is `descry.__version__`. Submodul
 
 ## License
 
-MIT
+MIT. The bundled standard-library data is derived from other projects; see
+[THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES.md).
