@@ -3,9 +3,11 @@
 import inspect
 import json
 import re
+import signal
 import subprocess
 import sys
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -205,6 +207,66 @@ class TestLifespan:
             health = json.loads(await mod.descry_health())
             assert health["status"] == "invalid_graph"
             assert "descry index" in await mod.descry_callers("anything")
+            assert "max_age_hours must be a finite" in await mod.descry_ensure(
+                float("nan")
+            )
+            assert "limit must not be negative" in await mod.descry_callers("x", -1)
+
+    @pytest.mark.asyncio
+    async def test_server_starts_when_the_graph_is_removed_during_startup(
+        self, tmp_path, monkeypatch
+    ):
+        import descry.mcp_server as mod
+
+        _project_with_stale_graph(tmp_path, monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mod, "_service", None)
+        graph = tmp_path / ".descry_cache" / "codebase_graph.json"
+        graph.unlink()
+        real_exists = Path.exists
+        monkeypatch.setattr(
+            Path,
+            "exists",
+            lambda path, **kwargs: path == graph or real_exists(path, **kwargs),
+        )
+
+        async with mod.server_lifespan(mod.mcp):
+            assert json.loads(await mod.descry_health())["status"] == "no_graph"
+
+
+def _call(msg_id, tool, **arguments):
+    return {
+        "jsonrpc": "2.0",
+        "id": msg_id,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments},
+    }
+
+
+_HANDSHAKE = [
+    {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "0"},
+        },
+    },
+    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+]
+
+# descry-mcp in a project whose indexer is the stand-in named by argv[1].
+_SERVE_WITH_INDEXER = """
+import json, os, sys
+from descry import mcp_server
+from descry.handlers import DescryService
+
+argv = json.loads(sys.argv[1])
+DescryService._indexer_child = lambda self, _path: (argv, dict(os.environ))
+mcp_server.main()
+"""
 
 
 class TestStdioTransport:
@@ -213,30 +275,12 @@ class TestStdioTransport:
         _project_with_stale_graph(tmp_path, monkeypatch)
         monkeypatch.setenv("DESCRY_LOG_LEVEL", "DEBUG")
 
-        def call(msg_id, tool, **arguments):
-            return {
-                "jsonrpc": "2.0",
-                "id": msg_id,
-                "method": "tools/call",
-                "params": {"name": tool, "arguments": arguments},
-            }
-
         messages = [
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": {"name": "test", "version": "0"},
-                },
-            },
-            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            *_HANDSHAKE,
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
-            call(3, "descry_health"),
-            call(4, "descry_callers", name="x"),
-            call(5, "descry_search", terms=["x"], lang="go"),
+            _call(3, "descry_health"),
+            _call(4, "descry_callers", name="x"),
+            _call(5, "descry_search", terms=["x"], lang="go"),
         ]
         proc = subprocess.Popen(
             [sys.executable, "-m", "descry.mcp_server"],
@@ -275,6 +319,30 @@ class TestStdioTransport:
 
         assert all(json.loads(line)["jsonrpc"] == "2.0" for line in stdout_lines)
         assert "Cannot load graph" in "".join(stderr_lines)
+
+    def test_interrupt_during_an_index_run_stops_what_the_indexer_started(
+        self, tmp_path, monkeypatch, indexer_tree
+    ):
+        """The indexer has a session of its own, so Ctrl-C does not reach it."""
+        _project_with_stale_graph(tmp_path, monkeypatch)
+        messages = [*_HANDSHAKE, _call(2, "descry_index")]
+        server = subprocess.Popen(
+            [sys.executable, "-c", _SERVE_WITH_INDEXER, json.dumps(indexer_tree.argv)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            cwd=tmp_path,
+        )
+        try:
+            server.stdin.write("".join(json.dumps(m) + "\n" for m in messages))
+            server.stdin.flush()
+            indexer_tree.wait_started()
+            server.send_signal(signal.SIGINT)
+            assert indexer_tree.grandchild_exited()
+        finally:
+            server.kill()
+            server.wait()
 
     def test_missing_mcp_sdk_is_a_one_line_error(self, tmp_path):
         result = subprocess.run(

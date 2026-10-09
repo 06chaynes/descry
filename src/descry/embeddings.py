@@ -554,9 +554,9 @@ class SemanticSearcher:
     def _cleanup_old_embeddings(self, keep: set[Path]):
         """Remove embedding cache files not in the keep set."""
         try:
-            # _atomic_save's temporaries are dot-prefixed, which these globs
-            # never match. `.tmp.` skips the undotted temporaries descry 0.2
-            # writes, which another process may be about to rename.
+            # No writer's in-flight temporary is removed: these globs never
+            # match _atomic_save's dot-prefixed names, and `.tmp.` excludes
+            # the undotted names descry releases before 0.3 write here.
             old_files = [
                 f
                 for pattern in ("embeddings_*.npz", "embeddings_*.json")

@@ -49,7 +49,7 @@ class CommandSpec:
     """Working directory for the subprocess."""
 
     env_extras: dict[str, str] = field(default_factory=dict)
-    """Additional env vars merged after `safe_env()`."""
+    """Additional env vars merged over the inherited environment."""
 
     output_mode: str = "direct"
     """"direct": indexer writes to the requested out_path.
@@ -145,8 +145,6 @@ def _probe_binary(adapter: LanguageAdapter) -> dict:
 
     import subprocess
 
-    from descry._env import safe_env
-
     result = {"available": False, "path": None, "version": None}
     path = shutil.which(adapter.binary)
     if path:
@@ -158,7 +156,6 @@ def _probe_binary(adapter: LanguageAdapter) -> dict:
                 encoding="utf-8",
                 errors="replace",
                 timeout=10,
-                env=safe_env(),
                 check=False,
             )
             if proc.returncode == 0:

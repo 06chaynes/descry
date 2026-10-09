@@ -10,9 +10,7 @@ mitigations from `src/descry/web/server.py`:
   default on cross-origin fetches).
 - TrustedHostMiddleware rejects requests whose Host header is not loopback.
 - Cross-origin writes (a blind `no-cors` POST) are refused.
-- `/api/source` refuses paths matching the secret-name blocklist even when
-  the file exists and is inside project_root, and never follows a symlink
-  out of it.
+- `/api/source` never follows a symlink out of project_root.
 - `--host` argparse only accepts loopback literals.
 - The page pins its third-party assets and ships a Content-Security-Policy.
 """
@@ -30,13 +28,16 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
 
+from descry.handlers import ServiceError
 from descry.web import server as web_server
 
 
@@ -45,7 +46,7 @@ def web_project(tmp_path, monkeypatch):
     """Fresh project root + graph + configured web server state."""
     (tmp_path / ".git").mkdir()
     graph = {
-        "schema_version": 1,
+        "schema_version": 2,
         "nodes": [
             {
                 "id": "FILE:app.py::hello",
@@ -146,77 +147,7 @@ class TestNoCORS:
         assert r.status_code in (400, 405)
 
 
-# --- /api/source secret-name blocklist ---
-
-
-class TestSourceSecretBlocklist:
-    @pytest.mark.parametrize(
-        "sensitive_rel",
-        [
-            ".env",
-            ".env.production",
-            ".envrc",
-            ".netrc",
-            ".npmrc",
-            ".pypirc",
-            ".aws/credentials",
-            ".ssh/id_rsa",
-            ".ssh/id_ed25519",
-            ".gnupg/private-keys-v1.d",
-            "secrets/prod.pem",
-            "certs/server.key",
-            "bundle.p12",
-            "keystore.jks",
-            ".git/config",
-            # A directory named .env, and the gitfile a worktree or submodule
-            # has in place of a .git directory.
-            ".env/backup",
-            "vendor/lib/.git",
-        ],
-    )
-    def test_sensitive_paths_refused(self, client, web_project, sensitive_rel):
-        path = web_project / sensitive_rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("secret=hunter2\n")
-        r = client.get(
-            f"/api/source?file={sensitive_rel}", headers={"host": "127.0.0.1"}
-        )
-        assert r.status_code == 403, (
-            f"{sensitive_rel} should be blocked, got {r.status_code}"
-        )
-        assert "sensitive" in r.json().get("error", "").lower()
-
-    def test_benign_paths_still_work(self, client):
-        r = client.get("/api/source?file=app.py", headers={"host": "127.0.0.1"})
-        assert r.status_code == 200
-        assert "def hello" in r.json()["content"]
-
-    @pytest.mark.parametrize(
-        "benign_rel",
-        [".gitignore", ".github/workflows/ci.yml", ".environment"],
-    )
-    def test_lookalike_names_are_not_blocked(self, client, web_project, benign_rel):
-        path = web_project / benign_rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("plain\n")
-        r = client.get(f"/api/source?file={benign_rel}")
-        assert r.status_code == 200
-
-    def test_symlink_to_secret_refused(self, client, web_project):
-        target = web_project / "secret.pem"
-        target.write_text("-----BEGIN PRIVATE KEY-----\n")
-        link = web_project / "innocent.txt"
-        try:
-            os.symlink(target, link)
-        except (OSError, NotImplementedError):
-            pytest.skip("symlinks unsupported on this platform")
-        # The resolved path ends in .pem; should be refused even though the
-        # request used a benign-looking name.
-        r = client.get("/api/source?file=innocent.txt", headers={"host": "127.0.0.1"})
-        assert r.status_code == 403
-
-
-# --- /api/source existing protections still hold ---
+# --- /api/source containment ---
 
 
 class TestSourceContainment:
@@ -241,16 +172,28 @@ class TestSourceContainment:
         assert r.status_code == 400
         assert "Invalid path" in r.json()["error"]
 
-    def test_oversize_file_413(self, client, web_project, monkeypatch):
-        monkeypatch.setattr(web_server, "_MAX_SOURCE_BYTES", 16)
+    def test_oversize_file_413(self, client, web_project):
+        web_server._get_config().max_file_mb = 16 / 2**20
         (web_project / "big.txt").write_text("x" * 100)
         r = client.get("/api/source?file=big.txt")
         assert r.status_code == 413
+
+    def test_no_file_is_oversize_without_a_limit(self, client, web_project):
+        web_server._get_config().max_file_mb = 0
+        (web_project / "big.txt").write_text("x" * 100)
+        r = client.get("/api/source?file=big.txt")
+        assert r.status_code == 200
+        assert r.json()["content"] == "x" * 100
 
     def test_binary_file_415(self, client, web_project):
         (web_project / "blob.bin").write_bytes(bytes(range(256)) * 8)
         r = client.get("/api/source?file=blob.bin")
         assert r.status_code == 415
+
+    def test_text_in_another_encoding_is_served(self, client, web_project):
+        (web_project / "legacy.c").write_bytes(b"// caf\xe9\nint x;\n")
+        r = client.get("/api/source?file=legacy.c")
+        assert r.status_code == 200
 
     def test_directory_is_not_a_regular_file(self, client, web_project):
         (web_project / "pkg").mkdir()
@@ -267,22 +210,83 @@ class TestSourceContainment:
         assert "regular file" in r.json()["error"]
 
 
+class TestSourceLanguage:
+    """The source view and the path snippets name a file's language from the
+    same map as every other interface."""
+
+    @pytest.mark.parametrize(
+        ("name", "language"),
+        [
+            ("main.go", "go"),
+            ("worker.mjs", "javascript"),
+            ("types.cts", "typescript"),
+            ("Main.java", "java"),
+            ("notes.md", "markdown"),
+            ("data.unknown", ""),
+        ],
+    )
+    def test_source_names_the_files_language(self, client, web_project, name, language):
+        (web_project / name).write_text("x\n")
+        r = client.get(f"/api/source?file={name}")
+        assert r.status_code == 200
+        assert r.json()["language"] == language
+
+    def test_source_and_path_use_the_configured_map(self, client, web_project):
+        (web_project / ".descry.toml").write_text(
+            '[syntax.lang_map]\n".tmpl" = "jinja"\n".go" = "golang"\n'
+        )
+        (web_project / "page.tmpl").write_text("x\n")
+        (web_project / "main.go").write_text("func a() { b() }\nfunc b() {}\n")
+        _write_web_graph(
+            web_project,
+            nodes=[_fn("a", file="main.go", lineno=1), _fn("b", file="main.go")],
+            edges=[
+                {
+                    "source": "FILE:main.go::a",
+                    "target": "FILE:main.go::b",
+                    "relation": "CALLS_RESOLVED",
+                    "metadata": {"lineno": 1},
+                }
+            ],
+        )
+
+        assert client.get("/api/source?file=page.tmpl").json()["language"] == "jinja"
+        assert "```golang\n" in client.get("/api/path?start=a&end=b").json()["markdown"]
+        assert "```golang\n" in asyncio.run(web_server._get_service().path("a", "b"))
+
+    def test_path_snippet_is_fenced_in_the_files_default_language(
+        self, client, web_project
+    ):
+        (web_project / "main.go").write_text("func a() { b() }\nfunc b() {}\n")
+        _write_web_graph(
+            web_project,
+            nodes=[_fn("a", file="main.go", lineno=1), _fn("b", file="main.go")],
+            edges=[
+                {
+                    "source": "FILE:main.go::a",
+                    "target": "FILE:main.go::b",
+                    "relation": "CALLS_RESOLVED",
+                    "metadata": {"lineno": 1},
+                }
+            ],
+        )
+
+        assert "```go\n" in client.get("/api/path?start=a&end=b").json()["markdown"]
+        assert "```go\n" in asyncio.run(web_server._get_service().path("a", "b"))
+
+
 def _swap_after_path_checks(monkeypatch, swap):
-    """Run `swap()` once, after api_source has resolved and contained the path.
+    """Run `swap()` after api_source has checked the path, just before it opens it.
 
-    The blocklist check sits between path resolution and the stat/open, so
-    hooking it reproduces a concurrent writer winning that race.
+    Reproduces a concurrent writer winning that race.
     """
-    real_check = web_server._is_sensitive_path
-    done = []
+    real_open = web_server._open_beneath
 
-    def check(rel):
-        if not done:
-            done.append(True)
-            swap()
-        return real_check(rel)
+    def open_beneath(root, parts):
+        swap()
+        return real_open(root, parts)
 
-    monkeypatch.setattr(web_server, "_is_sensitive_path", check)
+    monkeypatch.setattr(web_server, "_open_beneath", open_beneath)
 
 
 @pytest.fixture
@@ -330,7 +334,7 @@ class TestSourceRaces:
     def test_file_grown_after_size_check_is_not_read_past_the_cap(
         self, client, web_project, monkeypatch
     ):
-        monkeypatch.setattr(web_server, "_MAX_SOURCE_BYTES", 64)
+        web_server._get_config().max_file_mb = 64 / 2**20
         target = web_project / "grow.txt"
         target.write_text("small\n")
         real_open = os.open
@@ -425,6 +429,12 @@ class TestCrossOriginWrites:
         assert r.status_code == 200
         assert index_calls == ["."]
 
+    @pytest.mark.parametrize("origin", ["http://[", "http://[::1", "//[x"])
+    def test_origin_that_is_not_a_url_is_refused(self, client, index_calls, origin):
+        r = client.post("/api/index", headers={"origin": origin})
+        assert r.status_code == 403
+        assert index_calls == []
+
     def test_origin_must_match_the_port_too(self, client, index_calls):
         r = client.post(
             "/api/index",
@@ -483,6 +493,10 @@ class TestServiceDelegation:
     @pytest.mark.parametrize(
         ("endpoint", "method"),
         [
+            ("api_health", "status_data"),
+            ("api_status", "status_data"),
+            ("api_ensure", "ensure_data"),
+            ("api_examples", "examples_data"),
             ("api_search", "search_data"),
             ("api_semantic", "semantic_data"),
             ("api_callers", "callers_data"),
@@ -516,6 +530,9 @@ class TestServiceDelegation:
     @pytest.mark.parametrize(
         "endpoint",
         [
+            "api_status",
+            "api_ensure",
+            "api_examples",
             "api_structure",
             "api_impls",
             "api_quick",
@@ -530,10 +547,20 @@ class TestServiceDelegation:
     def test_endpoint_does_not_query_the_graph_itself(self, endpoint):
         assert "_get_querier" not in inspect.getsource(getattr(web_server, endpoint))
 
-    def test_run_index_delegates_and_does_not_spawn_its_own_subprocess(self):
-        src = inspect.getsource(web_server._run_index)
+    def test_index_delegates_and_does_not_spawn_its_own_subprocess(self):
+        src = inspect.getsource(web_server.api_index)
         assert "index()" in src
         assert "subprocess" not in src, "web must not run the indexer itself"
+
+    def test_web_holds_no_index_lock_of_its_own(self):
+        src = Path(web_server.__file__).read_text(encoding="utf-8")
+        assert "threading" not in src
+        assert "Lock" not in src
+
+    def test_web_keeps_no_graph_counts_of_its_own(self):
+        src = Path(web_server.__file__).read_text(encoding="utf-8")
+        assert "load_graph_with_schema" not in src
+        assert "st_mtime" not in src
 
 
 def _sse_events(text: str) -> list[dict]:
@@ -575,6 +602,136 @@ class TestServiceBackedEndpoints:
     def test_ensure_with_a_malformed_body_is_400(self, client, body):
         r = client.post("/api/ensure", content=body)
         assert r.status_code == 400
+
+    @pytest.fixture
+    def stale_graph(self, web_project, monkeypatch):
+        """A graph two hours old; returns the list of index runs asked for."""
+        graph = web_project / ".descry_cache" / "codebase_graph.json"
+        two_hours_ago = time.time() - 2 * 3600
+        os.utime(graph, (two_hours_ago, two_hours_ago))
+        calls = []
+
+        async def fake_index(path="."):
+            calls.append(path)
+            return "Index complete."
+
+        monkeypatch.setattr(web_server._get_service(), "index", fake_index)
+        return calls
+
+    @pytest.mark.parametrize("age", [b"NaN", b"Infinity", b"-Infinity", b"-1"])
+    def test_ensure_with_an_age_limit_that_is_not_an_age_is_400(
+        self, client, stale_graph, age
+    ):
+        r = client.post("/api/ensure", content=b'{"max_age_hours": %s}' % age)
+        assert r.status_code == 400
+        assert (
+            "max_age_hours must be a finite, non-negative number" in r.json()["error"]
+        )
+        assert stale_graph == []
+
+    def test_ensure_answers_with_what_the_service_did(self, client, stale_graph):
+        ready = client.post("/api/ensure", content=b'{"max_age_hours": 3}')
+        assert ready.json() == {
+            "action": "ready",
+            "graph": client.get("/api/status").json(),
+        }
+        assert stale_graph == []
+
+        refreshed = client.post("/api/ensure", content=b'{"max_age_hours": 1}')
+        assert refreshed.status_code == 200
+        assert refreshed.json() == {
+            "action": "refreshed",
+            "result": "Index complete.",
+            "graph": client.get("/api/status").json(),
+        }
+        assert stale_graph == ["."]
+
+    @pytest.mark.parametrize("path", ["/api/index", "/api/ensure"])
+    def test_failed_index_run_is_a_500(self, client, web_project, monkeypatch, path):
+        (web_project / ".descry_cache" / "codebase_graph.json").unlink()
+
+        async def failing_index(path="."):
+            return ServiceError("Index failed:\nboom")
+
+        monkeypatch.setattr(web_server._get_service(), "index", failing_index)
+        r = client.post(path)
+        assert r.status_code == 500
+        assert r.json() == {"error": "Index failed:\nboom"}
+
+    def test_status_is_the_services_view_of_the_graph(self, client, web_project):
+        graph = web_project / ".descry_cache" / "codebase_graph.json"
+        status = client.get("/api/status").json()
+        assert status == {
+            "exists": True,
+            "age_str": "0.0h ago",
+            "age_hours": 0.0,
+            "nodes": 1,
+            "edges": 0,
+            "stale": False,
+            "error": None,
+        }
+        assert client.get("/api/health").json()["graph"] == status
+
+        graph.write_text("{")
+        later = time.time() + 5
+        os.utime(graph, (later, later))
+        unreadable = client.get("/api/status").json()
+        assert (unreadable["nodes"], unreadable["edges"]) == (0, 0)
+        assert unreadable["error"]
+
+        graph.unlink()
+        assert client.get("/api/status").json() == {
+            "exists": False,
+            "age_str": "N/A",
+            "age_hours": None,
+            "nodes": 0,
+            "edges": 0,
+        }
+
+    def test_status_when_the_graph_vanishes_mid_request(
+        self, client, web_project, monkeypatch
+    ):
+        graph = web_project / ".descry_cache" / "codebase_graph.json"
+        graph.unlink()
+        real_exists = Path.exists
+        monkeypatch.setattr(
+            Path,
+            "exists",
+            lambda path, **kwargs: path == graph or real_exists(path, **kwargs),
+        )
+        r = client.get("/api/status")
+        assert r.status_code == 200
+        assert r.json()["exists"] is False
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "/api/search?terms=hello&limit=-1",
+            "/api/semantic?query=hello&limit=-1",
+            "/api/callers?name=hello&limit=-1",
+            "/api/callees?name=hello&limit=-1",
+            "/api/churn?limit=-1",
+            "/api/evolution?name=hello&limit=-1",
+            "/api/changes?limit=-1",
+        ],
+    )
+    def test_negative_limit_is_400(self, client, url):
+        r = client.get(url)
+        assert r.status_code == 400
+        assert r.json() == {"error": "limit must not be negative, got -1."}
+
+    def test_semantic_while_the_model_loads_says_what_the_service_says(self, client):
+        svc = web_server._get_service()
+        svc._semantic_available = True
+        svc._SemanticSearcher = object
+        svc._semantic_cache["loading"] = True
+
+        r = client.get("/api/semantic?query=greeting")
+        said = asyncio.run(svc.semantic("greeting"))
+
+        assert r.status_code == 503
+        assert isinstance(said, ServiceError)
+        assert r.json() == {"error": said}
 
     def test_semantic_reports_why_the_model_did_not_load(self, client):
         class GatedModel:
@@ -709,11 +866,10 @@ class TestServiceBackedEndpoints:
         monkeypatch.setattr(web_server._get_service(), "index_stream", fake_stream)
         events = _sse_events(client.post("/api/index/stream").text)
 
-        assert [e["type"] for e in events] == ["start", "output", "done"]
-        assert events[1]["line"] == "Parsed 1 file"
-        assert events[2]["success"] is True
-        assert events[2]["graph"]["nodes"] == 1
-        assert not web_server._index_lock.locked()
+        assert [e["type"] for e in events] == ["output", "done"]
+        assert events[0]["line"] == "Parsed 1 file"
+        assert events[1]["success"] is True
+        assert events[1]["graph"]["nodes"] == 1
 
 
 def _fn(name: str, file: str = "app.py", **meta) -> dict:
@@ -725,7 +881,7 @@ def _fn(name: str, file: str = "app.py", **meta) -> dict:
 
 
 def _write_web_graph(root: Path, nodes, edges=()) -> None:
-    graph = {"schema_version": 1, "nodes": list(nodes), "edges": list(edges)}
+    graph = {"schema_version": 2, "nodes": list(nodes), "edges": list(edges)}
     (root / ".descry_cache" / "codebase_graph.json").write_text(json.dumps(graph))
 
 
@@ -912,6 +1068,66 @@ class TestGraphEndpoints:
         r = client.get("/api/quick?name=nothing_here_xyz")
         assert r.status_code == 404
         assert r.json() == {"error": "No symbol found for 'nothing_here_xyz'"}
+
+    def test_callees_of_an_unknown_function_is_404(self, client):
+        r = client.get("/api/callees?name=nothing_here_xyz")
+        assert r.status_code == 404
+        assert r.json() == {"error": "No function 'nothing_here_xyz' found"}
+
+    def test_examples_name_symbols_of_the_indexed_graph(self, client, web_project):
+        def method(owner):
+            return {
+                "id": f"FILE:app.py::{owner}::start",
+                "type": "Method",
+                "metadata": {"name": "start"},
+            }
+
+        _write_web_graph(
+            web_project,
+            nodes=[
+                _fn("parse", in_degree=1),
+                _fn("load", in_degree=3),
+                _fn("run", in_degree=2),
+                _fn("_hidden", in_degree=9),
+                _fn("checks", file="test_app.py", in_degree=9),
+                {
+                    "id": "FILE:app.py::Engine",
+                    "type": "Class",
+                    "metadata": {"name": "Engine"},
+                },
+                method("Engine"),
+                method("Other"),
+            ],
+            edges=[
+                {"source": "FILE:app.py::run", "target": target, "relation": "CALLS"}
+                for target in ("FILE:app.py::load", "FILE:app.py::parse")
+            ],
+        )
+
+        r = client.get("/api/examples")
+
+        assert r.status_code == 200
+        assert r.json() == {
+            "available": True,
+            "search": ["load", "Engine", "start"],
+            "quick": ["load", "run"],
+            "callers": ["load", "run"],
+            "callees": ["load", "run"],
+            "flow_forward": "run",
+            "flow_backward": "load",
+            "path_start": "run",
+            "path_end": "load",
+            "structure": ["app.py", "test_app.py"],
+            "flatten": "FILE:app.py::Engine",
+            "impls": ["start"],
+            "evolution": ["load", "run"],
+        }
+
+    def test_examples_are_unavailable_without_symbols(self, client, web_project):
+        _write_web_graph(web_project, nodes=[])
+        assert client.get("/api/examples").json() == {"available": False}
+        (web_project / ".descry_cache" / "codebase_graph.json").unlink()
+        assert client.get("/api/examples").json() == {"available": False}
 
     def test_flow_markdown_is_the_services_trace_without_the_graph_header(self, client):
         r = client.get("/api/flow?start=hello&depth=2")
@@ -1312,7 +1528,7 @@ class TestIndexRuns:
         await body.aclose()
 
         assert await asyncio.wait_for(spawned[0][2].wait(), timeout=10) != 0
-        assert not web_server._index_lock.locked()
+        assert not web_server._get_service()._index_lock.locked()
 
     @pytest.mark.asyncio
     async def test_cancelling_the_response_kills_the_indexer(
@@ -1330,9 +1546,11 @@ class TestIndexRuns:
         reader = asyncio.create_task(read_body())
         await asyncio.wait_for(working.wait(), timeout=10)
         reader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reader
 
-        assert await asyncio.wait_for(spawned[0][2].wait(), timeout=10) != 0
-        assert not web_server._index_lock.locked()
+        assert spawned[0][2].returncode not in (None, 0)
+        assert not web_server._get_service()._index_lock.locked()
 
     @pytest.mark.asyncio
     async def test_stream_stops_at_the_configured_index_timeout(
@@ -1344,7 +1562,7 @@ class TestIndexRuns:
 
         events = [event async for event in svc.index_stream()]
 
-        assert events[0] == {"type": "output", "line": "working"}
+        assert events[1] == {"type": "output", "line": "working"}
         assert events[-1]["success"] is False
         assert "timed out" in events[-1]["message"]
         assert await asyncio.wait_for(spawned[0][2].wait(), timeout=10) != 0
@@ -1353,7 +1571,6 @@ class TestIndexRuns:
     async def test_stream_spawns_the_indexer_safely_and_reloads_the_caches(
         self, web_project, fake_indexer, monkeypatch
     ):
-        monkeypatch.setenv("DESCRY_TEST_API_TOKEN", "hunter2")
         spawned = fake_indexer("print('Parsed 1 file')")
         svc = web_server._get_service()
         svc._graph_cache["mtime"] = -1
@@ -1375,16 +1592,16 @@ class TestIndexRuns:
         events = [event async for event in svc.index_stream()]
 
         assert events == [
+            {"type": "start", "message": "Starting reindex..."},
             {"type": "output", "line": "Parsed 1 file"},
             {"type": "output", "line": "Embeddings: 1 nodes indexed"},
             {"type": "done", "success": True, "message": "Index complete."},
         ]
         assert svc._graph_cache["mtime"] == 0
         assert reloaded == ["vectors", "model"]
-        argv, kwargs, _proc = spawned[0]
+        argv, _kwargs, _proc = spawned[0]
         assert argv == tuple(svc._indexer_child(str(svc.config.project_root))[0])
         assert argv[:4] == (sys.executable, "-P", "-m", "descry.generate")
-        assert "DESCRY_TEST_API_TOKEN" not in kwargs["env"]
 
     @pytest.mark.asyncio
     async def test_stream_ends_normally_when_the_model_cannot_be_reloaded(
@@ -1422,20 +1639,72 @@ class TestIndexRuns:
         assert events[-1]["success"] is False
         assert "code 3" in events[-1]["message"]
 
+    def test_stream_ends_with_an_event_when_the_indexer_cannot_be_started(
+        self, client, web_project, monkeypatch
+    ):
+        monkeypatch.setattr(
+            web_server._get_service(),
+            "_indexer_child",
+            lambda _path: ([str(web_project / "no-such-python")], {}),
+        )
+
+        events = _sse_events(client.post("/api/index/stream").text)
+
+        assert [e["type"] for e in events] == ["start", "done"]
+        assert events[-1]["success"] is False
+        assert events[-1]["message"].startswith("Index error: ")
+        assert not web_server._get_service()._index_lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_stream_ends_with_an_event_when_a_line_is_too_long_to_read(
+        self, web_project, fake_indexer
+    ):
+        spawned = fake_indexer("import time; print('x' * 11_000_000); time.sleep(120)")
+
+        events = [event async for event in web_server._get_service().index_stream()]
+
+        assert [e["type"] for e in events] == ["start", "done"]
+        assert events[1]["success"] is False
+        assert events[1]["message"].startswith("Index error: ")
+        assert spawned[0][2].returncode not in (None, 0)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_index_keeps_the_lock_until_the_indexer_has_exited(
+        self, web_project, fake_indexer
+    ):
+        spawned = fake_indexer(_STUCK_INDEXER)
+        request = asyncio.create_task(web_server.api_index(None))
+
+        async def indexer_spawned():
+            while not spawned:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(indexer_spawned(), timeout=30)
+        assert web_server._get_service()._index_lock.locked()
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+
+        assert spawned[0][2].returncode not in (None, 0)
+        assert not web_server._get_service()._index_lock.locked()
+
     def test_index_requests_refused_while_a_run_is_in_progress(
         self, client, web_project
     ):
-        (web_project / ".descry_cache" / "codebase_graph.json").unlink()
-        assert web_server._index_lock.acquire(blocking=False)
+        assert web_server._get_service()._index_lock.acquire(blocking=False)
         try:
+            fresh = client.post("/api/ensure")
+            (web_project / ".descry_cache" / "codebase_graph.json").unlink()
             index = client.post("/api/index")
             ensure = client.post("/api/ensure")
             stream = _sse_events(client.post("/api/index/stream").text)
         finally:
-            web_server._index_lock.release()
+            web_server._get_service()._index_lock.release()
 
+        assert (fresh.status_code, fresh.json()["action"]) == (200, "ready")
         assert index.status_code == ensure.status_code == 409
         assert "in progress" in index.json()["error"]
+        assert ensure.json() == index.json()
         assert stream == [
             {
                 "type": "done",
@@ -1446,23 +1715,15 @@ class TestIndexRuns:
 
     @pytest.mark.asyncio
     async def test_concurrent_index_requests_start_one_run(
-        self, web_project, monkeypatch
+        self, web_project, fake_indexer
     ):
-        runs = 0
-
-        async def slow_index(path="."):
-            nonlocal runs
-            runs += 1
-            await asyncio.sleep(0.05)
-            return "Index complete."
-
-        monkeypatch.setattr(web_server._get_service(), "index", slow_index)
+        spawned = fake_indexer("print('Parsed 1 file')")
         responses = await asyncio.gather(
             *(web_server.api_index(None) for _ in range(3))
         )
 
         assert sorted(r.status_code for r in responses) == [200, 409, 409]
-        assert runs == 1
+        assert len(spawned) == 1
 
 
 INDEX_HTML = Path(web_server.WEB_DIR) / "index.html"
@@ -1538,7 +1799,9 @@ class TestPage:
         assert len(base64.b64decode(integrity.group(1))) == 48
         assert 'crossorigin="anonymous"' in tag
 
-    def test_policy_allows_only_the_cdns_and_the_pages_own_scripts(self, client):
+    def test_policy_allows_only_the_pinned_assets_and_the_pages_own_scripts(
+        self, client
+    ):
         html = INDEX_HTML.read_text(encoding="utf-8")
         hashes = [
             "'sha256-"
@@ -1552,17 +1815,15 @@ class TestPage:
         policy = {d.split()[0]: d.split()[1:] for d in header.split("; ")}
 
         assert policy["default-src"] == ["'none'"]
-        assert policy["script-src"] == [
-            "https://cdn.jsdelivr.net",
-            "https://cdnjs.cloudflare.com",
-            "'unsafe-eval'",
-            *hashes,
-        ]
+        assets = {"script": [], "link": []}
+        for tag in _remote_asset_tags():
+            url = re.search(r'(?:src|href)="([^"]+)"', tag).group(1)
+            assets[tag[1:].split()[0]].append(url)
+        assert assets["script"] and assets["link"]
+        assert policy["script-src"] == [*assets["script"], "'unsafe-eval'", *hashes]
+        assert policy["style-src"] == ["'self'", *assets["link"], "'unsafe-inline'"]
         assert policy["connect-src"] == ["'self'"]
         assert policy["frame-ancestors"] == ["'none'"]
-        for tag in _remote_asset_tags():
-            origin = re.search(r'"(https://[^/]+)/', tag).group(1)
-            assert origin in policy["script-src"] + policy["style-src"]
 
     def test_policy_also_covers_the_static_copy_of_the_page(self, client):
         assert (
@@ -1576,6 +1837,67 @@ class TestPage:
         assert 'x-show="results.churn?.data?.truncation_note"' in tag
         assert 'x-text="results.churn?.data?.truncation_note"' in tag
         assert "x-html" not in tag
+
+
+# descry-web serving a project whose indexer is the stand-in named by argv[1],
+# with a request to index it under way.
+_SERVE_AND_INDEX = """
+import http.client, json, os, socket, sys, threading, time
+from descry.handlers import DescryService
+from descry.web import server
+
+argv = json.loads(sys.argv[1])
+DescryService._indexer_child = lambda self, _path: (argv, dict(os.environ))
+with socket.socket() as probe:
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+
+def request_index():
+    while True:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+            break
+        except OSError:
+            time.sleep(0.05)
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=300)
+    connection.request("POST", "/api/index")
+    connection.getresponse().read()
+
+threading.Thread(target=request_index, daemon=True).start()
+sys.argv = ["descry-web", "--port", str(port)]
+server.main()
+"""
+
+
+class TestShutdown:
+    def test_interrupt_during_an_index_run_stops_the_indexer_and_the_server(
+        self, tmp_path, indexer_tree
+    ):
+        """uvicorn finishes open requests before it exits, and the indexer's
+        session keeps the terminal's Ctrl-C from reaching it."""
+        (tmp_path / ".git").mkdir()
+        env = {
+            **os.environ,
+            "PYTHONPATH": str(Path(web_server.__file__).parents[2]),
+            "DESCRY_NO_EMBEDDINGS": "1",
+        }
+        env.pop("DESCRY_CACHE_DIR", None)
+        server = subprocess.Popen(
+            [sys.executable, "-c", _SERVE_AND_INDEX, json.dumps(indexer_tree.argv)],
+            cwd=tmp_path,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            indexer_tree.wait_started()
+            server.send_signal(signal.SIGINT)
+            assert server.wait(timeout=30) == 0
+        finally:
+            server.kill()
+            server.wait()
+
+        assert indexer_tree.grandchild_exited()
 
 
 class TestStartup:

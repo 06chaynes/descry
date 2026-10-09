@@ -40,7 +40,7 @@ SPEC = {
 }
 
 GRAPH = {
-    "schema_version": 1,
+    "schema_version": 2,
     "nodes": [
         {
             "id": "FILE:backend/src/routes/actions.rs::list_actions",
@@ -291,7 +291,7 @@ class TestGraphLinking:
 
     def test_undecodable_graph_leaves_endpoints_unlinked(self, spec_path, tmp_path):
         bad = tmp_path / "bad.json"
-        bad.write_bytes(b'{"schema_version": 1, "nodes": [], "edges": [], "x": "\xff"}')
+        bad.write_bytes(b'{"schema_version": 2, "nodes": [], "edges": [], "x": "\xff"}')
         tracer = CrossLangTracer(str(spec_path), str(bad))
         assert tracer.operation_to_handler == {}
         assert tracer.get_stats()["total_endpoints"] == 7

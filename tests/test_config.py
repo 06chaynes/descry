@@ -121,6 +121,7 @@ file_suffixes = ["_test.py", ".custom_test.js"]
 
 [code_files]
 extensions = [".rs", ".py", ".custom"]
+max_file_mb = 64
 
 [git]
 churn_exclusions = ["custom.lock"]
@@ -154,6 +155,7 @@ max_callers_shown = 30
         assert config.test_path_patterns == ("/tests/", "/custom_tests/")
         assert config.test_file_suffixes == ("_test.py", ".custom_test.js")
         assert config.code_extensions == {".rs", ".py", ".custom"}
+        assert config.max_file_bytes == 64 * 1024 * 1024
         assert config.churn_exclusions == ["custom.lock"]
         assert config.git_timeout == 60
         assert config.scip_timeout_minutes == 10

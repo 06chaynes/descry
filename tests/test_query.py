@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from descry.handlers import DescryConfig
 from descry.query import MAX_PATH_DEPTH, GraphQuerier
 
 
@@ -17,7 +18,7 @@ class TestGraphQuerier:
     def sample_graph(self):
         """Create a sample graph for testing."""
         graph = {
-            "schema_version": 1,
+            "schema_version": 2,
             "nodes": [
                 {
                     "id": "FILE:test.py",
@@ -83,6 +84,52 @@ class TestGraphQuerier:
         assert len(callees) == 1
         assert "helper" in callees[0]
 
+    def test_callers_of_a_candidate_mark_the_call_as_one_of_several(self):
+        """An unresolved edge's candidates give the call to each named
+        definition, marked as one of N."""
+        graph = {
+            "schema_version": 2,
+            "nodes": [
+                {
+                    "id": "FILE:a.py::run",
+                    "type": "Function",
+                    "metadata": {"name": "run"},
+                },
+                {
+                    "id": "FILE:x.py::work",
+                    "type": "Function",
+                    "metadata": {"name": "work"},
+                },
+                {
+                    "id": "FILE:y.py::work",
+                    "type": "Function",
+                    "metadata": {"name": "work"},
+                },
+            ],
+            "edges": [
+                {
+                    "source": "FILE:a.py::run",
+                    "target": "REF:work",
+                    "relation": "CALLS",
+                    "metadata": {
+                        "lineno": 3,
+                        "candidates": ["FILE:x.py::work", "FILE:y.py::work"],
+                    },
+                }
+            ],
+        }
+        import json
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(graph, f)
+            path = f.name
+        q = GraphQuerier(path)
+        assert q.get_callers("work") == ["FILE:a.py::run"]
+        assert q.get_ambiguous_callers("work") == {"FILE:a.py::run": 2}
+        assert q.get_callees("FILE:a.py::run") == ["REF:work"]
+        assert q.get_ambiguous_callees("FILE:a.py::run") == {"REF:work": 2}
+
     def test_search_docs(self, sample_graph):
         """Should search by keywords."""
         q = GraphQuerier(sample_graph)
@@ -98,7 +145,7 @@ class TestFindTraitImpls:
     def trait_impl_graph(self):
         """Create a graph with trait implementations."""
         graph = {
-            "schema_version": 1,
+            "schema_version": 2,
             "nodes": [
                 {
                     "id": "FILE:auth.rs::JwtAuth::from_request_parts",
@@ -200,7 +247,7 @@ class TestFindCallPath:
     def call_path_graph(self):
         """Create a graph with call relationships."""
         graph = {
-            "schema_version": 1,
+            "schema_version": 2,
             "nodes": [
                 {
                     "id": "FILE:api.rs::handle_request",
@@ -337,7 +384,7 @@ class TestFlowDisambiguation:
         """Create a graph with multiple functions named 'new'."""
         # Create graph with two structs that each have a "new" method
         graph = {
-            "schema_version": 1,
+            "schema_version": 2,
             "nodes": [
                 {
                     "id": "FILE:service_a.rs",
@@ -506,7 +553,7 @@ fn fetch_user(user_id: &str) -> Result<User> {
         source_file.write_text(source_content)
 
         graph = {
-            "schema_version": 1,
+            "schema_version": 2,
             "nodes": [
                 {
                     "id": f"FILE:{source_file}",
@@ -583,10 +630,10 @@ fn fetch_user(user_id: &str) -> Result<User> {
         graph_file.write_text(json.dumps(graph))
         return str(graph_file), str(source_file)
 
-    def test_expand_callees_shows_full_source(self, graph_with_callees):
+    def test_expand_callees_shows_full_source(self, graph_with_callees, tmp_path):
         """expand_callees should show full source of direct callees."""
         graph_file, source_file = graph_with_callees
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
         result = q.get_context_prompt(
             f"FILE:{source_file}::authenticate",
@@ -652,7 +699,7 @@ fn validate_token_format(token: &str) -> bool {
         source_file.write_text(source_content)
 
         graph = {
-            "schema_version": 1,
+            "schema_version": 2,
             "nodes": [
                 {
                     "id": f"FILE:{source_file}",
@@ -691,10 +738,10 @@ fn validate_token_format(token: &str) -> bool {
         graph_file.write_text(json.dumps(graph))
         return str(graph_file), str(source_file)
 
-    def test_exact_node_id_works(self, graph_with_symbols):
+    def test_exact_node_id_works(self, graph_with_symbols, tmp_path):
         """Exact node ID should work without fuzzy matching."""
         graph_file, source_file = graph_with_symbols
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
         result = q.get_context_prompt(f"FILE:{source_file}::validate_token")
 
@@ -702,10 +749,10 @@ fn validate_token_format(token: &str) -> bool {
         assert "validate_token" in result
         assert "Matched" not in result  # No fuzzy match note
 
-    def test_symbol_name_only_matches(self, graph_with_symbols):
+    def test_symbol_name_only_matches(self, graph_with_symbols, tmp_path):
         """Just symbol name should find the node via fuzzy matching."""
         graph_file, _ = graph_with_symbols
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
         # Just the function name, no FILE: prefix or path
         result = q.get_context_prompt("validate_token")
@@ -729,10 +776,10 @@ fn validate_token_format(token: &str) -> bool {
         assert "validate_token" in msg
         assert "validate_token_format" in msg
 
-    def test_camel_case_finds_snake_case(self, graph_with_symbols):
+    def test_camel_case_finds_snake_case(self, graph_with_symbols, tmp_path):
         """camelCase query should find snake_case function."""
         graph_file, _ = graph_with_symbols
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
         # camelCase version
         result = q.get_context_prompt("validateToken")
@@ -741,10 +788,10 @@ fn validate_token_format(token: &str) -> bool {
         # Should match validate_token
         assert "validate_token" in result
 
-    def test_partial_path_matches(self, graph_with_symbols):
+    def test_partial_path_matches(self, graph_with_symbols, tmp_path):
         """Partial path should help narrow down matches."""
         graph_file, _ = graph_with_symbols
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
         # Just filename::function
         result = q.get_context_prompt("auth.rs::validate_token")
@@ -768,7 +815,7 @@ class TestFullSourceBypass:
         source_file.write_text("".join(lines))
 
         graph = {
-            "schema_version": 1,
+            "schema_version": 2,
             "nodes": [
                 {
                     "id": f"FILE:{source_file}::large_function",
@@ -788,10 +835,10 @@ class TestFullSourceBypass:
         graph_file.write_text(json.dumps(graph))
         return str(graph_file), str(source_file)
 
-    def test_full_false_truncates_large_function(self, large_function_graph):
+    def test_full_false_truncates_large_function(self, large_function_graph, tmp_path):
         """Should truncate large functions when full=False."""
         graph_file, source_file = large_function_graph
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
         source = q.get_smart_source(source_file, 1, 202, 2000, full=False)
 
@@ -800,10 +847,10 @@ class TestFullSourceBypass:
         # Should not contain all 200 lines
         assert source.count("let x") < 200
 
-    def test_full_true_shows_complete_source(self, large_function_graph):
+    def test_full_true_shows_complete_source(self, large_function_graph, tmp_path):
         """Should show complete source when full=True."""
         graph_file, source_file = large_function_graph
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
         source = q.get_smart_source(source_file, 1, 202, 2000, full=True)
 
@@ -812,10 +859,10 @@ class TestFullSourceBypass:
         # Should contain all 200 lines
         assert source.count("let x") == 200
 
-    def test_context_prompt_passes_full_parameter(self, large_function_graph):
+    def test_context_prompt_passes_full_parameter(self, large_function_graph, tmp_path):
         """Should pass full parameter through get_context_prompt."""
         graph_file, source_file = large_function_graph
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
         node_id = f"FILE:{source_file}::large_function"
 
@@ -840,10 +887,22 @@ def _calls(source, target):
     return {"source": source, "target": target, "relation": "CALLS_RESOLVED"}
 
 
+def _source_shown(q, node_id):
+    """Everything the querier prints that can carry the node's source."""
+    rel = node_id.split("::")[0].removeprefix("FILE:")
+    return "\n".join(
+        [
+            q.get_context_prompt(node_id),
+            q.trace_flow(node_id.split("::")[-1], inline_threshold=100),
+            q.get_source_segment(rel, 1, 2),
+        ]
+    )
+
+
 def _querier(tmp_path, nodes, edges=(), **config):
     graph_file = tmp_path / "graph.json"
     graph_file.write_text(
-        json.dumps({"schema_version": 1, "nodes": nodes, "edges": list(edges)})
+        json.dumps({"schema_version": 2, "nodes": nodes, "edges": list(edges)})
     )
     settings = {
         "max_depth": 3,
@@ -921,6 +980,22 @@ class TestSourcePathsResolveAgainstProjectRoot:
         assert "TOP SECRET" not in q.get_context_prompt(node_id)
         assert "TOP SECRET" not in q.trace_flow("leaked", inline_threshold=100)
         assert "TOP SECRET" not in q.get_source_segment(rel, 1, 2)
+
+    @pytest.mark.parametrize("absolute", [False, True])
+    def test_no_source_is_read_without_a_project_root(
+        self, tmp_path, monkeypatch, absolute
+    ):
+        source = tmp_path / "foo.py"
+        source.write_text("def leaked():\n    return 'TOP SECRET'\n")
+        monkeypatch.chdir(tmp_path)
+        rel = str(source) if absolute else "foo.py"
+        node_id = f"FILE:{rel}::leaked"
+        nodes = [_fn(node_id, lineno=1, end_lineno=2, token_count=10)]
+        rootless_config = _querier(tmp_path, nodes)
+        no_config = GraphQuerier(str(tmp_path / "graph.json"))
+
+        for q in (rootless_config, no_config):
+            assert "TOP SECRET" not in _source_shown(q, node_id)
 
 
 class TestLanguageFilter:
@@ -1099,3 +1174,14 @@ class TestLangMapValueInTruncation:
         out = q._truncate_output_progressively(text, max_tokens=50, source_lang=lang)
         assert "lines omitted, max_output_tokens limit" in out
         assert "line 199" not in out
+
+
+class TestCallerOrder:
+    def test_callers_come_back_sorted(self, tmp_path):
+        callers = [f"FILE:m.py::caller_{i:02d}" for i in range(20)]
+        q = _querier(
+            tmp_path,
+            [_fn("FILE:m.py::target"), *map(_fn, callers)],
+            [_calls(c, "FILE:m.py::target") for c in callers],
+        )
+        assert q.get_callers("target") == callers

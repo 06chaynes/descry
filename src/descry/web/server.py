@@ -20,8 +20,6 @@ import os
 import re
 import stat
 import sys
-import threading
-import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -56,7 +54,7 @@ SERVER_VERSION = __version__
 
 # --- Import shared modules ---
 
-from descry.handlers import DescryConfig, DescryService
+from descry.handlers import DescryConfig, DescryService, ServiceError
 from descry.query import GraphQuerier, _get_syntax_lang
 
 # --- Project config (lazy-loaded via DescryConfig) ---
@@ -82,8 +80,6 @@ def _get_service() -> DescryService:
 
 
 # --- Cached instances (delegate to DescryService) ---
-
-_graph_meta = {"mtime": 0, "nodes": 0, "edges": 0}
 
 
 async def _get_querier() -> GraphQuerier | None:
@@ -128,55 +124,20 @@ async def _service_error(result: str) -> JSONResponse | None:
     )
 
 
-def _git_failure(data: dict) -> JSONResponse:
-    """The error response for a failed git-history result from the service."""
-    status = 503 if data["reason"] == "unavailable" else 500
+def _graph_failure(data: dict) -> JSONResponse:
+    """The error response for a failed graph result from the service.
+
+    400 if the service rejected the arguments, else 503: there is no usable
+    graph, or semantic search has no model to answer with.
+    """
+    status = 400 if data.get("reason") == "invalid" else 503
     return JSONResponse({"error": data["error"]}, status_code=status)
 
 
-def _update_graph_meta():
-    global _graph_meta
-    cfg = _get_config()
-    if cfg.graph_path.exists():
-        mtime = cfg.graph_path.stat().st_mtime
-        if mtime != _graph_meta["mtime"]:
-            # Best-effort graph-metadata refresh: a corrupt / schema-
-            # mismatched graph shouldn't break status polling. The old
-            # cached meta stays in place until the next successful load.
-            try:
-                from descry._graph import GraphSchemaError, load_graph_with_schema
-
-                data = load_graph_with_schema(cfg.graph_path)
-                _graph_meta = {
-                    "mtime": mtime,
-                    "nodes": len(data.get("nodes", [])),
-                    "edges": len(data.get("edges", [])),
-                }
-            except (OSError, ValueError, GraphSchemaError):
-                pass
-
-
-def _graph_status() -> dict:
-    cfg = _get_config()
-    if not cfg.graph_path.exists():
-        return {
-            "exists": False,
-            "age_str": "N/A",
-            "age_hours": None,
-            "nodes": 0,
-            "edges": 0,
-        }
-    mtime = cfg.graph_path.stat().st_mtime
-    age_hours = (time.time() - mtime) / 3600
-    _update_graph_meta()
-    return {
-        "exists": True,
-        "age_str": f"{age_hours:.1f}h ago",
-        "age_hours": round(age_hours, 2),
-        "nodes": _graph_meta["nodes"],
-        "edges": _graph_meta["edges"],
-        "stale": age_hours > cfg.max_stale_hours,
-    }
+def _git_failure(data: dict) -> JSONResponse:
+    """The error response for a failed git-history result from the service."""
+    status = {"invalid": 400, "unavailable": 503}.get(data["reason"], 500)
+    return JSONResponse({"error": data["error"]}, status_code=status)
 
 
 def _node_to_dict(node: dict) -> dict:
@@ -202,9 +163,11 @@ def _node_to_dict(node: dict) -> dict:
     }
 
 
-def _caller_to_dict(caller_id: str, q: GraphQuerier) -> dict:
+def _caller_to_dict(caller_id: str, q: GraphQuerier, candidates: int = 0) -> dict:
     """Convert a caller node ID to a dict with location info."""
     result = {"id": caller_id, "name": caller_id}
+    if candidates:
+        result["candidates"] = candidates
     file_path = ""
     if caller_id.startswith("FILE:"):
         parts = caller_id.split("::")
@@ -238,26 +201,14 @@ async def api_health(_request: Request) -> JSONResponse:
             "status": health["status"],
             "version": SERVER_VERSION,
             "project_root": str(_get_config().project_root),
-            "graph": _graph_status(),
+            "graph": await _get_service().status_data(),
             "features": features,
         }
     )
 
 
 async def api_status(_request: Request) -> JSONResponse:
-    status = _graph_status()
-    return JSONResponse(status)
-
-
-# /api/index, /api/index/stream and /api/ensure write the same cache
-# directory, so only one of them indexes at a time; the others are refused
-# rather than queued.
-_index_lock = threading.Lock()
-_INDEX_BUSY = "An index run is already in progress"
-
-
-def _index_busy() -> JSONResponse:
-    return JSONResponse({"error": _INDEX_BUSY}, status_code=409)
+    return JSONResponse(await _get_service().status_data())
 
 
 async def api_ensure(request: Request) -> JSONResponse:
@@ -270,72 +221,45 @@ async def api_ensure(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": "Request body must be a JSON object"}, status_code=400
         )
-    max_age = body.get("max_age_hours", _get_config().max_stale_hours)
-    if isinstance(max_age, bool) or not isinstance(max_age, (int, float)):
+    max_age = body.get("max_age_hours")
+    if "max_age_hours" in body and (
+        isinstance(max_age, bool) or not isinstance(max_age, (int, float))
+    ):
         return JSONResponse(
             {"error": "'max_age_hours' must be a number"}, status_code=400
         )
-    status = _graph_status()
-    health = json.loads(await _get_service().health())
 
-    if not status["exists"] or health["status"] == "invalid_graph":
-        result = await _run_index()
-        if result is None:
-            return _index_busy()
-        return JSONResponse(
-            {"action": "generated", "result": result, "graph": _graph_status()}
-        )
-
-    if status["age_hours"] and status["age_hours"] > max_age:
-        result = await _run_index()
-        if result is None:
-            return _index_busy()
-        return JSONResponse(
-            {"action": "refreshed", "result": result, "graph": _graph_status()}
-        )
-
-    return JSONResponse({"action": "ready", "graph": status})
-
-
-async def _run_index() -> str | None:
-    """Regenerate the graph via DescryService, which applies `[timeouts] index_minutes`.
-
-    Returns None, without indexing, if another run is in progress.
-    """
-    if not _index_lock.acquire(blocking=False):
-        return None
-    try:
-        return await _get_service().index()
-    finally:
-        _index_lock.release()
+    data = await _get_service().ensure_data(max_age)
+    if not data["ok"]:
+        status = {"invalid": 400, "busy": 409}.get(data["reason"], 500)
+        return JSONResponse({"error": data["error"]}, status_code=status)
+    response = {"action": data["action"]}
+    if data["result"] is not None:
+        response["result"] = data["result"]
+    response["graph"] = await _get_service().status_data()
+    return JSONResponse(response)
 
 
 async def api_index(_request: Request) -> JSONResponse:
     # H.2: path body param removed; always index cfg.project_root.
-    result = await _run_index()
-    if result is None:
-        return _index_busy()
-    return JSONResponse({"result": result, "graph": _graph_status()})
+    result = await _get_service().index()
+    if isinstance(result, ServiceError):
+        status = 409 if result.reason == "busy" else 500
+        return JSONResponse({"error": result}, status_code=status)
+    return JSONResponse({"result": result, "graph": await _get_service().status_data()})
 
 
 async def api_index_stream(_request: Request) -> StreamingResponse:
     """Streaming reindex endpoint using Server-Sent Events for live output."""
 
     async def event_stream():
-        if not _index_lock.acquire(blocking=False):
-            yield f"data: {json.dumps({'type': 'done', 'success': False, 'message': _INDEX_BUSY})}\n\n"
-            return
-        try:
-            yield f"data: {json.dumps({'type': 'start', 'message': 'Starting reindex...'})}\n\n"
-            # Closing this generator (the client went away) closes the
-            # service's stream, which kills the indexer.
-            async with contextlib.aclosing(_get_service().index_stream()) as events:
-                async for event in events:
-                    if event["type"] == "done" and event["success"]:
-                        event["graph"] = _graph_status()
-                    yield f"data: {json.dumps(event)}\n\n"
-        finally:
-            _index_lock.release()
+        # Closing this generator (the client went away) closes the
+        # service's stream, which kills the indexer.
+        async with contextlib.aclosing(_get_service().index_stream()) as events:
+            async for event in events:
+                if event["type"] == "done" and event["success"]:
+                    event["graph"] = await _get_service().status_data()
+                yield f"data: {json.dumps(event)}\n\n"
 
     return StreamingResponse(
         event_stream(),
@@ -359,7 +283,7 @@ async def api_search(request: Request) -> JSONResponse:
         exclude_tests=request.query_params.get("exclude_tests", "").lower() == "true",
     )
     if not data["ok"]:
-        return JSONResponse({"error": data["error"]}, status_code=503)
+        return _graph_failure(data)
 
     return JSONResponse(
         {
@@ -379,7 +303,7 @@ async def api_semantic(request: Request) -> JSONResponse:
 
     data = await _get_service().semantic_data(query, limit=limit)
     if not data["ok"]:
-        return JSONResponse({"error": data["error"]}, status_code=503)
+        return _graph_failure(data)
     results = data["results"]
 
     return JSONResponse(
@@ -403,17 +327,20 @@ async def api_callers(request: Request) -> JSONResponse:
         name, limit=_int_param(request, "limit", 20)
     )
     if not data["ok"]:
-        return JSONResponse({"error": data["error"]}, status_code=503)
+        return _graph_failure(data)
 
     q = await _get_querier()
     if not q:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
+    ambiguous = data.get("ambiguous", {})
     return JSONResponse(
         {
             "symbol": data["symbol"],
             "fuzzy": data["fuzzy"],
             "total": data["total"],
-            "callers": [_caller_to_dict(c, q) for c in data["callers"]],
+            "callers": [
+                _caller_to_dict(c, q, ambiguous.get(c, 0)) for c in data["callers"]
+            ],
         }
     )
 
@@ -427,29 +354,24 @@ async def api_callees(request: Request) -> JSONResponse:
         name, limit=_int_param(request, "limit", 20)
     )
     if not data["ok"]:
-        return JSONResponse({"error": data["error"]}, status_code=503)
+        return _graph_failure(data)
     if not data["found"]:
-        return JSONResponse(
-            {
-                "symbol": name,
-                "fuzzy": False,
-                "total": 0,
-                "callees": [],
-                "error": "Symbol not found",
-            }
-        )
+        return JSONResponse({"error": f"No function '{name}' found"}, status_code=404)
 
     q = await _get_querier()
     if not q:
         return JSONResponse({"error": "Graph not found"}, status_code=503)
     node = data["node"]
+    ambiguous = data.get("ambiguous", {})
     return JSONResponse(
         {
             "symbol": node.get("metadata", {}).get("name", name),
             "node_id": node["id"],
             "fuzzy": data["fuzzy"],
             "total": data["total"],
-            "callees": [_caller_to_dict(c, q) for c in data["callees"]],
+            "callees": [
+                _caller_to_dict(c, q, ambiguous.get(c, 0)) for c in data["callees"]
+            ],
         }
     )
 
@@ -662,7 +584,11 @@ async def api_path(request: Request) -> JSONResponse:
         if file_path and call_line:
             md_lines.append(f"   {file_path}:{call_line}")
         if snippet:
-            lang = _get_syntax_lang(file_path) if file_path else ""
+            lang = (
+                _get_syntax_lang(file_path, _get_config().syntax_lang_map)
+                if file_path
+                else ""
+            )
             md_lines.append(f"```{lang}")
             md_lines.append(snippet)
             md_lines.append("```")
@@ -791,62 +717,6 @@ async def api_quick(request: Request) -> JSONResponse:
     )
 
 
-_MAX_SOURCE_BYTES = 10 * 1024 * 1024  # 10 MiB
-
-# Defense-in-depth: even with project-root containment, refuse to serve files
-# that commonly hold credentials or private keys. Matches path segments case-
-# insensitively. The web UI is local-only, but DNS-rebinding / cross-origin
-# bugs in browsers have historically exposed localhost services; make the
-# worst-case blast radius smaller than "every text file in the repo".
-_SENSITIVE_NAME_RE = re.compile(
-    r"(?ix)"
-    r"(^|/)\.env(\.|/|$)"
-    r"|(^|/)\.envrc$"
-    r"|(^|/)\.git(/|$)"
-    r"|(^|/)\.ssh/"
-    r"|(^|/)\.aws/"
-    r"|(^|/)\.gnupg/"
-    r"|(^|/)\.netrc$"
-    r"|(^|/)\.npmrc$"
-    r"|(^|/)\.pypirc$"
-    r"|(^|/)id_(rsa|dsa|ecdsa|ed25519)(\.|$)"
-    r"|\.(pem|key|p12|pfx|jks|keystore|asc|gpg)$"
-)
-
-
-def _is_sensitive_path(rel: str) -> bool:
-    """True if `rel` (project-root-relative POSIX path) matches a known secret pattern."""
-    return bool(_SENSITIVE_NAME_RE.search(rel))
-
-
-def _is_text_sample(sample: bytes) -> bool:
-    """Heuristic check: first N bytes look like text (UTF-8 or UTF-16, low NUL ratio)."""
-    if not sample:
-        return True
-    # Strip BOM if present.
-    if sample.startswith(b"\xef\xbb\xbf"):
-        sample = sample[3:]
-    elif sample.startswith((b"\xff\xfe", b"\xfe\xff")):
-        # UTF-16 BOM; try decode before NUL check.
-        try:
-            sample.decode("utf-16")
-            return True
-        except UnicodeDecodeError:
-            return False
-    nul_count = sample.count(b"\x00")
-    if nul_count > len(sample) * 0.01:  # > 1% NUL
-        return False
-    try:
-        sample.decode("utf-8")
-        return True
-    except UnicodeDecodeError:
-        try:
-            sample.decode("utf-16")
-            return True
-        except UnicodeDecodeError:
-            return False
-
-
 def _open_beneath(root: Path, parts: tuple[str, ...]) -> int:
     """Open `root/parts...` read-only, following no symlink below `root`.
 
@@ -891,18 +761,6 @@ async def api_source(request: Request) -> JSONResponse:
     except ValueError:
         return JSONResponse({"error": "Path outside project root"}, status_code=400)
 
-    # Defense-in-depth secret blocklist. Check both the requested path and the
-    # resolved path so a file symlinked to a sensitive target is still refused.
-    try:
-        rel_requested = file_param.replace("\\", "/")
-        rel_resolved = file_path.relative_to(cfg.resolved_project_root).as_posix()
-    except ValueError:
-        rel_resolved = rel_requested
-    if _is_sensitive_path(rel_requested) or _is_sensitive_path(rel_resolved):
-        return JSONResponse(
-            {"error": "Refusing to serve sensitive file"}, status_code=403
-        )
-
     if not file_path.exists():
         return JSONResponse({"error": f"File not found: {file_param}"}, status_code=404)
 
@@ -913,7 +771,8 @@ async def api_source(request: Request) -> JSONResponse:
 
     if not stat.S_ISREG(st.st_mode):
         return JSONResponse({"error": "Not a regular file"}, status_code=400)
-    if st.st_size > _MAX_SOURCE_BYTES:
+    limit = cfg.max_file_bytes
+    if limit and st.st_size > limit:
         return JSONResponse({"error": "File too large"}, status_code=413)
 
     # Open without following symlinks so a swap between the earlier
@@ -929,17 +788,17 @@ async def api_source(request: Request) -> JSONResponse:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 return JSONResponse({"error": "Not a regular file"}, status_code=400)
             sample = f.read(8192)
-            if not _is_text_sample(sample):
+            if b"\0" in sample:
                 return JSONResponse({"error": "Not a text file"}, status_code=415)
             f.seek(0)
-            raw = f.read(_MAX_SOURCE_BYTES + 1)
+            raw = f.read(limit + 1 if limit else -1)
     except OSError as e:
         return JSONResponse({"error": f"Cannot read file: {e}"}, status_code=500)
-    if len(raw) > _MAX_SOURCE_BYTES:
+    if limit and len(raw) > limit:
         return JSONResponse({"error": "File too large"}, status_code=413)
     content = raw.decode("utf-8", errors="replace")
 
-    lang = _get_syntax_lang(str(file_path))
+    lang = _get_syntax_lang(str(file_path), cfg.syntax_lang_map)
     lines = content.split("\n")
 
     # If a target line is specified, return a window around it
@@ -978,143 +837,11 @@ async def api_source(request: Request) -> JSONResponse:
 
 
 async def api_examples(_request: Request) -> JSONResponse:
-    """Return dynamic example symbols derived from the indexed graph.
-
-    Picks interesting symbols (high in-degree, classes, good flow candidates)
-    so the UI "Try:" links always work with the current project.
-    """
-    q = await _get_querier()
-    if not q:
+    """Example symbols for the UI's "Try:" links, from the indexed graph."""
+    data = await _get_service().examples_data()
+    if not data["ok"] or data["examples"] is None:
         return JSONResponse({"available": False})
-
-    nodes = q.data.get("nodes", [])
-    if not nodes:
-        return JSONResponse({"available": False})
-
-    edges = q.data.get("edges", [])
-
-    # Categorize nodes
-    functions = []
-    classes = []
-    methods = []
-    for n in nodes:
-        meta = n.get("metadata", {})
-        ntype = n.get("type", "")
-        name = meta.get("name", "")
-        # Skip test nodes and private/dunder names
-        if not name or name.startswith("_") or "test" in n.get("id", "").lower():
-            continue
-        entry = {
-            "name": name,
-            "id": n["id"],
-            "type": ntype,
-            "in_degree": meta.get("in_degree", 0),
-            "token_count": meta.get("token_count", 0),
-            "file": n["id"].replace("FILE:", "").split("::")[0]
-            if "::" in n["id"]
-            else "",
-        }
-        if ntype == "Function":
-            functions.append(entry)
-        elif ntype in ("Class", "Struct"):
-            classes.append(entry)
-        elif ntype == "Method":
-            methods.append(entry)
-
-    # Sort by in_degree (most-called first) for relevance
-    functions.sort(key=lambda x: x["in_degree"], reverse=True)
-    methods.sort(key=lambda x: x["in_degree"], reverse=True)
-
-    # Build outgoing edge counts for flow examples
-    out_degree = {}
-    for e in edges:
-        src = e.get("source", "")
-        out_degree[src] = out_degree.get(src, 0) + 1
-
-    # Pick "interesting" symbols for each tool
-    # Search: a popular function, a class, and a method
-    search_examples = []
-    if functions:
-        search_examples.append(functions[0]["name"])
-    if classes:
-        search_examples.append(classes[0]["name"])
-    if methods and len(search_examples) < 3:
-        search_examples.append(methods[0]["name"])
-
-    # Quick/callers/callees: functions with high in-degree (many callers)
-    popular = [f for f in functions if f["in_degree"] >= 2][:3]
-    popular_names = [f["name"] for f in popular] or [f["name"] for f in functions[:3]]
-
-    # Flow: find a function with good fanout (interesting forward trace)
-    flow_candidates = []
-    for f in functions[:20]:
-        od = out_degree.get(f["id"], 0)
-        if od >= 2:
-            flow_candidates.append({"name": f["name"], "out_degree": od})
-    flow_candidates.sort(key=lambda x: x["out_degree"], reverse=True)
-    flow_fwd = (
-        flow_candidates[0]["name"]
-        if flow_candidates
-        else (popular_names[0] if popular_names else "")
-    )
-    # Backward: pick a popular callee that differs from the forward symbol
-    flow_bwd = ""
-    for pn in popular_names:
-        if pn != flow_fwd:
-            flow_bwd = pn
-            break
-    if not flow_bwd:
-        flow_bwd = popular_names[0] if popular_names else ""
-
-    # Path: pick two symbols likely connected
-    path_start = flow_fwd
-    path_end = popular_names[0] if popular_names else ""
-    if path_start == path_end and len(popular_names) > 1:
-        path_end = popular_names[1]
-
-    # Structure: pick files that have multiple symbols
-    file_counts = {}
-    for n in nodes:
-        nid = n.get("id", "")
-        if "::" in nid:
-            f = nid.replace("FILE:", "").split("::")[0]
-            file_counts[f] = file_counts.get(f, 0) + 1
-    structure_files = sorted(file_counts.items(), key=lambda x: x[1], reverse=True)
-    structure_examples = [f for f, _ in structure_files[:3]]
-
-    # Flatten: pick a class
-    flatten_example = classes[0]["id"] if classes else ""
-
-    # Impls: pick method names that might have multiple implementations
-    impl_candidates = []
-    seen_names = {}
-    for m in methods:
-        n = m["name"]
-        seen_names[n] = seen_names.get(n, 0) + 1
-    impl_candidates = sorted(
-        [(name, count) for name, count in seen_names.items() if count >= 2],
-        key=lambda x: x[1],
-        reverse=True,
-    )
-    impl_examples = [name for name, _ in impl_candidates[:3]]
-
-    return JSONResponse(
-        {
-            "available": True,
-            "search": search_examples,
-            "quick": popular_names[:3],
-            "callers": popular_names[:3],
-            "callees": popular_names[:2],
-            "flow_forward": flow_fwd,
-            "flow_backward": flow_bwd,
-            "path_start": path_start,
-            "path_end": path_end,
-            "structure": structure_examples,
-            "flatten": flatten_example,
-            "impls": impl_examples,
-            "evolution": popular_names[:2],
-        }
-    )
+    return JSONResponse({"available": True, **data["examples"]})
 
 
 # --- App entrypoint ---
@@ -1123,21 +850,23 @@ async def api_examples(_request: Request) -> JSONResponse:
 def _content_security_policy(html: str) -> str:
     """Content-Security-Policy for the page whose source is `html`.
 
-    Scripts load only from the two CDNs the page pins its assets on, and
-    inline scripts run only if they hash to one of the page's own blocks.
-    Alpine.js compiles directive expressions with the Function constructor,
-    hence 'unsafe-eval'. Styles allow 'unsafe-inline' for the page's style
-    attributes and the <style> element Mermaid puts in each diagram.
+    Remote scripts and stylesheets load only from the URLs the page itself
+    names, each of which it pins with an integrity hash, and inline scripts
+    run only if they hash to one of the page's own blocks. Alpine.js compiles
+    directive expressions with the Function constructor, hence 'unsafe-eval'.
+    Styles allow 'unsafe-inline' for the page's style attributes and the
+    <style> element Mermaid puts in each diagram.
     """
     hashes = " ".join(
         f"'sha256-{base64.b64encode(hashlib.sha256(block.encode()).digest()).decode()}'"
         for block in re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
     )
+    scripts = " ".join(re.findall(r'<script\b[^>]*\bsrc="(https://[^"]+)"', html))
+    styles = " ".join(re.findall(r'<link\b[^>]*\bhref="(https://[^"]+)"', html))
     return (
         "default-src 'none'; "
-        "script-src https://cdn.jsdelivr.net https://cdnjs.cloudflare.com "
-        f"'unsafe-eval' {hashes}; "
-        "style-src 'self' https://cdnjs.cloudflare.com 'unsafe-inline'; "
+        f"script-src {scripts} 'unsafe-eval' {hashes}; "
+        f"style-src 'self' {styles} 'unsafe-inline'; "
         "img-src 'self' data:; connect-src 'self'; "
         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     )
@@ -1224,10 +953,15 @@ class _SameOriginMiddleware:
             headers = Headers(scope=scope)
             site = headers.get("sec-fetch-site", "same-origin")
             origin = headers.get("origin")
-            if site not in ("same-origin", "none") or (
-                origin is not None
-                and urlsplit(origin).netloc != headers.get("host", "")
-            ):
+            try:
+                cross_origin = site not in ("same-origin", "none") or (
+                    origin is not None
+                    and urlsplit(origin).netloc != headers.get("host", "")
+                )
+            # An Origin that is not a URL is not this page's.
+            except ValueError:
+                cross_origin = True
+            if cross_origin:
                 response = JSONResponse(
                     {"error": "Cross-origin request refused"}, status_code=403
                 )
@@ -1313,12 +1047,10 @@ def main():
 
         async def _prewarm():
             await _get_querier()
+            return await _get_service().status_data()
 
-        asyncio.run(_prewarm())
-        _update_graph_meta()
-        logger.info(
-            f"Graph ready: {_graph_meta['nodes']:,}n / {_graph_meta['edges']:,}e"
-        )
+        status = asyncio.run(_prewarm())
+        logger.info(f"Graph ready: {status['nodes']:,}n / {status['edges']:,}e")
 
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")

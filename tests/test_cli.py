@@ -1,5 +1,8 @@
 """Tests for descry.cli — command-line interface."""
 
+import json
+import os
+import signal
 import subprocess
 import sys
 from typing import ClassVar
@@ -7,7 +10,7 @@ from typing import ClassVar
 import pytest
 
 from descry import cli
-from descry.handlers import ServiceError
+from descry.handlers import DescryService, ServiceError
 
 
 class TestCliHelp:
@@ -130,3 +133,77 @@ class TestCliExitStatus:
         monkeypatch.setattr(sys, "argv", ["descry", "ensure"])
         cli.main()
         assert seen["max_age_hours"] is None
+
+    @pytest.mark.parametrize("age", ["nan", "inf", "-1"])
+    def test_ensure_refuses_an_age_limit_that_is_not_an_age(
+        self, tmp_path, monkeypatch, capsys, age
+    ):
+        (tmp_path / ".git").mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DESCRY_CACHE_DIR", raising=False)
+        monkeypatch.setenv("DESCRY_NO_EMBEDDINGS", "1")
+        indexed = []
+
+        async def fake_index(self, path="."):
+            indexed.append(path)
+            return "Index complete."
+
+        monkeypatch.setattr(DescryService, "index", fake_index)
+        monkeypatch.setattr(sys, "argv", ["descry", "ensure", "--max-age-hours", age])
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main()
+        assert exit_info.value.code == 2
+        assert "max_age_hours must be a finite" in capsys.readouterr().out
+        assert indexed == []
+
+    def test_negative_limit_exits_nonzero(self, tmp_path, monkeypatch, capsys):
+        (tmp_path / ".git").mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("DESCRY_CACHE_DIR", raising=False)
+        monkeypatch.setenv("DESCRY_NO_EMBEDDINGS", "1")
+        monkeypatch.setattr(sys, "argv", ["descry", "callers", "f", "--limit", "-1"])
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main()
+        assert exit_info.value.code == 2
+        assert "limit must not be negative" in capsys.readouterr().out
+
+
+# `descry index` in a project whose indexer is the stand-in named by argv[1].
+_INDEX_WITH = """
+import json, os, sys
+from descry import cli
+from descry.handlers import DescryService
+
+argv = json.loads(sys.argv[1])
+DescryService._indexer_child = lambda self, _path: (argv, dict(os.environ))
+sys.argv = ["descry", "index"]
+cli.main()
+"""
+
+
+class TestCliStopped:
+    @pytest.mark.parametrize("stop", ["SIGINT", "SIGTERM", "SIGHUP"])
+    def test_stopping_an_index_run_stops_what_the_indexer_started(
+        self, tmp_path, indexer_tree, stop
+    ):
+        """The indexer has a session of its own, so neither Ctrl-C nor a
+        signal sent to the CLI's process group reaches it."""
+        (tmp_path / ".git").mkdir()
+        env = {**os.environ, "DESCRY_NO_EMBEDDINGS": "1"}
+        env.pop("DESCRY_CACHE_DIR", None)
+        index = subprocess.Popen(
+            [sys.executable, "-c", _INDEX_WITH, json.dumps(indexer_tree.argv)],
+            cwd=tmp_path,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            indexer_tree.wait_started()
+            index.send_signal(getattr(signal, stop))
+            assert index.wait(timeout=30) == -getattr(signal, stop)
+        finally:
+            index.kill()
+            index.wait()
+
+        assert indexer_tree.grandchild_exited()

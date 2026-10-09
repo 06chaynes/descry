@@ -108,7 +108,7 @@ def graph_writer(tmp_path):
                 {"id": "f.py", "type": "File", "metadata": {}},
             ]
         p = cache / "codebase_graph.json"
-        p.write_text(json.dumps({"schema_version": 1, "nodes": nodes, "edges": []}))
+        p.write_text(json.dumps({"schema_version": 2, "nodes": nodes, "edges": []}))
         return p
 
     return write

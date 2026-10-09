@@ -84,6 +84,18 @@ class TestGraphShapeGuard:
                 "nodes": [],
                 "edges": [{"source": "a", "target": "b"}],
             },
+            {
+                "schema_version": CURRENT_SCHEMA,
+                "nodes": [],
+                "edges": [
+                    {
+                        "source": "a",
+                        "target": "b",
+                        "relation": "CALLS",
+                        "metadata": {"lineno": "3"},
+                    }
+                ],
+            },
         ],
     )
     def test_malformed_graph_raises_schema_error(self, tmp_path, content):
@@ -93,6 +105,31 @@ class TestGraphShapeGuard:
             load_graph_with_schema(bad)
         with pytest.raises(GraphSchemaError):
             GraphQuerier(bad)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("token_count", "12"),
+            ("token_count", None),
+            ("in_degree", [1]),
+            ("in_degree", 1.5),
+            ("docstring", 7),
+            ("docstring", None),
+            ("name", None),
+            ("signature", ["x"]),
+            ("path", 7),
+        ],
+    )
+    def test_node_metadata_of_the_wrong_type_raises_schema_error(
+        self, tmp_path, field, value
+    ):
+        node = {"id": "FILE:a.py::f", "type": "Function", "metadata": {field: value}}
+        bad = tmp_path / "codebase_graph.json"
+        bad.write_text(
+            json.dumps({"schema_version": CURRENT_SCHEMA, "nodes": [node], "edges": []})
+        )
+        with pytest.raises(GraphSchemaError, match=field):
+            load_graph_with_schema(bad)
 
     def test_node_without_metadata_or_name_is_queryable(self, tmp_path):
         path = tmp_path / "codebase_graph.json"

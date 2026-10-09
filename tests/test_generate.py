@@ -3,8 +3,11 @@
 import json
 import logging
 import os
+import subprocess
+import sys
 import tempfile
 import textwrap
+import threading
 from pathlib import Path
 
 import pytest
@@ -12,6 +15,7 @@ import pytest
 from descry import ast_grep, generate
 from descry.generate import (
     BaseParser,
+    CallResolver,
     CodeGraphBuilder,
     PythonParser,
     RustParser,
@@ -221,6 +225,29 @@ def outer():
         ]
         assert helper_calls == ["FILE:test.py::outer::inner"]
 
+    def test_nested_function_default_arguments_are_called_by_the_outer(self):
+        """A default argument is evaluated where its function is defined."""
+        content = """
+def outer():
+    def inner(a=make_default(), *, b=make_other(), c):
+        helper()
+    inner(c=1)
+"""
+        builder = CodeGraphBuilder(".")
+        PythonParser(builder).parse(Path("test.py"), "test.py", content)
+
+        calls = {
+            (e["source"], e["target"])
+            for e in builder.edges
+            if e["relation"] == "CALLS"
+        }
+        assert calls == {
+            ("FILE:test.py::outer", "REF:make_default"),
+            ("FILE:test.py::outer", "REF:make_other"),
+            ("FILE:test.py::outer", "REF:inner"),
+            ("FILE:test.py::outer::inner", "REF:helper"),
+        }
+
 
 class TestRustParser:
     """Tests for Rust parsing."""
@@ -407,6 +434,24 @@ class TestBaseParser:
         lines = ["// Copyright 2020 Example Corp.", "// MIT License", "fn main() {"]
         assert BaseParser(None).get_leading_docstring(lines, 2) == ""
 
+    def test_licence_notice_below_the_first_line_is_not_a_docstring(self):
+        """A licence notice documents no symbol wherever the file has it; a
+        comment that only mentions a licence still does."""
+        lines = [
+            "<?php",
+            "// Copyright (c) Example Corp.",
+            "// Licensed under the MIT License.",
+            "function main() {",
+            "}",
+            "// Returns the license a package declares.",
+            "function license() {",
+        ]
+        parser = BaseParser(None)
+        assert parser.get_leading_docstring(lines, 3) == ""
+        assert parser.get_leading_docstring(lines, 6) == (
+            "Returns the license a package declares."
+        )
+
     def test_block_end_ignores_braces_in_literals_and_comments(self):
         """Braces in strings, char literals and comments are not counted."""
         lines = [
@@ -553,6 +598,74 @@ function outer() {
         calls = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
         assert calls == {"REF:this.bindPort", "REF:haltWorkers"}
 
+    def test_class_property_holding_an_arrow_function_is_a_method(self):
+        """`name = (params): Type => {` in a class body declares a method."""
+        content = """
+export class Shape {
+    static create = <T>(side: T): Shape => {
+        return new Shape();
+    };
+    side = (1 + 2) * 3;
+}
+"""
+        builder = CodeGraphBuilder(".")
+        builder.use_ast_grep = False
+        TSParser(builder).parse(Path("shape.ts"), "shape.ts", content)
+
+        members = {
+            n["id"]: (n["type"], n["metadata"].get("return_type"))
+            for n in builder.nodes
+            if n["id"].startswith("FILE:shape.ts::Shape::")
+        }
+        assert members == {"FILE:shape.ts::Shape::create": ("Method", "Shape")}
+
+    def test_signature_over_several_lines_is_read_to_its_end(self):
+        """Parameters, type parameters and a return type may each run over
+        lines and hold braces; the body opens at the `{` after them."""
+        content = """
+export function hash<Alg extends string>(
+    alg: Alg,
+    params?: {
+        enc?: string; // one of { hex, base64 }
+    } & Options
+): Format<`${Alg}_hex`> {
+    return build(alg);
+}
+
+export interface Schema {
+    refine<Ch extends (arg: unknown) => unknown | Promise<unknown>>(
+        check: Ch
+    ): Refined<this>;
+    shape(): {
+        strict: boolean;
+    };
+    catch(fallback: unknown): Caught<this>;
+    parse(data: unknown): unknown
+    brand(): this
+}
+"""
+        builder = CodeGraphBuilder(".")
+        builder.use_ast_grep = False
+        TSParser(builder).parse(Path("hash.ts"), "hash.ts", content)
+
+        nodes = {
+            n["id"]: (n["metadata"].get("return_type"), n["metadata"].get("end_lineno"))
+            for n in builder.nodes
+            if n["type"] in ("Function", "Method")
+        }
+        assert nodes == {
+            "FILE:hash.ts::hash": ("Format<`${Alg}_hex`>", 9),
+            "FILE:hash.ts::Schema::refine": ("Refined<this>", 12),
+            "FILE:hash.ts::Schema::shape": ("{ strict: boolean; }", 15),
+            "FILE:hash.ts::Schema::catch": ("Caught<this>", 18),
+            "FILE:hash.ts::Schema::parse": ("unknown", 19),
+            "FILE:hash.ts::Schema::brand": ("this", 20),
+        }
+        calls = [e for e in builder.edges if e["relation"] == "CALLS"]
+        assert [(e["source"], e["target"]) for e in calls] == [
+            ("FILE:hash.ts::hash", "REF:build")
+        ]
+
 
 class TestCodeGraphBuilder:
     """Tests for the graph builder."""
@@ -656,6 +769,87 @@ class TestCallAccounting:
         )
         assert _calls(builder, "FILE:shapes.py::total") == ["REF:shape.area"]
 
+    def test_library_named_method_the_project_defines_stays_unresolved(self, tmp_path):
+        """`get` on a receiver of unknown type may be the project's `get` or
+        a library's: the call is neither dropped nor pinned to the project's."""
+        builder = _index(
+            tmp_path,
+            {
+                "store.py": """
+                class Store:
+                    def get(self, key): ...
+
+                def read(store, table):
+                    store.get("a")
+                    table.get("b")
+                """
+            },
+        )
+        assert _calls(builder, "FILE:store.py::read") == [
+            "REF:store.get",
+            "REF:table.get",
+        ]
+
+    def test_global_object_is_external_and_a_namesake_variable_is_not(self, tmp_path):
+        """`JSON` and `console` are global objects; `time`, a variable
+        bound to a call's result, is not the `time` module, so a call on
+        it is neither dropped nor pinned to the one project definition."""
+        builder = _index(
+            tmp_path,
+            {
+                "schema.ts": """
+                export class Schema {
+                    validate(value) {
+                        return value;
+                    }
+                    log(value) {
+                        return value;
+                    }
+                }
+
+                export function stringify(value) {
+                    return String(value);
+                }
+
+                function make() {
+                    return undefined;
+                }
+
+                export function check(value) {
+                    const time = make();
+                    time.validate(value);
+                    console.log(value);
+                    return JSON.stringify(value);
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:schema.ts::check") == [
+            "FILE:schema.ts::make",
+            "REF:time.validate",
+        ]
+
+    def test_method_of_a_literal_is_external(self, tmp_path):
+        """A regular expression or string literal has the methods of its
+        built-in type; a receiver of unknown type may have the project's."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Suite {
+                    test(name) {}
+                    trim() {}
+                }
+
+                export function check(body, suite) {
+                    suite.test(body);
+                    return /^[A-Z]/.test(body) || `${body} `.trim() || "x".trim();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::check") == ["REF:suite.test"]
+
     def test_summary_separates_external_from_unresolved(self, tmp_path, caplog):
         with caplog.at_level(logging.INFO, logger="descry.generate"):
             _index(
@@ -682,6 +876,139 @@ class TestCallAccounting:
             "(SCIP: 0/0%, Regex: 1/50%, Self: 0/0%, Unresolved: 1); "
             "1 external calls not counted"
         ) in caplog.text
+
+    def test_built_in_method_name_is_not_pinned_to_the_one_project_method(
+        self, tmp_path
+    ):
+        """`has` is a method of the language's own Map and Set, so a
+        receiver of unknown type may not be the project's Registry."""
+        builder = _index(
+            tmp_path,
+            {
+                "registry.ts": """
+                export class Registry {
+                    has(key) {
+                        return false;
+                    }
+                }
+
+                export function seen(items, key) {
+                    return items.has(key);
+                }
+                """,
+                "app/Walk.java": """
+                package app;
+
+                class Excluder {
+                    int modifiers() {
+                        return 0;
+                    }
+                }
+
+                class Walk {
+                    void each(java.util.List<Object> all) {
+                        all.forEach(r -> r.modifiers());
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:registry.ts::seen") == ["REF:items.has"]
+        assert "REF:r.modifiers" in _calls(builder, "FILE:app/Walk.java::Walk::each")
+
+
+class TestStdlibNamedBases:
+    """Where an INHERITS edge to a base named like a stdlib type leads."""
+
+    @staticmethod
+    def _bases(builder):
+        return {
+            (e["source"].split("::", 1)[1], e["target"])
+            for e in builder.edges
+            if e["relation"] == "INHERITS"
+        }
+
+    def test_python_base_the_module_defines_or_imports(self, tmp_path):
+        """`Error` is the project's class where the module defines or
+        imports it, and the builtin's namesake nowhere else."""
+        builder = _index(
+            tmp_path,
+            {
+                "pkg/__init__.py": "",
+                "pkg/errors.py": """
+                class Error(Exception): ...
+
+                class ParseError(Error): ...
+                """,
+                "pkg/api.py": """
+                from . import errors
+                from .errors import Error
+
+                class ApiError(Error): ...
+
+                class Timeout(errors.Error): ...
+                """,
+                "other.py": """
+                class Stray(Error): ...
+                """,
+            },
+        )
+        project_error = "FILE:pkg/errors.py::Error"
+        assert self._bases(builder) == {
+            ("ParseError", project_error),
+            ("ApiError", project_error),
+            ("Timeout", project_error),
+        }
+
+    def test_rust_trait_imported_from_the_project(self, tmp_path):
+        """An imported project trait is the base; a std trait is not the
+        project type that shares its name, nor the type implementing it."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub mod matcher;
+                pub mod regex;
+                """,
+                "src/matcher.rs": """
+                pub trait Matcher {}
+
+                pub struct Debug;
+                """,
+                "src/regex.rs": """
+                use std::fmt;
+                use crate::matcher::Matcher;
+
+                pub struct Error;
+
+                impl std::error::Error for Error {}
+
+                impl fmt::Debug for Error {}
+
+                pub struct RegexMatcher;
+
+                impl Matcher for RegexMatcher {}
+                """,
+            },
+        )
+        assert self._bases(builder) == {
+            ("RegexMatcher", "FILE:src/matcher.rs::Matcher")
+        }
+
+    def test_typescript_base_defined_in_the_same_file(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Test {}
+
+                class Subtest extends Test {}
+
+                class Failure extends Error {}
+                """
+            },
+        )
+        assert self._bases(builder) == {("Subtest", "FILE:a.ts::Test")}
 
 
 class _ScipStub:
@@ -973,8 +1300,55 @@ class TestPytestFixtureParameters:
         )
         assert _calls(builder, "FILE:tests/test_app.py::helper") == ["REF:svc.settle"]
 
+    def test_fixture_that_yields_gives_what_it_yields(self, tmp_path):
+        """A fixture annotated as the generator it is gives what it yields,
+        also from another generator."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.py": self.APP,
+                "tests/test_app.py": """
+                from typing import Iterator
+
+                import pytest
+                from app import Service
+
+                def serve(service: Service) -> Iterator[Service]: ...
+
+                @pytest.fixture
+                def svc() -> Iterator[Service]:
+                    yield from serve(Service())
+
+                def test_run(svc):
+                    svc.settle()
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:tests/test_app.py::test_run") == [
+            "FILE:app.py::Service::settle"
+        ]
+
 
 class TestPythonCallResolution:
+    def test_library_named_call_on_unknown_receiver_is_not_pinned(self, tmp_path):
+        """`requests.get` names a known library: on a receiver of unknown
+        type the one project `get` is not pinned, nor is the call dropped."""
+        builder = _index(
+            tmp_path,
+            {
+                "api.py": """
+                class Client:
+                    def get(self): ...
+
+                def fetch(client):
+                    return client.get("/x"), requests.get("https://e")
+                """
+            },
+        )
+        calls = _calls(builder, "FILE:api.py::fetch")
+        assert "FILE:api.py::Client::get" not in calls
+        assert any(t.endswith("get") for t in calls)
+
     def test_receiver_built_from_project_class_resolves_to_its_method(self, tmp_path):
         """`x = Cls(); x.m()` reaches Cls.m, whichever other class has an `m`
         and even when `m` is a common library method name."""
@@ -1129,11 +1503,11 @@ class TestPythonCallResolution:
                 import unittest
 
                 class Helper:
-                    def check(self): ...
+                    def skipTest(self): ...
 
                 class Case(unittest.TestCase):
                     def test_it(self):
-                        self.check()
+                        self.skipTest()
                 """
             },
         )
@@ -1215,6 +1589,780 @@ class TestPythonCallResolution:
         )
         assert _calls(builder, "FILE:test_lib.py::test_fenced") == [
             "FILE:lib.py::fenced"
+        ]
+
+    def test_star_import_reexports_the_public_names_of_a_module(self, tmp_path):
+        """`pkg.Client` is the class `pkg` takes from `_impl` with `import *`;
+        a private name is not taken."""
+        builder = _index(
+            tmp_path,
+            {
+                "decoy.py": """
+                class Client:
+                    def send(self): ...
+
+                def _hidden(): ...
+                """,
+                "pkg/__init__.py": "from ._impl import *\n",
+                "pkg/_impl.py": """
+                class Client:
+                    def send(self): ...
+
+                def _hidden(): ...
+                """,
+                "main.py": """
+                import pkg
+
+                def run():
+                    client = pkg.Client()
+                    client.send()
+                    pkg._hidden()
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:main.py::run") == [
+            "FILE:pkg/_impl.py::Client",
+            "FILE:pkg/_impl.py::Client::send",
+            "REF:pkg._hidden",
+        ]
+
+    def test_base_class_is_the_class_its_import_names(self, tmp_path):
+        """A base imported under another name, and a base its subclass shares
+        the name of, are the class the import names."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/__init__.py": "",
+                "lib/core.py": """
+                class View:
+                    def render(self): ...
+                """,
+                "decoy.py": """
+                class Page:
+                    def render(self): ...
+                """,
+                "app.py": """
+                import lib.core
+                from lib.core import View as Base
+
+                class Page(Base): ...
+
+                class View(lib.core.View): ...
+
+                def run():
+                    Page().render()
+                    View().render()
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.py::run") == [
+            "FILE:app.py::Page",
+            "FILE:app.py::View",
+            "FILE:lib/core.py::View::render",
+            "FILE:lib/core.py::View::render",
+        ]
+
+    def test_base_written_with_type_arguments_is_a_base(self, tmp_path):
+        """`Crate(Box[int])` has the methods of Box, and `Table(Mapping[str,
+        int])` those the standard library's data gives a mapping."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                from typing import Generic, Mapping, TypeVar
+
+                T = TypeVar("T")
+
+                class Other:
+                    def items(self): ...
+                    def load(self): ...
+
+                class Box(Generic[T]):
+                    def load(self): ...
+
+                class Crate(Box[int]): ...
+
+                class Table(Mapping[str, int]): ...
+
+                def run(crate: Crate, table: Table):
+                    crate.load()
+                    table.items()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == ["FILE:m.py::Box::load"]
+
+    def test_relative_import_from_a_namespace_package_inside_a_package(self, tmp_path):
+        """`pkg/sub` has no `__init__.py`: `..util` in it is still `pkg.util`."""
+        builder = _index(
+            tmp_path,
+            {
+                "util.py": "def helper(): ...\n",
+                "pkg/__init__.py": "",
+                "pkg/util.py": "def helper(): ...\n",
+                "pkg/sub/mod.py": """
+                from ..util import helper
+
+                def run():
+                    helper()
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:pkg/sub/mod.py::run") == [
+            "FILE:pkg/util.py::helper"
+        ]
+
+    def test_with_binds_what_enter_returns(self, tmp_path):
+        """`__enter__` returns the type its `self` is annotated with, the type
+        it names, or for `open` what the standard library's data says."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                from typing import TypeVar
+
+                T = TypeVar("T", bound="Session")
+
+                class Other:
+                    def send(self): ...
+                    def read(self): ...
+
+                class Session:
+                    def __enter__(self: T) -> T: ...
+                    def send(self): ...
+
+                class Pool:
+                    def __enter__(self) -> Session: ...
+
+                def run(path):
+                    with Session() as session, Pool() as pooled:
+                        session.send()
+                        pooled.send()
+                    with open(path) as handle:
+                        handle.read()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == [
+            "FILE:m.py::Pool",
+            "FILE:m.py::Session",
+            "FILE:m.py::Session::send",
+            "FILE:m.py::Session::send",
+        ]
+
+    def test_literal_is_a_value_of_its_builtin_type(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Url:
+                    def join(self): ...
+                    def encode(self): ...
+                    def get(self): ...
+                    def index(self): ...
+
+                def run(parts, name):
+                    ", ".join(parts)
+                    f"{name}!".encode()
+                    {"a": 1}.get(name)
+                    [1, 2].index(name)
+                    ("a" + name).encode()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == []
+
+    def test_standard_container_holds_what_its_type_arguments_say(self, tmp_path):
+        """A subscript, a method and a loop over a `list[Job]` or a `dict[str,
+        Job]` give a Job, however the annotation is written."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                import typing
+                from typing import Optional
+
+                class Other:
+                    def run(self): ...
+
+                class Job:
+                    def run(self): ...
+
+                class Queue:
+                    def __init__(self, jobs: list[Job], named: "dict[str, Job]"):
+                        self.jobs = jobs
+                        self.named: typing.Dict[str, "Job"] = named
+                        self.last: Optional[Job] = None
+
+                    def drain(self, name, extra: typing.Sequence[Job] | None):
+                        self.jobs[0].run()
+                        self.jobs.pop().run()
+                        self.named[name].run()
+                        self.named.get(name).run()
+                        self.last.run()
+                        extra[0].run()
+                        self.jobs[1:].run()
+                        for job in self.named.values():
+                            job.run()
+                        for key, job in self.named.items():
+                            key.strip()
+                            job.run()
+                        [job.run() for job in self.jobs]
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::Queue::drain") == [
+            *["FILE:m.py::Job::run"] * 9,
+            "REF:run",
+        ]
+
+    def test_return_annotation_with_type_arguments_types_the_result(self, tmp_path):
+        """`Optional[Job]` is a Job; a union of two classes is neither."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                from typing import Iterator, Optional, Union
+
+                class Other:
+                    def run(self): ...
+
+                class Job:
+                    def run(self): ...
+
+                def jobs() -> list[Job]: ...
+                def find() -> Optional[Job]: ...
+                def each() -> Iterator[Job]: ...
+                def either() -> Union[Job, Other]: ...
+
+                def run():
+                    jobs()[0].run()
+                    if (job := find()) is not None:
+                        job.run()
+                    for job in each():
+                        job.run()
+                    either().run()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == [
+            *["FILE:m.py::Job::run"] * 3,
+            "FILE:m.py::each",
+            "FILE:m.py::either",
+            "FILE:m.py::find",
+            "FILE:m.py::jobs",
+            "REF:run",
+        ]
+
+    def test_self_is_the_class_the_method_is_called_on(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                from typing import Self
+
+                class Other:
+                    def build(self): ...
+
+                class Base:
+                    def copy(self) -> Self: ...
+
+                class Query(Base):
+                    def build(self): ...
+
+                def run():
+                    Query().copy().build()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == [
+            "FILE:m.py::Base::copy",
+            "FILE:m.py::Query",
+            "FILE:m.py::Query::build",
+        ]
+
+    def test_unpacked_tuple_item_has_the_type_at_its_position(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Other:
+                    def run(self): ...
+                    def stop(self): ...
+
+                class Job:
+                    def run(self): ...
+
+                class Worker:
+                    def stop(self): ...
+
+                def pair() -> tuple[Job, Worker]: ...
+
+                def run(pairs: list[tuple[Job, Worker]]):
+                    job, worker = pair()
+                    job.run()
+                    worker.stop()
+                    for first, second in pairs:
+                        first.run()
+                        second.stop()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == [
+            "FILE:m.py::Job::run",
+            "FILE:m.py::Job::run",
+            "FILE:m.py::Worker::stop",
+            "FILE:m.py::Worker::stop",
+            "FILE:m.py::pair",
+        ]
+
+    def test_comprehension_variable_is_bound_only_inside_it(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Other:
+                    def run(self): ...
+
+                class Job:
+                    def run(self): ...
+
+                def run(names):
+                    job = Job()
+                    [job.strip() for job in names]
+                    job.run()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == [
+            "FILE:m.py::Job",
+            "FILE:m.py::Job::run",
+        ]
+
+    def test_lambda_parameter_is_what_the_standard_function_passes(self, tmp_path):
+        """`re.sub` passes its callable a match: `found.group` is no call of
+        the one project `group`."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                import re
+
+                class Token:
+                    def group(self): ...
+
+                def run(text):
+                    re.sub("a", lambda found: found.group(0), text)
+                    re.compile("a").sub(lambda found: found.group(0), text)
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == []
+
+    def test_isinstance_and_class_pattern_narrow_the_name_they_test(self, tmp_path):
+        """Inside the `if`, after the `assert` and in the `case` the name is
+        an instance of the class, unless the block rebinds it."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Other:
+                    def run(self): ...
+
+                class Job:
+                    def run(self): ...
+
+                def run(item, other, late, source):
+                    if isinstance(item, Job):
+                        item.run()
+                    assert isinstance(other, Job)
+                    other.run()
+                    if isinstance(late, Job):
+                        late = source
+                        late.run()
+                    match source:
+                        case Job():
+                            source.run()
+                        case Job() as job:
+                            job.run()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == [
+            *["FILE:m.py::Job::run"] * 4,
+            "REF:late.run",
+        ]
+
+    def test_attribute_has_the_type_it_is_declared_or_assigned(self, tmp_path):
+        """A module's variable, an attribute a base class assigns, also
+        beside `None`, a property and a class held in a class attribute."""
+        builder = _index(
+            tmp_path,
+            {
+                "state.py": """
+                class Other:
+                    def get(self): ...
+                    def run(self): ...
+
+                class Store:
+                    def get(self): ...
+
+                class Job:
+                    def run(self): ...
+
+                class Proxy: ...
+
+                store: Store = Proxy()
+                """,
+                "app.py": """
+                import state
+                from state import Job, Store
+
+                class Base:
+                    def __init__(self):
+                        self.job = Job()
+                        self.late = None
+
+                    def start(self):
+                        self.late = Job()
+
+                class Runner(Base):
+                    store_class = Store
+
+                    @property
+                    def current(self) -> Job: ...
+
+                def run(runner: Runner):
+                    state.store.get()
+                    runner.job.run()
+                    runner.late.run()
+                    runner.current.run()
+                    runner.store_class().get()
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.py::run") == [
+            *["FILE:state.py::Job::run"] * 3,
+            "FILE:state.py::Store",
+            "FILE:state.py::Store::get",
+            "FILE:state.py::Store::get",
+        ]
+
+    def test_none_says_nothing_of_what_a_name_holds(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "decoy.py": "def helper(): ...\n",
+                "lib.py": "def helper(): ...\n",
+                "main.py": """
+                try:
+                    from lib import helper
+                except ImportError:
+                    helper = None
+
+                def run():
+                    helper()
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:main.py::run") == ["FILE:lib.py::helper"]
+
+    def test_call_of_a_value_is_no_call_of_a_definition(self, tmp_path):
+        """A parameter that is called calls what it holds, whatever
+        definitions have its name; an instance that is called its `__call__`."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                from typing import Callable
+
+                class Hooks:
+                    def send(self): ...
+                    def receive(self): ...
+
+                class Handler:
+                    def __call__(self): ...
+
+                def run(send, receive: Callable[[], bytes], handler: Handler):
+                    send()
+                    receive()
+                    handler()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == ["FILE:m.py::Handler::__call__"]
+
+    def test_attribute_of_a_decorated_function_is_one_of_what_the_decorator_made(
+        self, tmp_path
+    ):
+        """`cli` is what `click.group()` returned, so `cli.command` is no
+        method of the project's."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                import click
+
+                class Group:
+                    def command(self): ...
+
+                @click.group()
+                def cli(): ...
+
+                @cli.command()
+                def sub(): ...
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::sub") == []
+
+    def test_class_object_is_the_class(self, tmp_path):
+        """A value annotated `type[Job]`, and `job.__class__`, are Job."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Other:
+                    def run(self): ...
+
+                    @classmethod
+                    def create(cls): ...
+
+                class Job:
+                    def run(self): ...
+
+                    @classmethod
+                    def create(cls): ...
+
+                def run(kind: type[Job], job: Job):
+                    kind.create()
+                    kind().run()
+                    job.__class__.create()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == [
+            "FILE:m.py::Job",
+            "FILE:m.py::Job::create",
+            "FILE:m.py::Job::create",
+            "FILE:m.py::Job::run",
+        ]
+
+    def test_standard_method_name_alone_does_not_pin_a_receiver(self, tmp_path):
+        """`locate` is a method of `importlib.metadata.PackagePath` and
+        `__html__` a protocol any class may implement: on a receiver of
+        unknown type the one project definition is not the only one that
+        fits."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Finder:
+                    def locate(self): ...
+                    def __html__(self): ...
+                    def frobnicate(self): ...
+
+                def run(thing):
+                    thing.locate()
+                    thing.__html__()
+                    thing.frobnicate()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == [
+            "FILE:m.py::Finder::frobnicate",
+            "REF:thing.__html__",
+            "REF:thing.locate",
+        ]
+
+    def test_operator_and_variadic_parameters_are_standard_values(self, tmp_path):
+        """`root / "x"` is a path, `args` a tuple, `kwargs` and `__dict__`
+        dicts, and `__init__` without a base that defines it `object`'s."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                from pathlib import Path
+
+                class Locator:
+                    def resolve(self): ...
+                    def setdefault(self): ...
+                    def count(self): ...
+                    def pop(self): ...
+
+                class Plain:
+                    def __init__(self, *args, **kwargs):
+                        super().__init__()
+                        kwargs.setdefault("a", 1)
+                        args.count(1)
+                        self.__dict__.pop("a")
+
+                def run(root: Path):
+                    (root / "x").resolve()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::Plain::__init__") == []
+        assert _calls(builder, "FILE:m.py::run") == []
+
+    def test_alias_and_union_of_standard_types(self, tmp_path):
+        """A name bound to a standard type is that type, and a union of
+        standard types some standard value; a union of two project classes
+        is neither of them."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                import typing
+
+                Scope = typing.MutableMapping[str, typing.Any]
+
+                class Other:
+                    def get(self): ...
+                    def decode(self): ...
+                    def run(self): ...
+
+                class Job:
+                    def run(self): ...
+
+                def run(scope: Scope, raw: str | bytes, either: Job | Other):
+                    scope.get("a")
+                    raw.decode()
+                    either.run()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == ["REF:either.run"]
+
+    def test_standard_function_returns_what_the_data_says(self, tmp_path):
+        """`re.compile(...).match(...)` is a match, whose `group` is the
+        standard library's; what `copy.copy` returns the data cannot say, so
+        `run` on it is not dropped."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                import copy
+                import re
+
+                class Other:
+                    def run(self): ...
+
+                class Job:
+                    def run(self): ...
+                    def group(self): ...
+
+                def run(job):
+                    copy.copy(job).run()
+                    re.compile("a").match("a").group(0)
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == ["REF:run"]
+
+    def test_unannotated_function_returns_what_its_body_does(self, tmp_path):
+        """A function without a return annotation returns what its `return`
+        statements agree on, `None` aside: an instance, `self`, an
+        attribute. A property is read as that. A generator, and a function
+        whose returns differ, return neither."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Other:
+                    def run(self): ...
+
+                class Job:
+                    def run(self): ...
+
+                    def named(self, name):
+                        self.name = name
+                        return self
+
+                class Queue:
+                    def __init__(self):
+                        self.head = Job()
+
+                    def first(self):
+                        return self.head
+
+                    @property
+                    def last(self):
+                        return self.head
+
+                def make(flag):
+                    if flag:
+                        return None
+                    return Job()
+
+                def either(flag):
+                    if flag:
+                        return Job()
+                    return Other()
+
+                def each():
+                    yield Job()
+
+                def run(queue: Queue):
+                    make(1).run()
+                    Job().named("a").run()
+                    queue.first().run()
+                    queue.last.run()
+                    either(1).run()
+                    each().run()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == [
+            "FILE:m.py::Job",
+            "FILE:m.py::Job::named",
+            *["FILE:m.py::Job::run"] * 4,
+            "FILE:m.py::Queue::first",
+            "FILE:m.py::each",
+            "FILE:m.py::either",
+            "FILE:m.py::make",
+            "REF:run",
+            "REF:run",
+        ]
+
+    def test_context_manager_function_hands_the_block_what_it_yields(self, tmp_path):
+        """Under `contextlib.contextmanager` or `asynccontextmanager`, `with
+        f() as x` binds what the function yields or is annotated to."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                import contextlib
+                from contextlib import asynccontextmanager
+                from typing import AsyncIterator
+
+                class Other:
+                    def run(self): ...
+
+                class Job:
+                    def run(self): ...
+
+                @contextlib.contextmanager
+                def opened():
+                    yield Job()
+
+                @asynccontextmanager
+                async def started() -> AsyncIterator[Job]:
+                    yield source()
+
+                async def run():
+                    with opened() as job:
+                        job.run()
+                    async with started() as job:
+                        job.run()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::run") == [
+            "FILE:m.py::Job::run",
+            "FILE:m.py::Job::run",
+            "FILE:m.py::opened",
+            "FILE:m.py::started",
         ]
 
 
@@ -1310,9 +2458,9 @@ class TestRustCallResolution:
         assert _calls(builder, method) == []
         assert _calls(builder, "FILE:src/report.rs::fail") == [method]
 
-    def test_qualified_call_prefers_the_nearest_type(self, tmp_path):
-        """`Matcher::new` reaches the `Matcher` of the calling file, not one
-        of the same name declared elsewhere."""
+    def test_qualified_call_picks_the_type_the_file_declares(self, tmp_path):
+        """`Matcher::new` where the file's own `Matcher` and another crate's
+        both fit is the file's: a name declared here is not ambiguous."""
         builder = _index(
             tmp_path,
             {
@@ -1341,6 +2489,147 @@ class TestRustCallResolution:
         assert _calls(builder, "FILE:b/src/testutil.rs::check") == [
             "FILE:b/src/testutil.rs::Matcher::new"
         ]
+
+    def test_qualified_call_of_alike_types_names_its_candidates(self, tmp_path):
+        """`Matcher::new` where two types of the name fit and neither is in
+        scope stays unresolved, the edge naming the definitions it may
+        reach."""
+        builder = _index(
+            tmp_path,
+            {
+                "a/src/util.rs": """
+                pub struct Matcher;
+                impl Matcher {
+                    pub fn new() -> Matcher {
+                        Matcher
+                    }
+                }
+                """,
+                "b/src/testutil.rs": """
+                pub struct Matcher;
+                impl Matcher {
+                    pub fn new() -> Matcher {
+                        Matcher
+                    }
+                }
+                """,
+                "c/src/check.rs": """
+                fn check() {
+                    let m = Matcher::new();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:c/src/check.rs::check") == ["REF:Matcher::new"]
+        (edge,) = (
+            e
+            for e in builder.edges
+            if e["source"] == "FILE:c/src/check.rs::check" and e["relation"] == "CALLS"
+        )
+        assert edge["metadata"]["candidates"] == [
+            "FILE:a/src/util.rs::Matcher::new",
+            "FILE:b/src/testutil.rs::Matcher::new",
+        ]
+
+    def test_turbofish_call_reaches_the_function(self, tmp_path):
+        """`parse::<T>()` is a call of `parse`: the turbofish's type
+        arguments are the call's, not part of the callee's name."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub fn parse() -> i32 {
+                    0
+                }
+
+                pub fn build() {
+                    let x = parse::<i32>();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::build") == ["FILE:src/lib.rs::parse"]
+
+    def test_turbofish_keeps_continuation_call_off_the_free_name(self, tmp_path):
+        """`.line_number()` after a call is read on that call's result:
+        the free `line_number` is not reached through it."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                fn line_number() {}
+
+                fn build() {
+                    make()
+                        .line_number();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::build") == []
+
+    def test_free_call_with_type_arguments_resolves(self, tmp_path):
+        """`Vec::<i32>::new()` records `Vec::new`: the path's turbofish
+        does not hide the callee."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Vec2<T>(T);
+                impl<T> Vec2<T> {
+                    pub fn new() -> Self {
+                        todo!()
+                    }
+                }
+
+                pub fn build() {
+                    let v = Vec2::<i32>::new();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::build") == [
+            "FILE:src/lib.rs::Vec2::new"
+        ]
+
+    def test_a_name_only_hit_does_not_type_its_result(self, tmp_path):
+        """`m.start()` where `m` is what `find_at` yields: `find_at` fits
+        by name only on a receiver no project type owns, so what it
+        returns is not read — `m` is of unknown type."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/matcher.rs": """
+                pub struct Match;
+                impl Match {
+                    pub fn start(&self) -> usize { 0 }
+                    pub fn end(&self) -> usize { 0 }
+                }
+                pub struct Error;
+                pub trait Matcher {
+                    fn find_at(&self, at: usize) -> Result<Option<Match>, Error>;
+                }
+                impl<'a, M: Matcher> Matcher for &'a M {
+                    fn find_at(&self, at: usize) -> Result<Option<Match>, Error> {
+                        (**self).find_at(at)
+                    }
+                }
+                """,
+                "src/other.rs": """
+                pub struct Regex;
+                pub struct Engine { regex: Regex }
+                impl Engine {
+                    pub fn seek(&self) {
+                        let m = self.regex.find_at(0);
+                        m.start();
+                        m.end();
+                    }
+                }
+                """,
+            },
+        )
+        calls = _calls(builder, "FILE:src/other.rs::Engine::seek")
+        assert "REF:m.start" in calls and "REF:m.end" in calls
 
     def test_free_call_and_method_call_are_told_apart(self, tmp_path):
         """`run(x)` is the free function; `self.run()` and `w.run()` are
@@ -1964,8 +3253,1189 @@ class TestRustCallResolution:
         )
         assert [e for e in builder.edges if e["relation"].startswith("CALLS")] == []
 
+    def test_field_type_is_not_a_local_of_the_same_name(self, tmp_path):
+        """A `let` binding of a call's result does not make a field of the
+        same name ambiguous."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Glob;
+
+                impl Glob {
+                    pub fn hits(&self) -> bool { true }
+                }
+
+                pub struct Other;
+
+                impl Other {
+                    pub fn hits(&self) -> bool { true }
+                }
+
+                pub struct Matcher {
+                    globs: Glob,
+                }
+
+                impl Matcher {
+                    pub fn new() -> Matcher {
+                        let globs = build();
+                        Matcher { globs }
+                    }
+
+                    pub fn check(&self) -> bool {
+                        self.globs.hits()
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::Matcher::check") == [
+            "FILE:src/lib.rs::Glob::hits"
+        ]
+
+    def test_method_of_a_standard_type_is_external(self, tmp_path):
+        """A receiver declared as a primitive or a standard generic type
+        calls that type's method, whatever the project names its own."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Stack {
+                    items: Vec<u32>,
+                    name: Option<String>,
+                }
+
+                impl Stack {
+                    pub fn len(&self) -> usize {
+                        self.items.len()
+                    }
+
+                    pub fn is_none(&self) -> bool {
+                        self.name.is_none()
+                    }
+                }
+
+                pub fn total(text: &str, stack: &Stack) -> usize {
+                    text.len() + stack.len()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::Stack::len") == []
+        assert _calls(builder, "FILE:src/lib.rs::Stack::is_none") == []
+        assert _calls(builder, "FILE:src/lib.rs::total") == [
+            "FILE:src/lib.rs::Stack::len"
+        ]
+
+    def test_project_trait_method_on_a_standard_type(self, tmp_path):
+        """A trait the project implements for a standard type gives it a
+        project method."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub trait Total {
+                    fn len(&self) -> u32;
+                }
+
+                impl<T> Total for T {
+                    fn len(&self) -> u32 { 0 }
+                }
+
+                pub struct Bag {
+                    items: Vec<u32>,
+                }
+
+                impl Bag {
+                    pub fn size(&self) -> u32 {
+                        self.items.len()
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::Bag::size") != []
+
+    def test_name_bound_by_a_pattern_has_no_declared_type(self, tmp_path):
+        """A match arm that binds a name shadows the parameter of that name:
+        it is what the variant matched holds."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Seq;
+
+                impl Seq {
+                    pub fn choose(&self) {}
+                }
+
+                pub struct Alt;
+
+                impl Alt {
+                    pub fn choose(&self) {}
+                }
+
+                pub fn pick(prev: Seq, next: Option<Alt>) {
+                    match next {
+                        Some(prev) => prev.choose(),
+                        None => {}
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::pick") == [
+            "FILE:src/lib.rs::Alt::choose"
+        ]
+
+    def test_variable_named_like_a_library_is_not_that_library(self, tmp_path):
+        """`bytes` is a closure parameter, not Go's package of that name:
+        its `len` is the project's."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Buf;
+
+                impl Buf {
+                    pub fn len(&self) -> usize { 0 }
+                }
+
+                pub fn sizes(all: Vec<Buf>) -> Vec<usize> {
+                    all.iter().map(|bytes| bytes.len()).collect()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::sizes") == [
+            "FILE:src/lib.rs::Buf::len"
+        ]
+
+    def test_field_type_is_that_of_the_struct_declaring_it(self, tmp_path):
+        """Two structs of one file may each have a field `inner`."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Glob;
+
+                impl Glob {
+                    pub fn hits(&self) {}
+                }
+
+                pub struct Other;
+
+                impl Other {
+                    pub fn hits(&self) {}
+                }
+
+                pub struct First {
+                    inner: Glob,
+                }
+
+                pub struct Second {
+                    inner: Other,
+                }
+
+                impl First {
+                    pub fn go(&self) {
+                        self.inner.hits()
+                    }
+                }
+
+                impl Second {
+                    pub fn go(&self) {
+                        self.inner.hits()
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::First::go") == [
+            "FILE:src/lib.rs::Glob::hits"
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::Second::go") == [
+            "FILE:src/lib.rs::Other::hits"
+        ]
+
+    def test_type_written_with_its_path(self, tmp_path):
+        """A parameter typed `process::ChildStderr` is of a type from
+        outside; a field typed `Box<dyn Visitor>` calls the trait's method."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                use std::process;
+
+                pub struct Reader;
+
+                impl Reader {
+                    pub fn read_to_end(&mut self) {}
+                }
+
+                pub trait Visitor {
+                    fn visit(&mut self);
+                }
+
+                pub struct Counter;
+
+                impl Counter {
+                    pub fn visit(&mut self) {}
+                }
+
+                pub struct Worker {
+                    visitor: Box<dyn Visitor>,
+                }
+
+                impl Worker {
+                    pub fn run(&mut self) {
+                        self.visitor.visit()
+                    }
+                }
+
+                pub fn drain(stderr: &mut process::ChildStderr) {
+                    stderr.read_to_end();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::Worker::run") == [
+            "FILE:src/lib.rs::Visitor::visit"
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::drain") == []
+
+    def test_outside_wrapper_around_a_reference_to_a_project_type(self, tmp_path):
+        """`anyhow::Result<&mut Builder>` unwraps to a Builder."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Builder;
+
+                impl Builder {
+                    pub fn pre(&mut self) -> anyhow::Result<&mut Builder> {
+                        Ok(self)
+                    }
+
+                    pub fn globs(&mut self) {}
+                }
+
+                pub struct Other;
+
+                impl Other {
+                    pub fn globs(&mut self) {}
+                }
+
+                pub fn make(builder: &mut Builder) -> anyhow::Result<()> {
+                    builder.pre()?.globs();
+                    Ok(())
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::make") == [
+            "FILE:src/lib.rs::Builder::globs",
+            "FILE:src/lib.rs::Builder::pre",
+        ]
+
+    def test_example_target_is_a_crate_of_its_own(self, tmp_path):
+        """`walker::Entry` is the library's type, not one an example of the
+        same package declares under that name."""
+        builder = _index(
+            tmp_path,
+            {
+                "walker/Cargo.toml": """
+                [package]
+                name = "walker"
+                """,
+                "walker/examples/demo.rs": """
+                enum Entry {
+                    One,
+                }
+
+                impl Entry {
+                    fn path(&self) {}
+                }
+                """,
+                "walker/src/lib.rs": """
+                pub struct Entry;
+
+                impl Entry {
+                    pub fn path(&self) {}
+                }
+                """,
+                "app/Cargo.toml": """
+                [package]
+                name = "app"
+                """,
+                "app/src/main.rs": """
+                struct Hay {
+                    dent: walker::Entry,
+                }
+
+                impl Hay {
+                    fn path(&self) {
+                        self.dent.path()
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app/src/main.rs::Hay::path") == [
+            "FILE:walker/src/lib.rs::Entry::path"
+        ]
+
+    def test_standard_method_returns_what_the_data_says(self, tmp_path):
+        """`Option<T>::unwrap` gives a `T`, `Vec<T>::first` an `Option<&T>`
+        and `HashMap<K, V>::get` an `Option<&V>`: the next call is one on
+        that type, and a call on a standard type is the library's."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                use std::collections::HashMap;
+
+                pub struct Product;
+
+                impl Product {
+                    pub fn ship(&self) {}
+                    pub fn len(&self) -> usize { 0 }
+                }
+
+                pub struct Decoy;
+
+                impl Decoy {
+                    pub fn ship(&self) {}
+                    pub fn len(&self) -> usize { 0 }
+                }
+
+                pub struct Store {
+                    best: Option<Product>,
+                    items: Vec<Product>,
+                    named: HashMap<String, Product>,
+                }
+
+                impl Store {
+                    pub fn best(&self) {
+                        self.best.as_ref().unwrap().ship();
+                    }
+
+                    pub fn first(&self) {
+                        self.items.first().unwrap().ship();
+                    }
+
+                    pub fn named(&self, name: &str) {
+                        self.named.get(name).unwrap().ship();
+                    }
+
+                    pub fn size(&self) -> usize {
+                        self.items.clone().len() + self.named.keys().len()
+                    }
+                }
+                """
+            },
+        )
+        ship = ["FILE:src/lib.rs::Product::ship"]
+        assert _calls(builder, "FILE:src/lib.rs::Store::best") == ship
+        assert _calls(builder, "FILE:src/lib.rs::Store::first") == ship
+        assert _calls(builder, "FILE:src/lib.rs::Store::named") == ship
+        assert _calls(builder, "FILE:src/lib.rs::Store::size") == []
+
+    def test_iterator_keeps_the_type_of_its_items(self, tmp_path):
+        """`filter` hands on the items of the iterator it is called on;
+        what a block given to `map` as a closure returns is not known."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Product;
+
+                impl Product {
+                    pub fn ship(&self) {}
+                    pub fn count(&self) -> usize { 0 }
+                }
+
+                pub struct Decoy;
+
+                impl Decoy {
+                    pub fn ship(&self) {}
+                }
+
+                pub fn kept(items: &[Product]) {
+                    items.iter().filter(|p| true).next().unwrap().ship();
+                }
+
+                pub fn total(items: Vec<Product>) -> usize {
+                    items.iter().rev().skip(1).count()
+                }
+
+                pub fn mapped(items: &[Product]) {
+                    items.iter().map(|p| { p }).next().unwrap().ship();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::kept") == [
+            "FILE:src/lib.rs::Product::ship"
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::total") == []
+        assert _calls(builder, "FILE:src/lib.rs::mapped") == ["REF:ship"]
+
+    def test_question_mark_takes_the_value_out_of_a_standard_type(self, tmp_path):
+        """`?` on an `io::Result<T>` or an `Option<T>` gives a `T`: each
+        `?` of `??` in its turn, and one that ends the line before."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                use std::io;
+
+                pub struct Product;
+
+                impl Product {
+                    pub fn ship(&self) {}
+                }
+
+                pub struct Decoy;
+
+                impl Decoy {
+                    pub fn ship(&self) {}
+                }
+
+                fn load() -> io::Result<Vec<Product>> { todo!() }
+
+                fn find() -> Option<Option<Product>> { todo!() }
+
+                pub fn run() -> io::Result<()> {
+                    load()?.pop().unwrap().ship();
+                    Ok(())
+                }
+
+                pub fn pick() -> Option<()> {
+                    find()??.ship();
+                    let found = find()??;
+                    found.ship();
+                    find()?
+                        .unwrap()
+                        .ship();
+                    None
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::run") == [
+            "FILE:src/lib.rs::Product::ship",
+            "FILE:src/lib.rs::load",
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::pick") == [
+            "FILE:src/lib.rs::Product::ship",
+            "FILE:src/lib.rs::Product::ship",
+            "FILE:src/lib.rs::Product::ship",
+            "FILE:src/lib.rs::find",
+            "FILE:src/lib.rs::find",
+            "FILE:src/lib.rs::find",
+        ]
+
+    def test_type_argument_of_unknown_type_is_not_guessed(self, tmp_path):
+        """What a `Vec<T>` holds is not known inside a function generic
+        over `T`."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Product;
+
+                impl Product {
+                    pub fn ship(&self) {}
+                }
+
+                pub struct Decoy;
+
+                impl Decoy {
+                    pub fn ship(&self) {}
+                }
+
+                pub fn all<T>(items: Vec<T>) -> usize {
+                    items.first().unwrap().ship();
+                    items.len()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::all") == ["REF:ship"]
+
+    def test_standard_pointer_has_its_own_methods_and_those_it_points_at(
+        self, tmp_path
+    ):
+        """`Arc<T>::clone` is the pointer's, not the `clone` of what it
+        points at; a method an `Rc` or a `RefCell` borrow has not is one of
+        the value inside."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                use std::cell::RefCell;
+                use std::rc::Rc;
+                use std::sync::Arc;
+
+                pub struct Product;
+
+                impl Product {
+                    pub fn ship(&self) {}
+                    pub fn clone(&self) -> Product { Product }
+                }
+
+                pub struct Decoy;
+
+                impl Decoy {
+                    pub fn ship(&self) {}
+                }
+
+                pub fn share(shared: Arc<Product>) {
+                    shared.clone().ship();
+                }
+
+                pub fn lend(cell: Rc<RefCell<Product>>) {
+                    cell.borrow().ship();
+                }
+                """
+            },
+        )
+        ship = ["FILE:src/lib.rs::Product::ship"]
+        assert _calls(builder, "FILE:src/lib.rs::share") == ship
+        assert _calls(builder, "FILE:src/lib.rs::lend") == ship
+
+    def test_alias_hides_a_standard_type_only_in_its_own_file(self, tmp_path):
+        """`type Result<T> = ...` in one file leaves `Result` the prelude's
+        in another."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/errors.rs": """
+                pub type Result<T> = std::result::Result<T, String>;
+                """,
+                "src/lib.rs": """
+                pub struct Product;
+
+                impl Product {
+                    pub fn unwrap(self) {}
+                }
+
+                fn load() -> Result<bool, String> { todo!() }
+
+                pub fn run() -> bool {
+                    load().unwrap()
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::run") == ["FILE:src/lib.rs::load"]
+
+    def test_function_of_a_standard_type_returns_what_the_data_says(self, tmp_path):
+        """`Vec::new()` is a `Vec`, `u8::try_from(..)` a `Result`."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Queue;
+
+                impl Queue {
+                    pub fn push(&mut self, item: u8) {}
+                    pub fn unwrap(self) {}
+                }
+
+                pub fn fill(size: usize) -> u8 {
+                    let mut items = Vec::with_capacity(size);
+                    items.push(1);
+                    u8::try_from(size).unwrap()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::fill") == []
+
+    def test_literal_and_constant_have_a_type(self, tmp_path):
+        """What a `let` binds to a `vec![..]` or a string literal, and a
+        constant, call the methods of their type."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                const GREETING: &str = "hello";
+
+                pub struct Queue;
+
+                impl Queue {
+                    pub fn push(&mut self, item: u8) {}
+                    pub fn len(&self) -> usize { 0 }
+                }
+
+                pub fn fill() -> usize {
+                    let mut items = vec![];
+                    items.push(1);
+                    let name = "queue";
+                    name.len() + GREETING.len()
+                }
+
+                pub fn spelled(queue: &Queue) -> usize {
+                    let name = "queue".to_string();
+                    queue.len()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::fill") == []
+        assert _calls(builder, "FILE:src/lib.rs::spelled") == [
+            "FILE:src/lib.rs::Queue::len"
+        ]
+
+    def test_trait_implemented_for_a_standard_type_is_that_type_s(self, tmp_path):
+        """A method the project gives `Box<S>` is reached through a `Box`
+        and does not make the same name on another standard type the
+        project's."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                use std::fmt;
+
+                pub trait Sink {
+                    fn finish(&self);
+                }
+
+                impl<S: Sink> Sink for Box<S> {
+                    fn finish(&self) {}
+                }
+
+                pub struct Printer;
+
+                impl Sink for Printer {
+                    fn finish(&self) {}
+                }
+
+                pub fn close(boxed: Box<Printer>) {
+                    boxed.finish();
+                }
+
+                pub fn show(f: &mut fmt::Formatter<'_>) {
+                    f.debug_struct("Printer").finish();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::close") == [
+            "FILE:src/lib.rs::Box::finish"
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::show") == []
+
+    def test_returned_trait_object_calls_the_trait(self, tmp_path):
+        """A `Box<dyn Trait>` a function returns calls the trait's method."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub trait Visitor {
+                    fn visit(&mut self);
+                }
+
+                pub struct Counter;
+
+                impl Counter {
+                    pub fn visit(&mut self) {}
+                }
+
+                fn build() -> Box<dyn Visitor + 'static> { todo!() }
+
+                pub fn run() {
+                    build().visit();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::run") == [
+            "FILE:src/lib.rs::Visitor::visit",
+            "FILE:src/lib.rs::build",
+        ]
+
+    def test_implementor_of_a_standard_trait_has_other_methods_too(self, tmp_path):
+        """What is only known to implement `Write` calls the trait's
+        `flush`; a method the trait has not may be the project's."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                use std::io::Write;
+
+                pub trait Tagged {
+                    fn tag(&self);
+                    fn flush(&self);
+                }
+
+                pub fn dump<W: Write + Tagged>(out: &mut W) {
+                    out.tag();
+                    out.flush();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::dump") == [
+            "FILE:src/lib.rs::Tagged::tag"
+        ]
+
+    def test_derived_trait_gives_its_methods(self, tmp_path):
+        """`#[derive(Clone, Default)]` makes `clone` and `default` the
+        standard traits' and what they return the type itself; a type
+        without the attribute has neither."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                /// Settings.
+                #[derive(
+                    Clone,
+                    Debug, Default,
+                )]
+                pub struct Config {
+                    depth: usize,
+                }
+
+                impl Config {
+                    pub fn apply(&self) {}
+                }
+
+                /// Not `#[derive(Clone)]`.
+                pub struct Decoy;
+
+                impl Decoy {
+                    pub fn apply(&self) {}
+                }
+
+                pub struct Other;
+
+                impl Other {
+                    pub fn clone(&self) -> Other { Other }
+                    pub fn default() -> Other { Other }
+                }
+
+                pub fn copy(config: &Config) {
+                    config.clone().apply();
+                    Config::default().apply();
+                }
+
+                pub fn plain(decoy: &Decoy) {
+                    decoy.clone().apply();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::copy") == [
+            "FILE:src/lib.rs::Config::apply",
+            "FILE:src/lib.rs::Config::apply",
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::plain") == [
+            "REF:apply",
+            "REF:decoy.clone",
+        ]
+
+    def test_standard_trait_gives_only_the_members_it_has(self, tmp_path):
+        """A type that implements `Deref` has `deref` from the standard
+        library; another method it has not may be one of what it
+        dereferences to."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                use std::ops::Deref;
+
+                pub struct Engine;
+
+                impl Engine {
+                    pub fn run(&self) {}
+                }
+
+                pub struct Handle(Engine);
+
+                impl Deref for Handle {
+                    type Target = Engine;
+
+                    fn deref(&self) -> &Engine {
+                        &self.0
+                    }
+                }
+
+                pub struct Other;
+
+                impl Other {
+                    pub fn run(&self) {}
+                }
+
+                pub fn start(handle: &Handle) {
+                    handle.run();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::start") == ["REF:handle.run"]
+
+    def test_for_loop_binds_what_iterating_gives(self, tmp_path):
+        """The name a `for` binds is an item of what is iterated: of a
+        `Vec`, of a map with its key, of an `enumerate()` with its index."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                use std::collections::HashMap;
+
+                pub struct Product;
+
+                impl Product {
+                    pub fn ship(&self) {}
+                    pub fn ready(&self) -> bool { true }
+                    pub fn label(&self) -> Label { Label }
+                }
+
+                pub struct Label;
+
+                impl Label {
+                    pub fn print(&self) {}
+                }
+
+                pub struct Decoy;
+
+                impl Decoy {
+                    pub fn ship(&self) {}
+                    pub fn ready(&self) -> bool { true }
+                    pub fn print(&self) {}
+                }
+
+                pub struct Store {
+                    items: Vec<Product>,
+                    named: HashMap<String, Product>,
+                }
+
+                impl Store {
+                    pub fn all(&self) {
+                        for product in &self.items {
+                            product.ship();
+                        }
+                    }
+
+                    pub fn named(&self) {
+                        for (name, product) in &self.named {
+                            product.ship();
+                        }
+                    }
+
+                    pub fn counted(&self) {
+                        for (index, product) in self.items.iter().enumerate() {
+                            product.ship();
+                        }
+                        product.ship();
+                    }
+                }
+                """
+            },
+        )
+        ship = "FILE:src/lib.rs::Product::ship"
+        assert _calls(builder, "FILE:src/lib.rs::Store::all") == [ship]
+        assert _calls(builder, "FILE:src/lib.rs::Store::named") == [ship]
+        assert _calls(builder, "FILE:src/lib.rs::Store::counted") == [
+            ship,
+            "REF:product.ship",
+        ]
+
+    def test_pattern_binds_what_the_value_holds(self, tmp_path):
+        """A name in a pattern is what the variant, the struct or the tuple
+        matched holds at its place: in `if let`, `while let`, `let` and the
+        arms of a `match`, of standard and of project types."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Product;
+
+                impl Product {
+                    pub fn ship(&self) {}
+                    pub fn ready(&self) -> bool { true }
+                    pub fn label(&self) -> Label { Label }
+                }
+
+                pub struct Label;
+
+                impl Label {
+                    pub fn print(&self) {}
+                }
+
+                pub struct Decoy;
+
+                impl Decoy {
+                    pub fn ship(&self) {}
+                    pub fn ready(&self) -> bool { true }
+                    pub fn print(&self) {}
+                }
+
+                pub struct Failure;
+
+                impl Failure {
+                    pub fn print(&self) {}
+                }
+
+                pub struct Wrapper(Product);
+
+                pub struct Order {
+                    product: Product,
+                    count: usize,
+                }
+
+                pub enum Message {
+                    Send(Product, usize),
+                    Stop,
+                }
+
+                fn pair() -> (Product, usize) { todo!() }
+
+                fn load() -> Result<Product, Failure> { todo!() }
+
+                pub fn optional(best: Option<Product>, queue: Vec<Product>) {
+                    if let Some(product) = best.as_ref() {
+                        product.ship();
+                    }
+                    while let Some(product) = queue.pop() {
+                        product.ship();
+                    }
+                }
+
+                pub fn taken(wrapper: Wrapper, order: &Order) {
+                    let (first, count) = pair();
+                    first.ship();
+                    let Wrapper(inner) = wrapper;
+                    inner.ship();
+                    let Order { product, .. } = order;
+                    product.ship();
+                }
+
+                pub fn matched(message: Message) {
+                    match message {
+                        Message::Send(product, _) => product.ship(),
+                        Message::Stop => {}
+                    }
+                    match load() {
+                        Ok(product) => {
+                            product.ship();
+                        }
+                        Err(failure) => failure.print(),
+                    }
+                }
+                """
+            },
+        )
+        ship = "FILE:src/lib.rs::Product::ship"
+        assert _calls(builder, "FILE:src/lib.rs::optional") == [ship, ship]
+        assert _calls(builder, "FILE:src/lib.rs::taken") == [
+            ship,
+            ship,
+            ship,
+            "FILE:src/lib.rs::Wrapper",
+            "FILE:src/lib.rs::pair",
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::matched") == [
+            "FILE:src/lib.rs::Failure::print",
+            "FILE:src/lib.rs::Message::Send",
+            ship,
+            ship,
+            "FILE:src/lib.rs::load",
+        ]
+
+    def test_closure_parameter_has_the_type_the_method_passes(self, tmp_path):
+        """What `for_each`, `filter` and `Option::map` pass to a closure is
+        the item or the value held, on the line and in the closure's block;
+        the name is no longer that after it."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Product;
+
+                impl Product {
+                    pub fn ship(&self) {}
+                    pub fn ready(&self) -> bool { true }
+                    pub fn label(&self) -> Label { Label }
+                }
+
+                pub struct Label;
+
+                impl Label {
+                    pub fn print(&self) {}
+                }
+
+                pub struct Decoy;
+
+                impl Decoy {
+                    pub fn ship(&self) {}
+                    pub fn ready(&self) -> bool { true }
+                    pub fn print(&self) {}
+                }
+
+                pub fn each(items: &[Product], best: Option<Product>) -> usize {
+                    items.iter().for_each(|product| product.ship());
+                    best.as_ref().map(|product| product.ship());
+                    items.iter().filter(|product| product.ready()).count()
+                }
+
+                pub fn block(items: Vec<Product>) {
+                    items.iter().for_each(|product| {
+                        product.ship();
+                    });
+                    product.ship();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::each") == [
+            "FILE:src/lib.rs::Product::ready",
+            "FILE:src/lib.rs::Product::ship",
+            "FILE:src/lib.rs::Product::ship",
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::block") == [
+            "FILE:src/lib.rs::Product::ship",
+            "REF:product.ship",
+        ]
+
+    def test_closure_result_types_what_the_method_returns(self, tmp_path):
+        """`map` gives what its closure returns where that is one call."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Product;
+
+                impl Product {
+                    pub fn ship(&self) {}
+                    pub fn ready(&self) -> bool { true }
+                    pub fn label(&self) -> Label { Label }
+                }
+
+                pub struct Label;
+
+                impl Label {
+                    pub fn print(&self) {}
+                }
+
+                pub struct Decoy;
+
+                impl Decoy {
+                    pub fn ship(&self) {}
+                    pub fn ready(&self) -> bool { true }
+                    pub fn print(&self) {}
+                }
+
+                pub fn labels(items: &[Product], best: Option<Product>) {
+                    items.iter().map(|product| product.label()).next().unwrap().print();
+                    best.map(|product| product.label()).unwrap().print();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::labels") == [
+            "FILE:src/lib.rs::Label::print",
+            "FILE:src/lib.rs::Label::print",
+            "FILE:src/lib.rs::Product::label",
+            "FILE:src/lib.rs::Product::label",
+        ]
+
 
 class TestTypeScriptCallResolution:
+    def test_this_in_an_object_literal_argument_reads_its_this_type(self, tmp_path):
+        """`this` inside `{...}` passed to a parameter written
+        `... & ThisType<Ctx>` is `Ctx`, not the enclosing class."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                interface Ctx {
+                  tally(): number;
+                }
+
+                declare function configure(opts: { setup(): void } & ThisType<Ctx>): void;
+
+                function run() {
+                  configure({ setup() { this.tally(); } });
+                }
+                """
+            },
+        )
+        assert "FILE:a.ts::Ctx::tally" in _calls(builder, "FILE:a.ts::run")
+
+    def test_returned_arrow_reads_the_functions_return_type(self, tmp_path):
+        """`return (x) => x.fetch()` in `(): (x: Dog) => Dog` types `x`."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Dog {
+                  fetch(): number { return 1; }
+                }
+
+                function makeMaker(): (x: Dog) => Dog {
+                  return (x) => x.fetch();
+                }
+                """
+            },
+        )
+        assert "FILE:a.ts::Dog::fetch" in _calls(builder, "FILE:a.ts::makeMaker")
+
+    def test_arrow_assigned_a_function_type_reads_its_params(self, tmp_path):
+        """`const f: (x: Dog) => Dog = (y) => y.fetch()` types `y`."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Dog {
+                  fetch(): number { return 1; }
+                }
+
+                const typed: (x: Dog) => Dog = (y) => y.fetch();
+                """
+            },
+        )
+        assert "FILE:a.ts::Dog::fetch" in _calls(builder, "FILE:a.ts")
+
+    def test_union_member_calls_stay_alternatives(self, tmp_path):
+        """`a.fetch()` on `Dog | Cat`, which both define, is genuinely
+        ambiguous: the edge names the members it may reach."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Dog {
+                  fetch(): number { return 1; }
+                }
+                class Cat {
+                  fetch(): number { return 2; }
+                  purr(): number { return 3; }
+                }
+                function makeA(): Dog | Cat { return new Dog(); }
+                function run() {
+                  const a = makeA();
+                  a.fetch();
+                  a.purr();
+                }
+                """
+            },
+        )
+        calls = _calls(builder, "FILE:a.ts::run")
+        assert "REF:a.fetch" in calls and "REF:a.purr" in calls
+        edges = {
+            e["target"]: e
+            for e in builder.edges
+            if e["source"] == "FILE:a.ts::run" and e["relation"] == "CALLS"
+        }
+        assert edges["REF:a.fetch"]["metadata"]["candidates"] == [
+            "FILE:a.ts::Cat::fetch",
+            "FILE:a.ts::Dog::fetch",
+        ]
+        assert edges["REF:a.purr"]["metadata"]["candidates"] == ["FILE:a.ts::Cat::purr"]
+
     def test_call_statement_is_not_a_method_definition(self, tmp_path):
         """`name(arg, {` inside a function body is a call; only `name(...) {`
         declares an object-literal method."""
@@ -2690,6 +5160,1394 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:a.ts::build") == []
 
+    def test_module_reexported_under_a_name_is_a_namespace(self, tmp_path):
+        """`export * as ns from` makes `lib.ns.name` a path into that module."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/coerce.ts": """
+                export function text() {}
+                """,
+                "lib/other.ts": """
+                export function text() {}
+                """,
+                "lib/index.ts": """
+                export * as coerce from "./coerce";
+                """,
+                "app.ts": """
+                import * as lib from "./lib/index";
+
+                export function run() {
+                    return lib.coerce.text();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.ts::run") == ["FILE:lib/coerce.ts::text"]
+
+    def test_variable_bound_to_a_call_spread_over_lines(self, tmp_path):
+        """A variable is bound to what a call returns although the call's
+        arguments run over several lines."""
+        builder = _index(
+            tmp_path,
+            {
+                "box.ts": """
+                export class Box {
+                    open() {}
+                }
+
+                export class Crate {
+                    open() {}
+                }
+
+                export function make(options: object): Box {
+                    return new Box();
+                }
+                """,
+                "app.ts": """
+                import { make } from "./box";
+
+                export function run() {
+                    const box = make({
+                        sealed: true,
+                    });
+                    box.open();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.ts::run") == [
+            "FILE:box.ts::Box::open",
+            "FILE:box.ts::make",
+        ]
+
+    def test_receiver_named_on_the_line_before(self, tmp_path):
+        """A line that starts with `.name(` calls on the name the line
+        before it ends with."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib.ts": """
+                export function start() {}
+
+                export class Job {
+                    start() {}
+                }
+                """,
+                "app.ts": """
+                import * as lib from "./lib";
+
+                export function run() {
+                    return lib
+                        .start();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.ts::run") == ["FILE:lib.ts::start"]
+
+    def test_return_type_named_through_an_import(self, tmp_path):
+        """A declared return type is the type its file imports under that
+        name, not another of the same name."""
+        builder = _index(
+            tmp_path,
+            {
+                "a/box.ts": """
+                export class Box {
+                    open() {}
+                }
+                """,
+                "b/box.ts": """
+                export class Box {
+                    open() {}
+                }
+                """,
+                "make.ts": """
+                import { Box } from "./a/box";
+
+                export function make(): Box {
+                    return new Box();
+                }
+                """,
+                "app.ts": """
+                import { make } from "./make";
+
+                export function run() {
+                    const box = make();
+                    box.open();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.ts::run") == [
+            "FILE:a/box.ts::Box::open",
+            "FILE:make.ts::make",
+        ]
+
+    def test_constant_naming_a_function_returns_what_it_returns(self, tmp_path):
+        """Calling `const make = Shape.create` gives what `create` declares."""
+        builder = _index(
+            tmp_path,
+            {
+                "shape.ts": """
+                export class Shape {
+                    static create(): Shape {
+                        return new Shape();
+                    }
+                    area() {}
+                }
+
+                export class Solid {
+                    area() {}
+                }
+
+                export const make = Shape.create;
+                """,
+                "app.ts": """
+                import { make } from "./shape";
+
+                export function run() {
+                    const shape = make();
+                    shape.area();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.ts::run") == [
+            "FILE:shape.ts::Shape::area",
+            "FILE:shape.ts::make",
+        ]
+
+    def test_method_returning_this_returns_the_receivers_type(self, tmp_path):
+        """`this` as a return type is the type the method was called on,
+        which may be a subtype of the one that declares it."""
+        builder = _index(
+            tmp_path,
+            {
+                "schema.ts": """
+                export interface Schema {
+                    strict(): this;
+                }
+
+                export interface Text extends Schema {
+                    upper(): Text;
+                }
+
+                export interface Count extends Schema {
+                    upper(): Count;
+                }
+
+                export function text(): Text {
+                    return build();
+                }
+                """,
+                "app.ts": """
+                import { text } from "./schema";
+
+                export function run() {
+                    return text().strict().upper();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.ts::run") == [
+            "FILE:schema.ts::Schema::strict",
+            "FILE:schema.ts::Text::upper",
+            "FILE:schema.ts::text",
+        ]
+
+    def test_declarations_behind_modifiers_and_named_function_expressions(
+        self, tmp_path
+    ):
+        """`abstract name(`, `override get name(` and `function name(`
+        declare the name; none of them calls it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export function run(data) {}
+
+                export function size() {}
+                """,
+                "b.ts": """
+                import { other } from "./c";
+
+                export abstract class Base {
+                    abstract run(data: unknown): void;
+                    override get size() {
+                        return 1;
+                    }
+                }
+
+                export const api = {
+                    start: function run(data) {
+                        return data;
+                    },
+                };
+                """,
+                "c.ts": """
+                export function other() {}
+                """,
+            },
+        )
+        calls = [e for e in builder.edges if e["relation"].startswith("CALLS")]
+        assert calls == []
+
+    def test_bare_call_in_a_module_reaches_only_its_own_bindings(self, tmp_path):
+        """A file that imports is a module: a bare name in it is no global
+        of another file, and never a member of a class."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export function make() {}
+
+                export class Box {
+                    static seal() {}
+                }
+                """,
+                "b.ts": """
+                import { helper } from "./c";
+
+                export function run() {
+                    make();
+                    seal();
+                    return helper();
+                }
+                """,
+                "c.ts": """
+                export function helper() {}
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:b.ts::run") == ["FILE:c.ts::helper"]
+
+    def test_member_call_is_not_pinned_to_a_function_of_another_module(self, tmp_path):
+        """`x.make()` reaches a module's `make` only through a binding of
+        that module, which `require` and `import()` give as well."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                export function make() {}
+                """,
+                "b.js": """
+                const lib = require("./a");
+
+                export function direct() {
+                    return lib.make();
+                }
+
+                export async function lazy() {
+                    const { make } = await import("./a");
+                    return make();
+                }
+
+                export function unknown(x) {
+                    return x.make();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:b.js::direct") == ["FILE:a.js::make"]
+        assert _calls(builder, "FILE:b.js::lazy") == ["FILE:a.js::make"]
+        assert _calls(builder, "FILE:b.js::unknown") == ["REF:x.make"]
+
+    def test_call_on_the_result_of_a_signature_over_several_lines(self, tmp_path):
+        """The return type declared after a parameter list that runs over
+        lines types the call made on the result, and the body that follows
+        makes its own calls."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export interface Text {
+                    upper(): Text;
+                }
+
+                export interface Count {
+                    upper(): Count;
+                }
+
+                function build() {}
+
+                export function text(
+                    options?: {
+                        trim?: boolean;
+                    }
+                ): Text {
+                    return build();
+                }
+
+                export function run() {
+                    return text({ trim: true }).upper();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::text") == ["FILE:a.ts::build"]
+        assert _calls(builder, "FILE:a.ts::run") == [
+            "FILE:a.ts::Text::upper",
+            "FILE:a.ts::text",
+        ]
+
+    def test_template_literal_over_several_lines_is_not_code(self, tmp_path):
+        """Text of a template literal that spans lines adds no call and no
+        definition; its `${...}` does, and code goes on after it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                function outline() {}
+                function label() {}
+                function close() {}
+
+                function emit(name) {
+                    const text = `
+                        element(s) of ${label()} at http://host/outline()
+                        function outline() {
+                    `.trim();
+                    return close();
+                }
+                """
+            },
+        )
+        assert "FILE:a.ts::emit::outline" not in {n["id"] for n in builder.nodes}
+        assert _calls(builder, "FILE:a.ts::emit") == [
+            "FILE:a.ts::close",
+            "FILE:a.ts::label",
+        ]
+
+    def test_regular_expression_text_is_not_a_call(self, tmp_path):
+        """A quote or a `name(` inside a regular expression literal is text;
+        the code after the literal is read."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                function outline() {}
+                function label() {}
+
+                function check(body) {
+                    return /^["'`]outline(s)/.test(body) || label();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::check") == ["FILE:a.ts::label"]
+
+    def test_constant_declared_over_several_lines_is_a_definition(self, tmp_path):
+        """A `const` whose annotation or value runs over lines is called
+        through an import as one written on a line is."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/parse.ts": """
+                export const parse: <T>(
+                    schema: T,
+                    value: unknown
+                ) => T = make();
+
+                export const table = make({
+                    strict: true,
+                });
+                """,
+                "lib/other.ts": """
+                export class Reader {
+                    parse(value) {}
+                }
+                """,
+                "app.ts": """
+                import * as lib from "./lib/parse";
+
+                export function run(value) {
+                    return lib.parse(lib.table, value);
+                }
+                """,
+            },
+        )
+        nodes = {n["id"]: n["type"] for n in builder.nodes}
+        assert nodes["FILE:lib/parse.ts::table"] == "Constant"
+        assert _calls(builder, "FILE:app.ts::run") == ["FILE:lib/parse.ts::parse"]
+
+    def test_export_under_another_name_is_found_through_an_import(self, tmp_path):
+        """`export { _make as make }` is called as `lib.make()`, though no
+        definition is named `make`."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib.ts": """
+                function _make() {}
+
+                export { _make as make };
+                """,
+                "app.ts": """
+                import * as lib from "./lib";
+
+                export function run() {
+                    return lib.make();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.ts::run") == ["FILE:lib.ts::_make"]
+
+    def test_member_named_by_a_keyword_is_called(self, tmp_path):
+        """After a `.` a keyword names a member: `lib.null()`, `.default()`
+        and `.catch()` are calls, of what an interface declares under those
+        names."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib.ts": """
+                export interface Schema {
+                    default(value: unknown): Schema;
+                    catch(value: unknown): Schema;
+                    strict(): Schema;
+                }
+
+                function _null(): Schema {
+                    return build();
+                }
+
+                export { _null as null };
+                """,
+                "app.ts": """
+                import * as lib from "./lib";
+
+                export function run() {
+                    try {
+                        return lib.null().default(1).catch(2).strict();
+                    } catch (error) {
+                        return null;
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.ts::run") == [
+            "FILE:lib.ts::Schema::catch",
+            "FILE:lib.ts::Schema::default",
+            "FILE:lib.ts::Schema::strict",
+            "FILE:lib.ts::_null",
+        ]
+
+    def test_constant_has_the_members_of_its_declared_type(self, tmp_path):
+        """`const Widget: Factory<Widget> = ...` is called as a Factory,
+        in its own file and through an import, though an interface of its
+        name has a member called the same."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/factory.ts": """
+                export interface Factory<T> {
+                    init(instance: T): void;
+                }
+                """,
+                "lib/widget.ts": """
+                import { Factory } from "./factory";
+
+                export interface Widget {
+                    init(): void;
+                }
+
+                export const Widget: Factory<Widget> = build(
+                    "Widget"
+                );
+
+                export function local(instance) {
+                    Widget.init(instance);
+                }
+                """,
+                "app.ts": """
+                import * as lib from "./lib/widget";
+
+                export function run(instance) {
+                    lib.Widget.init(instance);
+                }
+                """,
+            },
+        )
+        init = "FILE:lib/factory.ts::Factory::init"
+        assert _calls(builder, "FILE:lib/widget.ts::local") == [init]
+        assert _calls(builder, "FILE:app.ts::run") == [init]
+
+    def test_function_held_by_an_object_literal_is_its_member(self, tmp_path):
+        """`coerce.text()` reaches the function the constant `coerce` holds
+        under `text`, as a property or as a method, not a function of that
+        name."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib.ts": """
+                export function text() {}
+
+                export function count() {}
+
+                export const coerce = {
+                    text: ((arg) => text({ ...arg, coerce: true })) as typeof text,
+                    count(arg) {
+                        return count(arg);
+                    },
+                };
+
+                export function local() {
+                    return coerce.text();
+                }
+                """,
+                "app.ts": """
+                import * as lib from "./lib";
+
+                export function run() {
+                    lib.coerce.text();
+                    return lib.coerce.count();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib.ts::local") == ["FILE:lib.ts::coerce::text"]
+        assert _calls(builder, "FILE:app.ts::run") == [
+            "FILE:lib.ts::coerce::count",
+            "FILE:lib.ts::coerce::text",
+        ]
+        assert _calls(builder, "FILE:lib.ts::coerce::count") == ["FILE:lib.ts::count"]
+
+    def test_object_literal_holds_the_modules_it_names(self, tmp_path):
+        """`{ ...schemas, iso: dates }` holds what the module `schemas`
+        exports, and the module `dates` under `iso`."""
+        builder = _index(
+            tmp_path,
+            {
+                "schemas.ts": """
+                export function text() {}
+                """,
+                "dates.ts": """
+                export function text() {}
+                """,
+                "app.ts": """
+                import * as schemas from "./schemas";
+                import * as dates from "./dates";
+
+                const z = {
+                    ...schemas,
+                    iso: dates,
+                };
+
+                export function run() {
+                    z.text();
+                    return z.iso.text();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.ts::run") == [
+            "FILE:dates.ts::text",
+            "FILE:schemas.ts::text",
+        ]
+
+    def test_named_import_of_a_namespace_is_a_receiver(self, tmp_path):
+        """`import { util }` binds what the module exports as `util`: the
+        module `export * as util` names."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/util.ts": """
+                export function pick() {}
+                """,
+                "lib/other.ts": """
+                export function pick() {}
+                """,
+                "lib/index.ts": """
+                export * as util from "./util";
+                """,
+                "app.ts": """
+                import { util } from "./lib/index";
+
+                export function run() {
+                    return util.pick();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.ts::run") == ["FILE:lib/util.ts::pick"]
+
+    def test_property_that_holds_a_function_is_not_the_one_method(self, tmp_path):
+        """`effect.refinement()` on an unknown receiver may call the
+        function an Effect holds, so the one method of that name is not
+        pinned."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export interface Effect {
+                    refinement: (value: unknown) => void;
+                }
+
+                export class Schema {
+                    refinement(check) {}
+                    strict() {}
+                }
+
+                export function run(effect, schema) {
+                    effect.refinement(1);
+                    schema.strict();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::run") == [
+            "FILE:a.ts::Schema::strict",
+            "REF:effect.refinement",
+        ]
+
+    def test_call_on_a_standard_value_is_external_and_typed(self, tmp_path):
+        """A method of a standard type is the library's, whatever the
+        project names its own, and what it returns is typed for the call
+        after it: by the type arguments of an array or a map, a project
+        type."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Schema {
+                    run() {}
+                    map(fn) {}
+                    get(key) {}
+                    split(by) {}
+                    keys() {}
+                }
+
+                export class Decoy {
+                    run() {}
+                }
+
+                export function chains(text: string, table: object) {
+                    text.split(",").map((part) => part.trim()).filter(Boolean);
+                    Object.keys(table).forEach((key) => key.trim());
+                }
+
+                export function held(all: Schema[], named = new Map<string, Schema>()) {
+                    all.at(0).run();
+                    named.get("a").run();
+                }
+
+                export async function fetched(url) {
+                    const response = await fetch(url);
+                    return response.json();
+                }
+                """
+            },
+        )
+        run = "FILE:a.ts::Schema::run"
+        assert _calls(builder, "FILE:a.ts::chains") == []
+        assert _calls(builder, "FILE:a.ts::held") == [run, run]
+        assert _calls(builder, "FILE:a.ts::fetched") == []
+
+    def test_new_constructs_an_instance_and_a_call_returns(self, tmp_path):
+        """`new Type<arguments>(...)` is an instance of the type with the
+        arguments written; the same name called without `new` returns what
+        its call signature says."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Schema {
+                    run() {}
+                    getTime() {}
+                }
+
+                export class Decoy {
+                    run() {}
+                    getTime() {}
+                }
+
+                export function built() {
+                    new Date().getTime();
+                    new Map<string, Schema>().get("a").run();
+                    new Schema().run();
+                }
+
+                export function called() {
+                    Date().getTime();
+                }
+                """
+            },
+        )
+        run = "FILE:a.ts::Schema::run"
+        assert _calls(builder, "FILE:a.ts::built") == [
+            "FILE:a.ts::Schema",
+            run,
+            run,
+        ]
+        assert _calls(builder, "FILE:a.ts::called") == ["REF:getTime"]
+
+    def test_type_parameter_is_what_the_call_site_says(self, tmp_path):
+        """A parameter of a function passed to a generic function, declared
+        as one of its type parameters, has the type the call is written
+        with, else the one that the declared type of the variable the
+        result initialises puts in its place, else the parameter's bound;
+        with none of them it has no type."""
+        builder = _index(
+            tmp_path,
+            {
+                "core.ts": """
+                export interface Maker<T> {
+                    make(): T;
+                }
+
+                export function maker<T>(name: string, init: (inst: T) => void): Maker<T> {
+                    return undefined as any;
+                }
+
+                export function each<T extends Bounded>(run: (item: T) => void): void {}
+
+                export interface Bounded {
+                    check(): void;
+                }
+                """,
+                "a.ts": """
+                import * as core from "./core";
+
+                export interface Checked {
+                    check(): void;
+                }
+
+                export interface Other {
+                    check(): void;
+                }
+
+                export const One: core.Maker<Checked> = core.maker("One", (inst) => {
+                    inst.check();
+                });
+
+                export const Two: core.Maker<Checked> = core.maker(
+                    "Two",
+                    (inst) => {
+                        inst.check();
+                    }
+                );
+
+                export const Three: core.Maker<Checked> = core.maker("Three", (inst) => {
+                    inst.check();
+                }).make();
+
+                export function written() {
+                    core.maker<Other>("Four", (inst) => inst.check());
+                }
+
+                export function bounded() {
+                    core.each((item) => item.check());
+                }
+
+                export function unsaid() {
+                    core.maker("Five", (inst) => inst.check());
+                }
+                """,
+            },
+        )
+        maker = "FILE:core.ts::maker"
+        checked = "FILE:a.ts::Checked::check"
+        assert _calls(builder, "FILE:a.ts") == [
+            checked,
+            checked,
+            "FILE:core.ts::Maker::make",
+            maker,
+            maker,
+            maker,
+            "REF:inst.check",
+        ]
+        assert _calls(builder, "FILE:a.ts::written") == [
+            "FILE:a.ts::Other::check",
+            maker,
+        ]
+        assert _calls(builder, "FILE:a.ts::bounded") == [
+            "FILE:core.ts::Bounded::check",
+            "FILE:core.ts::each",
+        ]
+        assert _calls(builder, "FILE:a.ts::unsaid") == [maker, "REF:inst.check"]
+
+    def test_element_of_an_array_literal_is_any_of_its_elements(self, tmp_path):
+        """What a `for...of` over an array literal binds is any of its
+        elements, of an object literal the property named: a call on it is
+        resolved where every element leads to the same definition."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Base {
+                    run() {}
+                }
+
+                export class Left extends Base {
+                    only() {}
+                }
+
+                export class Right extends Base {
+                    only() {}
+                }
+
+                export class Decoy {
+                    run() {}
+                    only() {}
+                }
+
+                export function listed() {
+                    const cases = [
+                        { schema: new Left(), input: "a" },
+                        { schema: new Right(), input: "b" },
+                    ];
+                    for (const { schema, input } of cases) {
+                        schema.run();
+                        schema.only();
+                    }
+                }
+
+                export function inline() {
+                    for (const each of [new Left(), new Right()]) {
+                        each.run();
+                    }
+                }
+
+                export function spread(more) {
+                    const cases = [
+                        { schema: new Left() },
+                        ...more,
+                    ];
+                    for (const { schema } of cases) {
+                        schema.run();
+                    }
+                }
+                """
+            },
+        )
+        run = "FILE:a.ts::Base::run"
+        built = ["FILE:a.ts::Left", "FILE:a.ts::Right"]
+        assert _calls(builder, "FILE:a.ts::listed") == [
+            run,
+            *built,
+            "REF:schema.only",
+        ]
+        assert _calls(builder, "FILE:a.ts::inline") == [run, *built]
+        assert _calls(builder, "FILE:a.ts::spread") == [
+            "FILE:a.ts::Left",
+            "REF:schema.run",
+        ]
+
+    def test_return_type_is_read_as_written(self, tmp_path):
+        """A return type is read whole: a conditional type is the type its
+        branches agree on, an intersection the operand derived from the
+        others, a type parameter the type of the argument passed for it,
+        and of overloads the one that takes as many arguments and type
+        arguments, the first where all take the same types, else the type
+        they all return."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Meta {
+                    describe() {}
+                }
+
+                export class Base {
+                    run() {}
+                }
+
+                export class Decoy {
+                    run() {}
+                    describe() {}
+                    only() {}
+                }
+
+                export class Schema extends Base {
+                    only() {}
+                    refine<Ch extends (arg: unknown) => unknown>(
+                        check: Ch
+                    ): Ch extends (arg: any) => arg is infer R ? this & Base : this {
+                        return this as any;
+                    }
+                    pick<K>(key: K): K extends string ? Schema : Meta {
+                        return this as any;
+                    }
+                    meta(): Meta;
+                    meta(data: object): this;
+                    meta(data?: object): any {
+                        return this;
+                    }
+                    with(value: string): Schema;
+                    with(value: number): Schema;
+                    with(value: any): any {
+                        return this;
+                    }
+                    as(value: string): Schema;
+                    as(value: number): Meta;
+                    as(value: any): any {
+                        return this;
+                    }
+                    same(value: string): Schema;
+                    same<T>(value: string): Meta;
+                    same(value: any): any {
+                        return this;
+                    }
+                }
+
+                export function compile<T>(schema: T): T {
+                    return schema;
+                }
+
+                export function chained(schema: Schema) {
+                    schema.refine((value) => true).only();
+                    schema.meta({}).only();
+                    schema.with(1).only();
+                    compile(schema).only();
+                    compile(new Schema()).only();
+                    schema.same("a").only();
+                }
+
+                export function chosen(schema: Schema) {
+                    schema.meta().describe();
+                    schema.same<number>("a").describe();
+                }
+
+                export function undecided(schema: Schema) {
+                    schema.pick("a").run();
+                    schema.as(1).only();
+                }
+                """
+            },
+        )
+        schema = "FILE:a.ts::Schema"
+        assert _calls(builder, "FILE:a.ts::chained") == [
+            schema,
+            f"{schema}::meta",
+            *[f"{schema}::only"] * 6,
+            f"{schema}::refine",
+            f"{schema}::same",
+            f"{schema}::with",
+            "FILE:a.ts::compile",
+            "FILE:a.ts::compile",
+        ]
+        assert _calls(builder, "FILE:a.ts::chosen") == [
+            "FILE:a.ts::Meta::describe",
+            "FILE:a.ts::Meta::describe",
+            f"{schema}::meta",
+            f"{schema}::same",
+        ]
+        assert _calls(builder, "FILE:a.ts::undecided") == [
+            f"{schema}::as",
+            f"{schema}::pick",
+            "REF:only",
+            "REF:run",
+        ]
+
+    def test_function_without_a_return_type_returns_what_its_body_does(self, tmp_path):
+        """A function that declares no return type returns what every
+        `return` of its body gives: `this`, a construction, one call or a
+        name of a declared type. One whose returns differ, or that returns
+        anything else, returns what is not known."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Decoy {
+                    run() {}
+                }
+
+                export class Other {
+                    run() {}
+                }
+
+                export class Schema {
+                    run() {}
+                    self() {
+                        return this;
+                    }
+                    made(flag) {
+                        if (flag) return new Schema();
+                        return new Schema({
+                            flag,
+                        });
+                    }
+                    called() {
+                        return this.made(true);
+                    }
+                    given(other: Schema) {
+                        return other;
+                    }
+                    mixed(flag) {
+                        if (flag) {
+                            return new Other();
+                        }
+                        return this;
+                    }
+                    wrapped() {
+                        return [this].map((each) => {
+                            return each;
+                        });
+                    }
+                    chained() {
+                        return this.made(true).self();
+                    }
+                    async later() {
+                        return this;
+                    }
+                }
+
+                const build = (flag) => new Schema().made(flag);
+                const fresh = () => new Schema();
+
+                export function decided(schema: Schema) {
+                    schema.self().run();
+                    schema.made(true).run();
+                    schema.called().run();
+                    schema.given(schema).run();
+                    fresh().run();
+                }
+
+                export function undecided(schema: Schema) {
+                    schema.mixed(true).run();
+                    schema.wrapped().run();
+                    schema.chained().run();
+                    schema.later().run();
+                    build(true).run();
+                }
+                """
+            },
+        )
+        schema = "FILE:a.ts::Schema"
+        assert _calls(builder, "FILE:a.ts::decided") == [
+            f"{schema}::called",
+            f"{schema}::given",
+            f"{schema}::made",
+            *[f"{schema}::run"] * 5,
+            f"{schema}::self",
+            "FILE:a.ts::fresh",
+        ]
+        assert _calls(builder, "FILE:a.ts::undecided") == [
+            f"{schema}::chained",
+            f"{schema}::later",
+            f"{schema}::mixed",
+            f"{schema}::wrapped",
+            "FILE:a.ts::build",
+            *["REF:run"] * 5,
+        ]
+
+    def test_variable_has_the_type_its_value_is_asserted_as(self, tmp_path):
+        """`const name = value as Type` declares the variable as the type,
+        unless an operator before the `as` takes only part of the value
+        with it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Schema {
+                    run() {}
+                }
+
+                export class Decoy {
+                    run() {}
+                }
+
+                export function asserted(event, other) {
+                    const schema = event.target as Schema;
+                    schema.run();
+                    const twice = event.target as unknown as Schema;
+                    twice.run();
+                }
+
+                export function partly(event, other) {
+                    const either = other || event.target as Schema;
+                    either.run();
+                }
+                """
+            },
+        )
+        run = "FILE:a.ts::Schema::run"
+        assert _calls(builder, "FILE:a.ts::asserted") == [run, run]
+        assert _calls(builder, "FILE:a.ts::partly") == ["REF:either.run"]
+
+    def test_member_a_standard_type_has_not_may_be_the_projects(self, tmp_path):
+        """A value declared as a standard type may be of a project type
+        that extends it, so a member the type has not is neither dropped
+        nor pinned by its name."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Problem extends Error {
+                    flatten() {}
+                }
+
+                export function report(error: Error) {
+                    error.flatten();
+                    return error.toString();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::report") == ["REF:error.flatten"]
+
+    def test_global_is_the_librarys_unless_its_file_binds_the_name(self, tmp_path):
+        """`document` and `globalThis.console` are the browser's and the
+        language's; a parameter called `document` is not."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Page {
+                    typeset() {}
+                    log() {}
+                    querySelector() {}
+                }
+
+                export function setup() {}
+
+                export function draw() {
+                    document.querySelector("p").remove();
+                    globalThis.console.log("drawn");
+                    globalThis.setup();
+                }
+                """,
+                "b.ts": """
+                export function print(document) {
+                    document.typeset();
+                    document.querySelector("p");
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::draw") == ["FILE:a.ts::setup"]
+        assert _calls(builder, "FILE:b.ts::print") == [
+            "FILE:a.ts::Page::typeset",
+            "REF:document.querySelector",
+        ]
+
+    def test_function_passed_to_a_standard_method_is_typed_by_it(self, tmp_path):
+        """What `map`, `forEach`, `find`, `reduce` and `then` hand to the
+        function they are passed types its parameters, and what `map`
+        returns is typed by what that function returns."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Schema {
+                    child(): Child {
+                        return new Child();
+                    }
+                }
+
+                export class Child {
+                    run() {}
+                }
+
+                export class Decoy {
+                    child() {}
+                    run() {}
+                }
+
+                export function each(all: Schema[], later: Promise<Schema>) {
+                    all.forEach((schema) => schema.child());
+                    all.find((schema) => schema.child()).child();
+                    all.reduce((total, schema) => total + schema.child(), 0);
+                    later.then((schema) => schema.child());
+                }
+
+                export function mapped(all: Array<Schema>) {
+                    all.map((schema) => schema.child()).forEach((child) => {
+                        child.run();
+                    });
+                }
+                """
+            },
+        )
+        child = "FILE:a.ts::Schema::child"
+        assert _calls(builder, "FILE:a.ts::each") == [child] * 5
+        assert _calls(builder, "FILE:a.ts::mapped") == ["FILE:a.ts::Child::run", child]
+
+    def test_function_passed_to_a_project_function_is_typed_by_it(self, tmp_path):
+        """The parameters of a function passed as an argument have the
+        types the function called declares for them."""
+        builder = _index(
+            tmp_path,
+            {
+                "doc.ts": """
+                export class Doc {
+                    write(line: string) {}
+                    indented(body: (inner: Doc, depth: number) => void) {}
+                }
+
+                export class Decoy {
+                    write(line) {}
+                }
+                """,
+                "app.ts": """
+                import { Doc } from "./doc";
+
+                export function emit(doc: Doc) {
+                    doc.indented((inner, depth) => {
+                        inner.write(depth.toFixed(0));
+                    });
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.ts::emit") == [
+            "FILE:doc.ts::Doc::indented",
+            "FILE:doc.ts::Doc::write",
+        ]
+
+    def test_loop_variable_and_pattern_are_typed_by_their_value(self, tmp_path):
+        """`for...of` gives the elements of what it iterates, `for...in`
+        names; `const { a } = value` and `value.a.name()` read the property
+        `a` as the type of `value` declares it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Schema {
+                    run() {}
+                    trim() {}
+                }
+
+                export class Decoy {
+                    run() {}
+                }
+
+                export interface Context {
+                    schema: Schema;
+                    seen: Map<string, Schema>;
+                }
+
+                export function loops(all: Schema[], table: object) {
+                    for (const schema of all) {
+                        schema.run();
+                    }
+                    for (const key in table) {
+                        key.trim();
+                    }
+                }
+
+                export function parts(context: Context, all: Schema[]) {
+                    const { schema, seen } = context;
+                    const [first] = all;
+                    schema.run();
+                    first.run();
+                    seen.get("a").run();
+                    context.schema.run();
+                    context.seen.clear();
+                }
+                """
+            },
+        )
+        run = "FILE:a.ts::Schema::run"
+        assert _calls(builder, "FILE:a.ts::loops") == [run]
+        assert _calls(builder, "FILE:a.ts::parts") == [run] * 4
+
+    def test_variable_has_the_type_of_the_literal_it_is(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Suite {
+                    test(name) {}
+                    map(fn) {}
+                    trim() {}
+                }
+
+                export function check(body, suite) {
+                    const blank = /^\\s*$/;
+                    const names = ["a", "b"];
+                    const label = `check ${body}`;
+                    suite.test(body);
+                    return blank.test(body) || names.map(String) || label.trim();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::check") == ["REF:suite.test"]
+
+    def test_variable_declared_again_has_no_type_from_before(self, tmp_path):
+        """A name declared a second time without a type is of none, not of
+        the type an earlier declaration or a field of that name has."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Schema {
+                    run() {}
+                }
+
+                export class Other {
+                    run() {}
+                }
+
+                export interface Options {
+                    memo?: Schema;
+                }
+
+                test("first", () => {
+                    const schema: Schema = load();
+                    schema.run();
+                });
+
+                test("second", () => {
+                    const schema = flag ? left : right;
+                    const memo = config.memo;
+                    schema.run();
+                    memo.run();
+                });
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts") == [
+            "FILE:a.ts::Schema::run",
+            "REF:memo.run",
+            "REF:schema.run",
+        ]
+
+    def test_value_of_a_chain_below_its_name_and_of_a_typed_call(self, tmp_path):
+        """A variable is bound to the call its value ends with where the
+        chain starts on the line below the name, and where the call is
+        written with type arguments."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib.ts": """
+                export interface Schema {
+                    strict(): Schema;
+                    run(): void;
+                }
+
+                export interface Decoy {
+                    run(): void;
+                }
+
+                export function make<T>(shape?: object): Schema {
+                    return build(shape);
+                }
+                """,
+                "app.ts": """
+                import * as lib from "./lib";
+
+                export function below() {
+                    const schema = lib
+                        .make({
+                            deep: true,
+                        })
+                        .strict();
+                    schema.run();
+                }
+
+                export function typed() {
+                    const schema = lib.make<{ deep: boolean }>();
+                    schema.run();
+                }
+                """,
+            },
+        )
+        run = "FILE:lib.ts::Schema::run"
+        assert run in _calls(builder, "FILE:app.ts::below")
+        assert _calls(builder, "FILE:app.ts::typed") == [run, "FILE:lib.ts::make"]
+
 
 class TestGoCallResolution:
     def test_bare_call_is_the_function_not_a_method_of_that_name(self, tmp_path):
@@ -2919,6 +6777,7 @@ class TestGoCallResolution:
 
                 func withParameter(name string, check func()) {
                 \tcheck()
+                \thandler()
                 }
 
                 func withVariable() {
@@ -2933,15 +6792,1749 @@ class TestGoCallResolution:
                 """
             },
         )
-        assert _calls(builder, "FILE:app.go::withParameter") == []
+        assert _calls(builder, "FILE:app.go::withParameter") == ["FILE:app.go::handler"]
         assert _calls(builder, "FILE:app.go::withVariable") == []
         assert _calls(builder, "FILE:app.go::direct") == [
             "FILE:app.go::check",
             "FILE:app.go::handler",
         ]
 
+    def test_signature_with_function_types_or_over_several_lines(self, tmp_path):
+        """A function is read with its parameters and results where those
+        have function types or are written one to a line."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Job struct{}
+
+                func (j *Job) Run() {}
+
+                type Decoy struct{}
+
+                func (d *Decoy) Run() {}
+
+                func each(first *Job, visit func(*Job) error) func() error {
+                \tfirst.Run()
+                \treturn nil
+                }
+
+                func build(
+                \tjob *Job,
+                \twrap func(func() error) func() error,
+                ) (
+                \tmade *Job,
+                \terr error,
+                ) {
+                \tjob.Run()
+                \twrap()
+                \treturn
+                }
+
+                func wrap() {}
+
+                func use() {
+                \tmade, _ := build(nil, nil)
+                \tmade.Run()
+                \teach(made, nil)
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::each") == ["FILE:app.go::Job::Run"]
+        assert _calls(builder, "FILE:app.go::build") == ["FILE:app.go::Job::Run"]
+        assert _calls(builder, "FILE:app.go::use") == [
+            "FILE:app.go::Job::Run",
+            "FILE:app.go::build",
+            "FILE:app.go::each",
+        ]
+
+    def test_receiver_and_first_parameter_are_local_to_their_function(self, tmp_path):
+        """A name another function has as its receiver or first parameter
+        has no type from that."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Job struct{}
+
+                func (job *Job) Run() {}
+
+                type Step struct{}
+
+                func (s *Step) Run() {}
+
+                func start(step *Step, count int) {
+                \tstep.Run()
+                }
+
+                func (job *Job) each(items []interface{}) {
+                \tjob.Run()
+                \tstep := items[0]
+                \tstep.Run()
+                }
+
+                func all(items []interface{}) {
+                \tjob := items[0]
+                \tjob.Run()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::start") == ["FILE:app.go::Step::Run"]
+        assert _calls(builder, "FILE:app.go::Job::each") == [
+            "FILE:app.go::Job::Run",
+            "REF:step.Run",
+        ]
+        assert _calls(builder, "FILE:app.go::all") == ["REF:job.Run"]
+
+    def test_variable_bound_to_a_field_or_variable_has_its_type(self, tmp_path):
+        """`c := hs.c` gives `c` the type the field is declared with and
+        `other := hs` that of `hs`; a field no declaration types gives none."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Conn struct{}
+
+                func (c *Conn) Write() {}
+
+                type Mock struct{}
+
+                func (m *Mock) Write() {}
+
+                type state struct {
+                \tc *Conn
+                }
+
+                func (hs *state) send() {
+                \tc := hs.c
+                \tc.Write()
+                }
+
+                func (hs *state) copied() {
+                \tother := hs
+                \tconn := other.c
+                \tconn.Write()
+                }
+
+                func (hs *state) untyped() {
+                \tc := hs.spare
+                \tc.Write()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::state::send") == [
+            "FILE:app.go::Conn::Write"
+        ]
+        assert _calls(builder, "FILE:app.go::state::copied") == [
+            "FILE:app.go::Conn::Write"
+        ]
+        assert _calls(builder, "FILE:app.go::state::untyped") == ["REF:c.Write"]
+
+    def test_names_of_a_parameter_list_that_share_a_type(self, tmp_path):
+        """`first, second *Conn` declares both names as a `Conn`."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Conn struct{}
+
+                func (c *Conn) Write() {}
+
+                type Mock struct{}
+
+                func (m *Mock) Write() {}
+
+                func pair(first, second, third *Conn, mock *Mock) (a, b *Mock) {
+                \tfirst.Write()
+                \tsecond.Write()
+                \tthird.Write()
+                \ta.Write()
+                \treturn
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::pair") == [
+            "FILE:app.go::Conn::Write",
+            "FILE:app.go::Conn::Write",
+            "FILE:app.go::Conn::Write",
+            "FILE:app.go::Mock::Write",
+        ]
+
+    def test_type_assertion_in_an_if_initializer(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "app.go": """
+                package app
+
+                import "net"
+
+                type Conn struct{}
+
+                func (c *Conn) Temporary() bool { return false }
+
+                type Mock struct{}
+
+                func (m *Mock) Write() {}
+
+                func (c *Conn) Write() {}
+
+                func check(err error, in interface{}) {
+                \tif e, ok := err.(net.Error); ok && e.Temporary() {
+                \t\treturn
+                \t}
+                \tif mock, ok := in.(*Mock); ok {
+                \t\tmock.Write()
+                \t}
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.go::check") == ["FILE:app.go::Mock::Write"]
+
+    def test_entry_of_a_var_block_is_a_package_level_variable(self, tmp_path):
+        """A name declared in a `var (...)` block has its declared type in
+        every function of the file."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "app.go": """
+                package app
+
+                import "crypto/elliptic"
+
+                type Conn struct{}
+
+                func (c *Conn) Write() {}
+
+                func (c *Conn) Params() {}
+
+                type Mock struct{}
+
+                func (m *Mock) Write() {}
+
+                var (
+                \tcurve  elliptic.Curve
+                \tconn   *Conn
+                \tbackup = &Mock{}
+                )
+
+                func use() {
+                \tcurve.Params()
+                \tconn.Write()
+                \tbackup.Write()
+                }
+
+                func local() {
+                \tvar (
+                \t\tinner *Mock
+                \t)
+                \tinner.Write()
+                }
+
+                func elsewhere(items []interface{}) {
+                \tinner := items[0]
+                \tinner.Write()
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.go::use") == [
+            "FILE:app.go::Conn::Write",
+            "FILE:app.go::Mock::Write",
+        ]
+        assert _calls(builder, "FILE:app.go::local") == ["FILE:app.go::Mock::Write"]
+        assert _calls(builder, "FILE:app.go::elsewhere") == ["REF:inner.Write"]
+
+    def test_new_and_type_assertion_give_the_variable_its_type(self, tmp_path):
+        """`new(T)` and `value.(*T)` yield a T: a project type's method
+        resolves, an imported package's is external."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "app.go": """
+                package app
+
+                import "bytes"
+
+                type Command struct{}
+
+                func (c *Command) Runnable() bool { return true }
+
+                type Other struct{}
+
+                func (o *Other) Runnable() bool { return false }
+
+                func (o *Other) String() string { return "" }
+
+                func usage(in interface{}) string {
+                	c := in.(*Command)
+                	buf := new(bytes.Buffer)
+                	if c.Runnable() {
+                		return buf.String()
+                	}
+                	return ""
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.go::usage") == [
+            "FILE:app.go::Command::Runnable"
+        ]
+
+    def test_field_of_a_declared_value_has_its_declared_type(self, tmp_path):
+        """`c.flags` is the FlagSet of an imported package and `c.parent`
+        a Command, as the struct declares them."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "app.go": """
+                package app
+
+                import flag "github.com/spf13/pflag"
+
+                type Command struct {
+                	flags  *flag.FlagSet
+                	parent *Command
+                }
+
+                func (c *Command) SetOutput() {}
+
+                func (c *Command) run() {
+                	c.flags.SetOutput()
+                	c.parent.SetOutput()
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.go::Command::run") == [
+            "FILE:app.go::Command::SetOutput"
+        ]
+
+    def test_each_name_is_typed_by_the_result_in_its_position(self, tmp_path):
+        """`a, b := f()` and `var a, b = f()` give every name the type `f`
+        declares for that result, named or not."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Job struct{}
+
+                func (j *Job) Run() {}
+
+                type Report struct{}
+
+                func (r *Report) Run() {}
+
+                func (r *Report) Send() {}
+
+                type Decoy struct{}
+
+                func (d *Decoy) Run() {}
+
+                func (d *Decoy) Send() {}
+
+                func start() (*Job, *Report, error) {
+                \treturn nil, nil, nil
+                }
+
+                func named() (job, spare *Job, report *Report) {
+                \treturn
+                }
+
+                func one() *Report {
+                \treturn nil
+                }
+
+                func short() {
+                \tjob, report, err := start()
+                \tjob.Run()
+                \treport.Send()
+                }
+
+                func blank() {
+                \t_, report, _ := start()
+                \treport.Run()
+                }
+
+                func grouped() {
+                \tvar _, spare, report = named()
+                \tspare.Run()
+                \treport.Send()
+                }
+
+                func single() {
+                \treport := one()
+                \treport.Send()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::short") == [
+            "FILE:app.go::Job::Run",
+            "FILE:app.go::Report::Send",
+            "FILE:app.go::start",
+        ]
+        assert _calls(builder, "FILE:app.go::blank") == [
+            "FILE:app.go::Report::Run",
+            "FILE:app.go::start",
+        ]
+        assert _calls(builder, "FILE:app.go::grouped") == [
+            "FILE:app.go::Job::Run",
+            "FILE:app.go::Report::Send",
+            "FILE:app.go::named",
+        ]
+        assert _calls(builder, "FILE:app.go::single") == [
+            "FILE:app.go::Report::Send",
+            "FILE:app.go::one",
+        ]
+
+    def test_later_name_is_typed_only_by_a_declared_result(self, tmp_path):
+        """A later name has no type where the call is of a method value or
+        reaches no one definition; the last declaration of a name decides,
+        and an assignment declares nothing."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Report struct{}
+
+                func (r *Report) Send() {}
+
+                type Decoy struct{}
+
+                func (d *Decoy) Send() {}
+
+                type Source struct{}
+
+                func (s *Source) Fetch() (int, *Report) {
+                \treturn 0, nil
+                }
+
+                type Mirror struct{}
+
+                func (m *Mirror) Fetch() (int, *Decoy) {
+                \treturn 0, nil
+                }
+
+                func methodValue(s *Source) {
+                \tfetch := s.Fetch
+                \t_, report := fetch()
+                \treport.Send()
+                }
+
+                func unknownCallee(sources []interface{}) {
+                \tsource := sources[0]
+                \t_, report := source.Fetch()
+                \treport.Send()
+                }
+
+                func shadowed(s *Source, m *Mirror) {
+                \t_, report := s.Fetch()
+                \tif m != nil {
+                \t\t_, report := m.Fetch()
+                \t\treport.Send()
+                \t}
+                }
+
+                func assigned(sources []interface{}, report *Decoy) {
+                \tsource := sources[0]
+                \t_, report = source.Fetch()
+                \treport.Send()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::methodValue") == ["REF:report.Send"]
+        assert _calls(builder, "FILE:app.go::unknownCallee") == [
+            "REF:report.Send",
+            "REF:source.Fetch",
+        ]
+        assert _calls(builder, "FILE:app.go::shadowed") == [
+            "FILE:app.go::Decoy::Send",
+            "FILE:app.go::Mirror::Fetch",
+            "FILE:app.go::Source::Fetch",
+        ]
+        assert _calls(builder, "FILE:app.go::assigned") == [
+            "FILE:app.go::Decoy::Send",
+            "REF:source.Fetch",
+        ]
+
+    def test_error_method_of_the_predeclared_error_is_external(self, tmp_path):
+        """`Error()` on a value declared `error`, as a parameter, a named
+        result or a result of a project function, is the language's. On a
+        value of unknown type it may be a project type's."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type failure struct{}
+
+                func (f *failure) Error() string { return "" }
+
+                type refusal struct{}
+
+                func (r *refusal) Error() string { return "" }
+
+                func check() error {
+                \treturn nil
+                }
+
+                func load() (int, error) {
+                \treturn 0, nil
+                }
+
+                func fail() *failure {
+                \treturn nil
+                }
+
+                func single() string {
+                \terr := check()
+                \treturn err.Error()
+                }
+
+                func later() string {
+                \t_, err := load()
+                \treturn err.Error()
+                }
+
+                func parameter(err error) string {
+                \treturn err.Error()
+                }
+
+                func namedResult() (text string, err error) {
+                \ttext = err.Error()
+                \treturn
+                }
+
+                func own() string {
+                \terr := fail()
+                \treturn err.Error()
+                }
+
+                func unknown() string {
+                \tproduce := check
+                \terr := produce()
+                \treturn err.Error()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::single") == ["FILE:app.go::check"]
+        assert _calls(builder, "FILE:app.go::later") == ["FILE:app.go::load"]
+        assert _calls(builder, "FILE:app.go::parameter") == []
+        assert _calls(builder, "FILE:app.go::namedResult") == []
+        assert _calls(builder, "FILE:app.go::own") == [
+            "FILE:app.go::fail",
+            "FILE:app.go::failure::Error",
+        ]
+        assert _calls(builder, "FILE:app.go::unknown") == ["REF:err.Error"]
+
+    def test_project_type_named_error_is_not_the_predeclared_one(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type error struct{}
+
+                func (e *error) Error() string { return "" }
+
+                func check() *error {
+                \treturn nil
+                }
+
+                func report() string {
+                \terr := check()
+                \treturn err.Error()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::report") == [
+            "FILE:app.go::check",
+            "FILE:app.go::error::Error",
+        ]
+
+    def test_range_variable_has_the_declared_element_type(self, tmp_path):
+        """`for _, v := range xs` gives `v` the element type of the slice,
+        array or map `xs` is declared as, or is a literal of, and
+        `for k := range m` gives `k` the key type of a map."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Name string
+
+                func (n Name) Run() {}
+
+                type Step struct{}
+
+                func (s *Step) Run() {}
+
+                type Decoy struct{}
+
+                func (d *Decoy) Run() {}
+
+                type Job struct {
+                \tsteps  []*Step
+                \tbyName map[Name]*Step
+                }
+
+                func parameter(steps []*Step) {
+                \tfor _, step := range steps {
+                \t\tstep.Run()
+                \t}
+                }
+
+                func variadic(steps ...*Step) {
+                \tfor _, step := range steps {
+                \t\tstep.Run()
+                \t}
+                }
+
+                func field(j *Job) {
+                \tfor name, step := range j.byName {
+                \t\tname.Run()
+                \t}
+                \tfor _, step := range j.steps {
+                \t\tstep.Run()
+                \t}
+                }
+
+                func made() {
+                \tindex := make(map[Name]Decoy)
+                \tfor name := range index {
+                \t\tname.Run()
+                \t}
+                }
+
+                func array() {
+                \tvar steps [4]Step
+                \tfor _, step := range steps {
+                \t\tstep.Run()
+                \t}
+                }
+
+                func literal() {
+                \tfor _, step := range []*Step{nil} {
+                \t\tstep.Run()
+                \t}
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::parameter") == ["FILE:app.go::Step::Run"]
+        assert _calls(builder, "FILE:app.go::variadic") == ["FILE:app.go::Step::Run"]
+        assert _calls(builder, "FILE:app.go::field") == [
+            "FILE:app.go::Name::Run",
+            "FILE:app.go::Step::Run",
+        ]
+        assert _calls(builder, "FILE:app.go::made") == ["FILE:app.go::Name::Run"]
+        assert _calls(builder, "FILE:app.go::array") == ["FILE:app.go::Step::Run"]
+        assert _calls(builder, "FILE:app.go::literal") == ["FILE:app.go::Step::Run"]
+
+    def test_range_variable_of_no_known_element_type_is_untyped(self, tmp_path):
+        """A range variable hides an earlier declaration of its name, and
+        the single variable of a range over a slice is its index."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Step struct{}
+
+                func (s *Step) Run() {}
+
+                type Decoy struct{}
+
+                func (d *Decoy) Run() {}
+
+                func shadowed(step *Step, pending func() []*Decoy) {
+                \tfor _, step := range pending() {
+                \t\tstep.Run()
+                \t}
+                }
+
+                func index(steps []*Step) {
+                \tfor step := range steps {
+                \t\tstep.Run()
+                \t}
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::shadowed") == ["REF:step.Run"]
+        assert _calls(builder, "FILE:app.go::index") == []
+
+    def test_initializer_of_an_if_or_switch_binds_its_names(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Report struct{}
+
+                func (r *Report) Send() {}
+
+                type Decoy struct{}
+
+                func (d *Decoy) Send() {}
+
+                func one() *Report {
+                \treturn nil
+                }
+
+                func two() (int, *Report) {
+                \treturn 0, nil
+                }
+
+                func guarded(ready bool) {
+                \tif report := one(); report != nil {
+                \t\treport.Send()
+                \t} else if _, other := two(); ready {
+                \t\tother.Send()
+                \t}
+                \tswitch n, last := two(); n {
+                \tcase 0:
+                \t\tlast.Send()
+                \t}
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::guarded") == [
+            "FILE:app.go::Report::Send",
+            "FILE:app.go::Report::Send",
+            "FILE:app.go::Report::Send",
+            "FILE:app.go::one",
+            "FILE:app.go::two",
+            "FILE:app.go::two",
+        ]
+
+    def test_value_from_another_module_has_no_project_methods(self, tmp_path):
+        """Every result of a call into a package outside the module is from
+        outside, as is a field of a value declared with a type of such a
+        package."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "app.go": """
+                package app
+
+                import (
+                \t"net/http"
+                \t"os"
+
+                \tflag "github.com/spf13/pflag"
+                )
+
+                type failure struct{}
+
+                func (f *failure) Error() string { return "" }
+
+                func (f *failure) Type() string { return "" }
+
+                type refusal struct{}
+
+                func (r *refusal) Error() string { return "" }
+
+                func (r *refusal) Type() string { return "" }
+
+                func temp() string {
+                \t_, err := os.MkdirTemp("", "app")
+                \treturn err.Error()
+                }
+
+                func kind(f *flag.Flag) string {
+                \treturn f.Value.Type()
+                }
+
+                func fetch() string {
+                \tresponse, _ := http.Get("")
+                \treturn response.Body.Type()
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.go::temp") == []
+        assert _calls(builder, "FILE:app.go::kind") == []
+        assert _calls(builder, "FILE:app.go::fetch") == []
+
+    def test_results_of_the_standard_library_are_typed_by_its_data(self, tmp_path):
+        """What a standard function or method returns has the type the
+        data gives each result, so none of its methods is the project's and
+        ranging over it yields its elements."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "app.go": """
+                package app
+
+                import (
+                \t"bufio"
+                \t"net/http"
+                \t"os"
+                )
+
+                type Entry struct{}
+
+                func (e *Entry) Name() string { return "" }
+
+                type failure struct{}
+
+                func (f *failure) Error() string { return "" }
+
+                func (f *failure) Close() error { return nil }
+
+                func (f *failure) Add(key, value string) {}
+
+                type refusal struct{}
+
+                func (r *refusal) Error() string { return "" }
+
+                func (r *refusal) Close() error { return nil }
+
+                func (r *refusal) Add(key, value string) {}
+
+                func list(dir string) {
+                \tentries, _ := os.ReadDir(dir)
+                \tfor _, entry := range entries {
+                \t\tentry.Name()
+                \t}
+                }
+
+                func line(r *bufio.Reader) string {
+                \t_, err := r.ReadString(10)
+                \treturn err.Error()
+                }
+
+                func fetch(client *http.Client) {
+                \trequest, _ := http.NewRequest("GET", "", nil)
+                \trequest.Header.Add("a", "b")
+                \tresponse, _ := client.Do(request)
+                \tresponse.Body.Close()
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.go::list") == []
+        assert _calls(builder, "FILE:app.go::line") == []
+        assert _calls(builder, "FILE:app.go::fetch") == []
+
+    def test_standard_generic_type_hands_on_a_project_type(self, tmp_path):
+        """`atomic.Pointer[Config]` loads a `Config`, as the data's `*$0`
+        says."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "app.go": """
+                package app
+
+                import "sync/atomic"
+
+                type Config struct{}
+
+                func (c *Config) Apply() {}
+
+                type Decoy struct{}
+
+                func (d *Decoy) Apply() {}
+
+                type Stack[T any] struct{}
+
+                func (s *Stack[T]) Apply() {}
+
+                func reload(current *atomic.Pointer[Config], spare Stack[int]) {
+                \tcurrent.Load().Apply()
+                \tspare.Apply()
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.go::reload") == [
+            "FILE:app.go::Config::Apply",
+            "FILE:app.go::Stack::Apply",
+        ]
+
+    def test_standard_method_name_is_not_pinned_by_name_alone(self, tmp_path):
+        """On a receiver of unknown type a name that a type of the standard
+        library also has as a method is not the project's one definition
+        of it; any other name is."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Job struct{}
+
+                func (j *Job) Name() string { return "" }
+
+                func (j *Job) Enqueue() {}
+
+                func describe(jobs []interface{}) {
+                \tjob := jobs[0]
+                \tjob.Name()
+                \tjob.Enqueue()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::describe") == [
+            "FILE:app.go::Job::Enqueue",
+            "REF:job.Name",
+        ]
+
+    def test_fields_are_read_from_the_struct_in_any_file(self, tmp_path):
+        """A chain of fields is followed through the structs that declare
+        them, in whatever file of the package, to a method, to a type of
+        the standard library, or to a field that holds a function."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "conn.go": """
+                package app
+
+                import (
+                \t"bytes"
+                \t"net"
+                )
+
+                type Config struct {
+                \tname string
+                \tpick func() *Config
+                }
+
+                func (c *Config) Reset() {}
+
+                type half struct{}
+
+                func (h *half) Reset() {}
+
+                type Conn struct {
+                \tconn    net.Conn
+                \tconfig  *Config
+                \tin, out half
+                \tlog     bytes.Buffer
+                }
+
+                func (c *Conn) Close() error { return nil }
+
+                func (c *Conn) Reset() {}
+                """,
+                "state.go": """
+                package app
+
+                type state struct {
+                \tc *Conn
+                }
+
+                func (s *state) run() {
+                \ts.c.config.Reset()
+                \ts.c.in.Reset()
+                \ts.c.conn.Close()
+                \ts.c.log.Reset()
+                \ts.c.config.pick()
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:state.go::state::run") == [
+            "FILE:conn.go::Config::Reset",
+            "FILE:conn.go::half::Reset",
+        ]
+
+    def test_embedded_type_gives_its_methods_and_its_field(self, tmp_path):
+        """A struct has the methods of what it embeds and a field of that
+        name: a project type's are the project's, `net.Conn`'s are not."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "app.go": """
+                package app
+
+                import "net"
+
+                type Conn struct{}
+
+                func (c *Conn) Write(b []byte) {}
+
+                func (c *Conn) Flush() {}
+
+                type tokens struct{}
+
+                func (t *tokens) Trim() {}
+
+                type other struct{}
+
+                func (o *other) Trim() {}
+
+                func (o *other) Flush() {}
+
+                type parser struct {
+                \t*tokens
+                \tConn
+                }
+
+                type wrapped struct {
+                \tnet.Conn
+                }
+
+                func (p *parser) run() {
+                \tp.Trim()
+                \tp.tokens.Trim()
+                \tp.Flush()
+                }
+
+                func (w *wrapped) run(b []byte) {
+                \tw.Write(b)
+                \tw.Conn.Write(b)
+                \tw.SetDeadline()
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.go::parser::run") == [
+            "FILE:app.go::Conn::Flush",
+            "FILE:app.go::tokens::Trim",
+            "FILE:app.go::tokens::Trim",
+        ]
+        assert _calls(builder, "FILE:app.go::wrapped::run") == []
+
+    def test_named_slice_and_element_receivers(self, tmp_path):
+        """A named slice or map type holds what its definition says, and
+        `value[i].method()` is called on an element of `value`."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Job struct{}
+
+                func (j *Job) Name() string { return "" }
+
+                type Decoy struct{}
+
+                func (d *Decoy) Name() string { return "" }
+
+                type byName []*Job
+
+                func (s byName) Less(i, j int) bool { return s[i].Name() < s[j].Name() }
+
+                type registry map[string]*Decoy
+
+                func first(jobs byName, known registry, grid [][]*Job) {
+                \tfor _, job := range jobs {
+                \t\tjob.Name()
+                \t}
+                \tknown["a"].Name()
+                \tgrid[0][1].Name()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::byName::Less") == [
+            "FILE:app.go::Job::Name",
+            "FILE:app.go::Job::Name",
+        ]
+        assert _calls(builder, "FILE:app.go::first") == [
+            "FILE:app.go::Decoy::Name",
+            "FILE:app.go::Job::Name",
+            "FILE:app.go::Job::Name",
+        ]
+
+    def test_range_over_a_call_a_map_and_a_channel(self, tmp_path):
+        """The range variables are the key and the element of what a call
+        returns, of a map and of a standard slice, and what a channel
+        carries."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "app.go": """
+                package app
+
+                import "os"
+
+                type Job struct{}
+
+                func (j *Job) Name() string { return "" }
+
+                type Key struct{}
+
+                func (k Key) Name() string { return "" }
+
+                func pending() []*Job {
+                \treturn nil
+                }
+
+                func index() (map[Key]*Job, error) {
+                \treturn nil, nil
+                }
+
+                func all(queue chan *Job, files []os.DirEntry) {
+                \tfor _, job := range pending() {
+                \t\tjob.Name()
+                \t}
+                \tjobs, _ := index()
+                \tfor key, job := range jobs {
+                \t\tkey.Name()
+                \t\tjob.Name()
+                \t}
+                \tfor job := range queue {
+                \t\tjob.Name()
+                \t}
+                \tfor _, file := range files {
+                \t\tfile.Name()
+                \t}
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.go::all") == [
+            "FILE:app.go::Job::Name",
+            "FILE:app.go::Job::Name",
+            "FILE:app.go::Job::Name",
+            "FILE:app.go::Key::Name",
+            "FILE:app.go::index",
+            "FILE:app.go::pending",
+        ]
+
+    def test_type_switch_types_its_variable_in_each_clause(self, tmp_path):
+        """`switch v := x.(type)` gives `v` the type a clause names, and in
+        a clause of several types or none that of `x`."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "app.go": """
+                package app
+
+                import "fmt"
+
+                type Job struct{}
+
+                func (j *Job) String() string { return "" }
+
+                type Step struct{}
+
+                func (s Step) String() string { return "" }
+
+                type Decoy struct{}
+
+                func (d *Decoy) String() string { return "" }
+
+                func describe(in interface{}, fallback *Decoy) {
+                \tswitch v := in.(type) {
+                \tcase *Job:
+                \t\tv.String()
+                \tcase Step:
+                \t\tv.String()
+                \tcase fmt.Stringer:
+                \t\tv.String()
+                \t}
+                \tswitch v := fallback.(type) {
+                \tcase nil, *Decoy:
+                \t\tv.String()
+                \t}
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.go::describe") == [
+            "FILE:app.go::Decoy::String",
+            "FILE:app.go::Job::String",
+            "FILE:app.go::Step::String",
+        ]
+
+    def test_variable_bound_to_a_part_of_a_typed_value(self, tmp_path):
+        """`x := xs[i]`, `x, ok := m[k]`, `x := <-ch`, `x := xs[1:]`, `x :=
+        *p` and the statement a `for` starts with give `x` the type the
+        value's own says."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Job struct {
+                \tnext *Job
+                }
+
+                func (j *Job) Run() {}
+
+                type Decoy struct{}
+
+                func (d *Decoy) Run() {}
+
+                func each(jobs []*Job, known map[string]*Job, queue chan *Job, p **Job) {
+                \tfirst := jobs[0]
+                \tfirst.Run()
+                \tnamed, ok := known["a"]
+                \tnamed.Run()
+                \tsent := <-queue
+                \tsent.Run()
+                \trest := jobs[1:]
+                \trest[0].Run()
+                \tpointed := *p
+                \tpointed.Run()
+                \tfor job := first; job != nil; job = job.next {
+                \t\tjob.Run()
+                \t}
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::each") == ["FILE:app.go::Job::Run"] * 6
+
+    def test_package_level_variable_of_another_file(self, tmp_path):
+        """A package-level variable has its declared type in every file of
+        the package; a local variable of its name and no known type has
+        not, and a call of one that holds a function calls that value."""
+        builder = _index(
+            tmp_path,
+            {
+                "vars.go": """
+                package app
+
+                type Command struct{}
+
+                func (c *Command) Name() string { return "" }
+
+                type Decoy struct{}
+
+                func (d *Decoy) Name() string { return "" }
+
+                var rootCmd = &Command{}
+
+                var (
+                \tspare *Decoy
+                )
+
+                var hook func(*Command)
+                """,
+                "use.go": """
+                package app
+
+                func use() {
+                \trootCmd.Name()
+                \tspare.Name()
+                \thook(rootCmd)
+                }
+
+                func local(items []interface{}) {
+                \trootCmd := items[0]
+                \trootCmd.Name()
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:use.go::use") == [
+            "FILE:vars.go::Command::Name",
+            "FILE:vars.go::Decoy::Name",
+        ]
+        assert _calls(builder, "FILE:use.go::local") == ["REF:rootCmd.Name"]
+
+    def test_receiver_made_with_new_and_method_named_as_a_built_in(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Job struct{}
+
+                func (j *Job) close() {}
+
+                type Decoy struct{}
+
+                func (d *Decoy) close() {}
+
+                func run(ch chan int) {
+                \tnew(Job).close()
+                \tclose(ch)
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::run") == ["FILE:app.go::Job::close"]
+
+    def test_call_of_a_function_literal_returns_what_it_declares(self, tmp_path):
+        """A variable that holds a function literal is no definition, but a
+        call of it returns the results the literal declares."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Command struct{}
+
+                func (c *Command) Execute() error { return nil }
+
+                type Decoy struct{}
+
+                func (d *Decoy) Execute() error { return nil }
+
+                func (d *Decoy) Error() string { return "" }
+
+                func run() string {
+                \tgetCmd := func() *Command {
+                \t\treturn &Command{}
+                \t}
+                \tc := getCmd()
+                \terr := c.Execute()
+                \treturn err.Error()
+                }
+
+                func both() {
+                \tpair := func(name string) (*Decoy, *Command) { return nil, nil }
+                \tbuild := pair
+                \t_, c := build("a")
+                \tc.Execute()
+                }
+
+                func untyped() {
+                \tgetCmd := func() {}
+                \tgetCmd()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::run") == ["FILE:app.go::Command::Execute"]
+        assert _calls(builder, "FILE:app.go::both") == ["FILE:app.go::Command::Execute"]
+        assert _calls(builder, "FILE:app.go::untyped") == []
+
+    def test_call_on_an_interface_is_a_call_of_its_method(self, tmp_path):
+        """A method an interface declares is a node of the interface, and
+        a call on a receiver of that type is a call of it, whichever types
+        implement it; what it returns is what it declares. A method the
+        interface has from an embedded one is that one's."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "app.go": """
+                package app
+
+                import "io"
+
+                type Report struct{}
+
+                func (r *Report) Send() {}
+
+                type Decoy struct{}
+
+                func (d *Decoy) Send() {}
+
+                // Fetcher fetches reports.
+                type Fetcher interface {
+                \t// Fetch returns the next report.
+                \tFetch(name string) (*Report, error)
+                \tclose()
+                }
+
+                type Source struct{}
+
+                func (s *Source) Fetch(name string) (*Report, error) { return nil, nil }
+
+                func (s *Source) close() {}
+
+                type Mirror struct{}
+
+                func (m *Mirror) Fetch(name string) (*Report, error) { return nil, nil }
+
+                func (m *Mirror) close() {}
+
+                type Stream interface {
+                \tFetcher
+                \tio.Reader
+                }
+
+                func (r *Report) Read(p []byte) (int, error) { return 0, nil }
+
+                func (d *Decoy) Read(p []byte) (int, error) { return 0, nil }
+
+                func drain(fetcher Fetcher, stream Stream, source *Source) string {
+                \treport, err := fetcher.Fetch("a")
+                \treport.Send()
+                \tfetcher.close()
+                \tstream.Fetch("b")
+                \tstream.Read(nil)
+                \tsource.Fetch("c")
+                \treturn err.Error()
+                }
+                """,
+            },
+        )
+        methods = {
+            n["id"]: n["metadata"]["return_type"]
+            for n in builder.nodes
+            if n["id"].startswith("FILE:app.go::Fetcher::")
+        }
+        assert methods == {
+            "FILE:app.go::Fetcher::Fetch": "(*Report, error)",
+            "FILE:app.go::Fetcher::close": "",
+        }
+        assert _calls(builder, "FILE:app.go::Fetcher") == []
+        assert _calls(builder, "FILE:app.go::drain") == [
+            "FILE:app.go::Fetcher::Fetch",
+            "FILE:app.go::Fetcher::Fetch",
+            "FILE:app.go::Fetcher::close",
+            "FILE:app.go::Report::Send",
+            "FILE:app.go::Source::Fetch",
+        ]
+
+    def test_variable_bound_to_a_variable_of_another_package(self, tmp_path):
+        """`out := os.Stdout` is from outside as `os` is; a variable of a
+        project package has the type it is declared with there."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "tool/tool.go": """
+                package tool
+
+                type Log struct{}
+
+                func (l *Log) WriteString(s string) {}
+
+                type Decoy struct{}
+
+                func (d *Decoy) WriteString(s string) {}
+
+                var Default = &Log{}
+                """,
+                "app.go": """
+                package app
+
+                import (
+                \t"os"
+
+                \t"example.com/app/tool"
+                )
+
+                func report() {
+                \tout := os.Stdout
+                \tout.WriteString("a")
+                \tlog := tool.Default
+                \tlog.WriteString("b")
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:app.go::report") == [
+            "FILE:tool/tool.go::Log::WriteString"
+        ]
+
+    def test_call_of_a_function_valued_field_returns_what_it_declares(self, tmp_path):
+        """A struct field that holds a function is no definition, but a
+        call of it returns the results its type declares."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type Agreement struct{}
+
+                func (a *Agreement) Process() {}
+
+                type Decoy struct{}
+
+                func (d *Decoy) Process() {}
+
+                type suite struct {
+                \tka         func(version uint16) *Agreement // the key agreement
+                \tpair, swap func() (*Decoy, *Agreement)
+                \thook       func()
+                }
+
+                type state struct {
+                \tsuite *suite
+                }
+
+                func (s *state) run() {
+                \tagreement := s.suite.ka(1)
+                \tagreement.Process()
+                \t_, second := s.suite.swap()
+                \tsecond.Process()
+                \ts.suite.hook()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::state::run") == [
+            "FILE:app.go::Agreement::Process",
+            "FILE:app.go::Agreement::Process",
+        ]
+
+    def test_grouped_var_declares_every_name(self, tmp_path):
+        """`var a, b *T` gives each name the type, in a function, at
+        package level and in a `var (...)` block, for every file of the
+        package."""
+        builder = _index(
+            tmp_path,
+            {
+                "vars.go": """
+                package app
+
+                type Job struct{}
+
+                func (j *Job) Run() {}
+
+                type Decoy struct{}
+
+                func (d *Decoy) Run() {}
+
+                var first, second *Job
+
+                var (
+                \tthird, fourth *Decoy
+                )
+
+                func local(items []interface{}) {
+                \tvar a, b *Job = nil, nil
+                \ta.Run()
+                \tb.Run()
+                \tsecond.Run()
+                \tfourth.Run()
+                }
+                """,
+                "use.go": """
+                package app
+
+                func use() {
+                \tfirst.Run()
+                \tsecond.Run()
+                \tthird.Run()
+                \tfourth.Run()
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:vars.go::local") == [
+            "FILE:vars.go::Decoy::Run",
+            "FILE:vars.go::Job::Run",
+            "FILE:vars.go::Job::Run",
+            "FILE:vars.go::Job::Run",
+        ]
+        assert _calls(builder, "FILE:use.go::use") == [
+            "FILE:vars.go::Decoy::Run",
+            "FILE:vars.go::Decoy::Run",
+            "FILE:vars.go::Job::Run",
+            "FILE:vars.go::Job::Run",
+        ]
+
+    def test_platform_files_leave_the_one_the_build_compiles(self, tmp_path):
+        """`impl_linux.go` holds `Impl` in a build `call_linux.go` is of
+        and `impl_windows.go` does not; nothing decides a plain caller's."""
+        builder = _index(
+            tmp_path,
+            {
+                "pkg/impl_linux.go": """
+                package pkg
+                func Impl() {}
+                """,
+                "pkg/impl_windows.go": """
+                package pkg
+                func Impl() {}
+                """,
+                "pkg/call_linux.go": """
+                package pkg
+                func Call() { Impl() }
+                """,
+                "pkg/plain.go": """
+                package pkg
+                func Plain() { Impl() }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:pkg/call_linux.go::Call") == [
+            "FILE:pkg/impl_linux.go::Impl"
+        ]
+        assert _calls(builder, "FILE:pkg/plain.go::Plain") == ["REF:Impl"]
+
+    def test_a_test_file_definition_is_no_call_of_plain_code(self, tmp_path):
+        """A name only a `_test.go` file defines stays unresolved for a
+        caller that is not a test file of the same package."""
+        builder = _index(
+            tmp_path,
+            {
+                "pkg/helper_test.go": """
+                package pkg
+                func helper() {}
+                func exercise() { helper() }
+                """,
+                "pkg/plain.go": """
+                package pkg
+                func Plain() { helper() }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:pkg/helper_test.go::exercise") == [
+            "FILE:pkg/helper_test.go::helper"
+        ]
+        assert _calls(builder, "FILE:pkg/plain.go::Plain") == ["REF:helper"]
+        (edge,) = (
+            e
+            for e in builder.edges
+            if e["source"] == "FILE:pkg/plain.go::Plain" and e["relation"] == "CALLS"
+        )
+        assert edge["metadata"]["candidates"] == ["FILE:pkg/helper_test.go::helper"]
+
+    def test_a_go_build_tag_decides_between_definitions(self, tmp_path):
+        """`//go:build linux` on the caller's file rules a `windows` build
+        constraint on a definition's out."""
+        builder = _index(
+            tmp_path,
+            {
+                "pkg/on_linux.go": """
+                //go:build linux
+                package pkg
+                func Impl() {}
+                """,
+                "pkg/on_windows.go": """
+                //go:build windows
+                package pkg
+                func Impl() {}
+                """,
+                "pkg/call.go": """
+                //go:build linux
+                package pkg
+                func Call() { Impl() }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:pkg/call.go::Call") == [
+            "FILE:pkg/on_linux.go::Impl"
+        ]
+
 
 class TestJavaCallResolution:
+    def test_lambda_parameter_reads_the_interfaces_abstract_method(self, tmp_path):
+        """`x -> x.tally()` given for a `Mapper<Item, String>` parameter:
+        `x` is what `Mapper.apply` takes, `Item`."""
+        builder = _index(
+            tmp_path,
+            {
+                "Mapper.java": """
+                public interface Mapper<T, R> {
+                    R apply(T input);
+                    default int size() { return 0; }
+                }
+                """,
+                "Item.java": """
+                public class Item {
+                    public String tally() { return "x"; }
+                }
+                """,
+                "Use.java": """
+                public class Use {
+                    public String map(Mapper<Item, String> m) { return m.apply(new Item()); }
+                    public void go() {
+                        map(x -> x.tally());
+                    }
+                }
+                """,
+            },
+        )
+        assert "FILE:Item.java::Item::tally" in _calls(
+            builder, "FILE:Use.java::Use::go"
+        )
+
+    def test_lambda_parameter_of_an_assignment_reads_the_type_written(self, tmp_path):
+        """`Mapper<Item, String> f = y -> y.tally()`: `y` is the
+        `apply` parameter's `Item` substitute."""
+        builder = _index(
+            tmp_path,
+            {
+                "Mapper.java": """
+                public interface Mapper<T, R> {
+                    R apply(T input);
+                }
+                """,
+                "Item.java": """
+                public class Item {
+                    public String tally() { return "x"; }
+                }
+                """,
+                "Use.java": """
+                public class Use {
+                    public void go() {
+                        Mapper<Item, String> f = y -> y.tally();
+                    }
+                }
+                """,
+            },
+        )
+        assert "FILE:Item.java::Item::tally" in _calls(
+            builder, "FILE:Use.java::Use::go"
+        )
+
+    def test_lambda_parameter_of_a_cast_reads_the_type_written(self, tmp_path):
+        """`(Mapper<Item, String>) (z -> z.tally())` types `z` from the
+        cast's functional interface."""
+        builder = _index(
+            tmp_path,
+            {
+                "Mapper.java": """
+                public interface Mapper<T, R> {
+                    R apply(T input);
+                }
+                """,
+                "Item.java": """
+                public class Item {
+                    public String tally() { return "x"; }
+                }
+                """,
+                "Use.java": """
+                public class Use {
+                    public void go() {
+                        Object o = (Mapper<Item, String>) (z -> z.tally());
+                    }
+                }
+                """,
+            },
+        )
+        assert "FILE:Item.java::Item::tally" in _calls(
+            builder, "FILE:Use.java::Use::go"
+        )
+
     def test_declared_type_picks_the_method(self, tmp_path):
         builder = _index(
             tmp_path,
@@ -2967,6 +8560,37 @@ class TestJavaCallResolution:
         )
         assert _calls(builder, "FILE:Adapter.java::Adapter::read") == [
             "FILE:TreeReader.java::TreeReader::peek"
+        ]
+
+    def test_method_of_a_returned_library_type_is_external(self, tmp_path):
+        """What a project method declares it returns as `Set<String>` calls
+        the library's `iterator`, not a project method of that name."""
+        builder = _index(
+            tmp_path,
+            {
+                "Registry.java": """
+                import java.util.Set;
+
+                public class Registry {
+                    public Set<String> names() { return null; }
+                }
+                """,
+                "Cursor.java": """
+                public class Cursor {
+                    public Object iterator() { return null; }
+                }
+                """,
+                "Report.java": """
+                public class Report {
+                    public void print(Registry registry) {
+                        registry.names().iterator();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Report.java::Report::print") == [
+            "FILE:Registry.java::Registry::names"
         ]
 
     def test_call_is_made_by_the_method_it_is_in(self, tmp_path):
@@ -3243,6 +8867,4619 @@ class TestJavaCallResolution:
         )
         assert _calls(builder, "FILE:Client.java::Client::run") == []
 
+    def test_platform_class_named_in_full_is_external(self, tmp_path):
+        """`java.util.UUID.fromString` is the platform's, though a project
+        class defines a `fromString` too."""
+        builder = _index(
+            tmp_path,
+            {
+                "app/Ids.java": """
+                package app;
+
+                class Token {
+                    static Token fromString(String text) {
+                        return null;
+                    }
+                }
+
+                class Ids {
+                    Object read(String text) {
+                        return java.util.UUID.fromString(text);
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app/Ids.java::Ids::read") == []
+
+    def test_member_inherited_from_a_project_superclass(self, tmp_path):
+        """A method a typed receiver's class does not declare is its
+        superclass's; one of `java.lang.Object` is not the project's."""
+        builder = _index(
+            tmp_path,
+            {
+                "app/Shapes.java": """
+                package app;
+
+                class Element {
+                    String describe() {
+                        return "";
+                    }
+                }
+
+                class Array extends Element implements Comparable<Array> {
+                }
+
+                class Other {
+                    String describe() {
+                        return "";
+                    }
+
+                    public String toString() {
+                        return "";
+                    }
+                }
+
+                class Use {
+                    String both(Array array) {
+                        return array.describe() + array.toString();
+                    }
+                }
+                """
+            },
+        )
+        inherits = {
+            (e["source"].rpartition("::")[2], e["target"])
+            for e in builder.edges
+            if e["relation"] == "INHERITS"
+        }
+        assert ("Array", "FILE:app/Shapes.java::Element") in inherits
+        assert _calls(builder, "FILE:app/Shapes.java::Use::both") == [
+            "FILE:app/Shapes.java::Element::describe"
+        ]
+
+    def test_receiver_typed_by_a_cast_a_literal_or_a_static_field(self, tmp_path):
+        """`((T) x).m()` is called on a T, `"s".m()` on a String, and
+        `T.FIELD.m()` on what the field or enum constant is declared as."""
+        builder = _index(
+            tmp_path,
+            {
+                "app/Rules.java": """
+                package app;
+
+                enum Policy {
+                    STRICT,
+                    LOOSE;
+
+                    int length() {
+                        return 0;
+                    }
+                }
+
+                class Holder {
+                    static final Holder INSTANCE = new Holder();
+
+                    int length() {
+                        return 0;
+                    }
+                }
+
+                class Use {
+                    int all(Object value) {
+                        return ((Holder) value).length()
+                            + "text".length()
+                            + Policy.STRICT.length()
+                            + Holder.INSTANCE.length();
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app/Rules.java::Use::all") == [
+            "FILE:app/Rules.java::Holder::length",
+            "FILE:app/Rules.java::Holder::length",
+            "FILE:app/Rules.java::Policy::length",
+        ]
+
+    def test_declarations_that_are_not_calls(self, tmp_path):
+        """A method declared without a body over two lines, an annotation
+        element with a default, and an enum constant with arguments."""
+        builder = _index(
+            tmp_path,
+            {
+                "app/Kinds.java": """
+                package app;
+
+                interface Source {
+                    void readInto(Object target, int index)
+                        throws java.io.IOException;
+                }
+
+                @interface Expose {
+                    boolean readInto() default true;
+                }
+
+                enum Color {
+                    RED("red"),
+                    BLUE("blue");
+
+                    Color(String name) {
+                    }
+                }
+                """
+            },
+        )
+        declared = {
+            n["id"].partition("::")[2]: n["type"]
+            for n in builder.nodes
+            if n["type"] in ("Method", "Constant")
+        }
+        assert declared == {
+            "Source::readInto": "Method",
+            "Expose::readInto": "Method",
+            "Color::RED": "Constant",
+            "Color::BLUE": "Constant",
+            "Color::<init>": "Method",
+        }
+        calls = [e for e in builder.edges if e["relation"].startswith("CALLS")]
+        assert calls == []
+
+    def test_method_of_a_standard_type_is_typed_by_its_type_arguments(self, tmp_path):
+        """A call on a standard value is the library's, and what it returns
+        is typed by the type arguments of the value for the next call."""
+        builder = _index(
+            tmp_path,
+            {
+                "Part.java": """
+                public class Part {
+                    public void fit() {}
+                    public String trim() { return ""; }
+                    public int size() { return 0; }
+                }
+                """,
+                "Decoy.java": """
+                public class Decoy {
+                    public void fit() {}
+                }
+                """,
+                "Client.java": """
+                import java.util.ArrayList;
+                import java.util.List;
+                import java.util.Map;
+                import java.util.Optional;
+
+                public class Client {
+                    void element(List<Part> parts) {
+                        parts.get(0).fit();
+                    }
+
+                    void entry(Map<String, Part> byName) {
+                        byName.entrySet().iterator().next().getValue().fit();
+                    }
+
+                    void held(Optional<Part> found) {
+                        found.get().fit();
+                    }
+
+                    void made() {
+                        new ArrayList<Part>().get(0).fit();
+                        List<Part> parts = new ArrayList<>();
+                        parts.get(0).fit();
+                        var more = new ArrayList<Part>();
+                        more.get(0).fit();
+                    }
+
+                    void library(int count, List<Part> parts) {
+                        String.valueOf(count).trim();
+                        parts.size();
+                        new StringBuilder().append(count).toString().trim();
+                    }
+                }
+                """,
+            },
+        )
+        fit = "FILE:Part.java::Part::fit"
+        assert _calls(builder, "FILE:Client.java::Client::element") == [fit]
+        assert _calls(builder, "FILE:Client.java::Client::entry") == [fit]
+        assert _calls(builder, "FILE:Client.java::Client::held") == [fit]
+        assert _calls(builder, "FILE:Client.java::Client::made") == [fit, fit, fit]
+        assert _calls(builder, "FILE:Client.java::Client::library") == []
+
+    def test_standard_method_name_on_an_unknown_receiver_is_not_pinned(self, tmp_path):
+        """`isInterrupted` is a method of `java.lang.Thread`, so the one
+        project method of that name is not the only one that fits."""
+        builder = _index(
+            tmp_path,
+            {
+                "Monitor.java": """
+                public class Monitor {
+                    public boolean isInterrupted() { return false; }
+                    public void report() {}
+                }
+                """,
+                "Client.java": """
+                public class Client {
+                    void run() {
+                        worker.isInterrupted();
+                        worker.report();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Client.java::Client::run") == [
+            "FILE:Monitor.java::Monitor::report",
+            "REF:worker.isInterrupted",
+        ]
+
+    def test_member_a_class_has_from_the_standard_library(self, tmp_path):
+        """Every class has the methods of `Object`, an enum those of `Enum`,
+        and a class those of the standard class it extends; a bare call of
+        one is the library's, and typed by what the library returns."""
+        builder = _index(
+            tmp_path,
+            {
+                "app/Kinds.java": """
+                package app;
+
+                import java.util.ArrayList;
+
+                enum Shade {
+                    DARK,
+                    LIGHT;
+                }
+
+                class Decoy {
+                    public String name() { return ""; }
+                    public String getSimpleName() { return ""; }
+                    public void clear() {}
+                }
+
+                class Queue extends ArrayList<String> {
+                    void drain() {
+                        clear();
+                    }
+                }
+
+                class Use {
+                    String all(Shade shade) {
+                        return shade.name() + getClass().getSimpleName();
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app/Kinds.java::Queue::drain") == []
+        assert _calls(builder, "FILE:app/Kinds.java::Use::all") == []
+
+    def test_local_is_declared_in_its_method_only(self, tmp_path):
+        """A parameter of one method does not type the same name in the
+        next method, where it is a field; nor does a signature that goes on
+        over several lines keep its body from being the method's."""
+        builder = _index(
+            tmp_path,
+            {
+                "Alpha.java": """
+                public class Alpha {
+                    public void run() {}
+                }
+                """,
+                "Beta.java": """
+                public class Beta {
+                    public void run() {}
+                }
+                """,
+                "Client.java": """
+                public class Client {
+                    Beta item;
+
+                    void first(Alpha item) {
+                        item.run();
+                    }
+
+                    void second() {
+                        item.run();
+                    }
+
+                    void wrapped(
+                            Alpha first,
+                            Beta item) {
+                        item.run();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Client.java::Client::first") == [
+            "FILE:Alpha.java::Alpha::run"
+        ]
+        assert _calls(builder, "FILE:Client.java::Client::second") == [
+            "FILE:Beta.java::Beta::run"
+        ]
+        assert _calls(builder, "FILE:Client.java::Client::wrapped") == [
+            "FILE:Beta.java::Beta::run"
+        ]
+
+    def test_field_is_read_through_the_types_that_declare_it(self, tmp_path):
+        """A path of fields is followed through their declared types, from
+        a local, from `this` or from a field the class inherits; a field of
+        a standard type is the library's."""
+        builder = _index(
+            tmp_path,
+            {
+                "app/Parts.java": """
+                package app;
+
+                import java.util.List;
+
+                class Part {
+                    void fit() {}
+                }
+
+                class Decoy {
+                    void fit() {}
+                    void add(String name) {}
+                }
+
+                class Holder {
+                    Part part = new Part();
+                    List<String> names;
+                }
+
+                class Base {
+                    protected Holder holder;
+                }
+                """,
+                "app/Use.java": """
+                package app;
+
+                class Use extends Base {
+                    void local(Holder other) {
+                        other.part.fit();
+                        other.names.add("x");
+                    }
+
+                    void inherited() {
+                        holder.part.fit();
+                        this.holder.part.fit();
+                    }
+                }
+                """,
+            },
+        )
+        fit = "FILE:app/Parts.java::Part::fit"
+        assert _calls(builder, "FILE:app/Use.java::Use::local") == [fit]
+        assert _calls(builder, "FILE:app/Use.java::Use::inherited") == [fit, fit]
+
+    def test_super_and_qualified_this(self, tmp_path):
+        """`super.m()` is a method of the supertype, of the anonymous
+        class's where the call is in one, and `Outer.this.m()` one of
+        `Outer`."""
+        builder = _index(
+            tmp_path,
+            {
+                "app/Shapes.java": """
+                package app;
+
+                class Shape {
+                    void draw() {}
+                }
+
+                class Other {
+                    void draw() {}
+                }
+
+                class Circle extends Shape {
+                    void draw() {
+                        super.draw();
+                    }
+
+                    class Edge extends Other {
+                        void outer() {
+                            Circle.this.draw();
+                        }
+                    }
+                }
+
+                class Use {
+                    void draw() {}
+
+                    Object anonymous() {
+                        return new Shape() {
+                            void draw() {
+                                super.draw();
+                            }
+                        };
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app/Shapes.java::Circle::draw") == [
+            "FILE:app/Shapes.java::Shape::draw"
+        ]
+        assert _calls(builder, "FILE:app/Shapes.java::Circle::Edge::outer") == [
+            "FILE:app/Shapes.java::Circle::draw"
+        ]
+        assert "FILE:app/Shapes.java::Shape::draw" in _calls(
+            builder, "FILE:app/Shapes.java::Use::draw"
+        )
+
+    def test_type_name_is_read_in_its_package(self, tmp_path):
+        """A simple type name is the type of the file's own package, not a
+        class nested in an unrelated one that sits nearer in the tree."""
+        builder = _index(
+            tmp_path,
+            {
+                "main/app/arch/Processor.java": """
+                package app.arch;
+
+                public class Processor {
+                    public boolean is64Bit() { return true; }
+                    public static Processor detect() { return null; }
+                }
+                """,
+                "test/app/other/OtherTest.java": """
+                package app.other;
+
+                class OtherTest {
+                    static class Processor {
+                        boolean is64Bit() { return false; }
+                        static Processor detect() { return null; }
+                    }
+                }
+                """,
+                "test/app/arch/ProcessorTest.java": """
+                package app.arch;
+
+                class ProcessorTest {
+                    void typed(Processor processor) {
+                        processor.is64Bit();
+                    }
+
+                    void named() {
+                        Processor.detect();
+                    }
+                }
+                """,
+            },
+        )
+        source = "FILE:test/app/arch/ProcessorTest.java::ProcessorTest"
+        target = "FILE:main/app/arch/Processor.java::Processor"
+        assert _calls(builder, f"{source}::typed") == [f"{target}::is64Bit"]
+        assert _calls(builder, f"{source}::named") == [f"{target}::detect"]
+
+    def test_type_arguments_of_a_call_and_of_a_method(self, tmp_path):
+        """`Type.<A>name()` is a call of `name`, and a method's own type
+        parameters are no part of what it returns."""
+        builder = _index(
+            tmp_path,
+            {
+                "Maker.java": """
+                public class Maker {
+                    public static <T> Maker create() { return null; }
+                    public static <A extends Comparable<A>> Check<A> is(A a) {
+                        return null;
+                    }
+                    public Maker named(String name) { return this; }
+                }
+                """,
+                "Check.java": """
+                public class Check<A> {
+                    public boolean holds() { return true; }
+                }
+                """,
+                "Decoy.java": """
+                public class Decoy {
+                    public void create() {}
+                    public void named(String name) {}
+                    public boolean holds() { return true; }
+                }
+                """,
+                "Client.java": """
+                public class Client {
+                    void run() {
+                        Maker.<String>create().named("x");
+                        Maker.is("x").holds();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Client.java::Client::run") == [
+            "FILE:Check.java::Check::holds",
+            "FILE:Maker.java::Maker::create",
+            "FILE:Maker.java::Maker::is",
+            "FILE:Maker.java::Maker::named",
+        ]
+
+    def test_element_of_an_array_and_cast_of_a_call(self, tmp_path):
+        """`items[0].m()` is called on what the array holds, the array
+        itself has the methods of `Object`, and `((T) make()).m()` is
+        called on a T."""
+        builder = _index(
+            tmp_path,
+            {
+                "Part.java": """
+                public class Part {
+                    public void fit() {}
+                    public Object clone() { return this; }
+                }
+                """,
+                "Decoy.java": """
+                public class Decoy {
+                    public void fit() {}
+                }
+                """,
+                "Client.java": """
+                public class Client {
+                    Object make() { return null; }
+
+                    void run(Part[] items, int[] sizes) {
+                        items[0].fit();
+                        items.clone();
+                        sizes.clone();
+                        ((Part) make()).fit();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Client.java::Client::run") == [
+            "FILE:Client.java::Client::make",
+            "FILE:Part.java::Part::fit",
+            "FILE:Part.java::Part::fit",
+        ]
+
+    def test_lambda_parameter_is_typed_by_the_method_it_is_passed_to(self, tmp_path):
+        """A standard method that takes a functional interface passes the
+        lambda what the interface's method takes."""
+        builder = _index(
+            tmp_path,
+            {
+                "Part.java": """
+                public class Part {
+                    public void fit() {}
+                    public boolean ready() { return true; }
+                    public Part copy() { return this; }
+                }
+                """,
+                "Decoy.java": """
+                public class Decoy {
+                    public void fit() {}
+                    public boolean ready() { return true; }
+                    public Decoy copy() { return this; }
+                }
+                """,
+                "Client.java": """
+                import java.util.List;
+                import java.util.Map;
+
+                public class Client {
+                    void each(List<Part> parts) {
+                        parts.forEach(part -> part.fit());
+                    }
+
+                    void stream(List<Part> parts) {
+                        parts.stream().filter(part -> part.ready()).forEach(each -> {
+                            each.fit();
+                        });
+                    }
+
+                    void pairs(Map<Part, Part> pairs, Part key) {
+                        pairs.forEach((left, right) -> right.fit());
+                        pairs.computeIfAbsent(key, missing -> missing.copy());
+                    }
+                }
+                """,
+            },
+        )
+        part = "FILE:Part.java::Part"
+        assert _calls(builder, "FILE:Client.java::Client::each") == [f"{part}::fit"]
+        assert _calls(builder, "FILE:Client.java::Client::stream") == [
+            f"{part}::fit",
+            f"{part}::ready",
+        ]
+        assert _calls(builder, "FILE:Client.java::Client::pairs") == [
+            f"{part}::copy",
+            f"{part}::fit",
+        ]
+
+    def test_lambda_parameter_is_no_field(self, tmp_path):
+        """A lambda's parameter is not the field of the same name."""
+        builder = _index(
+            tmp_path,
+            {
+                "Part.java": """
+                public class Part {
+                    public void fit() {}
+                }
+                """,
+                "Decoy.java": """
+                public class Decoy {
+                    public void fit() {}
+                }
+                """,
+                "Client.java": """
+                public class Client {
+                    Part part;
+
+                    void run(Registry registry) {
+                        registry.visit(part -> part.fit());
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Client.java::Client::run") == ["REF:part.fit"]
+
+    def test_method_reference_is_a_call(self, tmp_path):
+        """`Type::name`, `value::name` and `this::name` call the method,
+        `Type::new` the type."""
+        builder = _index(
+            tmp_path,
+            {
+                "Part.java": """
+                public class Part {
+                    public String getName() { return ""; }
+                    public void fit() {}
+                }
+                """,
+                "Decoy.java": """
+                public class Decoy {
+                    public String getName() { return ""; }
+                    public void fit() {}
+                    public void check(Object part) {}
+                }
+                """,
+                "Client.java": """
+                import java.util.Comparator;
+                import java.util.List;
+                import java.util.function.Supplier;
+
+                public class Client {
+                    void check(Part part) {}
+
+                    void run(List<Part> parts, Part first) {
+                        parts.sort(Comparator.comparing(Part::getName));
+                        parts.forEach(this::check);
+                        Runnable fit = first::fit;
+                        Supplier<Part> maker = Part::new;
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Client.java::Client::run") == [
+            "FILE:Client.java::Client::check",
+            "FILE:Part.java::Part",
+            "FILE:Part.java::Part::fit",
+            "FILE:Part.java::Part::getName",
+        ]
+
+    def test_pattern_binds_a_name_of_its_type(self, tmp_path):
+        """What `instanceof` and a `case` label bind is of the type they
+        name."""
+        builder = _index(
+            tmp_path,
+            {
+                "Part.java": """
+                public class Part {
+                    public void fit() {}
+                }
+                """,
+                "Decoy.java": """
+                public class Decoy {
+                    public void fit() {}
+                }
+                """,
+                "Client.java": """
+                public class Client {
+                    void tested(Object value) {
+                        if (value instanceof Part part && part != null) {
+                            part.fit();
+                        }
+                    }
+
+                    void switched(Object value) {
+                        switch (value) {
+                            case Part part -> part.fit();
+                            default -> {}
+                        }
+                    }
+                }
+                """,
+            },
+        )
+        fit = "FILE:Part.java::Part::fit"
+        assert _calls(builder, "FILE:Client.java::Client::tested") == [fit]
+        assert _calls(builder, "FILE:Client.java::Client::switched") == [fit]
+
+    def test_overloads_return_the_type_they_agree_on(self, tmp_path):
+        """Overloads that return different types leave what a call of
+        them returns unknown; a type parameter stands for its bound."""
+        builder = _index(
+            tmp_path,
+            {
+                "Part.java": """
+                public class Part {
+                    public void fit() {}
+                }
+                """,
+                "Other.java": """
+                public class Other {
+                    public void fit() {}
+                }
+                """,
+                "Store.java": """
+                public class Store<T extends Part> {
+                    public Part take(int index) { return null; }
+                    public Other take(String name) { return null; }
+                    public Part pick(int index) { return null; }
+                    public void pick(String name) {}
+                    public T first() { return null; }
+                }
+                """,
+                "Client.java": """
+                public class Client {
+                    void run(Store<Part> store) {
+                        store.take("x").fit();
+                    }
+
+                    void agreed(Store<Part> store) {
+                        store.pick(0).fit();
+                        store.first().fit();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Client.java::Client::run") == [
+            "FILE:Store.java::Store::take",
+            "REF:fit",
+        ]
+        assert _calls(builder, "FILE:Client.java::Client::agreed") == [
+            "FILE:Part.java::Part::fit",
+            "FILE:Part.java::Part::fit",
+            "FILE:Store.java::Store::first",
+            "FILE:Store.java::Store::pick",
+        ]
+
+    def test_declaration_without_a_modifier_is_no_call(self, tmp_path):
+        """A constructor with its body on one line, a method that returns
+        a type with arguments and one whose parameters go on over the next
+        lines are declarations, and a member type is made through the
+        instance it belongs to."""
+        builder = _index(
+            tmp_path,
+            {
+                "app/Tree.java": """
+                package app;
+
+                import java.util.List;
+                import java.util.Map;
+
+                class Tree {
+                    class Node {
+                        Node() {}
+                    }
+
+                    Tree() {}
+
+                    Map<String, Node> index(List<Node> nodes) {
+                        return null;
+                    }
+
+                    List<Node> collect(
+                            Node first,
+                            Node second) {
+                        return null;
+                    }
+
+                    Node grow(Tree other) {
+                        return other.new Node();
+                    }
+                }
+                """
+            },
+        )
+        methods = {
+            n["id"].partition("::")[2] for n in builder.nodes if n["type"] == "Method"
+        }
+        assert methods == {
+            "Tree::Node::<init>",
+            "Tree::<init>",
+            "Tree::index",
+            "Tree::collect",
+            "Tree::grow",
+        }
+        calls = [
+            e["target"] for e in builder.edges if e["relation"].startswith("CALLS")
+        ]
+        assert calls == ["FILE:app/Tree.java::Tree::Node"]
+
+
+class TestPhpCallResolution:
+    def test_constructed_type_picks_the_method(self, tmp_path):
+        """`new T(...)` is a call of the class T, and types the variable it
+        is assigned to and a call made on it in parentheses."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Mailer.php": """
+                <?php
+                class Mailer {
+                    public function send(): void {}
+                }
+                """,
+                "src/Decoy.php": """
+                <?php
+                class Decoy {
+                    public function send(): void {}
+                }
+                """,
+                "src/Client.php": """
+                <?php
+                class Client {
+                    public function run(): void
+                    {
+                        $mailer = new Mailer('smtp');
+                        $mailer->send();
+                    }
+
+                    public function once(): void
+                    {
+                        (new Decoy())->send();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:src/Client.php::Client::run") == [
+            "FILE:src/Mailer.php::Mailer",
+            "FILE:src/Mailer.php::Mailer::send",
+        ]
+        assert _calls(builder, "FILE:src/Client.php::Client::once") == [
+            "FILE:src/Decoy.php::Decoy",
+            "FILE:src/Decoy.php::Decoy::send",
+        ]
+
+    def test_copy_has_the_type_of_what_it_copies(self, tmp_path):
+        """A variable assigned another variable, a property or an enum case
+        is of its type, and `new T` without an argument list is a call of
+        T as `new T()` is."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Types.php": """
+                <?php
+                enum Level {
+                    case Info;
+
+                    public function label(): string { return ''; }
+                }
+                class Mailer {
+                    public function send(): void {}
+                }
+                class Decoy {
+                    public function send(): void {}
+                    public function label(): string { return ''; }
+                }
+                class Client {
+                    private Mailer $mailer;
+
+                    public function run(): void
+                    {
+                        $mailer = $this->mailer;
+                        $mailer->send();
+                        $other = $mailer;
+                        $other->send();
+                        $level = Level::Info;
+                        $level->label();
+                        (new Mailer)->send();
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/Types.php::Client::run") == [
+            "FILE:src/Types.php::Level::label",
+            "FILE:src/Types.php::Mailer",
+            "FILE:src/Types.php::Mailer::send",
+            "FILE:src/Types.php::Mailer::send",
+            "FILE:src/Types.php::Mailer::send",
+        ]
+
+    def test_property_types_a_call_through_this(self, tmp_path):
+        """`$this->name->m()` is called on what the property is declared
+        as, in the class, as a promoted constructor parameter or in a
+        superclass; `$this->m()` is the class's own method, though a
+        property has that name."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Types.php": """
+                <?php
+                class Queue {
+                    public function push(): void {}
+                }
+                class Clock {
+                    public function push(): void {}
+                }
+                class Decoy {
+                    public function push(): void {}
+                }
+                abstract class Base {
+                    protected Clock $clock;
+                }
+                class Worker extends Base {
+                    private Queue $queue;
+                    private bool $push;
+
+                    public function __construct(private readonly ?Decoy $spare)
+                    {
+                    }
+
+                    public function run(): void
+                    {
+                        $this->queue->push();
+                        $this->spare->push();
+                        $this->clock->push();
+                        $this->push();
+                    }
+
+                    private function push(): void {}
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/Types.php::Worker::run") == [
+            "FILE:src/Types.php::Clock::push",
+            "FILE:src/Types.php::Decoy::push",
+            "FILE:src/Types.php::Queue::push",
+            "FILE:src/Types.php::Worker::push",
+        ]
+
+    def test_parameter_and_return_types_type_a_chain(self, tmp_path):
+        """A call on a typed parameter, on what a call is declared to
+        return (`static` is the class it was called on), and on a
+        variable bound to a call."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Types.php": """
+                <?php
+                class Maker {
+                    public function named(string $name): static { return $this; }
+                    public function assemble(): ?Product { return null; }
+                    public static function create(): self { return new self(); }
+                }
+                class Product {
+                    public function ship(): void {}
+                }
+                class Decoy {
+                    public function named(): void {}
+                    public function assemble(): void {}
+                    public function ship(): void {}
+                }
+                class Client {
+                    public function chained(Maker $maker): void
+                    {
+                        $maker->named('x')->assemble()->ship();
+                    }
+
+                    public function continued(): void
+                    {
+                        Maker::create()
+                            ->named('x')
+                            ->assemble()
+                            ->ship();
+                    }
+
+                    public function bound(Maker $maker): void
+                    {
+                        $product = $maker->assemble();
+                        $product->ship();
+                    }
+                }
+                """
+            },
+        )
+        chain = [
+            "FILE:src/Types.php::Maker::assemble",
+            "FILE:src/Types.php::Maker::named",
+            "FILE:src/Types.php::Product::ship",
+        ]
+        assert _calls(builder, "FILE:src/Types.php::Client::chained") == chain
+        assert _calls(builder, "FILE:src/Types.php::Client::continued") == [
+            *chain[:1],
+            "FILE:src/Types.php::Maker::create",
+            *chain[1:],
+        ]
+        assert _calls(builder, "FILE:src/Types.php::Client::bound") == [
+            "FILE:src/Types.php::Maker::assemble",
+            "FILE:src/Types.php::Product::ship",
+        ]
+
+    def test_parent_call_reaches_the_parent(self, tmp_path):
+        """`parent::m()` is the superclass's `m`, not the caller's own;
+        `self::m()` and `static::m()` are the class's."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Handlers.php": """
+                <?php
+                class Base {
+                    public function __construct() {}
+                    public function reset(): void {}
+                }
+                class Buffered extends Base {
+                    public function __construct()
+                    {
+                        parent::__construct();
+                    }
+
+                    public function reset(): void
+                    {
+                        parent::reset();
+                        self::clear();
+                        static::flush();
+                    }
+
+                    private static function clear(): void {}
+                    protected static function flush(): void {}
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/Handlers.php::Buffered::__construct") == [
+            "FILE:src/Handlers.php::Base::__construct"
+        ]
+        assert _calls(builder, "FILE:src/Handlers.php::Buffered::reset") == [
+            "FILE:src/Handlers.php::Base::reset",
+            "FILE:src/Handlers.php::Buffered::clear",
+            "FILE:src/Handlers.php::Buffered::flush",
+        ]
+
+    def test_trait_gives_the_class_its_methods(self, tmp_path):
+        """A method of a trait the class uses is the class's, ahead of an
+        inherited one; a call in the trait to a method it leaves to the
+        class using it is pinned to none."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Formats.php": """
+                <?php
+                trait Formats {
+                    public function format(): string { return $this->render(); }
+                }
+                class Base {
+                    public function format(): string { return ''; }
+                    public function level(): int { return 0; }
+                }
+                class Line extends Base {
+                    use Formats;
+
+                    public function render(): string { return ''; }
+
+                    public function run(Line $other): void
+                    {
+                        $this->format();
+                        $other->level();
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/Formats.php::Line::run") == [
+            "FILE:src/Formats.php::Base::level",
+            "FILE:src/Formats.php::Formats::format",
+        ]
+        assert _calls(builder, "FILE:src/Formats.php::Formats::format") == [
+            "REF:$this->render"
+        ]
+
+    def test_namespace_and_imports_decide_the_class(self, tmp_path):
+        """A name is the class its `use` import or its namespace says:
+        `\\DateTimeImmutable` is PHP's, not the project's class of that
+        name, and `extends \\Lib\\Record` is no project class either."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/DateTimeImmutable.php": """
+                <?php
+                namespace App;
+
+                class DateTimeImmutable extends \\DateTimeImmutable {
+                    public function format(string $format): string { return ''; }
+                }
+                """,
+                "src/Record.php": """
+                <?php
+                namespace App;
+
+                class Record {
+                    public function format(string $format): string { return ''; }
+                }
+                """,
+                "src/Other/Record.php": """
+                <?php
+                namespace App\\Other;
+
+                class Record extends \\Lib\\Record {
+                    public function format(string $format): string { return ''; }
+                }
+                """,
+                "src/Report.php": """
+                <?php
+                namespace App\\Reports;
+
+                use App\\DateTimeImmutable as Stamp;
+                use App\\Other;
+
+                class Report {
+                    public function run(\\App\\Record $record): void
+                    {
+                        (new \\DateTimeImmutable())->format('c');
+                        (new Stamp())->format('c');
+                        (new Other\\Record())->format('c');
+                        $record->format('c');
+                        (new Record())->format('c');
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:src/Report.php::Report::run") == [
+            "FILE:src/DateTimeImmutable.php::DateTimeImmutable",
+            "FILE:src/DateTimeImmutable.php::DateTimeImmutable::format",
+            "FILE:src/Other/Record.php::Record",
+            "FILE:src/Other/Record.php::Record::format",
+            "FILE:src/Record.php::Record::format",
+        ]
+        inherits = [
+            (e["source"].rpartition("/")[2], e["target"])
+            for e in builder.edges
+            if e["relation"] == "INHERITS"
+        ]
+        assert inherits == [
+            ("DateTimeImmutable.php::DateTimeImmutable", "REF:::DateTimeImmutable"),
+            ("Record.php::Record", "REF:::Lib::Record"),
+        ]
+
+    def test_inherited_member_and_interface(self, tmp_path):
+        """A method the receiver's class does not declare is its
+        superclass's or its interface's; one that a base from outside the
+        project may declare is not the project's."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Shapes.php": """
+                <?php
+                namespace App;
+
+                interface Shape {
+                    public function area(): float;
+                }
+                abstract class Figure implements Shape {
+                    public function describe(): string { return ''; }
+                }
+                class Square extends Figure {
+                    public function area(): float { return 1.0; }
+                }
+                class Failure extends \\RuntimeException {
+                    public function describe(): string { return ''; }
+                }
+                class Decoy {
+                    public function area(): float { return 0.0; }
+                    public function describe(): string { return ''; }
+                    public function getMessage(): string { return ''; }
+                }
+                class Client {
+                    public function run(Shape $shape, Square $square, Failure $failure)
+                    {
+                        $shape->area();
+                        $square->describe();
+                        $failure->getMessage();
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/Shapes.php::Client::run") == [
+            "FILE:src/Shapes.php::Figure::describe",
+            "FILE:src/Shapes.php::Shape::area",
+        ]
+        inherits = {
+            (e["source"].rpartition("::")[2], e["target"].rpartition("::")[2])
+            for e in builder.edges
+            if e["relation"] == "INHERITS"
+        }
+        assert inherits == {
+            ("Figure", "Shape"),
+            ("Square", "Figure"),
+            ("Failure", "RuntimeException"),
+        }
+
+    def test_instanceof_and_catch_type_the_variable(self, tmp_path):
+        """`instanceof` types a variable or a property inside the block it
+        opens, and `catch` the exception it names."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Handlers.php": """
+                <?php
+                interface Handler {
+                    public function handle(): void;
+                }
+                interface Resettable {
+                    public function reset(): void;
+                }
+                class Failure extends \\Exception {
+                    public function reset(): void {}
+                }
+                class Wrapper {
+                    private Handler $handler;
+
+                    public function reset(Handler $inner): void
+                    {
+                        if ($inner instanceof Resettable) {
+                            $inner->reset();
+                        }
+                        $inner->reset();
+                        if ($this->handler instanceof Resettable) {
+                            $this->handler->reset();
+                        }
+                        if (!$inner instanceof Resettable) {
+                            $inner->reset();
+                        }
+                    }
+
+                    public function attempt(): void
+                    {
+                        try {
+                            $this->handler->handle();
+                        } catch (Failure $failure) {
+                            $failure->reset();
+                        }
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/Handlers.php::Wrapper::reset") == [
+            "FILE:src/Handlers.php::Resettable::reset",
+            "FILE:src/Handlers.php::Resettable::reset",
+            "REF:$inner->reset",
+            "REF:$inner->reset",
+        ]
+        assert _calls(builder, "FILE:src/Handlers.php::Wrapper::attempt") == [
+            "FILE:src/Handlers.php::Failure::reset",
+            "FILE:src/Handlers.php::Handler::handle",
+        ]
+
+    def test_bare_call_reaches_a_function_only(self, tmp_path):
+        """A `name(` without a receiver is the function of the caller's
+        namespace, else the global one, else the one imported: never a
+        method or a property of that name."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/functions.php": """
+                <?php
+                namespace App\\Text;
+
+                function trim(string $text): string { return $text; }
+                """,
+                "src/global.php": """
+                <?php
+                function describe($value): string { return ''; }
+                function trim(string $text): string { return $text; }
+                """,
+                "src/Text/Cleaner.php": """
+                <?php
+                namespace App\\Text;
+
+                class Cleaner {
+                    private string $substr;
+
+                    public function substr(string $text): string
+                    {
+                        return substr(trim($text), 1) . describe($text) . \\trim($text);
+                    }
+                }
+                """,
+                "src/Report.php": """
+                <?php
+                namespace App;
+
+                use function App\\Text\\trim;
+
+                class Report {
+                    public function title(string $text): string
+                    {
+                        return trim($text) . Text\\trim($text) . describe();
+                    }
+
+                    public function describe(): string { return ''; }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:src/Text/Cleaner.php::Cleaner::substr") == [
+            "FILE:src/functions.php::trim",
+            "FILE:src/global.php::describe",
+            "FILE:src/global.php::trim",
+        ]
+        assert _calls(builder, "FILE:src/Report.php::Report::title") == [
+            "FILE:src/functions.php::trim",
+            "FILE:src/functions.php::trim",
+            "FILE:src/global.php::describe",
+        ]
+
+    def test_phpdoc_types_what_has_no_native_type(self, tmp_path):
+        """`@var`, `@param` and `@return` type a property, a variable, a
+        parameter and a result that the code leaves untyped, and a
+        `@method` tag declares a method the class answers by `__call`."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Types.php": """
+                <?php
+                namespace App;
+
+                /**
+                 * @method Product latest()
+                 */
+                class Store {
+                    /** @var Product|null */
+                    private $featured;
+
+                    /**
+                     * @param Product $product
+                     *
+                     * @return Product
+                     */
+                    public function keep($product)
+                    {
+                        $product->ship();
+                        $this->featured->ship();
+                        return $product;
+                    }
+
+                    public function __call($name, $arguments) {}
+                }
+                class Product {
+                    public function ship(): void {}
+                }
+                class Decoy {
+                    public function ship(): void {}
+                }
+                class Client {
+                    public function run(Store $store, array $items): void
+                    {
+                        $store->keep($items[0])->ship();
+                        $store->latest()->ship();
+                        /** @var Product $first */
+                        $first = $items[0];
+                        $first->ship();
+                    }
+                }
+                """
+            },
+        )
+        ship = "FILE:src/Types.php::Product::ship"
+        assert _calls(builder, "FILE:src/Types.php::Store::keep") == [ship, ship]
+        assert _calls(builder, "FILE:src/Types.php::Client::run") == [
+            ship,
+            ship,
+            ship,
+            "FILE:src/Types.php::Store::keep",
+            "FILE:src/Types.php::Store::latest",
+        ]
+
+    def test_receiver_of_unknown_type_is_not_guessed(self, tmp_path):
+        """A call on a value no declaration types, or on what a call into
+        a library returns, stays unresolved though one project class alone
+        has a method of that name, and is external where only a property
+        has it; a call on a value of a type from outside the project is
+        external."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Ledger.php": """
+                <?php
+                namespace App;
+
+                use Lib\\Message;
+
+                class Ledger {
+                    public $total;
+
+                    public function settle(int $amount): void {}
+                }
+                class Client {
+                    public function run($ledger, Message $message, array $rows): void
+                    {
+                        $ledger->settle(1);
+                        $rows[0]->settle(2);
+                        $ledger->total();
+                        $message->settle(3);
+                        $message->reply()->settle(4);
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/Ledger.php::Client::run") == [
+            "REF:$ledger->settle",
+            "REF:settle",
+            "REF:settle",
+        ]
+
+    def test_built_in_types_and_functions_are_read_from_the_data(self, tmp_path):
+        """A call on what a method or a function of PHP's own returns is
+        made on that type: external where the type has the method, though
+        a project class has one of that name. A project class has the
+        methods of the built-in one it extends, and a method neither has
+        stays unresolved."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Clock.php": """
+                <?php
+                namespace App;
+
+                class Decoy {
+                    public function format(string $format): string { return ''; }
+                    public function getName(): string { return ''; }
+                    public function getMessage(): string { return ''; }
+                    public function explain(): string { return ''; }
+                }
+                class Failure extends \\RuntimeException {
+                }
+                class Clock {
+                    public function run(\\DateTimeImmutable $now, Failure $failure): void
+                    {
+                        $now->modify('+1 day')->format('c');
+                        $now->getTimezone()->getName();
+                        date_create()->format('c');
+                        \\DateTime::createFromFormat('c', '')->format('c');
+                        $failure->getPrevious()->getMessage();
+                        $failure->explain();
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/Clock.php::Clock::run") == [
+            "REF:$failure->explain"
+        ]
+
+    def test_element_of_a_typed_array_or_iterable(self, tmp_path):
+        """What `foreach` or a destructuring assignment takes from an array
+        whose PHPDoc type names its elements, or from an iterator of the
+        standard library, is of that element type."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Group.php": """
+                <?php
+                namespace App;
+
+                class Handler {
+                    public function handle(): void {}
+                }
+                class Decoy {
+                    public function handle(): void {}
+                }
+                class Group {
+                    /** @var Handler[] */
+                    private array $handlers;
+
+                    /**
+                     * @param array<string, Handler> $named
+                     * @param \\ArrayIterator<int, Handler> $queued
+                     *
+                     * @return list<Handler>
+                     */
+                    public function all(array $named, \\ArrayIterator $queued): array
+                    {
+                        foreach ($this->handlers as $handler) {
+                            $handler->handle();
+                        }
+                        foreach ($named as $name => $handler) {
+                            $handler->handle();
+                        }
+                        foreach ($queued as $handler) {
+                            $handler->handle();
+                        }
+                        return $this->handlers;
+                    }
+
+                    public function first(array $untyped): void
+                    {
+                        [$first] = $this->all([], new \\ArrayIterator());
+                        $first->handle();
+                        foreach ($untyped as $handler) {
+                            $handler->handle();
+                        }
+                    }
+                }
+                """
+            },
+        )
+        handle = "FILE:src/Group.php::Handler::handle"
+        assert _calls(builder, "FILE:src/Group.php::Group::all") == [handle] * 3
+        assert _calls(builder, "FILE:src/Group.php::Group::first") == [
+            "FILE:src/Group.php::Group::all",
+            handle,
+            "REF:$handler->handle",
+        ]
+
+    def test_return_type_read_from_the_body(self, tmp_path):
+        """A method without a declared return type returns what each of its
+        `return` statements gives, where that is `$this`, a `new` object or
+        a typed property; with another `return` beside it, nothing known."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Builder.php": """
+                <?php
+                namespace App;
+
+                class Product {
+                    public function ship(): void {}
+                }
+                class Decoy {
+                    public function ship(): void {}
+                    public function named(): void {}
+                }
+                class Builder {
+                    private Product $product;
+
+                    public function named($name)
+                    {
+                        return $this;
+                    }
+
+                    public function build()
+                    {
+                        return new Product();
+                    }
+
+                    public function last()
+                    {
+                        return $this->product;
+                    }
+
+                    public function find($name)
+                    {
+                        if ($name === '') {
+                            return null;
+                        }
+                        return new Product();
+                    }
+                }
+                class Client {
+                    public function run(Builder $builder): void
+                    {
+                        $builder->named('a')->named('b')->build()->ship();
+                        $builder->last()->ship();
+                        $builder->find('a')->ship();
+                    }
+                }
+                """
+            },
+        )
+        ship = "FILE:src/Builder.php::Product::ship"
+        assert _calls(builder, "FILE:src/Builder.php::Client::run") == [
+            "FILE:src/Builder.php::Builder::build",
+            "FILE:src/Builder.php::Builder::find",
+            "FILE:src/Builder.php::Builder::last",
+            "FILE:src/Builder.php::Builder::named",
+            "FILE:src/Builder.php::Builder::named",
+            ship,
+            ship,
+            "REF:ship",
+        ]
+
+    def test_variable_named_parent_is_no_receiver_of_its_own_class(self, tmp_path):
+        """`parent` names the superclass in PHP alone: elsewhere a variable
+        of that name is of unknown type, and a method two classes define
+        is not pinned to the caller's own."""
+        builder = _index(
+            tmp_path,
+            {
+                "tree.js": """
+                class Node {
+                    size() {
+                        return 1;
+                    }
+
+                    total(parent) {
+                        return parent.size();
+                    }
+                }
+
+                class Leaf {
+                    size() {
+                        return 0;
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:tree.js::Node::total") == ["REF:parent.size"]
+
+
+class TestDotnetCallResolution:
+    def test_declared_type_picks_the_method(self, tmp_path):
+        """A parameter, a local, a field and a property are of the type they
+        are declared as."""
+        builder = _index(
+            tmp_path,
+            {
+                "Readers.cs": """
+                namespace App;
+
+                public class TreeReader
+                {
+                    public int Peek() => 0;
+                }
+
+                public class StreamReader
+                {
+                    public int Peek() => 0;
+                }
+                """,
+                "Adapter.cs": """
+                namespace App;
+
+                public class Adapter
+                {
+                    readonly StreamReader _stream;
+                    TreeReader Tree { get; }
+
+                    public int Read(TreeReader input)
+                    {
+                        StreamReader local = _stream;
+                        return input.Peek() + local.Peek() + _stream.Peek() + Tree.Peek();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Adapter.cs::Adapter::Read") == [
+            "FILE:Readers.cs::StreamReader::Peek",
+            "FILE:Readers.cs::StreamReader::Peek",
+            "FILE:Readers.cs::TreeReader::Peek",
+            "FILE:Readers.cs::TreeReader::Peek",
+        ]
+
+    def test_receiver_of_non_project_type_is_external(self, tmp_path):
+        """A call on a value declared with a type the project does not
+        define, on a type or a namespace it does not define, or of a
+        constructor of one, reaches no project member of that name."""
+        builder = _index(
+            tmp_path,
+            {
+                "Hub.cs": """
+                public class Hub
+                {
+                    public void Flush() { }
+                    public void Run() { }
+                    public void TimeOnly(int hours) { }
+                }
+                """,
+                "Client.cs": """
+                using System.IO;
+
+                public class Client : Hub
+                {
+                    readonly List<Hub> _hubs = new();
+
+                    public void Go(TextWriter output, string text)
+                    {
+                        output.Flush();
+                        text.Run();
+                        BenchmarkRunner.Run<Client>();
+                        System.Console.Out.Flush();
+                        _hubs.Run();
+                        var stamp = new TimeOnly(13);
+                        stamp.Run();
+                    }
+                }
+                """,
+            },
+        )
+        calls = [
+            e["target"]
+            for e in builder.edges
+            if e["relation"].startswith("CALLS") and "Client.cs" in e["source"]
+        ]
+        assert calls == []
+
+    def test_call_is_made_by_the_member_it_is_in(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "Helper.cs": """
+                public static class Helper
+                {
+                    public static Helper Create() => null;
+                    public static void Prepare() { }
+                    public static void Work() { }
+                    public static int Measure() => 0;
+                    public static void Visit(int item) { }
+                }
+                """,
+                "Client.cs": """
+                public class Client
+                {
+                    readonly object _helper = Helper.Create();
+
+                    public Client()
+                    {
+                        Helper.Prepare();
+                    }
+
+                    public int Size
+                    {
+                        get { return Helper.Measure(); }
+                    }
+
+                    public void Run(int[] items)
+                    {
+                        void Each(int item) => Helper.Visit(item);
+                        Array.ForEach(items, item =>
+                        {
+                            Helper.Work();
+                        });
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Client.cs::Client") == [
+            "FILE:Helper.cs::Helper::Create"
+        ]
+        assert _calls(builder, "FILE:Client.cs::Client::<init>") == [
+            "FILE:Helper.cs::Helper::Prepare"
+        ]
+        assert _calls(builder, "FILE:Client.cs::Client::Size") == [
+            "FILE:Helper.cs::Helper::Measure"
+        ]
+        assert _calls(builder, "FILE:Client.cs::Client::Run") == [
+            "FILE:Helper.cs::Helper::Work"
+        ]
+        assert _calls(builder, "FILE:Client.cs::Client::Run::Each") == [
+            "FILE:Helper.cs::Helper::Visit"
+        ]
+
+    def test_chain_is_typed_by_properties_and_return_types(self, tmp_path):
+        """Every link of a chain, on one line or over several, is a call on
+        what the link before returns or on what the property before is
+        declared as; so is a call on a `var` bound to the chain."""
+        builder = _index(
+            tmp_path,
+            {
+                "Config.cs": """
+                public class Config
+                {
+                    public SinkConfig WriteTo { get; }
+                    public Logger Create() => new Logger();
+                }
+
+                public class SinkConfig
+                {
+                    public Config Sink(
+                        object sink,
+                        int level = 0) => null;
+                }
+
+                public class Logger
+                {
+                    public void Write(string text) { }
+                }
+                """,
+                "Decoy.cs": """
+                public class Decoy
+                {
+                    public void Sink(object sink) { }
+                    public void Create() { }
+                    public void Write(string text) { }
+                }
+                """,
+                "Client.cs": """
+                public class Client
+                {
+                    void Chained()
+                    {
+                        new Config().WriteTo.Sink(null).Create().Write("x");
+                    }
+
+                    void Continued()
+                    {
+                        var logger = new Config()
+                            .WriteTo.Sink(
+                                null,
+                                level: 1)
+                            .Create();
+                        logger.Write("x");
+                    }
+                }
+                """,
+            },
+        )
+        chain = [
+            "FILE:Config.cs::Config",
+            "FILE:Config.cs::Config::Create",
+            "FILE:Config.cs::Logger::Write",
+            "FILE:Config.cs::SinkConfig::Sink",
+        ]
+        assert _calls(builder, "FILE:Client.cs::Client::Chained") == chain
+        assert _calls(builder, "FILE:Client.cs::Client::Continued") == chain
+
+    def test_instantiation_is_a_call_of_the_type(self, tmp_path):
+        """`new Name(...)`, `Name value = new(...)` and `new Name { ... }`
+        create a Name, though a member is called Name too."""
+        builder = _index(
+            tmp_path,
+            {
+                "Stamp.cs": """
+                public class Stamp
+                {
+                    public int Hour;
+                    public void Press() { }
+                }
+                """,
+                "Tests.cs": """
+                public class Tests
+                {
+                    public void Stamp() { }
+
+                    public void All()
+                    {
+                        var first = new Stamp();
+                        Stamp second = new();
+                        var third = new Stamp { Hour = 1 };
+                        first.Press();
+                        second.Press();
+                        third.Press();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Tests.cs::Tests::All") == [
+            "FILE:Stamp.cs::Stamp",
+            "FILE:Stamp.cs::Stamp",
+            "FILE:Stamp.cs::Stamp",
+            "FILE:Stamp.cs::Stamp::Press",
+            "FILE:Stamp.cs::Stamp::Press",
+            "FILE:Stamp.cs::Stamp::Press",
+        ]
+
+    def test_member_of_this_its_bases_and_interfaces(self, tmp_path):
+        """A bare call, a call on `this` or `base` and a call on an
+        inherited field reach the members of the base types; a name that is
+        a property of the type is that property, not the type of its name."""
+        builder = _index(
+            tmp_path,
+            {
+                "Core.cs": """
+                namespace App;
+
+                public interface ILogger
+                {
+                    void Write(string text);
+                    void Twice(string text)
+                    {
+                        Write(text);
+                    }
+                }
+
+                public class Logger : ILogger
+                {
+                    public void Write(string text) { }
+                    public void Close() { }
+                }
+
+                public abstract class Base
+                {
+                    protected ILogger Shared;
+                    protected void Helper() { }
+                    protected virtual void Step() { }
+                }
+                """,
+                "Log.cs": """
+                namespace App;
+
+                public class Log : Base
+                {
+                    public static ILogger Logger { get; set; }
+
+                    protected override void Step()
+                    {
+                        Helper();
+                        this.Helper();
+                        base.Step();
+                        Shared.Write("a");
+                        Logger.Write("b");
+                    }
+                }
+                """,
+            },
+        )
+        inherits = {
+            (e["source"].rpartition("::")[2], e["target"])
+            for e in builder.edges
+            if e["relation"] == "INHERITS"
+        }
+        assert inherits == {
+            ("Logger", "FILE:Core.cs::ILogger"),
+            ("Log", "FILE:Core.cs::Base"),
+        }
+        assert _calls(builder, "FILE:Core.cs::ILogger::Twice") == [
+            "FILE:Core.cs::ILogger::Write"
+        ]
+        assert _calls(builder, "FILE:Log.cs::Log::Step") == [
+            "FILE:Core.cs::Base::Helper",
+            "FILE:Core.cs::Base::Helper",
+            "FILE:Core.cs::Base::Step",
+            "FILE:Core.cs::ILogger::Write",
+            "FILE:Core.cs::ILogger::Write",
+        ]
+
+    def test_bare_call_reaches_no_other_type(self, tmp_path):
+        """A bare call is one of a member of an enclosing type, of a local
+        function or of a type named by `using static`; a variable called by
+        its name holds a delegate."""
+        builder = _index(
+            tmp_path,
+            {
+                "Tools.cs": """
+                namespace App.Util;
+
+                public static class Tools
+                {
+                    public static void Check(bool ok) { }
+                }
+
+                public class Other
+                {
+                    public void Emit() { }
+                    public void Notify() { }
+                }
+                """,
+                "Client.cs": """
+                using static App.Util.Tools;
+
+                public class Outer
+                {
+                    static void Shared() { }
+
+                    class Client
+                    {
+                        void Run(Action Notify)
+                        {
+                            Check(true);
+                            Shared();
+                            Emit();
+                            Notify();
+                        }
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Client.cs::Outer::Client::Run") == [
+            "FILE:Client.cs::Outer::Shared",
+            "FILE:Tools.cs::Tools::Check",
+        ]
+
+    def test_receiver_typed_where_it_is_bound(self, tmp_path):
+        """A cast, `as`, an `is` pattern, `catch`, `foreach`, `using` and an
+        `out var` argument give a value the type they name; a lambda's
+        parameter has none, so a call on it is of no one definition."""
+        builder = _index(
+            tmp_path,
+            {
+                "Model.cs": """
+                public class Order : IDisposable
+                {
+                    public void Ship() { }
+                    public void Dispose() { }
+                }
+
+                public class Failure : Exception
+                {
+                    public void Report() { }
+                }
+
+                public class Store
+                {
+                    public bool TryFind(string key, out Order found)
+                    {
+                        found = null;
+                        return false;
+                    }
+                }
+
+                public class Decoy
+                {
+                    public void Ship() { }
+                    public void Report() { }
+                }
+                """,
+                "Client.cs": """
+                public class Client
+                {
+                    void Typed(object raw, Order[] orders, Store store)
+                    {
+                        ((Order)raw).Ship();
+                        (raw as Order)?.Ship();
+                        var cast = (Order)raw;
+                        cast.Ship();
+                        if (raw is Order order) order.Ship();
+                        foreach (Order each in orders) each.Ship();
+                        using var held = new Order();
+                        held.Ship();
+                        if (store.TryFind("k", out var found)) found.Ship();
+                        try { } catch (Failure failure) { failure.Report(); }
+                    }
+
+                    void Untyped(Order[] orders)
+                    {
+                        Array.ForEach(orders, o => o.Ship());
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Client.cs::Client::Typed") == [
+            "FILE:Model.cs::Failure::Report",
+            "FILE:Model.cs::Order",
+            "FILE:Model.cs::Order::Ship",
+            "FILE:Model.cs::Order::Ship",
+            "FILE:Model.cs::Order::Ship",
+            "FILE:Model.cs::Order::Ship",
+            "FILE:Model.cs::Order::Ship",
+            "FILE:Model.cs::Order::Ship",
+            "FILE:Model.cs::Order::Ship",
+            "FILE:Model.cs::Store::TryFind",
+        ]
+        assert _calls(builder, "FILE:Client.cs::Client::Untyped") == ["REF:o.Ship"]
+
+    def test_unknown_receiver_is_not_guessed(self, tmp_path):
+        """One project method has the name, and the receiver's type is not
+        known: the call is left unresolved."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cursor.cs": """
+                public class Cursor
+                {
+                    public bool MoveNext() => false;
+                }
+                """,
+                "Client.cs": """
+                public class Client
+                {
+                    void Run(IEnumerable<int> numbers)
+                    {
+                        foreach (var e in numbers.Select(n => n.GetEnumerator()))
+                            e.MoveNext();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Client.cs::Client::Run") == ["REF:e.MoveNext"]
+
+    def test_usings_and_namespaces_tell_types_apart(self, tmp_path):
+        """A name is the type of an enclosing namespace, of a namespace a
+        `using` names or of what an alias stands for; where the project's
+        type of that name is in neither, which type is meant is not told."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/Core/Timer.cs": """
+                namespace App.Core
+                {
+                    public class Timer
+                    {
+                        public void Start() { }
+                    }
+                }
+                """,
+                "src/Test/Timer.cs": """
+                namespace App.Test;
+
+                public class Timer
+                {
+                    public void Start() { }
+                }
+                """,
+                "src/Core/Jobs.cs": """
+                namespace App.Core.Jobs;
+
+                public class Job
+                {
+                    void Run(Timer timer) => timer.Start();
+                }
+                """,
+                "src/Web/Page.cs": """
+                using App.Test;
+                using Clock = App.Core.Timer;
+
+                namespace Web;
+
+                public class Page
+                {
+                    void Load(Timer timer, Clock clock, App.Core.Timer named)
+                    {
+                        timer.Start();
+                        clock.Start();
+                        named.Start();
+                    }
+                }
+                """,
+                "src/Other/Tool.cs": """
+                using System.Threading;
+
+                namespace Other;
+
+                public class Tool
+                {
+                    void Run(Timer timer) => timer.Start();
+                }
+                """,
+            },
+        )
+        core = "FILE:src/Core/Timer.cs::Timer::Start"
+        assert _calls(builder, "FILE:src/Core/Jobs.cs::Job::Run") == [core]
+        assert _calls(builder, "FILE:src/Web/Page.cs::Page::Load") == [
+            core,
+            core,
+            "FILE:src/Test/Timer.cs::Timer::Start",
+        ]
+        assert _calls(builder, "FILE:src/Other/Tool.cs::Tool::Run") == [
+            "REF:timer.Start"
+        ]
+
+    def test_extension_method(self, tmp_path):
+        """A method whose first parameter is `this T` is called on a T or
+        on a type derived from it. One written for a type from outside is
+        the call's target where the standard library's data has the type
+        and it lacks the member; a receiver it cannot scope stays open."""
+        builder = _index(
+            tmp_path,
+            {
+                "Shapes.cs": """
+                public interface IShape { }
+
+                public class Circle : IShape
+                {
+                    public void Draw() { }
+                }
+                """,
+                "Extensions.cs": """
+                public static class Extensions
+                {
+                    public static void Describe(this IShape shape) { }
+                    public static string Shout(this string text) => text;
+                    public static int Total(this IEnumerable<int> numbers) => 0;
+                }
+                """,
+                "Client.cs": """
+                public class Client
+                {
+                    void Run(Circle circle, string text, List<int> numbers)
+                    {
+                        circle.Describe();
+                        circle.Draw();
+                        text.Shout();
+                        numbers.Total();
+                        numbers.Clear();
+                        Extensions.Shout(text);
+                        string.Shout(text);
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Client.cs::Client::Run") == [
+            "FILE:Extensions.cs::Extensions::Describe",
+            "FILE:Extensions.cs::Extensions::Shout",
+            "FILE:Extensions.cs::Extensions::Shout",
+            "FILE:Extensions.cs::Extensions::Shout",
+            "FILE:Shapes.cs::Circle::Draw",
+            "REF:numbers.Total",
+        ]
+
+    def test_attribute_is_a_call_of_its_class(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "TemplateAttribute.cs": """
+                public sealed class TemplateAttribute : Attribute
+                {
+                    public TemplateAttribute(string name) { }
+                }
+                """,
+                "Log.cs": """
+                public class Log
+                {
+                    [Template("message")]
+                    [Obsolete]
+                    public void Write(string message)
+                    {
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Log.cs::Log::Write") == [
+            "FILE:TemplateAttribute.cs::TemplateAttribute"
+        ]
+
+    def test_partial_type_is_one_type(self, tmp_path):
+        """The members of a partial type are those of all its declarations;
+        another type of its name is not one of them."""
+        builder = _index(
+            tmp_path,
+            {
+                "Reader.cs": """
+                namespace App;
+
+                public partial class Reader
+                {
+                    public void Read() => Fill();
+                }
+                """,
+                "Reader.Async.cs": """
+                namespace App;
+
+                public partial class Reader
+                {
+                    void Fill() { }
+                }
+                """,
+                "Other/Reader.cs": """
+                namespace Other;
+
+                public class Reader
+                {
+                    void Fill() { }
+                    public void Read() => Missing();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Reader.cs::Reader::Read") == [
+            "FILE:Reader.Async.cs::Reader::Fill"
+        ]
+        assert _calls(builder, "FILE:Other/Reader.cs::Reader::Read") == []
+
+    def test_overloads(self, tmp_path):
+        """A call reaches the first overload that takes as many arguments
+        as it passes and is called as it is, on the type or on a value;
+        what the call returns is told only where every overload returns the
+        same."""
+        builder = _index(
+            tmp_path,
+            {
+                "Token.cs": """
+                public class Token
+                {
+                    public bool Matches(Token other) => true;
+                    public static bool Matches(Token a, Token b) => true;
+                    static string GetType(Token token) => "";
+                    public Token Wrap() => this;
+                    public Text Wrap(int depth) => null;
+                    public Token Copy() => this;
+                    public Token Copy(int depth, params int[] more) => this;
+                    public bool Equals(Token other) => true;
+                    public void Close() { }
+
+                    bool Same(Token other) => Equals(this, other);
+                }
+
+                public class Text
+                {
+                    public void Close() { }
+                }
+                """,
+                "Client.cs": """
+                public class Client
+                {
+                    void Run(Token token)
+                    {
+                        Token.Matches(token, token);
+                        token.Matches(token);
+                        token.GetType();
+                        token.Copy(1, 2, 3).Close();
+                        token.Wrap(1).Close();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Token.cs::Token::Same") == []
+        assert _calls(builder, "FILE:Client.cs::Client::Run") == [
+            "FILE:Token.cs::Token::Close",
+            "FILE:Token.cs::Token::Matches",
+            "FILE:Token.cs::Token::overload2_Copy",
+            "FILE:Token.cs::Token::overload2_Matches",
+            "FILE:Token.cs::Token::overload2_Wrap",
+            "REF:Close",
+            "REF:token.GetType",
+        ]
+
+    def test_generic_type_from_outside(self, tmp_path):
+        """A member of `List<Order>` is the list's; what it returns may be
+        an Order, so a call on that is not dropped. A `Task<Order>` awaited
+        is an Order; so may be what a generic method from outside returns."""
+        builder = _index(
+            tmp_path,
+            {
+                "Order.cs": """
+                public class Order
+                {
+                    public void Add(int item) { }
+                    public void Ship() { }
+                }
+
+                public class Orders
+                {
+                    public Task<Order> LoadAsync() => null;
+                    public List<Order> All { get; }
+                }
+
+                public class Decoy
+                {
+                    public void Ship() { }
+                }
+                """,
+                "Client.cs": """
+                public class Client
+                {
+                    async Task Run(Orders orders, IServiceProvider services)
+                    {
+                        orders.All.Add(null);
+                        orders.All.First().Ship();
+                        var loaded = await orders.LoadAsync();
+                        loaded.Ship();
+                        services.GetService<Order>().Ship();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Client.cs::Client::Run") == [
+            "FILE:Order.cs::Order::Ship",
+            "FILE:Order.cs::Orders::LoadAsync",
+            "REF:Ship",
+            "REF:Ship",
+        ]
+
+
+class TestClangCallResolution:
+    def test_declared_type_picks_the_method(self, tmp_path):
+        """A local, a parameter, a `Type name(args)` variable and a
+        range-`for` variable are of the type they are declared with."""
+        builder = _index(
+            tmp_path,
+            {
+                "tree.h": """
+                class TreeReader {
+                 public:
+                  int Peek();
+                };
+                """,
+                "tree.cc": """
+                #include "tree.h"
+                int TreeReader::Peek() { return 0; }
+                """,
+                "stream.h": """
+                class StreamReader {
+                 public:
+                  int Peek() { return 0; }
+                };
+                """,
+                "adapter.cc": """
+                #include "stream.h"
+                #include "tree.h"
+                int Read(TreeReader* in, const StreamReader& other) {
+                  TreeReader local;
+                  StreamReader stream(1);
+                  for (TreeReader* each : readers) {
+                    each->Peek();
+                  }
+                  return in->Peek() + other.Peek() + local.Peek() + stream.Peek();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:adapter.cc::Read") == [
+            "FILE:stream.h::StreamReader::Peek",
+            "FILE:stream.h::StreamReader::Peek",
+            "FILE:tree.cc::TreeReader::Peek",
+            "FILE:tree.cc::TreeReader::Peek",
+            "FILE:tree.cc::TreeReader::Peek",
+        ]
+
+    def test_member_declared_and_defined_is_one_node(self, tmp_path):
+        """A member declared in its class and defined outside it is the
+        definition; a pure virtual one is its declaration."""
+        builder = _index(
+            tmp_path,
+            {
+                "db.h": """
+                namespace store {
+                class DB {
+                 public:
+                  virtual Status Put(int key) = 0;
+                  Status Get(int key);
+                };
+                }
+                """,
+                "db.cc": """
+                #include "db.h"
+                namespace store {
+                Status DB::Get(int key) { return Status(); }
+                }
+                """,
+                "client.cc": """
+                #include "db.h"
+                void Run(store::DB* db) {
+                  db->Put(1);
+                  db->Get(1);
+                }
+                """,
+            },
+        )
+        methods = sorted(n["id"] for n in builder.nodes if n["type"] == "Method")
+        assert methods == [
+            "FILE:db.cc::store::DB::Get",
+            "FILE:db.h::store::DB::Put",
+        ]
+        assert _calls(builder, "FILE:client.cc::Run") == methods
+
+    def test_field_of_the_class_types_the_receiver(self, tmp_path):
+        """A method defined outside its class uses the fields the class
+        declares, in the header; `->` on a smart pointer reaches what it
+        points at, and a field of a library type is from outside."""
+        builder = _index(
+            tmp_path,
+            {
+                "log.h": """
+                class Writer {
+                 public:
+                  void Append() {}
+                  void size() {}
+                  void reset() {}
+                };
+                """,
+                "db.h": """
+                #include <memory>
+                #include <string>
+                class Writer;
+                class DB {
+                  void Write();
+                  Writer* log_ GUARDED_BY(mutex_);
+                  std::unique_ptr<Writer> owned_;
+                  std::string name_;
+                };
+                """,
+                "db.cc": """
+                #include "db.h"
+                #include "log.h"
+                void DB::Write() {
+                  log_->Append();
+                  this->log_->Append();
+                  owned_->Append();
+                  owned_.reset();
+                  name_.size();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:db.cc::DB::Write") == [
+            "FILE:log.h::Writer::Append",
+            "FILE:log.h::Writer::Append",
+            "FILE:log.h::Writer::Append",
+        ]
+
+    def test_implicit_this_reaches_the_class_and_its_bases(self, tmp_path):
+        """A bare call in a member function is to a member of the class or
+        of a base, never to a method of an unrelated class."""
+        builder = _index(
+            tmp_path,
+            {
+                "shapes.h": """
+                class Shape {
+                 public:
+                  int Area() { return 0; }
+                };
+                class Square : public Shape {
+                 public:
+                  int Side() { return 1; }
+                  int Total();
+                };
+                class Other {
+                 public:
+                  int Volume() { return 0; }
+                };
+                """,
+                "shapes.cc": """
+                #include "shapes.h"
+                int Square::Total() {
+                  return Side() + Area() + this->Area() + Volume();
+                }
+                """,
+            },
+        )
+        inherits = {
+            (e["source"], e["target"])
+            for e in builder.edges
+            if e["relation"] == "INHERITS"
+        }
+        assert inherits == {("FILE:shapes.h::Square", "FILE:shapes.h::Shape")}
+        assert _calls(builder, "FILE:shapes.cc::Square::Total") == [
+            "FILE:shapes.h::Shape::Area",
+            "FILE:shapes.h::Shape::Area",
+            "FILE:shapes.h::Square::Side",
+        ]
+
+    def test_body_of_a_macro_definition_is_a_member_of_its_fixture(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "store.h": """
+                class Store {
+                 public:
+                  void Put() {}
+                };
+                """,
+                "store_test.cc": """
+                #include "store.h"
+                class StoreTest : public testing::Test {
+                 public:
+                  void Put() { store_.Put(); }
+                  Store store_;
+                };
+                TEST_F(StoreTest, Empty) {
+                  Put();
+                  store_.Put();
+                }
+                """,
+            },
+        )
+        test = "FILE:store_test.cc::StoreTest::TEST_F(StoreTest, Empty)"
+        assert _calls(builder, test) == [
+            "FILE:store.h::Store::Put",
+            "FILE:store_test.cc::StoreTest::Put",
+        ]
+
+    def test_qualified_call(self, tmp_path):
+        """`Type::name` and `space::name` are members of that type or
+        namespace; a qualifier the project does not declare is outside."""
+        builder = _index(
+            tmp_path,
+            {
+                "status.h": """
+                namespace util {
+                class Status {
+                 public:
+                  static Status OK() { return Status(); }
+                };
+                int move(int x) { return x; }
+                }
+                """,
+                "client.cc": """
+                #include "status.h"
+                int Run() {
+                  util::Status::OK();
+                  util::move(1);
+                  std::move(2);
+                  return 0;
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:client.cc::Run") == [
+            "FILE:status.h::util::Status::OK",
+            "FILE:status.h::util::move",
+        ]
+
+    def test_call_on_a_returned_value_is_typed_by_the_return_type(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "db.h": """
+                class Iterator {
+                 public:
+                  void Seek() {}
+                };
+                class DB {
+                 public:
+                  Iterator* NewIterator() { return nullptr; }
+                  std::string Name() { return ""; }
+                };
+                class Decoy {
+                 public:
+                  void Seek() {}
+                  void size() {}
+                };
+                """,
+                "client.cc": """
+                #include "db.h"
+                void Run(DB* db) {
+                  db->NewIterator()->Seek();
+                  auto it = db->NewIterator();
+                  it->Seek();
+                  auto* made = new Iterator();
+                  made->Seek();
+                  db->Name().size();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:client.cc::Run") == [
+            "FILE:db.h::DB::Name",
+            "FILE:db.h::DB::NewIterator",
+            "FILE:db.h::DB::NewIterator",
+            "FILE:db.h::Iterator",
+            "FILE:db.h::Iterator::Seek",
+            "FILE:db.h::Iterator::Seek",
+            "FILE:db.h::Iterator::Seek",
+        ]
+
+    def test_include_decides_which_type_is_meant(self, tmp_path):
+        """A type is known where its file is included; one of a name the
+        project does not declare is from outside."""
+        builder = _index(
+            tmp_path,
+            {
+                "a/handler.h": """
+                class Handler {
+                 public:
+                  void Run() {}
+                };
+                """,
+                "b/handler.h": """
+                class Handler {
+                 public:
+                  void Run() {}
+                };
+                """,
+                "main.cc": """
+                #include "b/handler.h"
+                void Start(Handler* handler, FILE* file) {
+                  handler->Run();
+                  file->Run();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:main.cc::Start") == [
+            "FILE:b/handler.h::Handler::Run"
+        ]
+
+    def test_static_function_is_called_from_its_file_only(self, tmp_path):
+        """A bare call reaches a function with external linkage anywhere,
+        one with internal linkage and a macro only where their file is
+        compiled in."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.c": """
+                static int helper(void) { return 0; }
+                int shared(void) { return helper(); }
+                """,
+                "limits.h": """
+                #define CLAMP(x) (x)
+                """,
+                "b.c": """
+                #include "limits.h"
+                int run(void) {
+                  return helper() + shared() + CLAMP(1);
+                }
+                """,
+                "c.c": """
+                int other(void) { return CLAMP(2); }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.c::shared") == ["FILE:a.c::helper"]
+        assert _calls(builder, "FILE:b.c::run") == [
+            "FILE:a.c::shared",
+            "FILE:limits.h::CLAMP",
+        ]
+        assert _calls(builder, "FILE:c.c::other") == []
+
+    def test_definitions_that_are_alternatives_stay_unresolved(self, tmp_path):
+        """Two definitions of one function, for two platforms or as
+        overloads in two headers, are both what a call may reach."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/unix/core.c": """
+                int loop_run(void) { return 0; }
+                """,
+                "src/win/core.c": """
+                int loop_run(void) { return 0; }
+                """,
+                "src/unix/tcp.c": """
+                int tcp_open(void) { return loop_run(); }
+                """,
+                "test/run.c": """
+                int main(void) { return loop_run(); }
+                """,
+                "include/a.h": """
+                namespace fmt { int write(int x) { return x; } }
+                """,
+                "include/b.h": """
+                #include "a.h"
+                namespace fmt {
+                int write(char c) { return c; }
+                int both() { return write(1); }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:src/unix/tcp.c::tcp_open") == ["REF:loop_run"]
+        (edge,) = (
+            e
+            for e in builder.edges
+            if e["source"] == "FILE:src/unix/tcp.c::tcp_open"
+            and e["relation"] == "CALLS"
+        )
+        assert edge["metadata"]["candidates"] == [
+            "FILE:src/unix/core.c::loop_run",
+            "FILE:src/win/core.c::loop_run",
+        ]
+        assert _calls(builder, "FILE:test/run.c::main") == ["REF:loop_run"]
+        assert _calls(builder, "FILE:include/b.h::fmt::both") == ["REF:write"]
+
+    def test_a_guarded_call_reaches_the_definition_of_its_arm(self, tmp_path):
+        """A call written inside `#ifdef WIN32` reaches the definition the
+        same arm gives; written outside a guard, it names both."""
+        builder = _index(
+            tmp_path,
+            {
+                "win.c": """
+                #ifdef WIN32
+                int config(void) { return 1; }
+                #endif
+                """,
+                "nix.c": """
+                #ifndef WIN32
+                int config(void) { return 0; }
+                #endif
+                """,
+                "use.c": """
+                #ifdef WIN32
+                int use(void) { return config(); }
+                #endif
+                """,
+                "any.c": """
+                int any(void) { return config(); }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:use.c::use") == ["FILE:win.c::config"]
+        assert _calls(builder, "FILE:any.c::any") == ["REF:config"]
+        (edge,) = (
+            e
+            for e in builder.edges
+            if e["source"] == "FILE:any.c::any" and e["relation"] == "CALLS"
+        )
+        assert edge["metadata"]["candidates"] == [
+            "FILE:nix.c::config",
+            "FILE:win.c::config",
+        ]
+
+    def test_only_definition_under_a_directive_is_the_call(self, tmp_path):
+        """A name whose one definition an `#if` arm builds is that
+        definition's, unless the standard library has the name for the
+        builds that leave the arm out."""
+        builder = _index(
+            tmp_path,
+            {
+                "compat.c": """
+                #ifdef TRACING
+                void trace(const char* text) { }
+                #endif
+                #ifndef HAVE_STRDUP
+                char* strdup(const char* text) { return 0; }
+                #endif
+                """,
+                "use.c": """
+                void use(const char* text) {
+                    trace(text);
+                    strdup(text);
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:use.c::use") == [
+            "FILE:compat.c::trace",
+            "REF:strdup",
+        ]
+
+    def test_call_of_a_value_is_no_call_of_a_definition(self, tmp_path):
+        """A parameter that holds a function, and a struct member that
+        does, declared in the struct or by a macro that stands for fields,
+        are not the functions of that name: each call is one of a value.
+        The struct is reached through its typedef."""
+        builder = _index(
+            tmp_path,
+            {
+                "loop.h": """
+                typedef struct handle_s handle_t;
+                typedef void (*read_cb_t)(handle_t* h);
+                #define HANDLE_FIELDS \\
+                  read_cb_t read_cb;  \\
+                  int flags;
+                struct handle_s {
+                  HANDLE_FIELDS
+                  void (*close_cb)(handle_t* h);
+                };
+                """,
+                "loop.c": """
+                #include "loop.h"
+                static void close_cb(handle_t* h) {}
+                static void done(void) {}
+                void finish(handle_t* h, struct handle_s* raw, void (*done)(void)) {
+                  h->close_cb(h);
+                  h->read_cb(h);
+                  raw->close_cb(raw);
+                  done();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:loop.c::finish") == []
+
+    def test_macro_invocation_is_a_reference_to_the_macro(self, tmp_path):
+        """Rows whose macro each includer defines its own way reach none
+        of them alone; a namespace that a macro opens holds what is at the
+        top of the files."""
+        builder = _index(
+            tmp_path,
+            {
+                "opcodes.h": """
+                OP(LOAD, 1)
+                OP(DUP, 2)
+                """,
+                "names.c": """
+                #define OP(name, size) #name,
+                static const char* names[] = {
+                #include "opcodes.h"
+                };
+                """,
+                "sizes.c": """
+                #define OP(name, size) size,
+                static const int sizes[] = {
+                #include "opcodes.h"
+                };
+                """,
+                "lib.h": """
+                #define LIB_BEGIN namespace lib {
+                #define LIB_END }
+                LIB_BEGIN
+                int format(int x) { return x; }
+                LIB_END
+                """,
+                "use.cc": """
+                #include "lib.h"
+                struct Printer {
+                  int format(int x) { return lib::format(x); }
+                };
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:opcodes.h") == ["REF:OP", "REF:OP"]
+        assert _calls(builder, "FILE:use.cc::Printer::format") == ["FILE:lib.h::format"]
+
+    def test_call_in_a_macro_argument_is_qualified_as_the_macro_writes_it(
+        self, tmp_path
+    ):
+        """`SYS(close(fd))` is `::close(fd)` where the macro writes `::`
+        before its parameter, itself or through a macro it passes it to:
+        no call of the member of that name. A macro that writes the
+        argument as it stands leaves the call a member's."""
+        builder = _index(
+            tmp_path,
+            {
+                "os.h": """
+                #define SYS(call) ::call
+                #define POSIX(call) SYS(call)
+                #define CHECK(value) check(value)
+                int check(int value);
+                class File {
+                 public:
+                  int close();
+                  int size();
+                  int fd_;
+                };
+                """,
+                "os.cc": """
+                #include "os.h"
+                int check(int value) { return value; }
+                int File::size() { return 0; }
+                int File::close() {
+                  CHECK(size());
+                  return POSIX(close(fd_));
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:os.cc::File::close") == [
+            "FILE:os.cc::File::size",
+            "FILE:os.h::CHECK",
+            "FILE:os.h::POSIX",
+        ]
+
+    def test_alias_is_the_type_it_names(self, tmp_path):
+        """A receiver, a field and a constructor call written with a
+        `typedef` or `using` name are of the type the alias names where it
+        is declared; an alias of a library type is from outside."""
+        builder = _index(
+            tmp_path,
+            {
+                "buffer.h": """
+                #include <string>
+                template <typename T> class basic_buffer {
+                 public:
+                  void append(T value) {}
+                  int size() { return 0; }
+                };
+                using buffer = basic_buffer<char>;
+                typedef std::string text;
+                class Table {
+                 public:
+                  class Iterator {
+                   public:
+                    void Seek() {}
+                  };
+                };
+                class Decoy {
+                 public:
+                  void Seek() {}
+                  int size() { return 0; }
+                };
+                """,
+                "use.cc": """
+                #include "buffer.h"
+                class Mem {
+                  typedef Table Rows;
+                  void Run(buffer& out, text& name);
+                  buffer scratch_;
+                };
+                void Mem::Run(buffer& out, text& name) {
+                  out.append('a');
+                  scratch_.size();
+                  name.size();
+                  auto made = buffer();
+                  made.size();
+                  Rows::Iterator it;
+                  it.Seek();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:use.cc::Mem::Run") == [
+            "FILE:buffer.h::Table::Iterator::Seek",
+            "FILE:buffer.h::basic_buffer",
+            "FILE:buffer.h::basic_buffer::append",
+            "FILE:buffer.h::basic_buffer::size",
+            "FILE:buffer.h::basic_buffer::size",
+        ]
+
+    def test_fixture_of_a_macro_definition_declared_in_another_file(self, tmp_path):
+        """The body is a member's of the type that an argument names where
+        the file includes its declaration; a type defined in a body types
+        what is declared with it."""
+        builder = _index(
+            tmp_path,
+            {
+                "fixture.h": """
+                class Store {
+                 public:
+                  void Flush() {}
+                };
+                class StoreTest {
+                 public:
+                  void Fill() {}
+                  Store* store_;
+                };
+                """,
+                "store_test.cc": """
+                #include "fixture.h"
+                TEST_F(StoreTest, Empty) {
+                  struct Probe {
+                    void Check() {}
+                  };
+                  Probe probe;
+                  probe.Check();
+                  Fill();
+                  store_->Flush();
+                }
+                """,
+            },
+        )
+        test = "FILE:store_test.cc::TEST_F(StoreTest, Empty)"
+        assert _calls(builder, test) == [
+            "FILE:fixture.h::Store::Flush",
+            "FILE:fixture.h::StoreTest::Fill",
+            f"{test}::Probe::Check",
+        ]
+
+    def test_range_for_types_its_variable_as_the_iterated(self, tmp_path):
+        """`for (auto& s : v)` binds `s` to the first type argument of the
+        container `v` is declared as."""
+        builder = _index(
+            tmp_path,
+            {
+                "s.h": """
+                struct S { int run() { return 0; } };
+                """,
+                "main.cc": """
+                #include "s.h"
+                #include <vector>
+                int main() {
+                  std::vector<S> v;
+                  for (auto& s : v) { s.run(); }
+                  for (auto other : v) other.run();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:main.cc::main") == [
+            "FILE:s.h::S::run",
+            "FILE:s.h::S::run",
+        ]
+
+    def test_smart_pointer_arrow_reaches_what_it_holds(self, tmp_path):
+        """`p->member` calls the member on the pointed-to type while
+        `p.member` calls the smart pointer's own — external where only the
+        standard library defines it."""
+        builder = _index(
+            tmp_path,
+            {
+                "s.h": """
+                struct S { int run() { return 0; } int tally() { return 0; } };
+                """,
+                "main.cc": """
+                #include "s.h"
+                #include <memory>
+                int main() {
+                  std::unique_ptr<S> p;
+                  p->run();
+                  p.get();
+                  p.reset();
+                }
+                """,
+            },
+        )
+        calls = builder.edges
+        resolved = [
+            e["target"]
+            for e in calls
+            if e["source"] == "FILE:main.cc::main" and e["relation"] == "CALLS_RESOLVED"
+        ]
+        assert resolved == ["FILE:s.h::S::run"]
+
+    def test_optional_deref_types_the_value_it_holds(self, tmp_path):
+        """`o->member` on a `std::optional<T>` is `T`'s member."""
+        builder = _index(
+            tmp_path,
+            {
+                "s.h": """
+                struct S { int run() { return 0; } };
+                """,
+                "main.cc": """
+                #include "s.h"
+                #include <optional>
+                int main() {
+                  std::optional<S> o;
+                  o->run();
+                  o.value();
+                }
+                """,
+            },
+        )
+        resolved = [
+            e["target"]
+            for e in builder.edges
+            if e["source"] == "FILE:main.cc::main" and e["relation"] == "CALLS_RESOLVED"
+        ]
+        assert resolved == ["FILE:s.h::S::run"]
+
+    def test_container_members_are_the_librarys(self, tmp_path):
+        """A `std::` container's members are external calls the data types,
+        not unresolved project calls."""
+        builder = _index(
+            tmp_path,
+            {
+                "s.h": """
+                struct S { int run() { return 0; } };
+                """,
+                "main.cc": """
+                #include "s.h"
+                #include <vector>
+                int main() {
+                  std::vector<S> v;
+                  v.front().run();
+                  v.size();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:main.cc::main") == ["FILE:s.h::S::run"]
+
+    def test_project_type_shadows_the_standard_name(self, tmp_path):
+        """A project type of a standard name is what a declaration means."""
+        builder = _index(
+            tmp_path,
+            {
+                "string.h": """
+                namespace std {
+                class string {
+                 public:
+                  void own() {}
+                };
+                }
+                """,
+                "main.cc": """
+                #include "string.h"
+                int main() {
+                  std::string s;
+                  s.own();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:main.cc::main") == [
+            "FILE:string.h::std::string::own"
+        ]
+
+    def test_standard_function_result_types_its_calls(self, tmp_path):
+        """What `std::make_unique<T>` returns is `unique_ptr<T>`: `->` on it
+        is `T`'s member."""
+        builder = _index(
+            tmp_path,
+            {
+                "s.h": """
+                struct S { int run() { return 0; } };
+                """,
+                "main.cc": """
+                #include "s.h"
+                #include <memory>
+                int main() {
+                  auto p = std::make_unique<S>();
+                  p->run();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:main.cc::main") == ["FILE:s.h::S::run"]
+
+
+class TestRubyCallResolution:
+    def test_constructed_receiver_resolves_to_its_class_s_method(self, tmp_path):
+        """A local or an instance variable assigned `Const.new` is a Const:
+        a method called on it is Const's, among several of the name."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/parser.rb": """
+                class Parser
+                  def initialize(limit)
+                  end
+
+                  def parse(text)
+                  end
+                end
+                """,
+                "lib/decoy.rb": """
+                class Decoy
+                  def parse(text)
+                  end
+                end
+                """,
+                "lib/reader.rb": """
+                class Reader
+                  def initialize
+                    @parser = Parser.new(10)
+                  end
+
+                  def read(text)
+                    @parser.parse(text)
+                  end
+
+                  def scan(text)
+                    parser = Parser.new(
+                      20
+                    )
+                    parser.parse text
+                  end
+                end
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/reader.rb::Reader::initialize") == [
+            "FILE:lib/parser.rb::Parser"
+        ]
+        assert _calls(builder, "FILE:lib/reader.rb::Reader::read") == [
+            "FILE:lib/parser.rb::Parser::parse"
+        ]
+        assert _calls(builder, "FILE:lib/reader.rb::Reader::scan") == [
+            "FILE:lib/parser.rb::Parser",
+            "FILE:lib/parser.rb::Parser::parse",
+        ]
+
+    def test_receiver_made_outside_the_project_is_external(self, tmp_path):
+        """`StringIO.new` and `Time.now` are no project values: a method
+        called on them is not the project's method of that name."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/log.rb": """
+                class Log
+                  def write(line)
+                  end
+
+                  def to_i
+                  end
+                end
+                """,
+                "lib/report.rb": """
+                class Report
+                  def print
+                    out = StringIO.new
+                    out.write("x")
+                    stamp = Time.now
+                    stamp.to_i
+                  end
+                end
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/report.rb::Report::print") == []
+
+    def test_receiver_of_unknown_type_is_not_pinned_by_name(self, tmp_path):
+        """A parameter may be any object: the one project method of the
+        name called on it stays a candidate."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/courier.rb": """
+                class Courier
+                  def deliver(parcel)
+                  end
+                end
+                """,
+                "lib/report.rb": """
+                class Report
+                  def print(out)
+                    out.deliver("x")
+                    @app.deliver("y")
+                  end
+                end
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/report.rb::Report::print") == [
+            "REF:@app.deliver",
+            "REF:out.deliver",
+        ]
+
+    def test_constant_receiver_is_looked_up_from_where_it_is_written(self, tmp_path):
+        """A constant names the definition of the innermost enclosing
+        namespace that has one, in whichever file that namespace declares
+        it; a module's method is called on the module."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/rack/utils.rb": """
+                module Rack
+                  module Utils
+                    def self.escape(text)
+                    end
+                  end
+                end
+                """,
+                "lib/rack/mock/utils.rb": """
+                module Rack
+                  module Mock
+                    module Utils
+                      def self.escape(text)
+                      end
+                    end
+                  end
+                end
+                """,
+                "lib/rack/request.rb": """
+                module Rack
+                  class Request
+                    def path
+                      Utils.escape("a")
+                    end
+                  end
+
+                  module Mock
+                    class Request
+                      def path
+                        Utils.escape("a")
+                        Rack::Utils.escape "b"
+                        ::JSON.escape("c")
+                      end
+                    end
+                  end
+                end
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/rack/request.rb::Rack::Request::path") == [
+            "FILE:lib/rack/utils.rb::Rack::Utils::escape"
+        ]
+        mock = "FILE:lib/rack/request.rb::Rack::Mock::Request::path"
+        assert _calls(builder, mock) == [
+            "FILE:lib/rack/mock/utils.rb::Rack::Mock::Utils::escape",
+            "FILE:lib/rack/utils.rb::Rack::Utils::escape",
+        ]
+
+    def test_call_without_receiver_is_made_on_self(self, tmp_path):
+        """It reaches a method of the enclosing class, of its superclass
+        or of a module it includes, not one of an unrelated class or of
+        the namespace around it."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/base.rb": """
+                module App
+                  def self.render
+                  end
+
+                  class Base
+                    def halt(code)
+                    end
+                  end
+
+                  module Helpers
+                    def status
+                    end
+                  end
+
+                  class Other
+                    def render
+                    end
+
+                    def redirect(to)
+                    end
+                  end
+                end
+                """,
+                "lib/page.rb": """
+                module App
+                  class Page < Base
+                    include Helpers
+
+                    def show
+                      halt 404
+                      status
+                      log_request
+                      self.log_request
+                      render
+                      redirect "/"
+                    end
+
+                    def log_request
+                    end
+                  end
+                end
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/page.rb::App::Page::show") == [
+            "FILE:lib/base.rb::App::Base::halt",
+            "FILE:lib/base.rb::App::Helpers::status",
+            "FILE:lib/page.rb::App::Page::log_request",
+            "FILE:lib/page.rb::App::Page::log_request",
+            "REF:redirect",
+            "REF:render",
+        ]
+
+    def test_call_in_a_module_reaches_the_types_that_include_it(self, tmp_path):
+        """A method of the one class that includes the module, or of a
+        module that class also includes, is the one called; where two
+        classes include it and differ, neither is picked."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/request.rb": """
+                class Request
+                  include Env
+                  include Helpers
+
+                  def session
+                  end
+                end
+
+                class Upload
+                  include Helpers
+
+                  def session
+                  end
+                end
+
+                module Env
+                  def get_header(name)
+                  end
+                end
+
+                module Helpers
+                  def host
+                    get_header "HOST"
+                    session
+                  end
+                end
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/request.rb::Helpers::host") == [
+            "FILE:lib/request.rb::Env::get_header",
+            "REF:session",
+        ]
+
+    def test_super_calls_the_method_of_a_base(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "lib/shapes.rb": """
+                class Shape
+                  def area(scale)
+                  end
+                end
+
+                class Other
+                  def area(scale)
+                  end
+                end
+
+                class Square < Shape
+                  def area(scale)
+                    super
+                  end
+                end
+
+                class Circle < Struct
+                  def area(scale)
+                    super(scale)
+                  end
+                end
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/shapes.rb::Square::area") == [
+            "FILE:lib/shapes.rb::Shape::area"
+        ]
+        assert _calls(builder, "FILE:lib/shapes.rb::Circle::area") == []
+
+    def test_class_and_instance_methods_of_one_name(self, tmp_path):
+        """Called on the class, in the body of a class or in a singleton
+        method, the name is the singleton method; called on an instance or
+        in an instance method, the instance method. `new` is the class's
+        own where it defines one, and a `Class.new(Base)` has the methods
+        of Base."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/parser.rb": """
+                class Parser
+                  def self.parse(io)
+                    new.parse(io)
+                  end
+
+                  def parse(io)
+                  end
+                end
+
+                class Pool
+                  def self.new(size)
+                  end
+                end
+
+                class Strict < Parser
+                  parse(nil)
+
+                  def self.check(io)
+                    parse(io)
+                  end
+
+                  def check(io)
+                    parse(io)
+                  end
+                end
+                """,
+                "lib/main.rb": """
+                def main(io)
+                  Parser.parse(io)
+                  Pool.new(2)
+                end
+
+                def derived(io)
+                  base = Class.new(Parser)
+                  base.parse(io)
+                end
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/main.rb::derived") == [
+            "FILE:lib/parser.rb::Parser::self.parse"
+        ]
+        for source in ("Strict", "Strict::self.check"):
+            assert _calls(builder, f"FILE:lib/parser.rb::{source}") == [
+                "FILE:lib/parser.rb::Parser::self.parse"
+            ]
+        assert _calls(builder, "FILE:lib/parser.rb::Strict::check") == [
+            "FILE:lib/parser.rb::Parser::parse"
+        ]
+        assert _calls(builder, "FILE:lib/parser.rb::Parser::self.parse") == [
+            "FILE:lib/parser.rb::Parser",
+            "FILE:lib/parser.rb::Parser::parse",
+        ]
+        assert _calls(builder, "FILE:lib/main.rb::main") == [
+            "FILE:lib/parser.rb::Parser::self.parse",
+            "FILE:lib/parser.rb::Pool::new",
+        ]
+
+    def test_top_level_method_is_reached_through_a_require(self, tmp_path):
+        """A method defined outside any class is every object's once its
+        file is loaded: the caller's own file, or one it requires."""
+        builder = _index(
+            tmp_path,
+            {
+                "test/helper.rb": """
+                def fixture(name)
+                end
+                """,
+                "test/other_spec.rb": """
+                def sample
+                end
+                """,
+                "test/parser_spec.rb": """
+                require_relative 'helper'
+
+                describe "parser" do
+                  it "parses" do
+                    fixture("a")
+                    sample
+                  end
+                end
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:test/parser_spec.rb") == [
+            "FILE:test/helper.rb::fixture",
+            "REF:sample",
+        ]
+
+    def test_chain_and_binding_follow_what_a_call_returns(self, tmp_path):
+        """A call on `Const.new(...)`, on a variable bound to such a chain
+        and on a reader of an instance variable is typed by what precedes
+        it; `@return [Type]` and `@param [Type]` in YARD and a Sorbet `sig`
+        state a type."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/mock.rb": """
+                class Response
+                  def ok?
+                  end
+                end
+
+                class Decoy
+                  def ok?
+                  end
+
+                  def get(path)
+                  end
+                end
+
+                class Session
+                  attr_reader :last
+
+                  def initialize
+                    @last = Response.new
+                  end
+
+                  # @return [Response]
+                  def get(path)
+                  end
+                end
+                """,
+                "lib/check.rb": """
+                class Check
+                  def chained
+                    Session.new.get("/").ok?
+                  end
+
+                  def bound
+                    response = Session.new.get("/")
+                    response.ok?
+                  end
+
+                  def read
+                    Session.new.last.ok?
+                  end
+
+                  # @param session [Session]
+                  def declared(session)
+                    session.get "/"
+                  end
+
+                  sig { params(session: Session).returns(Response) }
+                  def signed(session)
+                    session.get "/"
+                  end
+                end
+                """,
+            },
+        )
+        chain = [
+            "FILE:lib/mock.rb::Response::ok?",
+            "FILE:lib/mock.rb::Session",
+            "FILE:lib/mock.rb::Session::get",
+        ]
+        assert _calls(builder, "FILE:lib/check.rb::Check::chained") == chain
+        assert _calls(builder, "FILE:lib/check.rb::Check::bound") == chain
+        assert _calls(builder, "FILE:lib/check.rb::Check::read") == [
+            "FILE:lib/mock.rb::Response::ok?",
+            "FILE:lib/mock.rb::Session",
+            "FILE:lib/mock.rb::Session::last",
+        ]
+        for method in ("declared", "signed"):
+            assert _calls(builder, f"FILE:lib/check.rb::Check::{method}") == [
+                "FILE:lib/mock.rb::Session::get"
+            ]
+
+    def test_definition_that_cannot_take_the_arguments_is_not_the_one_called(
+        self, tmp_path
+    ):
+        """A block may be run with another `self`: a method of the class
+        around it that takes no argument is not what `body "x"` calls.
+        Keywords passed to a method that names none are one argument."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/page.rb": """
+                class Page
+                  def body
+                  end
+
+                  def title(text, size = 1)
+                  end
+
+                  def show
+                    route { body "x" }
+                    body
+                    title "a"
+                    title "a", bold: true
+                    title
+                    title "a", 2, 3
+                  end
+                end
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/page.rb::Page::show") == [
+            "FILE:lib/page.rb::Page::body",
+            "FILE:lib/page.rb::Page::title",
+            "FILE:lib/page.rb::Page::title",
+            "REF:body",
+            "REF:title",
+            "REF:title",
+        ]
+
+    def test_method_of_a_block_is_reached_from_inside_that_block(self, tmp_path):
+        """Each block that defines methods has its own: a call reaches the
+        one of the block it is in, or of a block around that one."""
+        builder = _index(
+            tmp_path,
+            {
+                "spec/page_spec.rb": """
+                describe "one" do
+                  def magic
+                  end
+
+                  it "works" do
+                    magic
+                  end
+
+                  context "inner" do
+                    def other
+                    end
+
+                    it "works" do
+                      magic
+                      other
+                    end
+                  end
+                end
+
+                describe "two" do
+                  def magic
+                  end
+
+                  it "works" do
+                    magic
+                  end
+                end
+                """,
+            },
+        )
+        spec = "FILE:spec/page_spec.rb"
+        assert _calls(builder, f"{spec}::<describe:2>") == [
+            f"{spec}::<describe:2>::magic"
+        ]
+        assert _calls(builder, f"{spec}::<describe:2>::<context:10>") == [
+            f"{spec}::<describe:2>::<context:10>::other",
+            f"{spec}::<describe:2>::magic",
+        ]
+        assert _calls(builder, f"{spec}::<describe:21>") == [
+            f"{spec}::<describe:21>::magic"
+        ]
+
+    def test_method_defined_in_a_block_run_in_another_object(self, tmp_path):
+        """`Const.class_eval do` adds to the class Const names; a block
+        run in an unknown object is no part of the class around it; one
+        run in `self` is."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/suite.rb": """
+                class Widget
+                  def name
+                  end
+                end
+
+                class Suite
+                  Widget.class_eval do
+                    def label
+                      name
+                    end
+                  end
+
+                  helpers do
+                    def label
+                    end
+                  end
+
+                  class_eval do
+                    def own
+                    end
+                  end
+
+                  def run
+                    Widget.new.label
+                    own
+                    label
+                  end
+                end
+                """,
+            },
+        )
+        suite = "FILE:lib/suite.rb::Suite"
+        assert _calls(builder, f"{suite}::<class_eval:8>::label") == [
+            "FILE:lib/suite.rb::Widget::name"
+        ]
+        assert _calls(builder, f"{suite}::run") == [
+            "FILE:lib/suite.rb::Suite::<class_eval:8>::label",
+            "FILE:lib/suite.rb::Suite::own",
+            "FILE:lib/suite.rb::Widget",
+            "REF:label",
+        ]
+
+    def test_base_of_the_same_simple_name_gives_its_members(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "lib/rack/request.rb": """
+                module Rack
+                  class Request
+                    def path
+                    end
+                  end
+                end
+                """,
+                "lib/app/request.rb": """
+                module App
+                  class Request < Rack::Request
+                    def show
+                      path
+                    end
+                  end
+                end
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/app/request.rb::App::Request::show") == [
+            "FILE:lib/rack/request.rb::Rack::Request::path"
+        ]
+
+    def test_method_returns_what_its_body_ends_with(self, tmp_path):
+        """A method without a declared type returns what its last
+        statement and its `return`s all give: a new object, the result of
+        one call, `self`, a typed instance variable; `nil` aside. Two
+        different things give no type."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/client.rb": """
+                class Response
+                  def ok?
+                  end
+                end
+
+                class Decoy
+                  def ok?
+                  end
+
+                  def get(path)
+                  end
+                end
+
+                class Client
+                  def initialize
+                    @last = Response.new
+                  end
+
+                  def get(path) request("GET", path) end
+
+                  def request(verb, path)
+                    log verb
+                    Response.new verb, path
+                  ensure
+                    close
+                  end
+
+                  def last
+                    @last
+                  end
+
+                  def cached
+                    @cached ||= Response.new
+                  end
+
+                  def either(flag)
+                    return nil unless flag
+                    Response.new
+                  end
+
+                  def mixed(flag)
+                    return "none" unless flag
+                    Response.new
+                  end
+
+                  def rescued
+                    Response.new
+                  rescue IOError
+                    false
+                  end
+
+                  def same
+                    self
+                  end
+
+                  def self.build
+                    new
+                  end
+                end
+                """,
+                "lib/check.rb": """
+                class Check
+                  def typed
+                    client = Client.new
+                    client.get("/").ok?
+                    client.last.ok?
+                    client.cached.ok?
+                    client.either(true).ok?
+                    client.same.last
+                    Client.build.last
+                  end
+
+                  def untyped
+                    client = Client.new
+                    client.mixed(true).ok?
+                    client.rescued.ok?
+                  end
+                end
+                """,
+            },
+        )
+        client, ok = "FILE:lib/client.rb::Client", "FILE:lib/client.rb::Response::ok?"
+        assert _calls(builder, "FILE:lib/check.rb::Check::typed") == sorted(
+            [client, f"{client}::get", ok, f"{client}::last", ok, f"{client}::cached"]
+            + [ok, f"{client}::either", ok, f"{client}::same", f"{client}::last"]
+            + [f"{client}::build", f"{client}::last"]
+        )
+        assert _calls(builder, "FILE:lib/check.rb::Check::untyped") == [
+            client,
+            f"{client}::mixed",
+            f"{client}::rescued",
+            "REF:ok?",
+            "REF:ok?",
+        ]
+
+
+class TestDartCallResolution:
+    def test_bare_call_reaches_only_what_the_library_has_in_scope(self, tmp_path):
+        """`expect` comes from a package outside the project: it is not the
+        method of that name of a project class the file never extends. A
+        function the library declares or imports is reached."""
+        builder = _index(
+            tmp_path,
+            {
+                "pubspec.yaml": "name: app\n",
+                "lib/checker.dart": """
+                class Checker {
+                  void expect(Object value) {}
+                }
+
+                void verify(Object value) {}
+                """,
+                "test/app_test.dart": """
+                import 'package:app/checker.dart';
+                import 'package:test/test.dart';
+
+                void helper() {}
+
+                void main() {
+                  expect(1, 1);
+                  verify(1);
+                  helper();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:test/app_test.dart::main") == [
+            "FILE:lib/checker.dart::verify",
+            "FILE:test/app_test.dart::helper",
+        ]
+
+    def test_bare_call_reaches_members_of_the_class_and_what_it_inherits(
+        self, tmp_path
+    ):
+        """A member of the class, of its superclass, of a mixin or of the
+        type an extension is on; a variable that holds a function is the
+        definition its call reaches."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/shapes.dart": """
+                class Base {
+                  void fromBase() {}
+                }
+
+                mixin Mixed {
+                  void fromMixin() {}
+                }
+
+                class Shape extends Base with Mixed {
+                  final void Function() _callback;
+                  Shape(this._callback);
+
+                  void own() {}
+
+                  void run() {
+                    own();
+                    fromBase();
+                    fromMixin();
+                    _callback();
+                  }
+                }
+
+                extension Rounded on Shape {
+                  void round() {
+                    own();
+                  }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/shapes.dart::Shape::run") == [
+            "FILE:lib/shapes.dart::Base::fromBase",
+            "FILE:lib/shapes.dart::Mixed::fromMixin",
+            "FILE:lib/shapes.dart::Shape::_callback",
+            "FILE:lib/shapes.dart::Shape::own",
+        ]
+        assert _calls(builder, "FILE:lib/shapes.dart::Rounded::round") == [
+            "FILE:lib/shapes.dart::Shape::own"
+        ]
+
+    def test_imports_decide_which_definition_a_name_is(self, tmp_path):
+        """A relative import, `show`, `hide`, an `export` and a prefix each
+        say which library a name comes from; a prefix of a package outside
+        the project names nothing in it."""
+        builder = _index(
+            tmp_path,
+            {
+                "pubspec.yaml": "name: app\n",
+                "lib/a.dart": """
+                void load() {}
+                void save() {}
+                """,
+                "lib/b.dart": """
+                void load() {}
+                void save() {}
+                void join() {}
+                """,
+                "lib/barrel.dart": """
+                export 'b.dart' show join;
+                """,
+                "lib/main.dart": """
+                import 'package:path/path.dart' as p;
+
+                import 'a.dart' show load;
+                import 'b.dart' hide load, join;
+                import 'barrel.dart' as barrel;
+
+                void main() {
+                  load();
+                  save();
+                  p.join('a', 'b');
+                  barrel.join();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/main.dart::main") == [
+            "FILE:lib/a.dart::load",
+            "FILE:lib/b.dart::join",
+            "FILE:lib/b.dart::save",
+        ]
+
+    def test_part_shares_the_scope_of_its_library(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "pubspec.yaml": "name: app\n",
+                "lib/tools.dart": """
+                void sharpen() {}
+                """,
+                "lib/shop.dart": """
+                import 'tools.dart' as tools;
+                import 'tools.dart';
+
+                part 'src/bench.dart';
+
+                void _sweep() {}
+                """,
+                "lib/src/bench.dart": """
+                part of '../shop.dart';
+
+                void work() {
+                  _sweep();
+                  sharpen();
+                  tools.sharpen();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/src/bench.dart::work") == [
+            "FILE:lib/shop.dart::_sweep",
+            "FILE:lib/tools.dart::sharpen",
+            "FILE:lib/tools.dart::sharpen",
+        ]
+
+    def test_constructor_expression_types_what_it_is_bound_to(self, tmp_path):
+        """`Maker(...)`, `const Maker(...)`, `Maker.named(...)` and
+        `Maker<T>.named(...)` make a Maker; each link of a chain is called
+        on what the link before is declared to return."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/maker.dart": """
+                class Maker<T> {
+                  const Maker();
+                  Maker.named(String name);
+                  factory Maker.cached() => Maker();
+
+                  Maker<T> tuned(int level) => this;
+                  Product assemble() => Product();
+                }
+
+                class Product {
+                  void ship() {}
+                }
+
+                class Decoy {
+                  void tuned(int level) {}
+                  void assemble() {}
+                  void ship() {}
+                }
+                """,
+                "lib/client.dart": """
+                import 'maker.dart';
+
+                void direct() {
+                  final maker = const Maker<int>();
+                  maker.tuned(1);
+                  Maker.named('x').tuned(2).assemble().ship();
+                }
+
+                void continued() {
+                  var product = Maker<int>.cached()
+                      .tuned(3)
+                      .assemble();
+                  product.ship();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/client.dart::direct") == [
+            "FILE:lib/maker.dart::Maker",
+            "FILE:lib/maker.dart::Maker::assemble",
+            "FILE:lib/maker.dart::Maker::named",
+            "FILE:lib/maker.dart::Maker::tuned",
+            "FILE:lib/maker.dart::Maker::tuned",
+            "FILE:lib/maker.dart::Product::ship",
+        ]
+        assert _calls(builder, "FILE:lib/client.dart::continued") == [
+            "FILE:lib/maker.dart::Maker::assemble",
+            "FILE:lib/maker.dart::Maker::cached",
+            "FILE:lib/maker.dart::Maker::tuned",
+            "FILE:lib/maker.dart::Product::ship",
+        ]
+
+    def test_value_over_several_lines_is_what_its_last_call_returns(self, tmp_path):
+        """A chain that goes on past a closure with a block body binds the
+        variable to what the call that ends the statement returns."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/pipeline.dart": """
+                class Pipeline {
+                  Pipeline add(void Function() step) => this;
+                  Server build() => Server();
+                  void start() {}
+                }
+
+                class Server {
+                  void start() {}
+                }
+
+                void main() {
+                  final server = Pipeline()
+                      .add(() {
+                        Pipeline().start();
+                      })
+                      .build();
+                  server.start();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/pipeline.dart::main") == [
+            "FILE:lib/pipeline.dart::Pipeline",
+            "FILE:lib/pipeline.dart::Pipeline",
+            "FILE:lib/pipeline.dart::Pipeline::add",
+            "FILE:lib/pipeline.dart::Pipeline::build",
+            "FILE:lib/pipeline.dart::Pipeline::start",
+            "FILE:lib/pipeline.dart::Server::start",
+        ]
+
+    def test_declared_type_of_a_local_a_parameter_or_a_field(self, tmp_path):
+        """A typed local, a positional, named or optional parameter, an
+        initializing formal, a field the class declares or inherits, and a
+        field without a type whose value is one constructor call."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/store.dart": """
+                class Reader {
+                  int peek() => 0;
+                }
+
+                class Writer {
+                  int peek() => 0;
+                }
+
+                class Base {
+                  final Reader inherited = Reader();
+                }
+
+                class Store extends Base {
+                  final Reader _reader;
+                  final _spare = Writer();
+                  Reader? maybe;
+
+                  Store(this._reader) {
+                    _reader.peek();
+                  }
+
+                  int all(Writer first, {required Reader named, Writer? last}) {
+                    Reader local = named;
+                    return first.peek() +
+                        named.peek() +
+                        last!.peek() +
+                        local.peek() +
+                        _reader.peek() +
+                        _spare.peek() +
+                        maybe?.peek() +
+                        inherited.peek();
+                  }
+                }
+                """,
+            },
+        )
+        reader = "FILE:lib/store.dart::Reader::peek"
+        writer = "FILE:lib/store.dart::Writer::peek"
+        assert _calls(builder, "FILE:lib/store.dart::Store::new") == [reader]
+        assert _calls(builder, "FILE:lib/store.dart::Store::all") == [
+            *[reader] * 5,
+            *[writer] * 3,
+        ]
+
+    def test_receiver_of_a_type_from_outside_is_external(self, tmp_path):
+        """A value declared with a type the library does not have from the
+        project, one a constructor from outside makes, a literal, and a
+        static member of such a type do not reach the project's method of
+        that name."""
+        builder = _index(
+            tmp_path,
+            {
+                "pubspec.yaml": "name: app\n",
+                "lib/pipe.dart": """
+                class Pipe {
+                  void close() {}
+                  static void connect() {}
+                }
+                """,
+                "lib/client.dart": """
+                import 'dart:io';
+
+                class Client {
+                  final HttpServer _server;
+                  final List<Socket> _sockets = [];
+                  Client(this._server);
+
+                  void stop(Socket socket) {
+                    _server.close();
+                    socket.close();
+                    _sockets.close();
+                    Socket.connect();
+                    const Duration().close();
+                    final queue = <Pipe>[];
+                    final label = 'pipe';
+                    queue.close();
+                    label.close();
+                  }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/client.dart::Client::stop") == []
+
+    def test_variable_that_holds_an_object_is_called_through_call(self, tmp_path):
+        """Calling a variable calls the `call` method of the object it
+        holds; one that holds a function, or a value of no known type,
+        calls no definition, whatever shares its name."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/handlers.dart": """
+                typedef Handler = void Function(String path);
+
+                class Recorder {
+                  void call(String path) {}
+                }
+
+                void handler(String path) {}
+                void plain(String path) {}
+
+                void run(Handler handler, Object Function() make) {
+                  final recorder = Recorder();
+                  final plain = make();
+                  recorder('/a');
+                  handler('/b');
+                  plain('/c');
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/handlers.dart::run") == [
+            "FILE:lib/handlers.dart::Recorder",
+            "FILE:lib/handlers.dart::Recorder::call",
+        ]
+
+    def test_cascade_is_called_on_its_target(self, tmp_path):
+        """Every section of a cascade, on one line or on the next ones, is
+        a call on the cascade's target, which is also its value."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/router.dart": """
+                class Router {
+                  Router get(String path) => this;
+                  void mount(String path) {}
+                  void serve() {}
+                }
+
+                class Decoy {
+                  void get(String path) {}
+                  void mount(String path) {}
+                  void serve() {}
+                }
+
+                void build(Router given) {
+                  final router = Router()
+                    ..get('/a')
+                    ..mount('/b');
+                  router.serve();
+                  given..mount('/c')..serve();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/router.dart::build") == [
+            "FILE:lib/router.dart::Router",
+            "FILE:lib/router.dart::Router::get",
+            "FILE:lib/router.dart::Router::mount",
+            "FILE:lib/router.dart::Router::mount",
+            "FILE:lib/router.dart::Router::serve",
+            "FILE:lib/router.dart::Router::serve",
+        ]
+
+    def test_this_super_and_the_order_of_mixins(self, tmp_path):
+        """`this.m()` is the class's own or inherited `m`, `super.m()` the
+        inherited one; of two that are inherited the last mixin's wins."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/animals.dart": """
+                class Animal {
+                  void move() {}
+                  void rest() {}
+                }
+
+                mixin Swimmer on Animal {
+                  void move() {}
+                }
+
+                mixin Flyer on Animal {
+                  void move() {}
+                }
+
+                class Duck extends Animal with Swimmer, Flyer {
+                  void rest() {
+                    super.rest();
+                    this.move();
+                    this.rest();
+                  }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/animals.dart::Duck::rest") == [
+            "FILE:lib/animals.dart::Animal::rest",
+            "FILE:lib/animals.dart::Duck::rest",
+            "FILE:lib/animals.dart::Flyer::move",
+        ]
+
+    def test_extension_method_on_a_project_or_an_outside_type(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "lib/extensions.dart": """
+                import 'dart:convert';
+
+                class Request {
+                  void send() {}
+                }
+
+                extension RequestParams on Request {
+                  String param(String name) => name;
+                }
+
+                extension on String {
+                  String shout() => this;
+                }
+
+                class Decoy {
+                  void param(String name) {}
+                  void shout() {}
+                }
+
+                void use(Request request, String text) {
+                  request.param('id');
+                  text.shout();
+                  'literal'.shout();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/extensions.dart::use") == [
+            "FILE:lib/extensions.dart::RequestParams::param",
+            "FILE:lib/extensions.dart::extension on String::shout",
+            "FILE:lib/extensions.dart::extension on String::shout",
+        ]
+
+    def test_static_member_enum_value_and_getter(self, tmp_path):
+        """`Type.m()` is a static member of Type; a member of an enum value
+        or of what a getter is declared to return is that type's."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/levels.dart": """
+                enum Level {
+                  low,
+                  high;
+
+                  String label() => name;
+                }
+
+                class Config {
+                  static Config load() => Config();
+                  Level get level => Level.low;
+                }
+
+                class Decoy {
+                  void label() {}
+                  void load() {}
+                }
+
+                void show(Config config) {
+                  Config.load();
+                  Level.high.label();
+                  config.level.label();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/levels.dart::show") == [
+            "FILE:lib/levels.dart::Config::load",
+            "FILE:lib/levels.dart::Level::label",
+            "FILE:lib/levels.dart::Level::label",
+        ]
+
+    def test_promotion_cast_and_pattern_type_the_receiver(self, tmp_path):
+        """`is T` promotes a variable, `as T` casts a value, a pattern
+        declares its variable with the type written; an object pattern
+        calls no constructor."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/shapes.dart": """
+                sealed class Shape {}
+
+                class Circle extends Shape {
+                  final double radius;
+                  Circle(this.radius);
+                  double area() => radius;
+                }
+
+                class Square extends Shape {
+                  double area() => 0;
+                }
+
+                double measure(Object value, Shape shape) {
+                  if (value is Circle) {
+                    return value.area();
+                  }
+                  final casted = value as Square;
+                  casted.area();
+                  switch (shape) {
+                    case Circle(:final radius):
+                      return radius;
+                    case Square square:
+                      return square.area();
+                  }
+                  return (value as Circle).area();
+                }
+
+                double describe(Shape shape) => switch (shape) {
+                  Circle(radius: final r) => r,
+                  Square() => 0,
+                };
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/shapes.dart::measure") == [
+            "FILE:lib/shapes.dart::Circle::area",
+            "FILE:lib/shapes.dart::Circle::area",
+            "FILE:lib/shapes.dart::Square::area",
+            "FILE:lib/shapes.dart::Square::area",
+        ]
+        assert _calls(builder, "FILE:lib/shapes.dart::describe") == []
+
+    def test_awaited_future_gives_what_it_holds(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "lib/fetch.dart": """
+                class Page {
+                  void render() {}
+                }
+
+                class Decoy {
+                  void render() {}
+                }
+
+                Future<Page> fetch() async => Page();
+
+                Future<void> show() async {
+                  final page = await fetch();
+                  page.render();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/fetch.dart::show") == [
+            "FILE:lib/fetch.dart::Page::render",
+            "FILE:lib/fetch.dart::fetch",
+        ]
+
+    def test_call_is_made_by_the_member_it_is_in(self, tmp_path):
+        """A call in a closure passed as an argument, in a getter, in a
+        constructor's initializer list or body, or in a nested function
+        leaves that member; one in a field's value leaves the class and one
+        in an annotation the member it annotates."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/jobs.dart": """
+                class Tag {
+                  const Tag.of(String name);
+                }
+
+                int count() => 0;
+                int twice(int value) => value;
+                void each(void Function(int) body) {}
+
+                class Jobs {
+                  final int started = count();
+                  final int limit;
+
+                  Jobs() : limit = count() {
+                    twice(1);
+                  }
+
+                  int get size => twice(2);
+
+                  @Tag.of('run')
+                  void run() {
+                    each((value) {
+                      twice(value);
+                    });
+                    int nested(int value) {
+                      return count();
+                    }
+                    nested(3);
+                  }
+                }
+                """,
+            },
+        )
+        count, twice = "FILE:lib/jobs.dart::count", "FILE:lib/jobs.dart::twice"
+        assert _calls(builder, "FILE:lib/jobs.dart::Jobs") == [count]
+        assert _calls(builder, "FILE:lib/jobs.dart::Jobs::new") == [count, twice]
+        assert _calls(builder, "FILE:lib/jobs.dart::Jobs::size") == [twice]
+        assert _calls(builder, "FILE:lib/jobs.dart::Jobs::run") == [
+            "FILE:lib/jobs.dart::Jobs::run::nested",
+            "FILE:lib/jobs.dart::Tag::of",
+            "FILE:lib/jobs.dart::each",
+            twice,
+        ]
+        assert _calls(builder, "FILE:lib/jobs.dart::Jobs::run::nested") == [count]
+
 
 class TestProcessDirectory:
     """Tests for the directory walk and per-file dispatch."""
@@ -3326,6 +13563,36 @@ class TestProcessDirectory:
 
         assert builder.use_ast_grep is False
 
+    def test_walk_outside_the_id_base_is_refused(self, tmp_path):
+        """Node IDs are relative to the project root; a file outside it gets
+        none rather than an absolute one."""
+        (tmp_path / "root").mkdir()
+        (tmp_path / "elsewhere").mkdir()
+        (tmp_path / "elsewhere" / "app.py").write_text("x = 1\n")
+        builder = CodeGraphBuilder(tmp_path / "elsewhere", rel_base=tmp_path / "root")
+
+        with pytest.raises(ValueError):
+            builder.process_directory()
+        assert builder.nodes == []
+
+    @pytest.mark.parametrize(
+        "search",
+        [
+            lambda resolver: resolver._js_alias("node:url", "/srv/app"),
+            lambda resolver: resolver._fixture_value(
+                "db", "FILE:/srv/app/test_a.py::test_x", set()
+            ),
+        ],
+        ids=["tsconfig", "conftest"],
+    )
+    def test_upward_search_ends_at_the_filesystem_root(self, tmp_path, search):
+        resolver = CallResolver(CodeGraphBuilder(tmp_path))
+        worker = threading.Thread(target=search, args=(resolver,), daemon=True)
+        worker.start()
+        worker.join(5)
+
+        assert not worker.is_alive()
+
     SVELTE = """<h1>Title</h1>
 <script context="module">
 function first() {
@@ -3380,6 +13647,149 @@ function second() {
             ("FILE:App.svelte::second", "REF:beta", 10),
         ]
 
+    def test_svelte_ast_grep_call_stays_in_its_own_block(self, tmp_path, monkeypatch):
+        """A call in a later block is not given to an earlier block's
+        function whose line in the file equals the call's line in its block."""
+        (tmp_path / "App.svelte").write_text(
+            '<script context="module">\n'
+            "function unused() {}\n"
+            "function first() { alpha(); }\n"
+            "</script>\n"
+            "<script>\n"
+            "function second() {\n"
+            "    beta();\n"
+            "}\n"
+            "</script>\n"
+        )
+        monkeypatch.setattr(
+            generate,
+            "extract_calls_typescript",
+            lambda path: [
+                {"callee": "alpha", "lineno": 3},
+                {"callee": "beta", "lineno": 7},
+            ],
+        )
+        monkeypatch.setattr(
+            generate, "extract_imports_typescript", lambda path: {}, raising=False
+        )
+        builder = CodeGraphBuilder(tmp_path)
+        builder.use_ast_grep = True
+        builder.process_directory()
+
+        calls = [
+            (e["source"], e["target"], e["metadata"]["lineno"])
+            for e in builder.edges
+            if e["relation"] == "CALLS"
+        ]
+        assert calls == [
+            ("FILE:App.svelte::first", "REF:alpha", 3),
+            ("FILE:App.svelte::second", "REF:beta", 7),
+        ]
+
+
+def _run_indexer(*args, cwd, **env):
+    """Run the regex-only indexer as a child process, as the service does.
+    ``env`` sets environment variables; None removes one."""
+    environ = {
+        **os.environ,
+        "DESCRY_NO_SCIP": "1",
+        "DESCRY_NO_EMBEDDINGS": "1",
+        **env,
+    }
+    return subprocess.run(
+        [sys.executable, "-P", "-m", "descry.generate", *args],
+        cwd=cwd,
+        env={k: v for k, v in environ.items() if v is not None},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+class TestCommandLine:
+    """Tests for the descry-generate entry point."""
+
+    @pytest.fixture
+    def root(self, tmp_path):
+        root = tmp_path / "root"
+        root.mkdir()
+        (root / "app.py").write_text("def hello():\n    return 1\n")
+        return root
+
+    @pytest.fixture
+    def elsewhere(self, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "other.ts").write_text(
+            'import { fileURLToPath } from "node:url";\n'
+            "export function away() {\n    return fileURLToPath(1);\n}\n"
+        )
+        return elsewhere
+
+    @staticmethod
+    def _ids(cache):
+        graph = json.loads((cache / "codebase_graph.json").read_text())
+        return {node["id"] for node in graph["nodes"]}
+
+    def test_project_root_alone_is_what_gets_walked(self, root, elsewhere, tmp_path):
+        """Without a path the project root is indexed, not the directory the
+        command runs in."""
+        cache = tmp_path / "cache"
+        result = _run_indexer(
+            "--project-root", str(root), cwd=elsewhere, DESCRY_CACHE_DIR=str(cache)
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert self._ids(cache) == {"FILE:app.py", "FILE:app.py::hello"}
+
+    def test_path_outside_the_project_root_is_refused(self, root, elsewhere, tmp_path):
+        cache = tmp_path / "cache"
+        result = _run_indexer(
+            "--project-root",
+            str(root),
+            str(elsewhere),
+            cwd=root,
+            DESCRY_CACHE_DIR=str(cache),
+        )
+
+        assert result.returncode == 2
+        assert "outside the project root" in result.stderr
+        assert not cache.exists()
+
+    def test_log_level_comes_from_the_environment(self, root, tmp_path):
+        cache = str(tmp_path / "cache")
+        default = _run_indexer(
+            str(root), cwd=root, DESCRY_CACHE_DIR=cache, DESCRY_LOG_LEVEL=None
+        )
+        quiet = _run_indexer(
+            str(root), cwd=root, DESCRY_CACHE_DIR=cache, DESCRY_LOG_LEVEL="ERROR"
+        )
+        verbose = _run_indexer(
+            "-v", str(root), cwd=root, DESCRY_CACHE_DIR=cache, DESCRY_LOG_LEVEL="ERROR"
+        )
+
+        assert "INFO: Graph exported" in default.stderr
+        assert quiet.returncode == 0
+        assert "INFO:" not in quiet.stderr
+        assert "INFO: Graph exported" in verbose.stderr
+
+    @pytest.mark.parametrize(
+        ("max_file_mb", "indexed"), [("0.00001", False), ("0", True)]
+    )
+    def test_files_over_the_configured_size_are_skipped(
+        self, root, tmp_path, max_file_mb, indexed
+    ):
+        (root / ".descry.toml").write_text(
+            f"[code_files]\nmax_file_mb = {max_file_mb}\n"
+        )
+        cache = tmp_path / "cache"
+        result = _run_indexer(str(root), cwd=root, DESCRY_CACHE_DIR=str(cache))
+
+        assert result.returncode == 0, result.stderr
+        assert ("FILE:app.py::hello" in self._ids(cache)) is indexed
+        assert ("exceeds [code_files] max_file_mb" in result.stderr) is not indexed
+
 
 class _SgResult:
     returncode = 0
@@ -3404,6 +13814,22 @@ class TestAstGrep:
             "imports": {},
             "namespaces": {},
         }
+
+    def test_array_elements_that_are_not_objects_are_skipped(self, monkeypatch):
+        match = {
+            "metaVariables": {"single": {"FUNC": {"text": "run"}}},
+            "range": {"start": {"line": 2}},
+        }
+        monkeypatch.setattr(
+            ast_grep.subprocess,
+            "run",
+            lambda *a, **kw: _SgResult(json.dumps([None, "text", 7, match])),
+        )
+        assert [c["callee"] for c in ast_grep.extract_calls_rust("x.rs")] == ["run"]
+        assert [c["callee"] for c in ast_grep.extract_calls_typescript("x.ts")] == [
+            "run"
+        ]
+        assert ast_grep.extract_imports_typescript("x.ts")["imports"] == {}
 
     def test_unexecutable_binary_is_unavailable(self, monkeypatch):
         """An `sg` that exists but cannot be executed counts as absent."""
@@ -3634,7 +14060,7 @@ class TestCrateFilter:
     def multi_package_graph(self):
         """Create a graph with nodes from multiple packages (mirrors descry's own structure)."""
         graph = {
-            "schema_version": 1,
+            "schema_version": 2,
             "nodes": [
                 # src/descry package (Python)
                 {
@@ -3790,7 +14216,7 @@ class TestExcludeTestsFilter:
     def graph_with_tests(self):
         """Create a graph with both production and test nodes."""
         graph = {
-            "schema_version": 1,
+            "schema_version": 2,
             "nodes": [
                 # Production files
                 {
@@ -3912,7 +14338,7 @@ class TestRaisedThresholds:
         source_file.write_text("".join(lines))
 
         graph = {
-            "schema_version": 1,
+            "schema_version": 2,
             "nodes": [
                 {
                     "id": f"FILE:{source_file}::large_function",
@@ -3932,12 +14358,13 @@ class TestRaisedThresholds:
         graph_file.write_text(json.dumps(graph))
         return str(graph_file), str(source_file)
 
-    def test_under_threshold_no_truncation(self, large_function_graph):
+    def test_under_threshold_no_truncation(self, large_function_graph, tmp_path):
         """Functions under 1000 tokens should NOT be truncated regardless of line count."""
+        from descry.handlers import DescryConfig
         from descry.query import GraphQuerier
 
         graph_file, source_file = large_function_graph
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
         # 950 tokens is under the 1000 threshold, should show full source
         source = q.get_smart_source(source_file, 1, 150, 950, full=False)
@@ -3946,12 +14373,13 @@ class TestRaisedThresholds:
         assert "lines omitted" not in source
         assert source.count("let var") == 148
 
-    def test_over_threshold_truncated(self, large_function_graph):
+    def test_over_threshold_truncated(self, large_function_graph, tmp_path):
         """Functions over 1000 tokens AND over 100 lines should be truncated."""
+        from descry.handlers import DescryConfig
         from descry.query import GraphQuerier
 
         graph_file, source_file = large_function_graph
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
         # 1200 tokens is over the new 1000 threshold, 150 lines is over 100
         source = q.get_smart_source(source_file, 1, 150, 1200, full=False)
@@ -3961,12 +14389,13 @@ class TestRaisedThresholds:
         # Not all 148 lines should be present
         assert source.count("let var") < 148
 
-    def test_secondary_threshold_60_15_treatment(self, large_function_graph):
+    def test_secondary_threshold_60_15_treatment(self, large_function_graph, tmp_path):
         """Functions between 1000-1800 tokens get 60+15 line treatment."""
+        from descry.handlers import DescryConfig
         from descry.query import GraphQuerier
 
         graph_file, source_file = large_function_graph
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
         # 1200 tokens (between 1000-1800) should use 60+15 line treatment
         source = q.get_smart_source(source_file, 1, 150, 1200, full=False)
@@ -3978,12 +14407,13 @@ class TestRaisedThresholds:
         line_count = source.count("let var")
         assert 70 <= line_count <= 80, f"Expected ~75 lines, got {line_count}"
 
-    def test_very_large_threshold_50_15_treatment(self, large_function_graph):
+    def test_very_large_threshold_50_15_treatment(self, large_function_graph, tmp_path):
         """Functions over 1800 tokens get 50+15 line treatment."""
+        from descry.handlers import DescryConfig
         from descry.query import GraphQuerier
 
         graph_file, source_file = large_function_graph
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
         # 2000 tokens (over 1800) should use 50+15 line treatment
         source = q.get_smart_source(source_file, 1, 150, 2000, full=False)
@@ -3993,3 +14423,87 @@ class TestRaisedThresholds:
         # Head should have ~50 lines, tail ~15 lines = ~65 total
         line_count = source.count("let var")
         assert 60 <= line_count <= 70, f"Expected ~65 lines, got {line_count}"
+
+    def test_opposite_preprocessor_arms_are_alternatives(self, tmp_path):
+        """A macro stub and a function in opposite arms of one `#if` are the
+        builds' alternatives: an unguarded call reaches one of them, a call
+        under the matching arm reaches the function."""
+        builder = _index(
+            tmp_path,
+            {
+                "internal.h": """
+                #if defined(__linux__)
+                int iou_fs(const char* a, const char* b);
+                #else
+                #define iou_fs(a, b) 0
+                #endif
+                """,
+                "linux.c": """
+                #include "internal.h"
+                int iou_fs(const char* a, const char* b) { return 1; }
+                """,
+                "fs.c": """
+                #include "internal.h"
+                void f(void) { iou_fs("a", "b"); }
+                #if defined(__linux__)
+                void g(void) { iou_fs("a", "b"); }
+                #endif
+                """,
+            },
+        )
+        # f is compiled everywhere: the arm decides which `iou_fs` it means.
+        (edge,) = (
+            e
+            for e in builder.edges
+            if e["source"] == "FILE:fs.c::f" and e["relation"] == "CALLS"
+        )
+        assert edge["target"] == "REF:iou_fs"
+        assert edge["metadata"]["candidates"] == [
+            "FILE:internal.h::iou_fs",
+            "FILE:linux.c::iou_fs",
+        ]
+        # g is under the arm that declares the function: it calls that one.
+        assert _calls(builder, "FILE:fs.c::g") == ["FILE:linux.c::iou_fs"]
+
+    def test_dotnet_extension_under_a_directive(self, tmp_path):
+        """An extension method the library's data says the receiver's type
+        has is external, whatever a project defines under `#if`; one the
+        library lacks is the project's, also when an `#if` arm builds it."""
+        builder = _index(
+            tmp_path,
+            {
+                "LinqBridge.cs": """
+                #if !HAVE_LINQ
+                using System.Collections.Generic;
+                namespace N {
+                static class Enumerable {
+                  public static IEnumerable<TSource> Union<TSource>(
+                    this IEnumerable<TSource> first,
+                    IEnumerable<TSource> second) { return first; }
+                  public static string Shout(this IEnumerable<char> source) { return ""; }
+                }
+                }
+                #endif
+                """,
+                "JavaScriptUtils.cs": """
+                using System.Collections.Generic;
+                namespace N {
+                class JavaScriptUtils {
+                  void EscapeText(char[] escapeChars) {
+                    var x = escapeChars.Union(new[] { '"' });
+                    var z = escapeChars.Shout();
+                  }
+                }
+                }
+                """,
+            },
+        )
+        # `IEnumerable<char>` has `Union` in the data: the call is external.
+        edges = {
+            e["target"]: e
+            for e in builder.edges
+            if e["source"] == "FILE:JavaScriptUtils.cs::JavaScriptUtils::EscapeText"
+            and e["relation"].startswith("CALLS")
+        }
+        assert "REF:escapeChars.Union" not in edges
+        assert "FILE:LinqBridge.cs::Enumerable::Shout" in edges

@@ -12,8 +12,8 @@ The tool reads ``.sln`` / ``.csproj`` / ``.vbproj`` and can do its own
 
 scip-dotnet v0.2.13 targets ``net9.0`` — on a system with a newer SDK
 (.NET 10+) the adapter sets ``DOTNET_ROLL_FORWARD=LatestMajor`` so the
-tool runs against the installed runtime. ``DOTNET_ROOT`` is surfaced
-too so ``safe_env()`` filtering doesn't drop it.
+tool runs against the installed runtime, and ``DOTNET_ROOT`` so it
+finds one.
 """
 
 from __future__ import annotations

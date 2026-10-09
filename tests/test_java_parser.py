@@ -358,7 +358,7 @@ public class Foo
             for e in builder.edges
             if e["relation"] == "CALLS"
         }
-        assert ("FILE:src/Foo.java::Foo", "REF:helper") in calls
+        assert ("FILE:src/Foo.java::Foo::bar", "REF:helper") in calls
 
     def test_context_closes_with_class(self, builder):
         """Members after an Allman class belong to the next class."""

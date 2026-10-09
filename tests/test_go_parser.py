@@ -167,6 +167,90 @@ func Identity[T any](v T) T {
         _parse(builder, src)
         assert "FILE:pkg/app.go::Identity" in _node_ids(builder)
 
+    def test_return_type_lists_every_result(self, builder):
+        src = """
+package app
+
+func One() *Server { return nil }
+
+func Two() (*Server, error) { return nil, nil }
+
+func Named() (first, second *Server, err error) { return }
+
+func Nested() (Pair[string, int], map[string]Server) { return nil, nil }
+
+func None() {}
+""".strip()
+        _parse(builder, src)
+        returns = {
+            n["id"].rpartition("::")[2]: n["metadata"]["return_type"]
+            for n in builder.nodes
+            if n["type"] == "Function"
+        }
+        assert returns == {
+            "One": "*Server",
+            "Two": "(*Server, error)",
+            "Named": "(*Server, *Server, error)",
+            "Nested": "(Pair[string, int], map[string]Server)",
+            "None": "",
+        }
+
+    def test_function_typed_and_multi_line_signatures(self, builder):
+        src = """
+package app
+
+func Walk(root string, visit func(path string) error) error {
+    return visit(root)
+}
+
+func Chain(steps ...func() error) func() error {
+    return nil
+}
+
+func Nested(wrap func(func(int) error) func() error) (func(a, b int) error, error) {
+    return nil, nil
+}
+
+func Spread(
+    root string,
+    visit func(string) error,
+) (
+    count int,
+    err error,
+) {
+    helper()
+    return
+}
+
+func (s *Server) Handle(
+    fn func(*Server),
+) *Server {
+    helper()
+    return s
+}
+
+func helper() {}
+""".strip()
+        _parse(builder, src)
+        returns = {
+            n["id"].rpartition("::")[2]: n["metadata"]["return_type"]
+            for n in builder.nodes
+            if n["type"] in ("Function", "Method")
+        }
+        assert returns == {
+            "Walk": "error",
+            "Chain": "func() error",
+            "Nested": "(func(a, b int) error, error)",
+            "Spread": "(int, error)",
+            "Handle": "*Server",
+            "helper": "",
+        }
+        callers = {e["source"] for e in builder.edges if e["target"] == "REF:helper"}
+        assert callers == {
+            "FILE:pkg/app.go::Spread",
+            "FILE:pkg/app.go::Server::Handle",
+        }
+
 
 class TestConstantsAndVars:
     def test_single_const(self, builder):
@@ -342,6 +426,41 @@ func (s *Stack[T]) Push(v T) {
             if e["relation"] == "CALLS"
         }
         assert ("FILE:pkg/app.go::Stack::Push", "REF:grow") in calls
+
+    def test_method_with_an_unnamed_receiver(self, builder):
+        src = """
+package app
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string { return describe() }
+
+func (*timeoutError) Timeout() bool {
+    return check()
+}
+
+func (Stack[T]) Empty() bool { return true }
+""".strip()
+        _parse(builder, src)
+        methods = {
+            n["id"]: (n["metadata"]["receiver"], n["metadata"]["return_type"])
+            for n in builder.nodes
+            if n["type"] == "Method"
+        }
+        assert methods == {
+            "FILE:pkg/app.go::timeoutError::Error": ("timeoutError", "string"),
+            "FILE:pkg/app.go::timeoutError::Timeout": ("timeoutError", "bool"),
+            "FILE:pkg/app.go::Stack::Empty": ("Stack", "bool"),
+        }
+        calls = {
+            (e["source"], e["target"])
+            for e in builder.edges
+            if e["relation"] == "CALLS"
+        }
+        assert calls == {
+            ("FILE:pkg/app.go::timeoutError::Error", "REF:describe"),
+            ("FILE:pkg/app.go::timeoutError::Timeout", "REF:check"),
+        }
 
     def test_receiver_declared_in_another_file_gets_node(self, builder):
         """Every edge source exists even when the receiver type is elsewhere."""

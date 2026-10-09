@@ -333,7 +333,7 @@
                     <template x-for="c in results.callers?.callers || []" :key="c.id">
                         <div class="symbol-list-item" @click="viewContext(c.id)">
                             <span x-text="c.name"></span>
-                            <span class="sl-location" x-text="c.location"></span>
+                            <span class="sl-location" x-text="c.location + (c.candidates ? ' · one of ' + c.candidates : '')"></span>
                         </div>
                     </template>
                 </div>
@@ -374,7 +374,7 @@
                     <template x-for="c in results.callees?.callees || []" :key="c.id">
                         <div class="symbol-list-item" @click="viewContext(c.id)">
                             <span x-text="c.name"></span>
-                            <span class="sl-location" x-text="c.location"></span>
+                            <span class="sl-location" x-text="c.location + (c.candidates ? ' · one of ' + c.candidates : '')"></span>
                         </div>
                     </template>
                 </div>

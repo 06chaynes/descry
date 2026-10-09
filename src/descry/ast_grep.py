@@ -13,16 +13,17 @@ import json
 import subprocess
 from collections.abc import Iterator
 
-from descry._env import safe_env
-
 
 def _load_matches(stdout: str) -> list:
-    """Decode ``sg --json`` output: an array of matches.
+    """Decode ``sg --json`` output: an array of match objects.
 
-    Any other JSON value (an error object, say) carries no matches.
+    Any other JSON value (an error object, say) carries no matches, and an
+    element that is no object is not one.
     """
     matches = json.loads(stdout) if stdout else []
-    return matches if isinstance(matches, list) else []
+    if not isinstance(matches, list):
+        return []
+    return [match for match in matches if isinstance(match, dict)]
 
 
 def extract_calls_rust(file_path: str) -> Iterator[dict]:
@@ -59,7 +60,6 @@ def extract_calls_rust(file_path: str) -> Iterator[dict]:
                 encoding="utf-8",
                 errors="replace",
                 timeout=30,
-                env=safe_env(),
                 check=False,
             )
 
@@ -179,7 +179,6 @@ def extract_calls_typescript(file_path: str) -> Iterator[dict]:
                 encoding="utf-8",
                 errors="replace",
                 timeout=30,
-                env=safe_env(),
                 check=False,
             )
 
@@ -246,7 +245,6 @@ def is_ast_grep_available() -> bool:
             ["sg", "--version"],
             capture_output=True,
             timeout=5,
-            env=safe_env(),
             check=False,
         )
         return result.returncode == 0
@@ -320,7 +318,6 @@ def extract_imports_typescript(file_path: str) -> dict:
                 encoding="utf-8",
                 errors="replace",
                 timeout=30,
-                env=safe_env(),
                 check=False,
             )
 

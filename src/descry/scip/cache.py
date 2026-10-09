@@ -33,7 +33,6 @@ from typing import ClassVar
 from urllib.parse import quote
 
 import descry.scip.adapters  # noqa: F401 — side-effect: populate ADAPTERS registry
-from descry._env import safe_env
 from descry.scip.adapter import (
     ADAPTERS,
     AdapterConfig,
@@ -164,27 +163,15 @@ class ScipCacheManager:
 
     @staticmethod
     def _file_signature(path: Path) -> tuple[int, int, int] | None:
-        """Inode, mtime and size of `path` itself, or None if absent.
+        """Inode, mtime and size of `path`, or None if absent.
 
         Differs before and after a subprocess iff it wrote the file.
         """
         try:
-            st = os.lstat(path)
+            st = os.stat(path)
         except OSError:
             return None
         return (st.st_ino, st.st_mtime_ns, st.st_size)
-
-    def _prepare_cache_dir(self) -> bool:
-        """Create the cache directory; False if it is a symlink.
-
-        The default cache directory is inside the indexed repository, which
-        could ship it as a link to anywhere.
-        """
-        if self.cache_dir.is_symlink():
-            logger.warning(f"SCIP: cache directory {self.cache_dir} is a symlink")
-            return False
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        return True
 
     def needs_update(self, project: str, project_type: str = "rust") -> bool:
         """Check if project SCIP needs regeneration.
@@ -283,13 +270,11 @@ class ScipCacheManager:
         if not ADAPTERS:
             return results
 
-        # Remove indexes that no registered adapter's name prefixes, such
-        # as ones named `<project>.scip`.
-        if not self.cache_dir.is_symlink():
-            current = tuple(f"{name}--" for name in ADAPTERS)
-            for path in self.cache_dir.glob("*.scip"):
-                if not path.name.startswith(current):
-                    path.unlink(missing_ok=True)
+        # Remove indexes that no registered adapter's name prefixes.
+        current = tuple(f"{name}--" for name in ADAPTERS)
+        for path in self.cache_dir.glob("*.scip"):
+            if not path.name.startswith(current):
+                path.unlink(missing_ok=True)
 
         with ThreadPoolExecutor(max_workers=max(1, len(ADAPTERS))) as executor:
             futures = {
@@ -326,17 +311,12 @@ class ScipCacheManager:
         """Run one adapter's SCIP generation for one project.
 
         Shared across every registered adapter. Timing, first-run detection,
-        timeout resolution, safe_env() application, and post-hoc file rename
+        timeout resolution, extra env vars, and post-hoc file rename
         (for adapters whose indexer lacks an --output flag) all live here so
         each adapter only has to describe *what* to run via `build_command`.
         """
         output_path = self._index_path(adapter.name, project.name)
-        if not self._prepare_cache_dir():
-            return False
-        # A direct-mode indexer would write through a symlink at the output
-        # path; unlinking removes the link, not its target.
-        if output_path.is_symlink():
-            output_path.unlink()
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         timeout_seconds = self._get_timeout()
         timeout_str = (
@@ -356,9 +336,7 @@ class ScipCacheManager:
             )
             return False
 
-        env = safe_env()
-        if spec.env_extras:
-            env = {**env, **spec.env_extras}
+        env = {**os.environ, **spec.env_extras}
 
         # Only a file the indexer writes during this run counts as its
         # output, not an index that was already there.
@@ -525,7 +503,7 @@ class ScipCacheManager:
                 errors="replace",
                 timeout=600,  # 10 minute timeout for cache priming
                 cwd=str(self.project_root),
-                env={**safe_env(), "RUST_ANALYZER_THREADS": str(num_threads)},
+                env={**os.environ, "RUST_ANALYZER_THREADS": str(num_threads)},
                 check=False,
             )
             # analysis-stats returns non-zero for warnings (like cyclic deps)
@@ -830,12 +808,8 @@ class ScipCacheManager:
         return {}
 
     def _save_checksums(self, checksums: dict[str, str]):
-        """Save checksums to disk atomically (tmp then rename).
-
-        Neither mkstemp nor os.replace writes through a symlink.
-        """
-        if not self._prepare_cache_dir():
-            return
+        """Save checksums to disk atomically (tmp then rename)."""
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.cache_dir, prefix=".checksums.")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:

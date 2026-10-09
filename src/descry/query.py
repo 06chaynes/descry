@@ -106,22 +106,9 @@ def _get_syntax_lang(file_path: str, lang_map: dict[str, str] | None = None) -> 
     ext = os.path.splitext(file_path)[1].lower()
     if lang_map:
         return lang_map.get(ext, "")
-    default_lang_map = {
-        ".rs": "rust",
-        ".py": "python",
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".svelte": "svelte",
-        ".proto": "protobuf",
-        ".json": "json",
-        ".toml": "toml",
-        ".yaml": "yaml",
-        ".yml": "yaml",
-        ".md": "markdown",
-    }
-    return default_lang_map.get(ext, "")
+    from descry.handlers import _DEFAULT_SYNTAX_LANG_MAP
+
+    return _DEFAULT_SYNTAX_LANG_MAP.get(ext, "")
 
 
 def _normalize_name(name: str) -> str:
@@ -220,10 +207,14 @@ class GraphQuerier:
 
         self.outgoing = defaultdict(list)
         self.incoming = defaultdict(list)
+        # candidate node id -> the unresolved edges that may reach it
+        self.candidate_incoming = defaultdict(list)
 
         for edge in self.edges:
             self.outgoing[edge["source"]].append(edge)
             self.incoming[edge["target"]].append(edge)
+            for candidate in edge.get("metadata", {}).get("candidates", ()):
+                self.candidate_incoming[candidate].append(edge)
 
         # Config-driven limits (fall back to module-level constants)
         self._max_depth = config.max_depth if config else MAX_DEPTH
@@ -253,10 +244,13 @@ class GraphQuerier:
         self._expansion_cache = {}  # {key: (results, token_cost, nodes_added)}
 
     def _disk_path(self, file_path):
-        """Where a graph-relative source path lives on disk; see source_path."""
+        """Where a graph-relative source path lives on disk; see source_path.
+
+        Empty when the querier has no project root to resolve it against.
+        """
         if self._project_root:
             return source_path(self._project_root, file_path)
-        return file_path
+        return ""
 
     def get_source_segment(self, file_path, start_line, end_line):
         """Get source code segment using cached file content."""
@@ -2148,7 +2142,31 @@ class GraphQuerier:
                 if edge["relation"] in relevant_relations:
                     callers.add(edge["source"])
 
-        return list(callers)
+        # A call the resolver left unresolved but narrowed to candidates
+        # reaches each one.
+        for target_id in target_ids:
+            if target_id.startswith("REF:"):
+                continue
+            for edge in self.candidate_incoming.get(target_id, []):
+                if edge["relation"] in relevant_relations:
+                    callers.add(edge["source"])
+
+        return sorted(callers)
+
+    def get_ambiguous_callers(self, func_name, fuzzy=False):
+        """``{caller: number of candidates}`` of the calls that may reach a
+        symbol matching ``func_name`` only through an unresolved edge's
+        candidates — the call is one of N, not a caller for sure."""
+        target_ids = self._resolve_target_ids(func_name, fuzzy)
+        relations = {"CALLS", "INSTANTIATES"}
+        ambiguous = {}
+        for target_id in target_ids:
+            if target_id.startswith("REF:"):
+                continue
+            for edge in self.candidate_incoming.get(target_id, []):
+                if edge["relation"] in relations:
+                    ambiguous[edge["source"]] = len(edge["metadata"]["candidates"])
+        return ambiguous
 
     def _resolve_target_ids(self, func_name: str, fuzzy: bool = False) -> set:
         """Resolve a function name to all possible target IDs in the graph.
@@ -2237,6 +2255,18 @@ class GraphQuerier:
                         callees.append(target)
 
         return callees
+
+    def get_ambiguous_callees(self, func_node_id):
+        """``{REF: target: number of candidates}`` of the calls of
+        ``func_node_id`` the resolver left unresolved but narrowed — each
+        is one call that may reach one of N definitions, not N calls."""
+        ambiguous = {}
+        for edge in self.outgoing[func_node_id]:
+            if edge["relation"] == "CALLS" and edge["target"].startswith("REF:"):
+                candidates = edge.get("metadata", {}).get("candidates")
+                if candidates:
+                    ambiguous[edge["target"]] = len(candidates)
+        return ambiguous
 
     def find_call_path_result(
         self,

@@ -219,50 +219,6 @@ class TestRustSingleCrateAtRoot:
         assert mgr._hash_typescript_package(tmp_path.name) != first
 
 
-class TestCacheDirSymlinks:
-    def test_checksums_symlink_is_replaced_not_followed(self, tmp_path):
-        victim = tmp_path / "victim.txt"
-        victim.write_text("precious")
-        mgr = ScipCacheManager(tmp_path / "repo")
-        mgr.cache_dir.mkdir(parents=True)
-        mgr.checksums_file.symlink_to(victim)
-
-        mgr._save_checksums({"rust:app": "abc"})
-
-        assert victim.read_text() == "precious"
-        assert mgr._load_checksums() == {"rust:app": "abc"}
-
-    def test_index_symlink_is_not_written_through(self, tmp_path):
-        victim = tmp_path / "victim.txt"
-        victim.write_text("precious")
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        mgr = ScipCacheManager(repo)
-        adapter = _StubAdapter("printf 'payload' > {out}")
-        index = mgr._index_path(adapter.name, "proj")
-        index.parent.mkdir(parents=True)
-        index.symlink_to(victim)
-
-        assert mgr._generate_scip(adapter, _project(repo, adapter)) is True
-
-        assert victim.read_text() == "precious"
-        assert index.read_bytes() == b"payload"
-
-    def test_symlinked_cache_dir_is_not_written_into(self, tmp_path):
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        repo = tmp_path / "repo"
-        (repo / ".descry_cache").mkdir(parents=True)
-        (repo / ".descry_cache" / "scip").symlink_to(outside)
-        mgr = ScipCacheManager(repo)
-        adapter = _StubAdapter("printf 'payload' > {out}")
-
-        assert mgr._generate_scip(adapter, _project(repo, adapter)) is False
-        mgr._save_checksums({"rust:app": "abc"})
-
-        assert list(outside.iterdir()) == []
-
-
 class TestCacheDirParameter:
     def test_default_is_inside_the_project(self, tmp_path):
         assert ScipCacheManager(tmp_path).cache_dir == tmp_path / ".descry_cache/scip"

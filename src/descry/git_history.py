@@ -19,7 +19,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from descry._env import safe_env
+from descry.handlers import _DEFAULT_CODE_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +147,7 @@ _GIT_DIFF_OPTS = (
     "--src-prefix=a/",
     "--dst-prefix=b/",
 )
-# Merged over safe_env(). A partial clone would otherwise fetch missing
+# Merged over the environment. A partial clone would otherwise fetch missing
 # objects on demand through whatever transport command its remote config
 # names. The C locale keeps the resulting error text matchable.
 _GIT_ENV = {"GIT_NO_LAZY_FETCH": "1", "LC_ALL": "C"}
@@ -239,20 +239,7 @@ def _churn_partial_note(skipped: dict[str, int]) -> str:
     )
 
 
-CODE_EXTENSIONS = {
-    ".rs",
-    ".py",
-    ".ts",
-    ".tsx",
-    ".js",
-    ".jsx",
-    ".svelte",
-    ".go",
-    ".java",
-    ".css",
-    ".scss",
-    ".html",
-}
+CODE_EXTENSIONS = _DEFAULT_CODE_EXTENSIONS
 
 
 class GitHistoryAnalyzer:
@@ -323,7 +310,7 @@ class GitHistoryAnalyzer:
                 capture_output=True,
                 cwd=str(self.project_root),
                 timeout=timeout,
-                env={**safe_env(), **_GIT_ENV},
+                env={**os.environ, **_GIT_ENV},
                 check=False,
             )
             if result.returncode != 0:
@@ -1507,25 +1494,16 @@ class GitHistoryAnalyzer:
                         line += 1
         return modified_symbols
 
-    def get_changes(
+    def _collect_changes(
         self,
-        commit_range: str | None = None,
-        time_range: str | None = None,
-        path_filter: str | None = None,
-        show_callers: bool = True,
-        limit: int = 50,
-    ) -> str:
-        """Analyze change impact for a commit range.
+        commit_range: str | None,
+        time_range: str | None,
+        path_filter: str | None,
+    ) -> tuple[list[dict], int, dict[str, dict]] | str:
+        """Changed files, commit count and per-symbol line counts for a range.
 
-        Args:
-            commit_range: Git commit range (e.g., "HEAD~5..HEAD").
-            time_range: Time range (e.g., "last 7 days"). Used if commit_range not given.
-            path_filter: Path filter (e.g., "backend/").
-            show_callers: Include callers of changed symbols.
-            limit: Maximum symbols to show.
-
-        Returns:
-            Formatted impact analysis.
+        A string instead when there is nothing to report: the message saying
+        why.
         """
         self._verify_git()
 
@@ -1616,7 +1594,32 @@ class GitHistoryAnalyzer:
         hunks = self._parse_diff_hunks(diff_output) if diff_output else []
 
         # Attribute changes to symbols
-        modified_symbols = self._attribute_hunks_to_symbols(hunks)
+        return changed_files, commit_count, self._attribute_hunks_to_symbols(hunks)
+
+    def get_changes(
+        self,
+        commit_range: str | None = None,
+        time_range: str | None = None,
+        path_filter: str | None = None,
+        show_callers: bool = True,
+        limit: int = 50,
+    ) -> str:
+        """Analyze change impact for a commit range.
+
+        Args:
+            commit_range: Git commit range (e.g., "HEAD~5..HEAD").
+            time_range: Time range (e.g., "last 7 days"). Used if commit_range not given.
+            path_filter: Path filter (e.g., "backend/").
+            show_callers: Include callers of changed symbols.
+            limit: Maximum symbols to show.
+
+        Returns:
+            Formatted impact analysis.
+        """
+        changes = self._collect_changes(commit_range, time_range, path_filter)
+        if isinstance(changes, str):
+            return changes
+        changed_files, commit_count, modified_symbols = changes
 
         # Format output
         lines = []
@@ -1690,82 +1693,10 @@ class GitHistoryAnalyzer:
         Returns dict with keys: range, commits, files_count, symbols_count,
         symbols (list), changed_files (list when no symbol attribution).
         """
-        self._verify_git()
-
-        if commit_range:
-            try:
-                _validate_git_range(commit_range)
-            except GitError as e:
-                return {"error": f"Invalid commit range '{commit_range}': {e}"}
-        effective_range = commit_range
-        count_range = None
-        if not effective_range:
-            if time_range:
-                time_flags = self._parse_time_range(time_range)
-                git_args = ["log", "--format=%H", "--no-merges"] + time_flags
-                output = self._run_git(git_args, timeout=30)
-                commit_hashes = [
-                    h.strip() for h in output.strip().split("\n") if h.strip()
-                ]
-                if not commit_hashes:
-                    return {"error": "No commits found for the given time range."}
-                effective_range, count_range = self._ranges_covering(commit_hashes)
-            else:
-                effective_range, count_range = self._ranges_covering(["HEAD"])
-
-        if path_filter:
-            try:
-                _validate_pathspec(path_filter)
-            except GitError as e:
-                return {"error": f"Invalid path filter '{path_filter}': {e}"}
-
-        diff_stat_args = ["diff", "--numstat", effective_range]
-        if path_filter:
-            diff_stat_args.extend(["--", path_filter])
-
-        try:
-            filter_overrides = self._worktree_filter_overrides(effective_range)
-            numstat_output = self._run_git(
-                diff_stat_args, timeout=30, config=filter_overrides
-            )
-        except PartialCloneError:
-            raise
-        except GitError as e:
-            return {"error": f"Invalid commit range '{effective_range}': {e}"}
-
-        if not numstat_output.strip():
-            return {"error": f"No changes found in {effective_range}."}
-
-        changed_files: list[dict] = []
-        for line in numstat_output.strip().split("\n"):
-            parts = line.split("\t")
-            if len(parts) == 3:
-                added = int(parts[0]) if parts[0] != "-" else 0
-                removed = int(parts[1]) if parts[1] != "-" else 0
-                changed_files.append(
-                    {"file": parts[2], "added": added, "removed": removed}
-                )
-
-        try:
-            commit_count_output = self._run_git(
-                ["rev-list", "--count", count_range or effective_range], timeout=10
-            )
-            commit_count = int(commit_count_output.strip())
-        except (GitError, ValueError):
-            commit_count = 0
-
-        diff_args = ["diff", effective_range]
-        if path_filter:
-            diff_args.extend(["--", path_filter])
-
-        try:
-            diff_output = self._run_git(diff_args, timeout=60, config=filter_overrides)
-        except GitError:
-            diff_output = ""
-
-        hunks = self._parse_diff_hunks(diff_output) if diff_output else []
-
-        modified_symbols = self._attribute_hunks_to_symbols(hunks)
+        changes = self._collect_changes(commit_range, time_range, path_filter)
+        if isinstance(changes, str):
+            return {"error": changes}
+        changed_files, commit_count, modified_symbols = changes
 
         range_display = commit_range or time_range or "HEAD~1..HEAD"
 

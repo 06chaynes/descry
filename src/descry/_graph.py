@@ -9,7 +9,7 @@ results.
 import json
 from pathlib import Path
 
-CURRENT_SCHEMA = 1
+CURRENT_SCHEMA = 2
 
 
 class GraphSchemaError(Exception):
@@ -27,14 +27,20 @@ def _malformed(what: str) -> GraphSchemaError:
     )
 
 
+# Node metadata that consumers do arithmetic on, and that they call string
+# methods on. Each is optional.
+_INT_FIELDS = ("lineno", "end_lineno", "token_count", "in_degree")
+_STR_FIELDS = ("name", "signature", "docstring", "path")
+
+
 def _check_shape(data: dict) -> None:
     """Verify the node/edge shape every consumer indexes into.
 
     Checked once here so consumers can use `node["id"]`, `node["type"]`,
     `node["metadata"]`, `edge["source"]`, `edge["target"]` and
-    `edge["relation"]`, and do arithmetic on a node's line numbers, without
-    each guarding against a malformed file. A node with no metadata is given
-    an empty one.
+    `edge["relation"]`, do arithmetic on `_INT_FIELDS` and on an edge's line
+    number, and call string methods on `_STR_FIELDS`, without each guarding
+    against a malformed file. A node with no metadata is given an empty one.
     """
     nodes = data.get("nodes")
     edges = data.get("edges")
@@ -50,11 +56,12 @@ def _check_shape(data: dict) -> None:
             raise _malformed(f"node {i} lacks a string 'id' or 'type'")
         if not isinstance(node.setdefault("metadata", {}), dict):
             raise _malformed(f"node {i} has non-object 'metadata'")
-        if not all(
-            isinstance(node["metadata"].get(key, 0), int)
-            for key in ("lineno", "end_lineno")
-        ):
-            raise _malformed(f"node {i} has a non-integer line number")
+        for key in _INT_FIELDS:
+            if not isinstance(node["metadata"].get(key, 0), int):
+                raise _malformed(f"node {i} has a non-integer '{key}'")
+        for key in _STR_FIELDS:
+            if not isinstance(node["metadata"].get(key, ""), str):
+                raise _malformed(f"node {i} has a non-string '{key}'")
 
     for i, edge in enumerate(edges):
         if not isinstance(edge, dict):
@@ -67,6 +74,8 @@ def _check_shape(data: dict) -> None:
             )
         if not isinstance(edge.get("metadata", {}), dict):
             raise _malformed(f"edge {i} has non-object 'metadata'")
+        if not isinstance(edge.get("metadata", {}).get("lineno", 0), int):
+            raise _malformed(f"edge {i} has a non-integer 'lineno'")
 
 
 def load_graph_with_schema(path: Path | str) -> dict:

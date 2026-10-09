@@ -19,7 +19,14 @@ from __future__ import annotations
 import re
 
 from descry._comments import strip_block_comments, strip_line_comment
-from descry.generate import BaseParser, blank_strings, is_generated_source
+from descry.generate import (
+    _JAVA_BOXES,
+    BaseParser,
+    _bracketed_parts,
+    _strip_generics,
+    blank_strings,
+    is_generated_source,
+)
 
 # Package declaration: `package com.foo.bar;`
 _RE_PACKAGE = re.compile(r"^\s*package\s+([\w.]+)\s*;")
@@ -41,40 +48,60 @@ _RE_TYPE_DECL = re.compile(
 # match bare control-flow like `if (cond)`. Does NOT match constructors
 # (those lack a return type; handled separately).
 _METHOD_MODIFIERS = r"(?:public|protected|private|static|final|abstract|synchronized|default|native|strictfp)"
+# Type arguments or parameters, nested three deep
+_PLAIN = r"[^<>;(){}=]*"
+_TYPE_ARGUMENTS = rf"<{_PLAIN}(?:<{_PLAIN}(?:<{_PLAIN}>{_PLAIN})*>{_PLAIN})*>"
+# Annotations written on the line of the declaration they are on
+_ANNOTATIONS = r"(?:@[\w.]+(?:\([^()]*\))?\s+)*"
 _RE_METHOD = re.compile(
-    rf"^\s*(?:(?:{_METHOD_MODIFIERS})\s+)+"
-    r"(?:<[^>]+>\s+)?"  # optional generic type params
-    r"(?P<returns>[\w<>\[\],?\s.]+?)\s+"  # return type (lazy)
+    rf"^\s*{_ANNOTATIONS}(?:(?:{_METHOD_MODIFIERS})\s+)+"
+    rf"(?:{_TYPE_ARGUMENTS}\s+)?"  # optional generic type params
+    r"(?:@[\w.]+\s+)*"  # annotations of the return type
+    r"(?P<returns>(?!<)[\w<>\[\],?\s.]+?)\s+"  # return type (lazy)
     r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*\("  # name + open paren
 )
 
-# Parameter list without nested parentheses, then any `throws` clause.
-_PARAMS_AND_THROWS = r"\([^()]*\)\s*(?:throws\s+[\w.,\s]+)?"
+# Parameter list without nested parentheses, then any `throws` clause or,
+# on an annotation's element, its `default` value.
+_PARAMS_AND_THROWS = r"\([^()]*\)\s*(?:throws\s+[\w.,\s]+|default\s+[^;{]+)?"
 
 # Method declared without a modifier: `Type name(params) {` or, in an
 # interface, `Type name(params);`. A statement of that shape is never a call.
-_RE_PACKAGE_METHOD = re.compile(
-    rf"^\s*(?:<[^>]+>\s+)?(?!(?:return|new|throw|else|case|assert|yield|{_METHOD_MODIFIERS})\b)"
-    r"(?P<returns>[\w<>\[\],?.]+)\s+"
-    rf"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*{_PARAMS_AND_THROWS}[{{;]\s*$"
+_PACKAGE_METHOD = (
+    rf"^\s*(?:{_TYPE_ARGUMENTS}\s+)?(?!(?:return|new|throw|else|case|assert|yield|{_METHOD_MODIFIERS})\b)"
+    rf"(?P<returns>[\w.]+(?:{_TYPE_ARGUMENTS})?(?:\[\])*)\s+"
+    r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*"
 )
+_RE_PACKAGE_METHOD = re.compile(rf"{_PACKAGE_METHOD}{_PARAMS_AND_THROWS}(?:\{{|;\s*$)")
+_RE_PACKAGE_METHOD_OPENS = re.compile(rf"{_PACKAGE_METHOD}\(")
 
 # Constructor: visibility + CapitalizedName ( — no return type.
 _RE_CONSTRUCTOR = re.compile(
-    r"^\s*(?:(?:public|protected|private)\s+)"
+    rf"^\s*(?:(?:public|protected|private)\s+)(?:{_TYPE_ARGUMENTS}\s+)?"
     r"([A-Z][A-Za-z0-9_$]*)\s*\("
 )
 # Constructor declared without a modifier: `Name(params) {`.
 _RE_PACKAGE_CONSTRUCTOR = re.compile(
-    rf"^\s*([A-Z][A-Za-z0-9_$]*)\s*{_PARAMS_AND_THROWS}\{{\s*$"
+    rf"^\s*([A-Z][A-Za-z0-9_$]*)\s*{_PARAMS_AND_THROWS}\{{"
 )
 
 # Field declaration: modifiers + type + name + (= value)? ;
 _RE_FIELD = re.compile(
-    rf"^\s*(?:(?:{_METHOD_MODIFIERS}|volatile|transient)\s+)+"
-    r"[\w<>\[\],?\s.]+?\s+"
-    r"([a-z_$][A-Za-z0-9_$]*)\s*(?:=|;)"
+    rf"^\s*{_ANNOTATIONS}(?:(?:{_METHOD_MODIFIERS}|volatile|transient)\s+)+"
+    rf"(?!{_METHOD_MODIFIERS}\b)(?P<type>[\w<>\[\],?\s.]+?)\s+"
+    r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*(?:=|;|$)"
 )
+# Field declared without a modifier: `Type name;` or `Type name = value`.
+_RE_PACKAGE_FIELD = re.compile(
+    r"^\s*(?!(?:return|throws?|new|else|case|assert|yield|default|package|import)\b)"
+    rf"(?P<type>[\w.]+(?:{_TYPE_ARGUMENTS})?(?:\[\])*)\s+"
+    r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*(?:=(?!=)|;)"
+)
+# An enum constant, alone on its line: `NAME,`, `NAME(args),`, `NAME {`
+_RE_ENUM_CONSTANT = re.compile(r"^\s*([A-Z][A-Z0-9_]*)\s*(?:\(.*\))?\s*[,;{]?\s*$")
+# `(Type) value` inside the parentheses before a member: a cast gives the
+# value that type
+_RE_CAST = re.compile(r"\(\s*([A-Z][\w.]*(?:<[^()]*>)?(?:\[\])*)\s*\)\s*[\w(\"]")
 
 # Call site: identifier(...) or receiver.method(...).
 # The lookbehind excludes:
@@ -82,19 +109,24 @@ _RE_FIELD = re.compile(
 #   - `@` (so annotations `@JsonProperty(...)` are NOT matched as calls)
 _RE_CALL = re.compile(
     r"(?<![A-Za-z0-9_$@])"
-    r"([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)"
+    r"([A-Za-z_$][A-Za-z0-9_$]*(?:\.\s*[A-Za-z_$][A-Za-z0-9_$]*)*)"
     r"\s*\("
 )
 
+_PRIMITIVES = "boolean|byte|char|short|int|long|float|double"
 _DECLARATIONS = (
-    # `Type name` before `=`, `;`, `,`, `)` or `:` — a local, field,
-    # parameter or for-each variable
+    # `Type name` before `=`, `;`, `,`, `)`, `:`, `&&` or `->`: a local, a
+    # field, a parameter, a for-each variable or what a pattern binds. The
+    # type is read with its type arguments, and an array of any type.
     re.compile(
-        r"\b(?P<type>[A-Z][\w.]*)(?:<[^;(){}=]*>)?(?:\[\])*(?:\.\.\.)?\s+"
-        r"(?P<name>[A-Za-z_$][\w$]*)\s*(?=[=;,):])"
+        rf"\b(?P<type>[A-Z][\w.]*(?:{_TYPE_ARGUMENTS})?(?:\[\])*|(?:{_PRIMITIVES})(?:\[\])+)"
+        r"\s+(?P<name>[A-Za-z_$][\w$]*)\s*(?=[=;,):]|&&|->)"
     ),
     # A type parameter's bound: `<T extends Type`
-    re.compile(r"[<,]\s*(?P<param>[A-Z]\w*)\s+extends\s+(?P<type>[A-Z][\w.]*)"),
+    re.compile(
+        r"[<,]\s*(?P<param>[A-Z]\w*)\s+extends\s+"
+        r"(?P<type>[A-Z][\w.]*(?:<(?:[^<>]|<[^<>]*>)*>)?)(?![<(])"
+    ),
 )
 
 # Keywords that the call regex would spuriously match.
@@ -119,16 +151,77 @@ _JAVA_CONTROL_KEYWORDS = frozenset(
 )
 
 
-_RE_NEW_GENERIC = re.compile(r"\bnew\s+[A-Za-z_$][A-Za-z0-9_$.]*\s*<")
+# The parameter of a lambda that has one, or the list of them, without types
+_LAMBDA = r"(?<![\w$.])(?<!\bcase\s)([\w$]+)\s*->|\(([\w$\s,]+)\)\s*->"
+_RE_LAMBDA = re.compile(_LAMBDA)
+# The name a `var` binds, and those a lambda does
+_RE_UNTYPED = re.compile(rf"\bvar\s+([\w$]+)|{_LAMBDA}")
+# `receiver::name`, a reference to a method or with `new` to a constructor
+_RE_METHOD_REFERENCE = re.compile(r"(?<![\w$.])([\w$.]+)\s*::\s*([A-Za-z_$][\w$]*)")
+_RE_NEW_GENERIC = re.compile(r"(?:\bnew\s+[A-Za-z_$][A-Za-z0-9_$.]*|\.)\s*<")
 _RE_BODY_OPENS = re.compile(r"\)\s*\{\s*$")
-_RE_NEW_ENDS = re.compile(r"\bnew\s+[A-Za-z_$][A-Za-z0-9_$.]*\s*$")
+
+
+def _type_params(code, start=0):
+    """The type parameter names a declaration writes in `<...>` at
+    ``start``: `interface Function<F, T>` gives `("F", "T")`. A parameter's
+    bound may itself be generic — `B extends Pair<T, B>` still names `B`."""
+    lead = re.match(r"\s*<", code[start:])
+    if not lead:
+        return ()
+    depth, end = 0, None
+    for i, char in enumerate(code[start + lead.end() :], start + lead.end()):
+        depth += char == "<"
+        depth -= char == ">"
+        if depth < 0:
+            end = i
+            break
+    if end is None:
+        return ()
+    inner = code[start + lead.end() : end]
+    return tuple(
+        part.strip().split(" extends ")[0].split()[-1]
+        for part in _bracketed_parts(inner)
+        if part.strip()
+    )
+
+
+def _param_writings(code, start):
+    """The type each parameter between the `(` at ``start`` and its `)`
+    declares, in order."""
+    depth = 0
+    for end, char in enumerate(code[start:], start):
+        depth += char == "("
+        depth -= char == ")"
+        if not depth:
+            break
+    else:
+        return ()
+    writings = []
+    for part in _bracketed_parts(code[start + 1 : end] + ")"):
+        part = re.sub(r"@\w+(\([^)]*\))?\s+", "", part.strip())
+        part = re.sub(r"\bfinal\s+", "", part).rstrip()
+        if " " in part:
+            writings.append(part.rpartition(" ")[0])
+        elif part:
+            writings.append(part)
+    return tuple(writings)
+
+
+# `path[index].` before a member: an element of an array
+_RE_ELEMENT = re.compile(r"(?<![\w$.])([\w$.]+)((?:\[[^\[\]]*\])+)\s*\.\s*$")
+# `new T` or `outer.new T` before the `(` of an instantiation
+_RE_NEW_ENDS = re.compile(
+    r"(?:([\w$.]+)\s*\.\s*)?\bnew\s+([A-Za-z_$][A-Za-z0-9_$.]*)\s*$"
+)
 _RE_EMPTY_BODY = re.compile(r"(?<=\))\s*\{\s*\}(?=\s*\.)")
 
 
 def _plain_instantiations(code: str) -> str:
     """Return ``code`` with the type arguments of every `new T<...>(` and
-    every empty anonymous class body before a `.` turned to spaces, so that
-    the instantiation reads as a call of `T` and a call on it as a chain."""
+    of every `.<...>name(`, and every empty anonymous class body before a
+    `.`, turned to spaces, so that the instantiation reads as a call of
+    `T`, the call as one of `name`, and a call on either as a chain."""
     for match in _RE_NEW_GENERIC.finditer(code):
         start, depth = match.end() - 1, 0
         for end in range(start, len(code)):
@@ -152,13 +245,92 @@ class JavaParser(BaseParser):
 
     binding_re = re.compile(r"\bvar\s+(?P<name>\w+)\s*=(?!=)")
 
-    def _node_type(self, node_id):
-        """Type of the node of this file with ID ``node_id``, if there is one."""
-        if node_id in self.builder.node_registry:
-            for node in reversed(self.builder.nodes):
-                if node["id"] == node_id:
-                    return node["type"]
+    @staticmethod
+    def bindings(param):
+        """Yield ``(name, steps)`` for a lambda's parameter that is written
+        without its type."""
+        if re.fullmatch(r"\s*[\w$]+\s*", param):
+            yield param.strip(), ()
+
+    def call_origin(self, callee, lineno, since, owner=None):
+        """Origin path of a callee that starts at a name. A local stands
+        for its declared type or the call it was bound to, `?` where it has
+        neither; `this` is `self`, `super` the supertype of the anonymous
+        class the line is in, else `super()`, and `Outer.this` an `Outer`.
+        Any other name is left to be read in scope."""
+        root, _, path = callee.partition(".")
+        if not path:
+            return None
+        if root == "this":
+            return f"self.{path}"
+        if root == "super":
+            return f"{self._supers[-1][1] if self._supers else 'super'}().{path}"
+        if path.startswith("this."):
+            return f"{root}().{path[5:]}"
+        typed = [d[0] for d in self.declared.get(root, ()) if since <= d[0] <= lineno]
+        bound = [n for n in self._untyped.get(root, ()) if since <= n <= lineno]
+        if max(bound, default=0) > max(typed, default=0):
+            return f"?.{path}"
+        if not typed:
+            return f"{self._bound(root)}.{path}"
+        head = super().call_origin(f"{root}.x", lineno, since)
+        return f"{head[:-2] if head else '?'}.{path}"
+
+    def _bound(self, written):
+        """The type ``written``, or where the file bounds a type parameter
+        of that name, its bound. A parameter bounded by its own bound's
+        arguments — `B extends Builder<B>` — is a self-type: it stays
+        written so the resolver can substitute the receiver's."""
+        bound = self._declared(f"<{written}>", 0, 0, True)
+        if bound and re.search(rf"<[^<>]*\b{written}\b", bound):
+            return written
+        return bound or written
+
+    def _lambda_target(self, before):
+        """The type a lambda at the end of ``before`` is assigned to or
+        cast as, as a `>` origin root — None where it is an argument of a
+        call, whose parameters the callee's give it."""
+        cast = re.search(r"\(\s*([A-Z][\w.$]*)\s*(<[^<>;()]*>)?\s*\)\s*\(\s*$", before)
+        if cast:
+            written = "".join((cast[2] or "").split())
+            return f">{cast[1].replace('.', '::')}{written}"
+        assigned = re.search(
+            r"(?<![\w.])([A-Z][\w.$]*(?:<[^<>;()]*>)?)\s+[\w$]+\s*=\s*$", before
+        )
+        if assigned:
+            return f">{assigned[1].replace('.', '::')}"
         return None
+
+    def _bind_closures(self, code, index, lines, before):
+        """Type the parameters of a lambda that opens before ``before``
+        as the target of an assignment or a cast, from the functional
+        interface it is for; arguments of calls go on to the shared path."""
+        while self._closures and self._closures[0][0] < before:
+            bar, params, _end = self._closures[0]
+            around = [o for o, c in self._pairs.items() if o < bar < c]
+            around += [o for o in self._opens if o < bar]
+            origin = (
+                None if around or self._open_calls else self._lambda_target(code[:bar])
+            )
+            if origin is None:
+                break
+            self._closures.pop(0)
+            bindings = {
+                name: ".".join([f"{origin}.^{number}", *steps])
+                for number, param in enumerate(_bracketed_parts(params + ")"))
+                for name, steps in self.bindings(param)
+            }
+            self._bind(bindings, index, lines, code.rstrip().endswith("{"))
+        super()._bind_closures(code, index, lines, before)
+
+    def _has_body(self, lines, index, code):
+        """Whether the method declared on ``lines[index]`` has a body: a
+        `{` on that line, ``code`` without its comments, or below it where
+        its signature goes on, before any `;`."""
+        if "{" in code:
+            return True
+        brace = self.opening_brace_line(lines, index, code)
+        return brace is not None and not any(";" in text for text in lines[index:brace])
 
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
@@ -185,11 +357,25 @@ class JavaParser(BaseParser):
                 path = m.group(1).rstrip(".*").rstrip(".")
                 if path:
                     self.builder.add_edge(file_id, f"MODULE:{path}", "IMPORTS")
-                    if not m.group(1).endswith("*"):
-                        name = path.rpartition(".")[2]
-                        self.builder.imports.setdefault(file_id, {})[name] = path
+                    # An on-demand import is kept under its own text.
+                    name = path.rpartition(".")[2]
+                    if m.group(1).endswith("*"):
+                        name = m.group(1)
+                    self.builder.imports.setdefault(file_id, {})[name] = path
 
-        self.scan_declarations(lines, _DECLARATIONS)
+        self.scan_declarations(
+            [line.replace("...", "[]") for line in lines], _DECLARATIONS
+        )
+        # name -> the lines where a `var` or a lambda binds it without a
+        # type
+        self._untyped = {}
+        for lineno, line in enumerate(lines, 1):
+            for found in _RE_UNTYPED.finditer(line):
+                for param in (found[1] or found[2] or found[3]).split(","):
+                    for name in param.split()[-1:]:
+                        self._untyped.setdefault(name, []).append(lineno)
+        # (last line, type) of each anonymous class body the line is in
+        self._supers = []
 
         # Walk for types, methods, fields, and calls. A type
         # (class/interface/enum/record) is the context for the definitions
@@ -198,6 +384,7 @@ class JavaParser(BaseParser):
         self.enter_context(file_id, 0, len(lines))
         bodies: list[tuple[str, int, int]] = []  # open methods: ID, first, last line
         anonymous: dict[int, int] = {}  # last line of an anonymous body -> `new` edge
+        enums: set[str] = set()  # IDs of the enum types
 
         i = 0
         n = len(lines)
@@ -209,6 +396,10 @@ class JavaParser(BaseParser):
             context_id, context_start = self.context_at(lineno)
             while bodies and lineno > bodies[-1][2]:
                 bodies.pop()
+            while self._supers and lineno > self._supers[-1][0]:
+                self._supers.pop()
+            # The open bodies of the enclosing type, outermost first.
+            inside = [body for body in bodies if body[1] >= context_start]
             # Call scanning starts past a name declared on the line.
             call_scan_start = 0
 
@@ -255,8 +446,19 @@ class JavaParser(BaseParser):
                     end_lineno=end_lineno,
                     token_count=(end_lineno - lineno + 1) * 10,
                     docstring=docstring,
+                    generics=_type_params(line, m_type.end()),
                 )
                 self.builder.add_edge(parent_id, type_id, "DEFINES")
+                header = [line, *lines[i + 1 : (brace_line_idx or i) + 1]]
+                header = _strip_generics(" ".join(header)).partition("{")[0]
+                for clause in re.split(r"\b(?:extends|implements)\b", header)[1:]:
+                    for base in clause.split(","):
+                        if base.split():
+                            self.builder.add_edge(
+                                type_id, f"REF:{base.split()[0]}", "INHERITS"
+                            )
+                if kind == "enum":
+                    enums.add(type_id)
                 if has_open_brace and end_lineno > brace_line_idx + 1:
                     self.enter_context(type_id, lineno, end_lineno)
                 i = brace_line_idx + 1 if has_open_brace else i + 1
@@ -265,19 +467,45 @@ class JavaParser(BaseParser):
             # 2. Methods and constructors (only inside a type context)
             if context_id != file_id:
                 m_method = _RE_METHOD.match(line) or _RE_PACKAGE_METHOD.match(line)
+                if not m_method and _RE_PACKAGE_METHOD_OPENS.match(line):
+                    # `Type name(params)` whose parameters or whose `throws`
+                    # clause go on over the next lines.
+                    signature = line.rstrip()
+                    for following in map(str.strip, lines[i + 1 : i + 10]):
+                        listed = signature.count("(") <= signature.count(")")
+                        if listed and not following.startswith("throws "):
+                            break
+                        signature += f" {following}"
+                    m_method = _RE_PACKAGE_METHOD.match(signature)
                 if m_method:
                     name = m_method["name"]
                     if name not in _JAVA_CONTROL_KEYWORDS:
                         call_scan_start = m_method.end()
                         parent_id = context_id
                         method_id = f"{parent_id}::{name}"
+                        has_body = self._has_body(lines, i, line)
                         end_lineno = (
-                            self._find_block_end(lines, i) if "{" in line else lineno
+                            self._find_block_end(lines, i) if has_body else lineno
                         )
                         docstring = self.get_leading_docstring(lines, i)
+                        returns = self._bound(m_method["returns"].strip())
+                        declared = self._node(method_id)
                         # A field of the same name moves to `<type>::field_<name>`.
-                        if self._node_type(method_id) == "Constant":
+                        if declared and declared["type"] == "Constant":
                             self.rename_node(method_id, f"{parent_id}::field_{name}")
+                        elif declared and declared["type"] == "Method":
+                            # Overloads that return something return the
+                            # type they agree on, a primitive as its box,
+                            # with its type arguments where those agree.
+                            known = declared["metadata"].get("return_type") or ""
+                            heads = (known.partition("<")[0], returns.partition("<")[0])
+                            agreed = {_JAVA_BOXES.get(head, head) for head in heads}
+                            if known == "void":
+                                known = returns
+                            elif returns not in (known, "void"):
+                                known = agreed.pop() if len(agreed) == 1 else None
+                            declared["metadata"]["return_type"] = known
+                        head = m_method[0]
                         self.builder.add_node(
                             method_id,
                             "Method",
@@ -286,10 +514,14 @@ class JavaParser(BaseParser):
                             end_lineno=end_lineno,
                             token_count=(end_lineno - lineno + 1) * 10,
                             docstring=docstring,
-                            return_type=m_method["returns"].strip(),
+                            return_type=returns,
+                            params=_param_writings(m_method.string, m_method.end() - 1),
+                            static=bool(re.search(r"\bstatic\b", head)),
+                            default=bool(re.search(r"\bdefault\b", head)),
+                            body=has_body,
                         )
                         self.builder.add_edge(parent_id, method_id, "DEFINES")
-                        if "{" in line:
+                        if has_body:
                             bodies.append((method_id, lineno, end_lineno))
                 else:
                     m_ctor = _RE_CONSTRUCTOR.match(line)
@@ -300,10 +532,9 @@ class JavaParser(BaseParser):
                             call_scan_start = m_ctor.end()
                             parent_id = context_id
                             ctor_id = f"{parent_id}::<init>"
+                            has_body = self._has_body(lines, i, line)
                             end_lineno = (
-                                self._find_block_end(lines, i)
-                                if "{" in line
-                                else lineno
+                                self._find_block_end(lines, i) if has_body else lineno
                             )
                             self.builder.add_node(
                                 ctor_id,
@@ -316,21 +547,20 @@ class JavaParser(BaseParser):
                                 is_constructor=True,
                             )
                             self.builder.add_edge(parent_id, ctor_id, "DEFINES")
-                            if "{" in line:
+                            if has_body:
                                 bodies.append((ctor_id, lineno, end_lineno))
 
                 # 3. Fields (only inside types, not methods)
-                # Skip if line ended in `{` — that's a method/type decl with inline body.
-                if "{" not in line and ";" in line:
-                    m_field = _RE_FIELD.match(line)
+                if not inside:
+                    m_field = _RE_FIELD.match(line) or _RE_PACKAGE_FIELD.match(line)
                     if m_field:
-                        name = m_field.group(1)
+                        name = m_field["name"]
                         # Filter common false positives (keywords and control flow
                         # would already be caught by _METHOD_MODIFIERS requirement).
                         parent_id = context_id
                         field_id = f"{parent_id}::{name}"
                         # A method of the same name keeps `<type>::<name>`.
-                        if self._node_type(field_id) == "Method":
+                        if (self._node(field_id) or {}).get("type") == "Method":
                             field_id = f"{parent_id}::field_{name}"
                         if field_id not in self.builder.node_registry:
                             self.builder.add_node(
@@ -339,8 +569,22 @@ class JavaParser(BaseParser):
                                 name=name,
                                 lineno=lineno,
                                 docstring="",
+                                value_type=self._bound(m_field["type"].strip()),
                             )
                             self.builder.add_edge(parent_id, field_id, "DEFINES")
+                m_constant = context_id in enums and _RE_ENUM_CONSTANT.match(code)
+                if m_constant and not inside:
+                    call_scan_start = m_constant.end(1)
+                    constant_id = f"{context_id}::{m_constant[1]}"
+                    self.builder.add_node(
+                        constant_id,
+                        "Constant",
+                        name=m_constant[1],
+                        lineno=lineno,
+                        docstring="",
+                        value_type=context_id.rpartition("::")[2],
+                    )
+                    self.builder.add_edge(context_id, constant_id, "DEFINES")
 
             # 4. Calls. ast-grep has no Java backend today, so we always
             #    run the regex extractor (rather than gating on
@@ -350,30 +594,105 @@ class JavaParser(BaseParser):
                 parent_id = context_id
                 if bodies and bodies[-1][1] >= context_start:
                     parent_id = bodies[-1][0]
+                # A local is declared from the first line of the outermost
+                # body the line is in, or on the line itself.
+                since = inside[0][1] if inside else lineno
+                written = code
                 code = _plain_instantiations(code)
                 self.begin_line(code, lineno, raw=raw_line)
                 if lineno in anonymous and code.lstrip().startswith("}"):
                     self.continue_chain(code.index("}"), anonymous.pop(lineno))
+                # The lambdas on the line whose parameters are still to be
+                # read: those in the parentheses of a call, and one the line
+                # starts with, an argument of a call left open.
+                around = [*self._pairs.items(), *((o, len(code)) for o in self._opens)]
+                self._closures = [
+                    (found.start(), found[1] or found[2], found.end())
+                    for found in _RE_LAMBDA.finditer(code if "->" in code else "")
+                    if not code[: found.start()].strip()
+                    or any(o < found.start() < c for o, c in around)
+                ]
+                self._bodies = []
                 for call_match in _RE_CALL.finditer(code, call_scan_start):
-                    callee = call_match.group(1)
+                    # The callee without the type arguments blanked in it.
+                    callee = "".join(call_match.group(1).split())
                     simple_name = callee.split(".")[-1]
                     if simple_name in _JAVA_CONTROL_KEYWORDS:
                         continue
+                    self._bind_closures(code, i, lines, call_match.start(1))
+                    before = code[: call_match.start(1)]
+                    paren = call_match.end() - 1
+                    # The parentheses before the callee that end no call.
+                    receiver = before.rstrip()
+                    close = len(receiver) - 2 if receiver.endswith(").") else None
+                    grouped = [o for o, c in self._pairs.items() if c == close]
+                    cast = (
+                        grouped
+                        and not self.call_closed_at(close)
+                        and _RE_CAST.match(code, grouped[0] + 1)
+                    )
+                    made = _RE_NEW_ENDS.search(code[:paren])
+                    element = "]" in before and _RE_ELEMENT.search(before)
+                    literal = raw_line[: len(before)].rstrip().endswith('".')
+                    if ".class." in callee:
+                        # `Type.class` is a java.lang.Class.
+                        origin = f"Class().{simple_name}"
+                    elif cast:
+                        origin = f"{cast[1].replace('.', '::')}().{callee}"
+                    elif literal:
+                        origin = f"String().{callee}"
+                    elif element:
+                        # What an array holds is its type's first argument.
+                        array = self.call_origin(f"{element[1]}.x", lineno, since)
+                        held = ".@0" * element[2].count("[")
+                        origin = f"{array[:-2]}{held}.{callee}"
+                    elif made and made[1]:
+                        # `outer.new T(...)` makes a member type of `outer`.
+                        origin = self.call_origin(f"{made[1]}.{callee}", lineno, since)
+                    elif made:
+                        # `new T<A>(...)` is a call of the type `T<A>`.
+                        arguments = written[call_match.end(1) : paren].strip()
+                        origin = f"{callee}{arguments}".replace(".", "::")
+                    elif callee != call_match.group(1):
+                        origin = self.call_origin(callee, lineno, since)
+                    else:
+                        origin = None
                     self.add_call(
                         parent_id,
                         callee,
                         lineno,
-                        0,
-                        call_match.start(1),
-                        call_match.end() - 1,
-                        # `Type.class` is a java.lang.Class.
-                        f"Class().{simple_name}" if ".class." in callee else None,
+                        since,
+                        call_match.end(1) - len(callee),
+                        paren,
+                        origin,
                     )
+                self._bind_closures(code, i, lines, len(code))
+                references = "::" in code and _RE_METHOD_REFERENCE.finditer(code)
+                for reference in references or ():
+                    # `T::new` is a call of the type `T`, any other one of
+                    # the method `receiver.name`.
+                    receiver, name = reference.groups()
+                    if name == "new":
+                        callee, start = receiver, reference.start(1)
+                        origin = receiver.replace(".", "::")
+                    else:
+                        callee = f"{receiver}.{name}"
+                        start = reference.start(2) - len(receiver) - 1
+                        origin = self.call_origin(callee, lineno, since)
+                    self.add_call(parent_id, callee, lineno, since, start, -1, origin)
                 # `new T(...) {` opens the body of an anonymous subclass; a
                 # call on its closing brace is made on the new object.
                 body = _RE_BODY_OPENS.search(code)
                 created = body and self.call_closed_at(body.start())
-                if created and _RE_NEW_ENDS.search(code[: created[1]]):
-                    anonymous[self._find_block_end(lines, i)] = created[0]
+                subclassed = created and _RE_NEW_ENDS.search(code[: created[1]])
+                if subclassed:
+                    last = self._find_block_end(lines, i)
+                    anonymous[last] = created[0]
+                    self._supers.append((last, subclassed[2].replace(".", "::")))
+
+            # A block opened outside every method is a body of the type's.
+            opened = bodies and bodies[-1][1] == lineno
+            if not inside and not opened and code.rstrip().endswith("{"):
+                bodies.append((context_id, lineno, self._find_block_end(lines, i)))
 
             i += 1

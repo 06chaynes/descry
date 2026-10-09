@@ -56,7 +56,7 @@ class FakeQuerier:
     """The slice of GraphQuerier that GitHistoryAnalyzer uses."""
 
     def __init__(self, nodes):
-        self.data = {"schema_version": 1, "nodes": nodes, "edges": []}
+        self.data = {"schema_version": 2, "nodes": nodes, "edges": []}
 
     def get_node_info(self, node_id):
         return next((n for n in self.data["nodes"] if n["id"] == node_id), None)
@@ -201,7 +201,7 @@ class TestGitHistoryBuildFileLineMap:
     def test_maps_lines_to_symbols(self):
         # Create a mock querier with graph data
         graph_data = {
-            "schema_version": 1,
+            "schema_version": 2,
             "nodes": [
                 {
                     "id": "FILE:src/auth.rs::validate_token",
