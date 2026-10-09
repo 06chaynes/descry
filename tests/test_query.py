@@ -1218,6 +1218,27 @@ class TestUnresolvedCallsInPathsAndFlows:
         ]
         return _querier(tmp_path, nodes, edges)
 
+    def test_path_starts_from_every_node_of_the_name(self, querier):
+        found = querier.find_call_path_result("helper", "leaf")
+        assert [(hop["caller_id"], hop["callee_id"]) for hop in found["path"]] == [
+            ("FILE:b.py::helper", "FILE:b.py::leaf")
+        ]
+
+    def test_path_between_two_definitions_of_one_name(self, tmp_path):
+        nodes = [_fn("FILE:a.py::run"), _fn("FILE:b.py::run")]
+        edges = [_calls("FILE:a.py::run", "FILE:b.py::run")]
+        found = _querier(tmp_path, nodes, edges).find_call_path_result("run", "run")
+        assert [(hop["caller_id"], hop["callee_id"]) for hop in found["path"]] == [
+            ("FILE:a.py::run", "FILE:b.py::run")
+        ]
+
+    def test_start_nodes_do_not_spend_the_node_budget(self, tmp_path):
+        nodes = [_fn(f"FILE:f{i}.py::h") for i in range(120)]
+        nodes.append(_fn("FILE:z.py::end"))
+        edges = [_calls("FILE:f7.py::h", "FILE:z.py::end")]
+        querier = _querier(tmp_path, nodes, edges)
+        assert querier.find_call_path_result("h", "end")["status"] == "found"
+
     @pytest.mark.parametrize("direction", ["forward", "backward"])
     def test_path_goes_through_a_candidate_and_says_so(self, querier, direction):
         ends = ("start", "leaf") if direction == "forward" else ("leaf", "start")

@@ -12275,6 +12275,60 @@ class TestClangCallResolution:
         assert "FILE:a.cc::Widget::spin" in _calls(builder, "FILE:a.cc::go")
         assert "FILE:a.cc::Gadget::spin" not in _calls(builder, "FILE:a.cc::go")
 
+    def test_auto_bound_to_a_lambda_is_not_what_its_body_calls(self, tmp_path):
+        """`auto f = [&]() { pack(); };`: `f` is no `Bag`."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cc": """
+                struct Bag { int get(); };
+                struct Jar { int get(); };
+                int Bag::get() { return 1; }
+                int Jar::get() { return 2; }
+                Bag pack() { return Bag(); }
+                void go() {
+                  auto f = [&]() { pack(); };
+                  f.get();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.cc::go") == ["FILE:a.cc::pack", "REF:f.get"]
+
+    def test_auto_bound_to_a_lambda_called_at_once_is_not_its_argument(self, tmp_path):
+        """`auto x = [&](Bag b) { return jar(); }(pack());`: `x` is no `Bag`."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cc": """
+                struct Bag { int get(); };
+                struct Jar { int get(); };
+                int Bag::get() { return 1; }
+                int Jar::get() { return 2; }
+                Bag pack() { return Bag(); }
+                Jar jar() { return Jar(); }
+                void go() {
+                  auto x = [&](Bag b) { return jar(); }(pack());
+                  x.get();
+                }
+                """,
+            },
+        )
+        assert "FILE:a.cc::Bag::get" not in _calls(builder, "FILE:a.cc::go")
+
+    def test_typedef_of_a_pointer_to_an_unnamed_struct(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "a.c": """
+                typedef struct { int v; } *Ptr;
+                typedef struct { int v; } *const Fixed;
+                """,
+            },
+        )
+        types = {node["id"] for node in builder.nodes if node["type"] == "Class"}
+        assert types == {"FILE:a.c::Ptr", "FILE:a.c::Fixed"}
+
 
 class TestRubyCallResolution:
     def test_constructed_receiver_resolves_to_its_class_s_method(self, tmp_path):

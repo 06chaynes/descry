@@ -24,11 +24,13 @@ _TYPE_DECL = re.compile(
     r"(?:<([A-Za-z_][\w\s,]*(?:extends\s+[^{}]*)?)>)?\s*"
     r"(.*?)\s*{\s*$"
 )
+# Words before a name that are no return type
+_NO_TYPE = "new|as|with|class|implements|typedef|get|set|return|await|throw"
 _MEMBER = re.compile(
-    r"^\s*(?:@[\w$.]+(?:\([^)]*\))?\s*)*"
+    r"^\s*(?:@[\w$.]+(?![\w$.])(?:\([^)]*\))?\s*)*"
     r"(?:(static|factory|abstract|covariant|external|late|final|const|static\s+late)\s+)*"
-    r"([A-Za-z_][\w$.<>,? ]*?|operator|void|dynamic)?\s*"
-    r"(get\s+|set\s+|operator\s*)?([A-Za-z_][\w$]*|operator\s*[<>=!+\-*/%&|^~\[\]]+|[\w$]+)"
+    rf"(?:(?!(?:{_NO_TYPE})\b)([A-Za-z_][\w$.<>,? ]*?|operator|void|dynamic)\s+)?"
+    r"(get\s+|set\s+|operator\s*)?(?!Function\b)([A-Za-z_][\w$]*|operator\s*[<>=!+\-*/%&|^~\[\]]+|[\w$]+)"
     r"\s*(?:<[\w$,\s]*>)?\s*(?:\((.*)\))?\s*(?:=>|;|\{|$)"
 )
 _FUNC_PARAM = re.compile(
@@ -192,7 +194,19 @@ def build(origin):
                 continue
             if current is None:
                 member = _MEMBER.match(stripped)
-                if at_depth == 0 and member and member[4] and "(" in stripped:
+                # `Type name(...)`, or `name(...)` with a body: a `name (` is
+                # a clause, and `name(...);` alone a call.
+                if (
+                    at_depth == 0
+                    and member
+                    and "(" in stripped
+                    and not member[4].startswith("_")
+                    and (
+                        member[2]
+                        or stripped.startswith(("(", "<"), member.end(4))
+                        and not stripped.endswith(";")
+                    )
+                ):
                     functions[member[4]] = _written(member[2] or "", ())
                 continue
             if current == "_skipped" or at_depth != 1:
@@ -204,8 +218,14 @@ def build(origin):
                 continue
             modifiers, ret_type, accessor, name, sig = member.groups()
             modifiers = modifiers or ""
-            if ret_type is None and not accessor and not modifiers:
-                # A bare name or statement is no member.
+            constructs = (
+                "factory" in modifiers
+                or name == current
+                or name.startswith(current + ".")
+            )
+            untyped = ret_type is None and not accessor
+            if untyped and (not modifiers or sig is not None and not constructs):
+                # A bare name, a statement, or a call a value goes on with.
                 continue
             if (ret_type or "").endswith(".") or name in _STATEMENTS:
                 continue
@@ -218,7 +238,7 @@ def build(origin):
                 continue
             table = types[current]["statics" if static else "methods"]
             if accessor == "get" or (
-                accessor is None and not sig and name != "operator"
+                accessor is None and sig is None and name != "operator"
             ):
                 record(table, name, _written(ret_type or "", params))
                 continue
@@ -226,11 +246,7 @@ def build(origin):
                 continue
             if name == "operator":
                 continue
-            if (
-                "factory" in modifiers
-                or name == current
-                or name.startswith(current + ".")
-            ):
+            if constructs:
                 record(
                     types[current]["statics"],
                     name.split(".")[-1] if "." in name else "new",

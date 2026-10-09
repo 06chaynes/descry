@@ -119,31 +119,6 @@ class ScipCacheManager:
         self._scip_skip_crates = set(scip_skip_crates) if scip_skip_crates else set()
         self._scip_toolchain = scip_toolchain
 
-    def _discover_for(self, lang: str) -> list[DiscoveredProject]:
-        """Run discovery for one adapter by `lang` name; empty list if unknown."""
-        adapter = ADAPTERS.get(lang)
-        if adapter is None:
-            return []
-        return adapter.discover(self.project_root, self.excluded_dirs)
-
-    def get_projects(self) -> list[tuple[str, str]]:
-        """Auto-discover all indexable projects across every registered adapter.
-
-        Returns:
-            Sorted list of (project_name, project_type) tuples where
-            project_type is the adapter's `name` (e.g. "rust", "typescript",
-            "python", and any future SCIP language additions).
-        """
-        out: list[tuple[str, str]] = []
-        for adapter in ADAPTERS.values():
-            for project in adapter.discover(self.project_root, self.excluded_dirs):
-                out.append((project.name, adapter.name))
-        return sorted(out)
-
-    def get_project_names(self, lang: str) -> list[str]:
-        """Discovered project names for one adapter, e.g. Rust crate dirs."""
-        return [p.name for p in self._discover_for(lang)]
-
     @staticmethod
     def _project_key(adapter_name: str, project: str) -> str:
         """Key for one project in ``checksums.json`` and in result dicts.

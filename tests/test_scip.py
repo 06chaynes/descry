@@ -9,7 +9,7 @@ import pytest
 
 from descry.generate import TypeScriptSymbolTable
 from descry.scip.adapters.typescript import parse_backtick_descriptors
-from descry.scip.cache import ScipCacheManager
+from descry.scip.cache import ADAPTERS, ScipCacheManager
 from descry.scip.parser import ScipIndex
 
 
@@ -140,8 +140,15 @@ class TestScipCachePerformance:
                 os.environ["DESCRY_PRIME_THREADS"] = original
 
 
+def _discovered(manager, lang):
+    """Names of the projects the ``lang`` adapter finds under the manager's
+    root."""
+    found = ADAPTERS[lang].discover(manager.project_root, manager.excluded_dirs)
+    return [project.name for project in found]
+
+
 class TestPythonSCIPDiscovery:
-    """get_project_names covers monorepo and single-package layouts."""
+    """Discovery covers monorepo and single-package layouts."""
 
     def test_monorepo_layout_with_pyproject(self, tmp_path):
         for name in ("backend", "workers"):
@@ -154,7 +161,7 @@ class TestPythonSCIPDiscovery:
         (tmp_path / "frontend" / "index.js").write_text("")
 
         manager = ScipCacheManager(tmp_path)
-        assert manager.get_project_names("python") == ["backend", "workers"]
+        assert _discovered(manager, "python") == ["backend", "workers"]
 
     def test_monorepo_respects_excluded_dirs(self, tmp_path):
         node_modules = tmp_path / "node_modules" / "some-pkg"
@@ -163,7 +170,7 @@ class TestPythonSCIPDiscovery:
         (node_modules / "a.py").write_text("")
 
         manager = ScipCacheManager(tmp_path)
-        assert manager.get_project_names("python") == []
+        assert _discovered(manager, "python") == []
 
     def test_single_package_layout_uses_root_name(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text('[project]\nname = "standalone"\n')
@@ -173,20 +180,13 @@ class TestPythonSCIPDiscovery:
         (src / "app.py").write_text("def main(): pass\n")
 
         manager = ScipCacheManager(tmp_path)
-        assert manager.get_project_names("python") == [tmp_path.name]
+        assert _discovered(manager, "python") == [tmp_path.name]
 
     def test_setup_py_recognized(self, tmp_path):
         (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup()\n")
         (tmp_path / "mod.py").write_text("x = 1\n")
         manager = ScipCacheManager(tmp_path)
-        assert manager.get_project_names("python") == [tmp_path.name]
-
-    def test_get_projects_includes_python(self, tmp_path):
-        (tmp_path / "pyproject.toml").write_text('[project]\nname="x"\n')
-        (tmp_path / "m.py").write_text("")
-        manager = ScipCacheManager(tmp_path)
-        types = {t for _, t in manager.get_projects()}
-        assert "python" in types
+        assert _discovered(manager, "python") == [tmp_path.name]
 
     def test_hash_python_changes_on_source_edit(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text('[project]\nname="x"\n')

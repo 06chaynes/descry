@@ -387,27 +387,6 @@
     }
    }
   },
-  "JsonDecoder": {
-   "sonDecoder": {
-    "0": {
-     "params": [
-      "Object?",
-      "Object?"
-     ],
-     "returns": null
-    }
-   }
-  },
-  "JsonEncoder": {
-   "sonEncoder": {
-    "0": {
-     "params": [
-      "dynamic"
-     ],
-     "returns": null
-    }
-   }
-  },
   "LinkedHashSet": {
    "forEach": {
     "0": {
@@ -1074,14 +1053,6 @@
    }
   },
   "Zone": {
-   "Function": {
-    "0": {
-     "params": [
-      "T"
-     ],
-     "returns": null
-    }
-   },
    "bindCallback": {
     "0": {
      "params": [],
@@ -1218,125 +1189,6 @@
   }
  },
  "functions": {
-  "BlobCallback": "typedef",
-  "CleanupCallback": "typedef",
-  "ClientServiceHandle": "typedef",
-  "CreateTempDirCallback": "typedef",
-  "CustomElementConstructor": "typedef",
-  "DdsConnectedCallback": "typedef",
-  "DdsDisconnectedCallback": "typedef",
-  "DecodeErrorCallback": "typedef",
-  "DecodeSuccessCallback": "typedef",
-  "DeleteDirCallback": "typedef",
-  "FrameRequestCallback": "typedef",
-  "Function": "int",
-  "FunctionStringCallback": "typedef",
-  "IdleRequestCallback": "typedef",
-  "ListFilesCallback": "typedef",
-  "MService": "V",
-  "ObserverCallback": "typedef",
-  "ReadFileCallback": "typedef",
-  "S": null,
-  "ServeObservatoryCallback": "typedef",
-  "ServerInformamessage_routertionCallback": "typedef",
-  "ServerInformationCallback": "typedef",
-  "SqlTransactionCallback": "typedef",
-  "SqlTransactionErrorCallback": "typedef",
-  "TimelineAsyncFunction": "typedef",
-  "WebServerAcceptNewWebSocketConnectionsCallback": "typedef",
-  "WebServerControlCallback": "typedef",
-  "WriteFileCallback": "typedef",
-  "WriteStreamFileCallback": "typedef",
-  "_": "extension",
-  "_AcceptStructuredCloneDart2Js": "new",
-  "_AsyncCallback": "typedef",
-  "_BroadcastCallback": "typedef",
-  "_EntriesCallback": "typedef",
-  "_EntryCallback": "typedef",
-  "_ErrorCallback": "typedef",
-  "_FileCallback": "typedef",
-  "_FileSystemCallback": "typedef",
-  "_FileWriterCallback": "typedef",
-  "_SinkMapper": "typedef",
-  "_TimerCallback": "typedef",
-  "_TransformDataHandler": "typedef",
-  "_TransformDoneHandler": "typedef",
-  "_Transformation": "typedef",
-  "_addUserTagsToStreamableSampleList": null,
-  "_argumentsAsJson": "String",
-  "_cancelAndValue": null,
-  "_checkForErrorResponse": null,
-  "_clampToZero": "T",
-  "_combineSurrogatePair": "int",
-  "_completeRequest": "Future<T>",
-  "_createObjectLiteral": "JSObjectRepType",
-  "_decodeAssets": "List<dynamic>",
-  "_defaultEquals": "bool",
-  "_defaultHashCode": "int",
-  "_defaultToEncodable": null,
-  "_dynamicCompare": "int",
-  "_encodeDevFSDisabledError": "String",
-  "_encodeFileSystemAlreadyExistsError": "String",
-  "_encodeFileSystemDoesNotExistError": "String",
-  "_externalizeNonNullable": "WasmExternRef",
-  "_externalizeNullable": "WasmExternRef",
-  "_getConstructor": null,
-  "_getHttpEnableTimelineLogging": "String",
-  "_getIsolateIdFromSendPort": "String",
-  "_getNativeField": "int",
-  "_getNextTaskId": "int",
-  "_getObjectId": "String",
-  "_getServerInfo": null,
-  "_getServiceMajorVersion": "int",
-  "_getServiceMinorVersion": "int",
-  "_getTraceClock": "int",
-  "_interceptError": "AsyncError",
-  "_interceptUserError": "AsyncError",
-  "_internalizeNonNullable": "WasmAnyRef",
-  "_internalizeNullable": "WasmAnyRef",
-  "_invalidArgument": "String",
-  "_isDartStreamEnabled": "bool",
-  "_isLeadSurrogate": "bool",
-  "_isTailSurrogate": "bool",
-  "_isTrailSurrogate": "bool",
-  "_iterablePartsToStrings": null,
-  "_lookupExtension": "ServiceExtensionHandler",
-  "_microtaskLoop": null,
-  "_missingArgument": "String",
-  "_notNull": "bool",
-  "_nullDataHandler": null,
-  "_nullDoneHandler": null,
-  "_nullErrorHandler": null,
-  "_onExit": null,
-  "_onServerAddressChange": null,
-  "_onStart": null,
-  "_parseJson": null,
-  "_postEvent": null,
-  "_printToZone": null,
-  "_registerIsolate": null,
-  "_removeUserTagsFromStreamableSampleList": null,
-  "_requestAssets": "Uint8List",
-  "_rootHandleError": null,
-  "_rootPrint": null,
-  "_rootRun": "R",
-  "_runGuarded": null,
-  "_scheduleAsyncCallback": null,
-  "_schedulePriorityAsyncCallback": null,
-  "_setHttpEnableTimelineLogging": "String",
-  "_setStdioFDs": null,
-  "_socketProfilingEnabled": "String",
-  "_startMicrotaskLoop": null,
-  "_success": "String",
-  "_trySetStackTrace": null,
-  "_validateZLibMemLevel": null,
-  "_validateZLibStrategy": null,
-  "_validateZLibWindowBits": null,
-  "_validateZLibeLevel": null,
-  "_vmCancelStream": null,
-  "_vmListenStream": "bool",
-  "_wasmExternRefIsNull": "bool",
-  "_workerSelf": "WorkerGlobalScope",
-  "a": null,
   "acos": "double",
   "add": "T",
   "addHttpClientProfilingData": null,
@@ -1352,42 +1204,39 @@
   "boot": "RawReceivePort",
   "callConstructor": "T",
   "callMethod": "T",
-  "convertDartToNative_IDBKey": "_",
+  "convertDartToNative_DateTime": null,
+  "convertDartToNative_Dictionary": null,
+  "convertDartToNative_ImageData": null,
+  "convertDartToNative_PrepareForStructuredClone": null,
+  "convertDartToNative_SerializedScriptValue": null,
   "convertDartToNative_StringArray": "List",
-  "convertDartToNative_Value": "_",
+  "convertNativeToDart_AcceptStructuredClone": null,
+  "convertNativeToDart_ContextAttributes": null,
   "convertNativeToDart_DateTime": "DateTime",
   "convertNativeToDart_Dictionary": "Map<String, dynamic>",
-  "convertNativeToDart_IDBAny": "_",
-  "convertNativeToDart_IDBKey": "_",
   "convertNativeToDart_ImageData": "ImageData",
-  "convertNativeToDart_Value": "_",
+  "convertNativeToDart_SerializedScriptValue": null,
   "cos": "double",
   "createDartExport": "Object",
   "createJSInteropWrapper": "JSObject",
   "currentMirrorSystem": "MirrorSystem",
-  "d": null,
   "dartify": null,
   "debugger": "bool",
   "delete": "bool",
   "divide": "T",
-  "e": null,
-  "encode": "json.",
   "encodeCompilationError": "String",
   "encodeInvalidParamError": "String",
   "encodeMissingParamError": "String",
   "encodeResult": "String",
   "encodeSuccess": "String",
   "equal": "bool",
-  "etProperty": "g",
   "exit": "Never",
   "exp": "double",
   "exponentiate": "T",
   "externRefForJSAny": "WasmExternRef",
-  "f": "i",
   "getCurrentTag": "UserTag",
   "getHttpClientProfilingData": "List<Map<String, dynamic>>",
   "getProperty": "T",
-  "getResidentCompilerInfoFileCallback": "typedef",
   "greaterThan": "bool",
   "greaterThanOrEqual": "bool",
   "hasProperty": "bool",
@@ -1413,35 +1262,22 @@
   "min": "T",
   "modulo": "T",
   "multiply": "T",
-  "n": "o",
-  "ncodeResult": "e",
-  "ncodeRpcError": "e",
   "newObject": "T",
   "not": "T",
   "notEqual": "bool",
   "objectGetPrototypeOf": null,
   "objectKeys": "List<Object?>",
   "onServerAddressChange": null,
-  "onvertDartToNative_DateTime": "c",
-  "onvertDartToNative_Dictionary": "c",
-  "onvertDartToNative_ImageData": "c",
-  "onvertDartToNative_PrepareForStructuredClone": "c",
-  "onvertDartToNative_SerializedScriptValue": "c",
-  "onvertNativeToDart_AcceptStructuredClone": "c",
-  "onvertNativeToDart_ContextAttributes": "c",
-  "onvertNativeToDart_SerializedScriptValue": "c",
   "or": "T",
   "pid": "int",
   "pow": "num",
   "print": null,
   "promiseToFuture": "Future<T>",
   "promiseToFutureAsMap": "Future<Map<String, dynamic>?>",
-  "r": null,
   "reflect": "InstanceMirror",
   "reflectClass": "ClassMirror",
   "reflectType": "TypeMirror",
-  "registerExtension": "_",
-  "romiseToFuture": "p",
+  "registerExtension": null,
   "scheduleMicrotask": null,
   "sendIsolateServiceMessage": "bool",
   "sendObjectRootServiceMessage": null,
@@ -1457,10 +1293,8 @@
   "tan": "double",
   "typeofEquals": "bool",
   "unawaited": null,
-  "unction": "F",
   "unsignedRightShift": "num",
-  "window": "Window",
-  "witch": "s"
+  "window": "Window"
  },
  "scope": {},
  "source": "the Dart 3.7.0 SDK `sdk/lib` libraries",
@@ -1475,11 +1309,11 @@
   },
   "AbiSpecificInteger": {
    "bases": [],
-   "methods": {
-    "biSpecificInteger": "A"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "AbiSpecificInteger"
+   }
   },
   "AbiSpecificIntegerArray": {
    "bases": [
@@ -1497,11 +1331,12 @@
   "AbiSpecificIntegerMapping": {
    "bases": [],
    "methods": {
-    "biSpecificIntegerMapping": "A",
     "mapping": "Map<Abi, NativeType>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "AbiSpecificIntegerMapping"
+   }
   },
   "AbortPaymentEvent": {
    "bases": [
@@ -1515,9 +1350,7 @@
   },
   "AbsoluteOrientationSensor": {
    "bases": [],
-   "methods": {
-    "S": "J"
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "new": "AbsoluteOrientationSensor"
@@ -1538,8 +1371,7 @@
     "EventTarget"
    ],
    "methods": {
-    "onError": "Stream<Event>",
-    "ventStreamProvider": "E"
+    "onError": "Stream<Event>"
    },
    "params": [],
    "statics": {}
@@ -1547,7 +1379,6 @@
   "Accelerometer": {
    "bases": [],
    "methods": {
-    "S": "J",
     "native": "num"
    },
    "params": [],
@@ -1560,24 +1391,22 @@
     "EventTarget"
    ],
    "methods": {
-    "S": "J",
-    "ccessibleNode": "A",
     "native": null,
     "onAccessibleClick": "Stream<Event>",
     "onAccessibleContextMenu": "Stream<Event>",
     "onAccessibleDecrement": "Stream<Event>",
     "onAccessibleFocus": "Stream<Event>",
     "onAccessibleIncrement": "Stream<Event>",
-    "onAccessibleScrollIntoView": "Stream<Event>",
-    "ventStreamProvider": "E"
+    "onAccessibleScrollIntoView": "Stream<Event>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "AccessibleNode"
+   }
   },
   "AccessibleNodeList": {
    "bases": [],
    "methods": {
-    "S": "J",
     "native": "int"
    },
    "params": [],
@@ -1615,7 +1444,6 @@
   "AmbientLightSensor": {
    "bases": [],
    "methods": {
-    "S": "J",
     "native": "num"
    },
    "params": [],
@@ -1628,7 +1456,6 @@
     "AudioNode"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -1661,14 +1488,11 @@
     "EventTarget"
    ],
    "methods": {
-    "S": "J",
     "finished": "Future<Animation>",
     "native": null,
     "onCancel": "Stream<Event>",
     "onFinish": "Stream<Event>",
-    "ready": "Future<Animation>",
-    "romiseToFuture": "p",
-    "ventStreamProvider": "E"
+    "ready": "Future<Animation>"
    },
    "params": [],
    "statics": {
@@ -1707,7 +1531,6 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -1720,7 +1543,6 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": "num"
    },
    "params": [],
@@ -1755,8 +1577,7 @@
     "onNoUpdate": "Stream<Event>",
     "onObsolete": "Stream<Event>",
     "onProgress": "Stream<ProgressEvent>",
-    "onUpdateReady": "Stream<Event>",
-    "ventStreamProvider": "E"
+    "onUpdateReady": "Stream<Event>"
    },
    "params": [],
    "statics": {
@@ -1782,11 +1603,12 @@
    ],
    "methods": {
     "native": "String",
-    "reaElement": "A",
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "AreaElement"
+   }
   },
   "ArgumentError": {
    "bases": [
@@ -1796,7 +1618,6 @@
     "invalidValue": null,
     "message": null,
     "name": "String",
-    "rgumentError": "A",
     "toString": "String"
    },
    "params": [],
@@ -1840,7 +1661,6 @@
     "Encoding"
    ],
    "methods": {
-    "allowInvalid": "_",
     "decode": "String",
     "decoder": "AsciiDecoder",
     "encode": "Uint8List",
@@ -1853,19 +1673,20 @@
   "AsciiDecoder": {
    "bases": [],
    "methods": {
-    "sciiDecoder": "A",
     "startChunkedConversion": "ByteConversionSink"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "AsciiDecoder"
+   }
   },
   "AsciiEncoder": {
    "bases": [],
-   "methods": {
-    "sciiEncoder": "A"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "AsciiEncoder"
+   }
   },
   "AssertionError": {
    "bases": [
@@ -1873,7 +1694,6 @@
    ],
    "methods": {
     "message": null,
-    "ssertionError": "A",
     "toString": "String"
    },
    "params": [],
@@ -1885,7 +1705,6 @@
     "data": "Uint8List",
     "mimeType": "String",
     "name": "String",
-    "sset": "A",
     "toString": "String"
    },
    "params": [],
@@ -1900,7 +1719,6 @@
    "methods": {
     "error": "Object",
     "stackTrace": "StackTrace",
-    "syncError": "A",
     "toString": "String"
    },
    "params": [],
@@ -1911,7 +1729,6 @@
   "AudioBuffer": {
    "bases": [],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -1924,7 +1741,6 @@
     "AudioScheduledSourceNode"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -1937,16 +1753,15 @@
     "BaseAudioContext"
    ],
    "methods": {
-    "S": "J",
     "close": "Future",
     "createGain": "GainNode",
     "getOutputTimestamp": "Map",
     "native": "num",
-    "suspend": "Future",
-    "udioContext": "A"
+    "suspend": "Future"
    },
    "params": [],
    "statics": {
+    "new": "AudioContext",
     "supported": "bool"
    }
   },
@@ -2008,7 +1823,6 @@
     "isNotEmpty": "bool",
     "keys": "Iterable<String>",
     "length": "int",
-    "onvertNativeToDart_Dictionary": "c",
     "operator []": "Map",
     "operator []=": null,
     "putIfAbsent": null,
@@ -2035,8 +1849,7 @@
     "AudioNode"
    ],
    "methods": {
-    "onEnded": "Stream<Event>",
-    "ventStreamProvider": "E"
+    "onEnded": "Stream<Event>"
    },
    "params": [],
    "statics": {}
@@ -2055,8 +1868,7 @@
    ],
    "methods": {
     "native": "int",
-    "onChange": "Stream<Event>",
-    "ventStreamProvider": "E"
+    "onChange": "Stream<Event>"
    },
    "params": [],
    "statics": {}
@@ -2074,7 +1886,6 @@
     "AudioNode"
    ],
    "methods": {
-    "S": "J",
     "native": "AudioParamMap"
    },
    "params": [],
@@ -2118,11 +1929,11 @@
    "bases": [
     "HtmlElement"
    ],
-   "methods": {
-    "RElement": "B"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "BRElement"
+   }
   },
   "BackgroundFetchClickEvent": {
    "bases": [
@@ -2141,7 +1952,6 @@
     "ExtendableEvent"
    ],
    "methods": {
-    "S": "J",
     "native": "String"
    },
    "params": [],
@@ -2207,7 +2017,6 @@
    ],
    "methods": {
     "native": "List<BackgroundFetchSettledFetch>",
-    "romiseToFuture": "p",
     "updateUI": "Future"
    },
    "params": [],
@@ -2226,38 +2035,40 @@
   "BarcodeDetector": {
    "bases": [],
    "methods": {
-    "S": "J",
-    "arcodeDetector": "B",
     "detect": "Future<List<dynamic>>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "BarcodeDetector"
+   }
   },
   "Base64Codec": {
    "bases": [
     "Codec<List<int>, String>"
    ],
    "methods": {
-    "ase64Codec": "B",
     "decode": "Uint8List",
     "decoder": "Base64Decoder",
     "encoder": "Base64Encoder",
     "normalize": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Base64Codec"
+   }
   },
   "Base64Decoder": {
    "bases": [
     "Converter<String, List<int>>"
    ],
    "methods": {
-    "ase64Decoder": "B",
     "convert": "Uint8List",
     "startChunkedConversion": "StringConversionSink"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Base64Decoder"
+   }
   },
   "Base64Encoder": {
    "bases": [
@@ -2286,11 +2097,12 @@
     "HtmlElement"
    ],
    "methods": {
-    "aseElement": "B",
     "native": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "BaseElement"
+   }
   },
   "BatteryManager": {
    "bases": [
@@ -2307,10 +2119,8 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": "List<String>",
     "prompt": "Future",
-    "romiseToFutureAsMap": "p",
     "userChoice": "Future<Map<String, dynamic>?>"
    },
    "params": [],
@@ -2383,7 +2193,6 @@
     "AudioNode"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -2398,10 +2207,6 @@
    },
    "params": [],
    "statics": {
-    "bag_set": "_",
-    "create_1": "_",
-    "create_2": "_",
-    "create_bag": "_",
     "new": "Blob"
    }
   },
@@ -2410,7 +2215,6 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -2423,7 +2227,6 @@
    "methods": {
     "native": null,
     "readValue": "Future",
-    "romiseToFuture": "p",
     "writeValue": "Future"
    },
    "params": [],
@@ -2437,7 +2240,6 @@
     "formData": "Future<FormData>",
     "json": "Future",
     "native": "bool",
-    "romiseToFuture": "p",
     "text": "Future<String>"
    },
    "params": [],
@@ -2448,7 +2250,6 @@
     "HtmlElement"
    ],
    "methods": {
-    "odyElement": "B",
     "onBlur": "ElementStream<Event>",
     "onError": "ElementStream<Event>",
     "onFocus": "ElementStream<Event>",
@@ -2461,19 +2262,20 @@
     "onResize": "ElementStream<Event>",
     "onScroll": "ElementStream<Event>",
     "onStorage": "ElementStream<StorageEvent>",
-    "onUnload": "ElementStream<Event>",
-    "ventStreamProvider": "E"
+    "onUnload": "ElementStream<Event>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "BodyElement"
+   }
   },
   "Bool": {
    "bases": [],
-   "methods": {
-    "ool": "B"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Bool"
+   }
   },
   "BoolAddress": {
    "bases": [
@@ -2526,10 +2328,8 @@
     "EventTarget"
    ],
    "methods": {
-    "S": "J",
     "native": "String",
-    "onMessage": "Stream<MessageEvent>",
-    "ventStreamProvider": "E"
+    "onMessage": "Stream<MessageEvent>"
    },
    "params": [],
    "statics": {
@@ -2555,11 +2355,12 @@
     "HtmlElement"
    ],
    "methods": {
-    "native": null,
-    "uttonElement": "B"
+    "native": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "ButtonElement"
+   }
   },
   "ButtonInputElement": {
    "bases": [
@@ -2659,8 +2460,7 @@
     "has": "Future",
     "keys": "Future",
     "match": "Future",
-    "open": "Future",
-    "romiseToFuture": "p"
+    "open": "Future"
    },
    "params": [],
    "statics": {}
@@ -2698,14 +2498,13 @@
     "HtmlElement"
    ],
    "methods": {
-    "S": "J",
     "context2D": "CanvasRenderingContext2D",
     "getContext": null,
     "native": "int",
     "onWebGlContextLost": "ElementStream<gl.ContextEvent>",
     "onWebGlContextRestored": "ElementStream<gl.ContextEvent>",
     "toBlob": "Future<Blob>",
-    "toDataUrl": null
+    "toDataUrl": "String"
    },
    "params": [],
    "statics": {
@@ -2734,29 +2533,27 @@
   },
   "Capability": {
    "bases": [],
-   "methods": {
-    "apability": "C"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Capability"
+   }
   },
   "CertificateException": {
    "bases": [
     "TlsException"
    ],
-   "methods": {
-    "ertificateException": "C"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "CertificateException"
+   }
   },
   "ChannelMergerNode": {
    "bases": [
     "AudioNode"
    ],
-   "methods": {
-    "S": "J"
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "new": "ChannelMergerNode"
@@ -2766,9 +2563,7 @@
    "bases": [
     "AudioNode"
    ],
-   "methods": {
-    "S": "J"
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "new": "ChannelSplitterNode"
@@ -2778,11 +2573,11 @@
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "har": "C"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Char"
+   }
   },
   "CheckboxInputElement": {
    "bases": [
@@ -2813,8 +2608,7 @@
    ],
    "methods": {
     "add": null,
-    "close": null,
-    "hunkedConversionSink": "C"
+    "close": null
    },
    "params": [
     "T"
@@ -2846,9 +2640,6 @@
    "methods": {
     "close": null,
     "defaultClientName": "String",
-    "ervice": "s",
-    "isconnect": "d",
-    "lient": "C",
     "name": "String",
     "native": "String",
     "onNotification": null,
@@ -2878,7 +2669,6 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": "DataTransfer"
    },
    "params": [],
@@ -2891,7 +2681,6 @@
     "StringSink"
    ],
    "methods": {
-    "ClosableStringSink": "_",
     "close": null
    },
    "params": [],
@@ -2902,7 +2691,6 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -2928,14 +2716,15 @@
     "encode": "T",
     "encoder": "Converter<S, T>",
     "fuse": "Codec<S, R>",
-    "inverted": "Codec<T, S>",
-    "odec": "C"
+    "inverted": "Codec<T, S>"
    },
    "params": [
     "S",
     "T"
    ],
-   "statics": {}
+   "statics": {
+    "new": "Codec"
+   }
   },
   "ColorBufferFloat": {
    "bases": [],
@@ -2991,7 +2780,6 @@
   "CompositionEvent": {
    "bases": [],
    "methods": {
-    "S": "J",
     "native": "String"
    },
    "params": [],
@@ -3057,7 +2845,6 @@
    ],
    "methods": {
     "modifiedObject": null,
-    "oncurrentModificationError": "C",
     "toString": "String"
    },
    "params": [],
@@ -3090,7 +2877,6 @@
     "AudioScheduledSourceNode"
    ],
    "methods": {
-    "S": "J",
     "native": "AudioParam"
    },
    "params": [],
@@ -3109,11 +2895,11 @@
     "HtmlElement"
    ],
    "methods": {
-    "native": "String",
-    "ontentElement": "C"
+    "native": "String"
    },
    "params": [],
    "statics": {
+    "new": "ContentElement",
     "supported": "bool"
    }
   },
@@ -3151,7 +2937,6 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": "String"
    },
    "params": [],
@@ -3164,12 +2949,10 @@
     "StreamTransformerBase<S, T>"
    ],
    "methods": {
-    "astConverter": "C",
     "bind": "Stream<T>",
     "cast": "Converter<RS, RT>",
     "convert": "T",
     "fuse": "Converter<S, TT>",
-    "onverter": "C",
     "startChunkedConversion": "Sink<S>"
    },
    "params": [
@@ -3177,7 +2960,8 @@
     "T"
    ],
    "statics": {
-    "castFrom": "Converter<TS, TT>"
+    "castFrom": "Converter<TS, TT>",
+    "new": "Converter"
    }
   },
   "ConvolverNode": {
@@ -3185,7 +2969,6 @@
     "AudioNode"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -3250,7 +3033,6 @@
     "get": "Future",
     "preventSilentAccess": "Future",
     "requireUserMediation": "Future",
-    "romiseToFuture": "p",
     "store": "Future"
    },
    "params": [],
@@ -3259,7 +3041,6 @@
   "Crypto": {
    "bases": [],
    "methods": {
-    "S": "J",
     "getRandomValues": "TypedData",
     "native": "_SubtleCrypto"
    },
@@ -3307,7 +3088,6 @@
     "contains": "bool",
     "containsAll": "bool",
     "difference": "Set<String>",
-    "eadClasses": "r",
     "elementAt": "String",
     "every": "bool",
     "expand": "Iterable<T>",
@@ -3326,7 +3106,6 @@
     "length": "int",
     "lookup": "String",
     "map": "Iterable<T>",
-    "odify": "m",
     "readClasses": "Set<String>",
     "reduce": "String",
     "remove": "bool",
@@ -3427,7 +3206,6 @@
     "CssStyleValue"
    ],
    "methods": {
-    "S": "J",
     "native": "String"
    },
    "params": [],
@@ -3440,7 +3218,6 @@
     "CssTransformComponent"
    ],
    "methods": {
-    "S": "J",
     "native": "DomMatrix"
    },
    "params": [],
@@ -3491,7 +3268,6 @@
     "CssTransformComponent"
    ],
    "methods": {
-    "S": "J",
     "native": "CssNumericValue"
    },
    "params": [],
@@ -3504,7 +3280,6 @@
     "CssStyleValue"
    ],
    "methods": {
-    "S": "J",
     "native": "CssNumericValue"
    },
    "params": [],
@@ -3527,7 +3302,6 @@
     "CssTransformComponent"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -3546,7 +3320,6 @@
     "CssTransformComponent"
    ],
    "methods": {
-    "S": "J",
     "native": "num"
    },
    "params": [],
@@ -3690,7 +3463,6 @@
     "direction": "String",
     "display": "String",
     "emptyCells": "String",
-    "etPropertyValue": "g",
     "filter": "String",
     "flex": "String",
     "flexBasis": "String",
@@ -3965,7 +3737,6 @@
     "CssStyleValue"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -3976,7 +3747,6 @@
     "CssTransformComponent"
    ],
    "methods": {
-    "S": "J",
     "native": "CssNumericValue"
    },
    "params": [],
@@ -3987,7 +3757,6 @@
     "CssNumericValue"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -4028,7 +3797,6 @@
     "CssImageValue"
    ],
    "methods": {
-    "S": "J",
     "native": "String"
    },
    "params": [],
@@ -4062,7 +3830,6 @@
    "bases": [],
    "methods": {
     "define": null,
-    "romiseToFuture": "p",
     "whenDefined": "Future"
    },
    "params": [],
@@ -4073,10 +3840,8 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
-    "detail": "get",
-    "native": "dynamic",
-    "onvertNativeToDart_SerializedScriptValue": "c"
+    "detail": null,
+    "native": "dynamic"
    },
    "params": [],
    "statics": {}
@@ -4085,19 +3850,19 @@
    "bases": [
     "HtmlElement"
    ],
-   "methods": {
-    "ListElement": "D"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "DListElement"
+   }
   },
   "DartRepresentationOf": {
    "bases": [],
-   "methods": {
-    "artRepresentationOf": "D"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "DartRepresentationOf"
+   }
   },
   "DataElement": {
    "bases": [
@@ -4114,22 +3879,23 @@
     "HtmlElement"
    ],
    "methods": {
-    "ataListElement": "D",
     "native": "List<Node>"
    },
    "params": [],
    "statics": {
+    "new": "DataListElement",
     "supported": "bool"
    }
   },
   "DataTransfer": {
    "bases": [],
    "methods": {
-    "ataTransfer": "D",
     "native": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "DataTransfer"
+   }
   },
   "DataTransferItem": {
    "bases": [],
@@ -4163,8 +3929,7 @@
     "transaction": "Transaction",
     "transactionList": "Transaction",
     "transactionStore": "Transaction",
-    "transactionStores": "Transaction",
-    "ventStreamProvider": "E"
+    "transactionStores": "Transaction"
    },
    "params": [],
    "statics": {}
@@ -4173,7 +3938,6 @@
    "bases": [],
    "methods": {
     "address": "InternetAddress",
-    "atagram": "D",
     "data": "Uint8List",
     "port": "int"
    },
@@ -4272,8 +4036,7 @@
    "bases": [],
    "methods": {
     "onMessage": "Stream<MessageEvent>",
-    "postMessage": null,
-    "ventStreamProvider": "E"
+    "postMessage": null
    },
    "params": [],
    "statics": {
@@ -4283,11 +4046,12 @@
   "DefaultAsset": {
    "bases": [],
    "methods": {
-    "efaultAsset": "D",
     "id": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "DefaultAsset"
+   }
   },
   "DeferredLoadException": {
    "bases": [
@@ -4304,7 +4068,6 @@
     "AudioNode"
    ],
    "methods": {
-    "S": "J",
     "native": "AudioParam"
    },
    "params": [],
@@ -4315,12 +4078,13 @@
   "Deprecated": {
    "bases": [],
    "methods": {
-    "eprecated": "D",
     "message": "String",
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Deprecated"
+   }
   },
   "DeprecatedStorageInfo": {
    "bases": [],
@@ -4353,47 +4117,48 @@
     "HtmlElement"
    ],
    "methods": {
-    "etailsElement": "D",
     "native": "bool"
    },
    "params": [],
    "statics": {
+    "new": "DetailsElement",
     "supported": "bool"
    }
   },
   "DetectedBarcode": {
    "bases": [],
    "methods": {
-    "S": "J",
-    "etectedBarcode": "D",
     "native": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "DetectedBarcode"
+   }
   },
   "DetectedFace": {
    "bases": [],
    "methods": {
-    "etectedFace": "D",
     "native": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "DetectedFace"
+   }
   },
   "DetectedText": {
    "bases": [],
    "methods": {
-    "etectedText": "D",
     "native": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "DetectedText"
+   }
   },
   "DevFS": {
    "bases": [],
    "methods": {
     "cleanup": null,
-    "evFS": "D",
     "shouldHandleMessage": "bool"
    },
    "params": [],
@@ -4421,7 +4186,6 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -4434,7 +4198,6 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -4514,29 +4277,26 @@
    "bases": [
     "HtmlElement"
    ],
-   "methods": {
-    "ivElement": "D"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "DivElement"
+   }
   },
   "DocsEditable": {
    "bases": [],
-   "methods": {
-    "ocsEditable": "D"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "DocsEditable"
+   }
   },
   "Document": {
    "bases": [],
    "methods": {
-    "S": "J",
+    "EventStreamProvider": null,
     "createElement": "Element",
-    "createElementNS_2": "_",
-    "createElement_2": "_",
     "native": null,
-    "ocument": "D",
     "onAbort": "Stream<Event>",
     "onBeforeCopy": "Stream<Event>",
     "onBeforeCut": "Stream<Event>",
@@ -4609,12 +4369,13 @@
     "onVolumeChange": "Stream<Event>",
     "onWaiting": "Stream<Event>",
     "querySelectorAll": "ElementList<T>",
-    "ventStreamProvider": "E",
     "visibilityState": "String",
     "window": "WindowBase"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Document"
+   }
   },
   "DocumentOrShadowRoot": {
    "bases": [],
@@ -4628,9 +4389,7 @@
    "bases": [
     "AnimationTimeline"
    ],
-   "methods": {
-    "S": "J"
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "new": "DocumentTimeline"
@@ -4639,7 +4398,6 @@
   "DomError": {
    "bases": [],
    "methods": {
-    "S": "J",
     "native": "String"
    },
    "params": [],
@@ -4687,7 +4445,6 @@
   "DomMatrixReadOnly": {
    "bases": [],
    "methods": {
-    "S": "J",
     "multiply": "DomMatrix",
     "native": null,
     "transformPoint": "DomPoint"
@@ -4701,26 +4458,26 @@
   "DomName": {
    "bases": [],
    "methods": {
-    "name": "String",
-    "omName": "D"
+    "name": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "DomName"
+   }
   },
   "DomParser": {
    "bases": [],
-   "methods": {
-    "omParser": "D"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "DomParser"
+   }
   },
   "DomPoint": {
    "bases": [
     "DomPointReadOnly"
    ],
    "methods": {
-    "S": "J",
     "native": "num"
    },
    "params": [],
@@ -4733,7 +4490,6 @@
   "DomPointReadOnly": {
    "bases": [],
    "methods": {
-    "S": "J",
     "matrixTransform": "DomPoint",
     "native": "num"
    },
@@ -4746,7 +4502,6 @@
   "DomQuad": {
    "bases": [],
    "methods": {
-    "S": "J",
     "native": "DomPoint"
    },
    "params": [],
@@ -4761,8 +4516,6 @@
     "Rectangle"
    ],
    "methods": {
-    "Point": "new",
-    "S": "J",
     "bottom": "num",
     "bottomLeft": "Point",
     "bottomRight": "Point",
@@ -4805,11 +4558,11 @@
   },
   "Double": {
    "bases": [],
-   "methods": {
-    "ouble": "D"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Double"
+   }
   },
   "DoubleAddress": {
    "bases": [
@@ -4838,7 +4591,6 @@
     "Queue<E>"
    ],
    "methods": {
-    "DoubleLinkedQueueSentinel": "_",
     "add": null,
     "addAll": null,
     "addFirst": null,
@@ -4853,7 +4605,6 @@
     "last": "E",
     "lastEntry": "DoubleLinkedQueueEntry<E>",
     "length": "int",
-    "oubleLinkedQueue": "D",
     "remove": "bool",
     "removeFirst": "E",
     "removeLast": "E",
@@ -4967,7 +4718,6 @@
     "AudioNode"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -4986,7 +4736,6 @@
     "Events"
    ],
    "methods": {
-    "lementEvents": "E",
     "operator []": "Stream<Event>"
    },
    "params": [],
@@ -5106,11 +4855,11 @@
     "HtmlElement"
    ],
    "methods": {
-    "mbedElement": "E",
     "native": "String"
    },
    "params": [],
    "statics": {
+    "new": "EmbedElement",
     "supported": "bool"
    }
   },
@@ -5122,12 +4871,12 @@
     "decodeStream": "Future<String>",
     "decoder": "Converter<List<int>, String>",
     "encoder": "Converter<String, List<int>>",
-    "name": "String",
-    "ncoding": "E"
+    "name": "String"
    },
    "params": [],
    "statics": {
-    "getByName": "Encoding"
+    "getByName": "Encoding",
+    "new": "Encoding"
    }
   },
   "Endian": {
@@ -5186,7 +4935,6 @@
   "Error": {
    "bases": [],
    "methods": {
-    "rror": "E",
     "stackTrace": "StackTrace"
    },
    "params": [],
@@ -5200,7 +4948,6 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -5211,8 +4958,6 @@
   "Event": {
    "bases": [],
    "methods": {
-    "S": "J",
-    "convertNativeToDart_EventTarget": "_",
     "currentTarget": "EventTarget",
     "matchingTarget": "Element",
     "native": null,
@@ -5243,12 +4988,10 @@
     "EventTarget"
    ],
    "methods": {
-    "S": "J",
     "native": null,
     "onError": "Stream<Event>",
     "onMessage": "Stream<MessageEvent>",
-    "onOpen": "Stream<Event>",
-    "ventStreamProvider": "E"
+    "onOpen": "Stream<Event>"
    },
    "params": [],
    "statics": {
@@ -5266,8 +5009,7 @@
   "Events": {
    "bases": [],
    "methods": {
-    "operator []": "Stream<Event>",
-    "vents": "E"
+    "operator []": "Stream<Event>"
    },
    "params": [],
    "statics": {}
@@ -5286,21 +5028,22 @@
     "name": "String",
     "operator []": "T",
     "operator []=": null,
-    "toString": "String",
-    "xpando": "E"
+    "toString": "String"
    },
    "params": [
     "T"
    ],
-   "statics": {}
+   "statics": {
+    "new": "Expando"
+   }
   },
   "Experimental": {
    "bases": [],
-   "methods": {
-    "xperimental": "E"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Experimental"
+   }
   },
   "ExtBlendMinMax": {
    "bases": [],
@@ -5354,9 +5097,7 @@
    "bases": [
     "Event"
    ],
-   "methods": {
-    "S": "J"
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "new": "ExtendableEvent"
@@ -5423,7 +5164,6 @@
   "FaceDetector": {
    "bases": [],
    "methods": {
-    "S": "J",
     "detect": "Future<List<dynamic>>"
    },
    "params": [],
@@ -5437,7 +5177,6 @@
     "CredentialUserData"
    ],
    "methods": {
-    "S": "J",
     "native": "String"
    },
    "params": [],
@@ -5450,10 +5189,8 @@
     "ExtendableEvent"
    ],
    "methods": {
-    "S": "J",
     "native": null,
-    "preloadResponse": "Future",
-    "romiseToFuture": "p"
+    "preloadResponse": "Future"
    },
    "params": [],
    "statics": {
@@ -5465,11 +5202,12 @@
     "HtmlElement"
    ],
    "methods": {
-    "ieldSetElement": "F",
     "native": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "FieldSetElement"
+   }
   },
   "File": {
    "bases": [
@@ -5477,7 +5215,6 @@
     "FileSystemEntity"
    ],
    "methods": {
-    "S": "J",
     "absolute": "File",
     "copy": "Future<File>",
     "copySync": "File",
@@ -5493,7 +5230,6 @@
     "length": "Future<int>",
     "lengthSync": "int",
     "native": null,
-    "onvertNativeToDart_DateTime": "c",
     "open": "Future<RandomAccessFile>",
     "openRead": "Stream<List<int>>",
     "openSync": "RandomAccessFile",
@@ -5545,7 +5281,6 @@
     "EventTarget"
    ],
    "methods": {
-    "ileReader": "F",
     "native": null,
     "onAbort": "Stream<ProgressEvent>",
     "onError": "Stream<ProgressEvent>",
@@ -5553,11 +5288,12 @@
     "onLoadEnd": "Stream<ProgressEvent>",
     "onLoadStart": "Stream<ProgressEvent>",
     "onProgress": "Stream<ProgressEvent>",
-    "result": null,
-    "ventStreamProvider": "E"
+    "result": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "FileReader"
+   }
   },
   "FileStat": {
    "bases": [],
@@ -5574,7 +5310,7 @@
    "params": [],
    "statics": {
     "stat": "Future<FileStat>",
-    "statSync": null
+    "statSync": "FileStat"
    }
   },
   "FileSystem": {
@@ -5591,7 +5327,7 @@
    "bases": [],
    "methods": {
     "absolute": "FileSystemEntity",
-    "delete": null,
+    "delete": "Future<FileSystemEntity>",
     "deleteSync": null,
     "exists": "Future<bool>",
     "existsSync": "bool",
@@ -5623,14 +5359,15 @@
     "IOException"
    ],
    "methods": {
-    "ileSystemException": "F",
     "message": "String",
     "osError": "OSError",
     "path": "String",
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "FileSystemException"
+   }
   },
   "FileUploadInputElement": {
    "bases": [
@@ -5658,8 +5395,7 @@
     "onProgress": "Stream<ProgressEvent>",
     "onWrite": "Stream<ProgressEvent>",
     "onWriteEnd": "Stream<ProgressEvent>",
-    "onWriteStart": "Stream<ProgressEvent>",
-    "ventStreamProvider": "E"
+    "onWriteStart": "Stream<ProgressEvent>"
    },
    "params": [],
    "statics": {}
@@ -5715,11 +5451,11 @@
   },
   "Float": {
    "bases": [],
-   "methods": {
-    "loat": "F"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Float"
+   }
   },
   "Float32List": {
    "bases": [],
@@ -5886,8 +5622,6 @@
   "FocusEvent": {
    "bases": [],
    "methods": {
-    "S": "J",
-    "convertNativeToDart_EventTarget": "_",
     "native": "dynamic",
     "relatedTarget": "EventTarget"
    },
@@ -5899,11 +5633,9 @@
   "FontFace": {
    "bases": [],
    "methods": {
-    "S": "J",
     "load": "Future<FontFace>",
     "loaded": "Future<FontFace>",
-    "native": "String",
-    "romiseToFuture": "p"
+    "native": "String"
    },
    "params": [],
    "statics": {
@@ -5918,8 +5650,7 @@
     "native": "String",
     "onLoading": "Stream<FontFaceSetLoadEvent>",
     "onLoadingDone": "Stream<FontFaceSetLoadEvent>",
-    "onLoadingError": "Stream<FontFaceSetLoadEvent>",
-    "ventStreamProvider": "E"
+    "onLoadingError": "Stream<FontFaceSetLoadEvent>"
    },
    "params": [],
    "statics": {}
@@ -5929,7 +5660,6 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": "List<FontFace>"
    },
    "params": [],
@@ -5972,11 +5702,12 @@
    ],
    "methods": {
     "native": null,
-    "ormElement": "F",
     "requestAutocomplete": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "FormElement"
+   }
   },
   "FormatException": {
    "bases": [
@@ -5985,12 +5716,13 @@
    "methods": {
     "message": "String",
     "offset": "int",
-    "ormatException": "F",
     "source": null,
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "FormatException"
+   }
   },
   "Framebuffer": {
    "bases": [],
@@ -6145,7 +5877,6 @@
     "AudioNode"
    ],
    "methods": {
-    "S": "J",
     "native": "AudioParam"
    },
    "params": [],
@@ -6174,7 +5905,6 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": "Gamepad"
    },
    "params": [],
@@ -6273,8 +6003,7 @@
     "onTouchStart": "Stream<TouchEvent>",
     "onVolumeChange": "Stream<Event>",
     "onWaiting": "Stream<Event>",
-    "onWheel": "Stream<WheelEvent>",
-    "ventStreamProvider": "E"
+    "onWheel": "Stream<WheelEvent>"
    },
    "params": [],
    "statics": {}
@@ -6282,7 +6011,6 @@
   "Gyroscope": {
    "bases": [],
    "methods": {
-    "S": "J",
     "native": "num"
    },
    "params": [],
@@ -6295,21 +6023,22 @@
     "HtmlElement"
    ],
    "methods": {
-    "RElement": "H",
     "native": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "HRElement"
+   }
   },
   "HandshakeException": {
    "bases": [
     "TlsException"
    ],
-   "methods": {
-    "andshakeException": "H"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "HandshakeException"
+   }
   },
   "HasNextIterator": {
    "bases": [],
@@ -6327,7 +6056,6 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": "String"
    },
    "params": [],
@@ -6339,9 +6067,7 @@
    "bases": [
     "Map<K, V>"
    ],
-   "methods": {
-    "ashMap": "H"
-   },
+   "methods": {},
    "params": [
     "K",
     "V"
@@ -6364,11 +6090,11 @@
    "bases": [
     "HtmlElement"
    ],
-   "methods": {
-    "eadElement": "H"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "HeadElement"
+   }
   },
   "HeaderValue": {
    "bases": [],
@@ -6410,7 +6136,6 @@
    "bases": [],
    "methods": {
     "native": null,
-    "onvertNativeToDart_SerializedScriptValue": "c",
     "pushState": null,
     "replaceState": null,
     "state": null
@@ -6445,11 +6170,12 @@
   "HtmlElement": {
    "bases": [],
    "methods": {
-    "native": "String",
-    "tmlElement": "H"
+    "native": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "HtmlElement"
+   }
   },
   "HtmlEscape": {
    "bases": [
@@ -6458,11 +6184,12 @@
    "methods": {
     "convert": "String",
     "mode": "HtmlEscapeMode",
-    "startChunkedConversion": "StringConversionSink",
-    "tmlEscape": "H"
+    "startChunkedConversion": "StringConversionSink"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "HtmlEscape"
+   }
   },
   "HtmlEscapeMode": {
    "bases": [],
@@ -6486,11 +6213,11 @@
    "bases": [
     "HtmlElement"
    ],
-   "methods": {
-    "tmlHtmlElement": "H"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "HtmlHtmlElement"
+   }
   },
   "HtmlHyperlinkElementUtils": {
    "bases": [],
@@ -6612,11 +6339,12 @@
    "methods": {
     "message": "String",
     "toString": "String",
-    "ttpException": "H",
     "uri": "Uri"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "HttpException"
+   }
   },
   "HttpHeaders": {
    "bases": [],
@@ -6649,7 +6377,7 @@
    "params": [],
    "statics": {
     "current": "HttpOverrides",
-    "global": "set",
+    "global": null,
     "runWithHttpOverrides": "R"
    }
   },
@@ -6682,12 +6410,11 @@
     "response": null,
     "responseHeaders": "Map<String, String>",
     "session": "HttpSession",
-    "ttpRequest": "H",
-    "uri": "Uri",
-    "ventStreamProvider": "E"
+    "uri": "Uri"
    },
    "params": [],
    "statics": {
+    "new": "HttpRequest",
     "supportsCrossOrigin": "bool",
     "supportsLoadEndEvent": "bool",
     "supportsOverrideMimeType": "bool",
@@ -6705,8 +6432,7 @@
     "onLoadEnd": "Stream<ProgressEvent>",
     "onLoadStart": "Stream<ProgressEvent>",
     "onProgress": "Stream<ProgressEvent>",
-    "onTimeout": "Stream<ProgressEvent>",
-    "ventStreamProvider": "E"
+    "onTimeout": "Stream<ProgressEvent>"
    },
    "params": [],
    "statics": {}
@@ -6816,13 +6542,13 @@
     "HtmlElement"
    ],
    "methods": {
-    "FrameElement": "I",
     "contentWindow": "WindowBase",
-    "convertNativeToDart_Window": "_",
     "native": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "IFrameElement"
+   }
   },
   "IOException": {
    "bases": [
@@ -6858,7 +6584,7 @@
    "params": [],
    "statics": {
     "current": "IOOverrides",
-    "global": "set",
+    "global": null,
     "runWithIOOverrides": "R"
    }
   },
@@ -6885,7 +6611,6 @@
   "IdGenerator": {
    "bases": [],
    "methods": {
-    "dGenerator": "I",
     "newId": "String",
     "prologue": "String",
     "release": null
@@ -6916,9 +6641,7 @@
    "bases": [
     "AudioNode"
    ],
-   "methods": {
-    "S": "J"
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "new": "IirFilterNode"
@@ -6963,12 +6686,10 @@
   "ImageCapture": {
    "bases": [],
    "methods": {
-    "S": "J",
     "getPhotoCapabilities": "Future<PhotoCapabilities>",
     "getPhotoSettings": "Future<Map<String, dynamic>?>",
     "grabFrame": "Future<ImageBitmap>",
     "native": "MediaStreamTrack",
-    "romiseToFutureAsMap": "p",
     "setOptions": "Future",
     "takePhoto": "Future<Blob>"
    },
@@ -6980,7 +6701,6 @@
   "ImageData": {
    "bases": [],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -7117,7 +6837,6 @@
   "InputDeviceCapabilities": {
    "bases": [],
    "methods": {
-    "S": "J",
     "native": "bool"
    },
    "params": [],
@@ -7149,7 +6868,6 @@
     "ExtendableEvent"
    ],
    "methods": {
-    "S": "J",
     "registerForeignFetch": null
    },
    "params": [],
@@ -7174,19 +6892,19 @@
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "nt": "I"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Int"
+   }
   },
   "Int16": {
    "bases": [],
-   "methods": {
-    "nt16": "I"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Int16"
+   }
   },
   "Int16Array": {
    "bases": [
@@ -7247,11 +6965,11 @@
   },
   "Int32": {
    "bases": [],
-   "methods": {
-    "nt32": "I"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Int32"
+   }
   },
   "Int32Array": {
    "bases": [
@@ -7360,11 +7078,11 @@
   },
   "Int64": {
    "bases": [],
-   "methods": {
-    "nt64": "I"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Int64"
+   }
   },
   "Int64Array": {
    "bases": [
@@ -7415,11 +7133,11 @@
   },
   "Int8": {
    "bases": [],
-   "methods": {
-    "nt8": "I"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Int8"
+   }
   },
   "Int8Array": {
    "bases": [
@@ -7492,11 +7210,11 @@
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "ntPtr": "I"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "IntPtr"
+   }
   },
   "IntWasmInstructions": {
    "bases": [
@@ -7524,12 +7242,13 @@
    ],
    "methods": {
     "message": "String",
-    "ntegerDivisionByZeroException": "I",
     "stackTrace": "StackTrace",
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "IntegerDivisionByZeroException"
+   }
   },
   "InternalizeNonNullable": {
    "bases": [
@@ -7585,7 +7304,6 @@
   "IntersectionObserver": {
    "bases": [],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -7616,7 +7334,6 @@
     "isSetter": "bool",
     "memberName": "Symbol",
     "namedArguments": "Map<Symbol, dynamic>",
-    "nvocation": "I",
     "positionalArguments": "List<dynamic>",
     "typeArguments": "List<Type>"
    },
@@ -7638,7 +7355,6 @@
     "removeOnExitListener": null,
     "resume": null,
     "setErrorsFatal": null,
-    "solate": "I",
     "terminateCapability": "Capability"
    },
    "params": [],
@@ -7670,7 +7386,6 @@
    ],
    "methods": {
     "message": "String",
-    "solateSpawnException": "I",
     "toString": "String"
    },
    "params": [],
@@ -7680,7 +7395,6 @@
    "bases": [],
    "methods": {
     "any": "bool",
-    "astIterable": "C",
     "cast": "Iterable<R>",
     "contains": "bool",
     "elementAt": "E",
@@ -7706,19 +7420,18 @@
     "skipWhile": "Iterable<E>",
     "take": "Iterable<E>",
     "takeWhile": "Iterable<E>",
-    "terable": "I",
     "toList": "List<E>",
     "toSet": "Set<E>",
     "toString": "String",
     "where": "Iterable<E>",
-    "whereType": "Iterable<T>",
-    "xpandIterable": "E"
+    "whereType": "Iterable<T>"
    },
    "params": [
     "E"
    ],
    "statics": {
-    "castFrom": "Iterable<T>"
+    "castFrom": "Iterable<T>",
+    "new": "Iterable"
    }
   },
   "IterableExtensions": {
@@ -7750,11 +7463,12 @@
   "JS": {
    "bases": [],
    "methods": {
-    "S": "J",
     "name": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "JS"
+   }
   },
   "JSAnyOperatorExtension": {
    "bases": [],
@@ -7831,11 +7545,11 @@
    "bases": [
     "JSObject"
    ],
-   "methods": {
-    "SDataView": "J"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "JSDataView"
+   }
   },
   "JSDataViewToByteData": {
    "bases": [
@@ -7920,9 +7634,7 @@
   },
   "JSObject": {
    "bases": [],
-   "methods": {
-    "SObject": "J"
-   },
+   "methods": {},
    "params": [],
    "statics": {}
   },
@@ -7932,7 +7644,6 @@
    ],
    "methods": {
     "delete": "JSBoolean",
-    "etProperty": "s",
     "has": "bool",
     "hasProperty": "JSBoolean",
     "operator []": "JSAny",
@@ -8009,7 +7720,6 @@
     "JsonUnsupportedObjectError"
    ],
    "methods": {
-    "sonCyclicError": "J",
     "toString": "String"
    },
    "params": [],
@@ -8022,11 +7732,12 @@
    "methods": {
     "bind": "Stream<Object?>",
     "convert": null,
-    "sonDecoder": "J",
     "startChunkedConversion": "StringConversionSink"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "JsonDecoder"
+   }
   },
   "JsonEncoder": {
    "bases": [
@@ -8037,11 +7748,12 @@
     "convert": "String",
     "fuse": "Converter<Object?, T>",
     "indent": "String",
-    "sonEncoder": "J",
     "startChunkedConversion": "ChunkedConversionSink<Object?>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "JsonEncoder"
+   }
   },
   "JsonUnsupportedObjectError": {
    "bases": [
@@ -8079,7 +7791,6 @@
   "KeyboardEvent": {
    "bases": [],
    "methods": {
-    "S": "J",
     "native": null,
     "which": "int"
    },
@@ -8090,9 +7801,7 @@
    "bases": [
     "KeyframeEffectReadOnly"
    ],
-   "methods": {
-    "S": "J"
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "new": "KeyframeEffect"
@@ -8111,29 +7820,30 @@
     "HtmlElement"
    ],
    "methods": {
-    "IElement": "L",
     "native": "int"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "LIElement"
+   }
   },
   "LabelElement": {
    "bases": [
     "HtmlElement"
    ],
    "methods": {
-    "abelElement": "L",
     "native": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "LabelElement"
+   }
   },
   "Latin1Codec": {
    "bases": [
     "Encoding"
    ],
    "methods": {
-    "allowInvalid": "_",
     "decode": "String",
     "decoder": "Latin1Decoder",
     "encode": "Uint8List",
@@ -8146,30 +7856,32 @@
   "Latin1Decoder": {
    "bases": [],
    "methods": {
-    "atin1Decoder": "L",
     "startChunkedConversion": "ByteConversionSink"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Latin1Decoder"
+   }
   },
   "Latin1Encoder": {
    "bases": [],
-   "methods": {
-    "atin1Encoder": "L"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Latin1Encoder"
+   }
   },
   "LegendElement": {
    "bases": [
     "HtmlElement"
    ],
    "methods": {
-    "egendElement": "L",
     "native": "FormElement"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "LegendElement"
+   }
   },
   "LibraryDependencyMirror": {
    "bases": [],
@@ -8209,11 +7921,11 @@
    "methods": {
     "bind": "Stream<String>",
     "convert": "List<String>",
-    "ineSplitter": "L",
     "startChunkedConversion": "StringConversionSink"
    },
    "params": [],
    "statics": {
+    "new": "LineSplitter",
     "split": "Iterable<String>"
    }
   },
@@ -8221,9 +7933,7 @@
    "bases": [
     "Accelerometer"
    ],
-   "methods": {
-    "S": "J"
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "new": "LinearAccelerationSensor"
@@ -8258,20 +7968,19 @@
     "HtmlElement"
    ],
    "methods": {
-    "inkElement": "L",
     "native": null,
     "supportsImport": "bool"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "LinkElement"
+   }
   },
   "LinkedHashMap": {
    "bases": [
     "Map<K, V>"
    ],
-   "methods": {
-    "inkedHashMap": "L"
-   },
+   "methods": {},
    "params": [
     "K",
     "V"
@@ -8284,7 +7993,6 @@
    ],
    "methods": {
     "forEach": null,
-    "inkedHashSet": "L",
     "iterator": "Iterator<E>"
    },
    "params": [
@@ -8302,7 +8010,6 @@
     "contains": "bool",
     "first": "E",
     "forEach": null,
-    "inkedList": "L",
     "isEmpty": "bool",
     "iterator": "Iterator<E>",
     "last": "E",
@@ -8405,7 +8112,6 @@
     "insertAll": null,
     "isEmpty": "bool",
     "isNotEmpty": "bool",
-    "istBase": "L",
     "iterator": "Iterator<E>",
     "join": "String",
     "last": null,
@@ -8437,16 +8143,15 @@
     "toList": "List<E>",
     "toSet": "Set<E>",
     "toString": "String",
-    "ubListIterable": "S",
     "where": "Iterable<E>",
-    "whereType": "Iterable<T>",
-    "xpandIterable": "E"
+    "whereType": "Iterable<T>"
    },
    "params": [
     "E"
    ],
    "statics": {
-    "listToString": "String"
+    "listToString": "String",
+    "new": "ListBase"
    }
   },
   "ListQueue": {
@@ -8464,7 +8169,6 @@
     "first": "E",
     "forEach": null,
     "isEmpty": "bool",
-    "istQueue": "L",
     "iterator": "Iterator<E>",
     "last": "E",
     "length": "int",
@@ -8508,13 +8212,12 @@
     "RangeInputElementBase"
    ],
    "methods": {
-    "InputElement": "new",
-    "ocalDateTimeInputElement": "L",
     "readOnly": "bool",
     "required": "bool"
    },
    "params": [],
    "statics": {
+    "new": "LocalDateTimeInputElement",
     "supported": "bool"
    }
   },
@@ -8531,21 +8234,21 @@
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "ong": "L"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Long"
+   }
   },
   "LongLong": {
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "ongLong": "L"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "LongLong"
+   }
   },
   "LoseContext": {
    "bases": [],
@@ -8558,8 +8261,6 @@
    "methods": {
     "addAll": null,
     "addEntries": null,
-    "ap": "M",
-    "astMap": "C",
     "cast": "Map<RK, RV>",
     "clear": null,
     "containsKey": "bool",
@@ -8585,7 +8286,8 @@
     "V"
    ],
    "statics": {
-    "castFrom": "Map<K2, V2>"
+    "castFrom": "Map<K2, V2>",
+    "new": "Map"
    }
   },
   "MapBase": {
@@ -8595,7 +8297,6 @@
    "methods": {
     "addAll": null,
     "addEntries": null,
-    "apBase": "M",
     "cast": "Map<RK, RV>",
     "clear": null,
     "containsKey": "bool",
@@ -8621,7 +8322,8 @@
     "V"
    ],
    "statics": {
-    "mapToString": "String"
+    "mapToString": "String",
+    "new": "MapBase"
    }
   },
   "MapEntry": {
@@ -8725,7 +8427,6 @@
    "methods": {
     "client": "Client",
     "completed": "bool",
-    "etResponse": "s",
     "forwardToJson": "Map<String, dynamic>",
     "method": "String",
     "response": "Future<Response>",
@@ -8824,7 +8525,6 @@
    ],
    "methods": {
     "add": null,
-    "amedLookup": "N",
     "iterator": "Iterator<E>",
     "keyOf": "String",
     "operator []": "E",
@@ -8839,21 +8539,22 @@
    "bases": [],
    "methods": {
     "assetId": "String",
-    "ative": "N",
     "isLeaf": "bool",
     "symbol": "String"
    },
    "params": [
     "T"
    ],
-   "statics": {}
+   "statics": {
+    "new": "Native"
+   }
   },
   "NativeApi": {
    "bases": [],
    "methods": {
-    "closeNativePort": "get",
-    "newNativePort": "get",
-    "postCObject": "get"
+    "closeNativePort": null,
+    "newNativePort": null,
+    "postCObject": null
    },
    "params": [],
    "statics": {
@@ -8948,8 +8649,7 @@
    ],
    "methods": {
     "isUndefined": "bool",
-    "toString": "String",
-    "ullRejectionException": "N"
+    "toString": "String"
    },
    "params": [],
    "statics": {}
@@ -9015,18 +8715,18 @@
     "Exception"
    ],
    "methods": {
-    "SError": "O",
     "errorCode": "int",
     "message": "String",
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "OSError"
+   }
   },
   "Object": {
    "bases": [],
    "methods": {
-    "bject": "O",
     "hashCode": "int",
     "noSuchMethod": null,
     "operator ==": "bool",
@@ -9036,13 +8736,13 @@
    "params": [],
    "statics": {
     "hashAll": "int",
-    "hashAllUnordered": "int"
+    "hashAllUnordered": "int",
+    "new": "Object"
    }
   },
   "ObjectMirror": {
    "bases": [],
    "methods": {
-    "elegate": "d",
     "getField": "InstanceMirror",
     "setField": "InstanceMirror"
    },
@@ -9095,7 +8795,6 @@
   "Observer": {
    "bases": [],
    "methods": {
-    "S": "J",
     "observe": null
    },
    "params": [],
@@ -9171,7 +8870,6 @@
    ],
    "methods": {
     "native": "int",
-    "romiseToFuture": "p",
     "startRendering": "Future<AudioBuffer>",
     "suspendFor": "Future"
    },
@@ -9184,8 +8882,7 @@
    ],
    "methods": {
     "onBlocked": "Stream<Event>",
-    "onUpgradeNeeded": "Stream<VersionChangeEvent>",
-    "ventStreamProvider": "E"
+    "onUpgradeNeeded": "Stream<VersionChangeEvent>"
    },
    "params": [],
    "statics": {}
@@ -9195,7 +8892,6 @@
     "AudioScheduledSourceNode"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -9209,27 +8905,28 @@
    ],
    "methods": {
     "stackTrace": "StackTrace",
-    "toString": "String",
-    "utOfMemoryError": "O"
+    "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "OutOfMemoryError"
+   }
   },
   "Packed": {
    "bases": [],
    "methods": {
-    "acked": "P",
     "memberAlignment": "int"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Packed"
+   }
   },
   "PannerNode": {
    "bases": [
     "AudioNode"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -9282,22 +8979,24 @@
     "FileSystemException"
    ],
    "methods": {
-    "athAccessException": "P",
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "PathAccessException"
+   }
   },
   "PathExistsException": {
    "bases": [
     "FileSystemException"
    ],
    "methods": {
-    "athExistsException": "P",
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "PathExistsException"
+   }
   },
   "PathNotFoundException": {
    "bases": [
@@ -9320,9 +9019,7 @@
   },
   "PeriodicWave": {
    "bases": [],
-   "methods": {
-    "S": "J"
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "new": "PeriodicWave"
@@ -9458,9 +9155,8 @@
    "methods": {
     "exitCode": "int",
     "pid": "int",
-    "rocessResult": "P",
-    "tderr": "s",
-    "tdout": "s"
+    "stderr": null,
+    "stdout": null
    },
    "params": [],
    "statics": {}
@@ -9585,7 +9281,6 @@
     "ArgumentError"
    ],
    "methods": {
-    "angeError": "R",
     "end": "num",
     "invalidValue": "num",
     "start": "num"
@@ -9732,8 +9427,6 @@
   "RawSocketOption": {
    "bases": [],
    "methods": {
-    "awSocketOption": "R",
-    "getOptionValue": "_",
     "level": "int",
     "option": "int",
     "value": "Uint8List"
@@ -9746,7 +9439,8 @@
     "levelIPv6": "int",
     "levelSocket": "int",
     "levelTcp": "int",
-    "levelUdp": "int"
+    "levelUdp": "int",
+    "new": "RawSocketOption"
    }
   },
   "RawSynchronousSocket": {
@@ -9804,8 +9498,6 @@
   "Rectangle": {
    "bases": [],
    "methods": {
-    "dynamic": "as",
-    "ectangle": "R",
     "height": "T",
     "left": "T",
     "top": "T",
@@ -9814,21 +9506,24 @@
    "params": [
     "T"
    ],
-   "statics": {}
+   "statics": {
+    "new": "Rectangle"
+   }
   },
   "RedirectException": {
    "bases": [
     "HttpException"
    ],
    "methods": {
-    "edirectException": "R",
     "message": "String",
     "redirects": "List<RedirectInfo>",
     "toString": "String",
     "uri": "Uri"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "RedirectException"
+   }
   },
   "RedirectInfo": {
    "bases": [],
@@ -9877,7 +9572,6 @@
     "Error"
    ],
    "methods": {
-    "emoteError": "R",
     "stackTrace": "StackTrace",
     "toString": "String"
    },
@@ -9898,8 +9592,7 @@
     "native": null,
     "onError": "Stream<Event>",
     "onSuccess": "Stream<Event>",
-    "result": null,
-    "ventStreamProvider": "E"
+    "result": null
    },
    "params": [],
    "statics": {}
@@ -9930,10 +9623,9 @@
   "Response": {
    "bases": [],
    "methods": {
-    "ayload": "p",
     "decodeJson": null,
-    "esponse": "R",
-    "kind": "ResponsePayloadKind"
+    "kind": "ResponsePayloadKind",
+    "payload": null
    },
    "params": [],
    "statics": {}
@@ -9956,8 +9648,7 @@
     "movePrevious": "bool",
     "rawIndex": null,
     "reset": null,
-    "string": "String",
-    "uneIterator": "R"
+    "string": "String"
    },
    "params": [],
    "statics": {}
@@ -9969,8 +9660,7 @@
    "methods": {
     "iterator": "RuneIterator",
     "last": "int",
-    "string": "String",
-    "unes": "R"
+    "string": "String"
    },
    "params": [],
    "statics": {}
@@ -9986,8 +9676,7 @@
     "routeRequest": "Future<Response>",
     "routeResponse": null,
     "sendPort": "SendPort",
-    "serviceId": "String",
-    "unningIsolate": "R"
+    "serviceId": "String"
    },
    "params": [],
    "statics": {}
@@ -10000,8 +9689,7 @@
     "isolateShutdown": null,
     "isolateStartup": null,
     "routeRequest": "Future<Response>",
-    "routeResponse": null,
-    "unningIsolates": "R"
+    "routeResponse": null
    },
    "params": [],
    "statics": {}
@@ -10027,18 +9715,14 @@
    ],
    "methods": {
     "native": "int",
-    "onAudioProcess": "Stream<AudioProcessingEvent>",
-    "ventStreamProvider": "E"
+    "onAudioProcess": "Stream<AudioProcessingEvent>"
    },
    "params": [],
    "statics": {}
   },
   "ScrollAlignment": {
    "bases": [],
-   "methods": {
-    "oString": "t",
-    "value": "_"
-   },
+   "methods": {},
    "params": [],
    "statics": {}
   },
@@ -10130,14 +9814,11 @@
     "result": "String"
    },
    "params": [],
-   "statics": {
-    "validateErrorCode": "_"
-   }
+   "statics": {}
   },
   "ServiceProtocolInfo": {
    "bases": [],
    "methods": {
-    "erviceProtocolInfo": "S",
     "serverUri": "Uri",
     "serverWebSocketUri": "Uri",
     "toString": "String"
@@ -10152,7 +9833,6 @@
    "methods": {
     "add": "bool",
     "addAll": null,
-    "astSet": "C",
     "cast": "Set<R>",
     "clear": null,
     "contains": "bool",
@@ -10161,7 +9841,6 @@
     "intersection": "Set<E>",
     "iterator": "Iterator<E>",
     "lookup": "E",
-    "nmodifiableSetView": "U",
     "remove": "bool",
     "removeAll": null,
     "removeWhere": null,
@@ -10191,10 +9870,8 @@
     "containsAll": "bool",
     "difference": "Set<E>",
     "elementAt": "E",
-    "etBase": "S",
     "every": "bool",
     "expand": "Iterable<T>",
-    "fficientLengthMappedIterable": "E",
     "first": "E",
     "firstWhere": "E",
     "fold": "T",
@@ -10227,13 +9904,13 @@
     "toString": "String",
     "union": "Set<E>",
     "where": "Iterable<E>",
-    "whereType": "Iterable<T>",
-    "xpandIterable": "E"
+    "whereType": "Iterable<T>"
    },
    "params": [
     "E"
    ],
    "statics": {
+    "new": "SetBase",
     "setToString": "String"
    }
   },
@@ -10255,34 +9932,35 @@
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "hort": "S"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Short"
+   }
   },
   "SignalException": {
    "bases": [
     "IOException"
    ],
    "methods": {
-    "ignalException": "S",
     "message": "String",
-    "sError": "o",
+    "osError": null,
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "SignalException"
+   }
   },
   "SignedChar": {
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "ignedChar": "S"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "SignedChar"
+   }
   },
   "Sink": {
    "bases": [],
@@ -10299,11 +9977,11 @@
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "ize": "S"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Size"
+   }
   },
   "Socket": {
    "bases": [
@@ -10338,9 +10016,7 @@
   },
   "SocketDirection": {
    "bases": [],
-   "methods": {
-    "value": "_"
-   },
+   "methods": {},
    "params": [],
    "statics": {}
   },
@@ -10351,29 +10027,27 @@
    "methods": {
     "address": "InternetAddress",
     "message": "String",
-    "ocketException": "S",
     "osError": "OSError",
     "port": "int",
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "SocketException"
+   }
   },
   "SocketMessage": {
    "bases": [],
    "methods": {
     "controlMessages": "List<SocketControlMessage>",
-    "data": "Uint8List",
-    "ocketMessage": "S"
+    "data": "Uint8List"
    },
    "params": [],
    "statics": {}
   },
   "SocketOption": {
    "bases": [],
-   "methods": {
-    "value": "_"
-   },
+   "methods": {},
    "params": [],
    "statics": {}
   },
@@ -10430,16 +10104,16 @@
    ],
    "methods": {
     "stackTrace": "StackTrace",
-    "tackOverflowError": "S",
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "StackOverflowError"
+   }
   },
   "StackTrace": {
    "bases": [],
    "methods": {
-    "tackTrace": "S",
     "toString": "String"
    },
    "params": [],
@@ -10453,7 +10127,6 @@
    ],
    "methods": {
     "message": "String",
-    "tateError": "S",
     "toString": "String"
    },
    "params": [],
@@ -10481,11 +10154,12 @@
    "methods": {
     "message": "String",
     "osError": "OSError",
-    "tdinException": "S",
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "StdinException"
+   }
   },
   "StdioType": {
    "bases": [],
@@ -10517,18 +10191,18 @@
    "methods": {
     "message": "String",
     "osError": "OSError",
-    "tdoutException": "S",
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "StdoutException"
+   }
   },
   "StereoPannerNode": {
    "bases": [
     "AudioNode"
    ],
    "methods": {
-    "S": "J",
     "native": "AudioParam"
    },
    "params": [],
@@ -10547,8 +10221,7 @@
     "isRunning": "bool",
     "reset": null,
     "start": null,
-    "stop": null,
-    "topwatch": "S"
+    "stop": null
    },
    "params": [],
    "statics": {}
@@ -10556,7 +10229,6 @@
   "Stream": {
    "bases": [],
    "methods": {
-    "CastStream": "new",
     "any": "Future<bool>",
     "asyncExpand": "Stream<E>",
     "asyncMap": "Stream<E>",
@@ -10591,14 +10263,14 @@
     "toList": "Future<List<T>>",
     "toSet": "Future<Set<T>>",
     "transform": "Stream<S>",
-    "tream": "S",
     "where": "Stream<T>"
    },
    "params": [
     "T"
    ],
    "statics": {
-    "castFrom": "Stream<T>"
+    "castFrom": "Stream<T>",
+    "new": "Stream"
    }
   },
   "StreamConsumer": {
@@ -10665,7 +10337,6 @@
   "StreamTransformer": {
    "bases": [],
    "methods": {
-    "StreamBindTransformer": "_",
     "bind": "Stream<T>",
     "cast": "StreamTransformer<RS, RT>"
    },
@@ -10680,14 +10351,15 @@
     "StreamTransformer<S, T>"
    ],
    "methods": {
-    "cast": "StreamTransformer<RS, RT>",
-    "treamTransformerBase": "S"
+    "cast": "StreamTransformer<RS, RT>"
    },
    "params": [
     "S",
     "T"
    ],
-   "statics": {}
+   "statics": {
+    "new": "StreamTransformerBase"
+   }
   },
   "StreamView": {
    "bases": [
@@ -10751,14 +10423,15 @@
     "isNotEmpty": "bool",
     "length": "int",
     "toString": "String",
-    "tringBuffer": "S",
     "write": null,
     "writeAll": null,
     "writeCharCode": null,
     "writeln": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "StringBuffer"
+   }
   },
   "StringSink": {
    "bases": [],
@@ -10783,9 +10456,7 @@
   },
   "Struct": {
    "bases": [],
-   "methods": {
-    "truct": "S"
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "create": "T"
@@ -10850,11 +10521,12 @@
    "bases": [],
    "methods": {
     "browserName": "String",
-    "minimumVersion": "String",
-    "upportedBrowser": "S"
+    "minimumVersion": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "SupportedBrowser"
+   }
   },
   "SwitchElement": {
    "bases": [],
@@ -10892,11 +10564,12 @@
     "decoder": "Converter<List<int>, String>",
     "encode": "List<int>",
     "encoder": "Converter<String, List<int>>",
-    "name": "String",
-    "ystemEncoding": "S"
+    "name": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "SystemEncoding"
+   }
   },
   "TSpanElement": {
    "bases": [
@@ -11042,7 +10715,6 @@
    "bases": [],
    "methods": {
     "finish": null,
-    "imelineTask": "T",
     "instant": null,
     "pass": "int",
     "start": null
@@ -11056,7 +10728,6 @@
    ],
    "methods": {
     "duration": "Duration",
-    "imeoutException": "T",
     "message": "String",
     "toString": "String"
    },
@@ -11093,20 +10764,19 @@
     "IOException"
    ],
    "methods": {
-    "lsException": "T",
     "message": "String",
     "osError": "OSError",
     "toString": "String",
     "type": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "TlsException"
+   }
   },
   "TlsProtocolVersion": {
    "bases": [],
-   "methods": {
-    "witch": "s"
-   },
+   "methods": {},
    "params": [],
    "statics": {}
   },
@@ -11119,8 +10789,7 @@
     "native": null,
     "onAbort": "Stream<Event>",
     "onComplete": "Stream<Event>",
-    "onError": "Stream<Event>",
-    "ventStreamProvider": "E"
+    "onError": "Stream<Event>"
    },
    "params": [],
    "statics": {}
@@ -11135,11 +10804,7 @@
   },
   "Transform": {
    "bases": [],
-   "methods": {
-    "ImmutableListMixin": "with",
-    "JavaScriptObject": "class",
-    "List": "implements"
-   },
+   "methods": {},
    "params": [],
    "statics": {}
   },
@@ -11211,11 +10876,11 @@
   },
   "Uint16": {
    "bases": [],
-   "methods": {
-    "int16": "U"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Uint16"
+   }
   },
   "Uint16Array": {
    "bases": [
@@ -11276,11 +10941,11 @@
   },
   "Uint32": {
    "bases": [],
-   "methods": {
-    "int32": "U"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Uint32"
+   }
   },
   "Uint32Array": {
    "bases": [
@@ -11341,11 +11006,11 @@
   },
   "Uint64": {
    "bases": [],
-   "methods": {
-    "int64": "U"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Uint64"
+   }
   },
   "Uint64Array": {
    "bases": [
@@ -11396,11 +11061,11 @@
   },
   "Uint8": {
    "bases": [],
-   "methods": {
-    "int8": "U"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Uint8"
+   }
   },
   "Uint8Array": {
    "bases": [
@@ -11485,11 +11150,11 @@
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "intPtr": "U"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "UintPtr"
+   }
   },
   "UniformLocation": {
    "bases": [],
@@ -11504,7 +11169,6 @@
    ],
    "methods": {
     "message": "String",
-    "nimplementedError": "U",
     "toString": "String"
    },
    "params": [],
@@ -11512,9 +11176,7 @@
   },
   "Union": {
    "bases": [],
-   "methods": {
-    "nion": "U"
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "create": "T"
@@ -11597,59 +11259,59 @@
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "nsignedChar": "U"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "UnsignedChar"
+   }
   },
   "UnsignedInt": {
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "nsignedInt": "U"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "UnsignedInt"
+   }
   },
   "UnsignedLong": {
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "nsignedLong": "U"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "UnsignedLong"
+   }
   },
   "UnsignedLongLong": {
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "nsignedLongLong": "U"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "UnsignedLongLong"
+   }
   },
   "UnsignedShort": {
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "nsignedShort": "U"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "UnsignedShort"
+   }
   },
   "Unstable": {
    "bases": [],
-   "methods": {
-    "nstable": "U"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Unstable"
+   }
   },
   "UnsupportedError": {
    "bases": [
@@ -11657,7 +11319,6 @@
    ],
    "methods": {
     "message": "String",
-    "nsupportedError": "U",
     "toString": "String"
    },
    "params": [],
@@ -11751,11 +11412,12 @@
     "decoder": "Utf8Decoder",
     "encode": "Uint8List",
     "encoder": "Utf8Encoder",
-    "name": "String",
-    "tf8Codec": "U"
+    "name": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Utf8Codec"
+   }
   },
   "Utf8Decoder": {
    "bases": [
@@ -11765,8 +11427,7 @@
     "bind": "Stream<String>",
     "convert": "String",
     "fuse": "Converter<List<int>, T>",
-    "startChunkedConversion": "ByteConversionSink",
-    "tf8Decoder": "U"
+    "startChunkedConversion": "ByteConversionSink"
    },
    "params": [],
    "statics": {
@@ -11780,33 +11441,32 @@
    "methods": {
     "bind": "Stream<List<int>>",
     "convert": "Uint8List",
-    "startChunkedConversion": "StringConversionSink",
-    "tf8Encoder": "U"
+    "startChunkedConversion": "StringConversionSink"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Utf8Encoder"
+   }
   },
   "VMService": {
    "bases": [
     "MessageRouter"
    ],
    "methods": {
-    "MService": "V",
     "ddsUri": "Uri",
     "eventPort": "RawReceivePort",
-    "getNamespace": "_",
     "isExiting": "bool",
     "messageHandler": null,
     "routeResponse": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "VMService"
+   }
   },
   "VMServiceEmbedderHooks": {
    "bases": [],
-   "methods": {
-    "cceptNewWebSocketConnections": "a"
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "cleanup": "CleanupCallback",
@@ -11845,7 +11505,6 @@
     "Event"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -11877,11 +11536,11 @@
    "bases": [
     "AbiSpecificInteger"
    ],
-   "methods": {
-    "Char": "W"
-   },
+   "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "WChar"
+   }
   },
   "WasmAnyRef": {
    "bases": [],
@@ -11958,23 +11617,25 @@
   "WasmF32": {
    "bases": [],
    "methods": {
-    "asmF32": "W",
     "toDouble": "double"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "WasmF32"
+   }
   },
   "WasmF64": {
    "bases": [],
    "methods": {
-    "asmF64": "W",
     "copysign": "WasmF64",
     "sqrt": "WasmF64",
     "toDouble": "double",
     "truncSatS": "WasmI64"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "WasmF64"
+   }
   },
   "WasmFuncRef": {
    "bases": [],
@@ -11997,7 +11658,6 @@
   "WasmI32": {
    "bases": [],
    "methods": {
-    "asmI32": "W",
     "geU": "bool",
     "gtU": "bool",
     "leU": "bool",
@@ -12015,12 +11675,13 @@
     "toIntUnsigned": "int"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "WasmI32"
+   }
   },
   "WasmI64": {
    "bases": [],
    "methods": {
-    "asmI64": "W",
     "divS": "WasmI64",
     "geU": "bool",
     "gtU": "bool",
@@ -12032,7 +11693,9 @@
     "toInt": "int"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "WasmI64"
+   }
   },
   "WasmStructRef": {
    "bases": [
@@ -12045,7 +11708,6 @@
   "WasmTable": {
    "bases": [],
    "methods": {
-    "asmTable": "W",
     "callIndirect": "F",
     "operator []": "T",
     "operator []=": null,
@@ -12054,14 +11716,15 @@
    "params": [
     "T"
    ],
-   "statics": {}
+   "statics": {
+    "new": "WasmTable"
+   }
   },
   "WaveShaperNode": {
    "bases": [
     "AudioNode"
    ],
    "methods": {
-    "S": "J",
     "native": null
    },
    "params": [],
@@ -12092,13 +11755,14 @@
     "IOException"
    ],
    "methods": {
-    "ebSocketException": "W",
     "httpStatusCode": "int",
     "message": "String",
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "WebSocketException"
+   }
   },
   "WebSocketStatus": {
    "bases": [],
@@ -12140,7 +11804,6 @@
     "Codec<List<int>, List<int>>"
    ],
    "methods": {
-    "ZLibDecoder": "new",
     "decoder": "ZLibDecoder",
     "dictionary": "List<int>",
     "encoder": "ZLibEncoder",
@@ -12196,7 +11859,6 @@
   "Zone": {
    "bases": [],
    "methods": {
-    "Function": null,
     "bindCallback": "ZoneCallback<R>",
     "bindUnaryCallback": "ZoneUnaryCallback<R, T>",
     "createPeriodicTimer": "Timer",

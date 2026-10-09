@@ -329,6 +329,8 @@ FACTS = [
     ("dart", ("types", "Iterable", "methods", "map"), "Iterable<T>"),
     ("dart", ("types", "Iterable", "methods", "first"), "E"),
     ("dart", ("types", "String", "methods", "length"), "int"),
+    ("dart", ("types", "AsciiDecoder", "statics", "new"), "AsciiDecoder"),
+    ("dart", ("types", "CustomEvent", "methods", "detail"), None),
     (
         "dart",
         ("callbacks", "Iterable", "forEach", "0", "params"),

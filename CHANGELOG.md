@@ -176,8 +176,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   ends with a `done` event. `ensure` refuses an age limit that is not a
   finite, non-negative number, and a negative `limit` is an error in every
   interface. Callers come back in a stable order. `path` no longer follows
-  an unresolved call to the first definition of its name, and `flatten`
-  follows an unresolved base only when one class has the name.
+  an unresolved call to the first definition of its name, and searches from
+  every definition its start name matches; `flatten` follows an unresolved
+  base only when one class has the name.
 - **Embeddings.** The file lock now excludes; cache cleanup cannot delete
   another process's temporary; concurrent first searches load the model
   once; `min_score` applies after re-ranking; a stale or mismatched cache

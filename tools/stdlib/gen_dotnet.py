@@ -114,9 +114,6 @@ def parts(path):
     return name, args
 
 
-_ARITY = re.compile(r"`\d+$")
-
-
 def written(path, names):
     """The type ``path`` as the data writes it: its generic arguments in
     ``<>`` and the arity its name is keyed by, and a name of ``names`` —

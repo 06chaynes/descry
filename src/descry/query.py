@@ -2362,20 +2362,21 @@ class GraphQuerier:
         if not end_nodes:
             return result("not_found")
 
-        start_id = start_nodes[0]["id"]
+        start_ids = [n["id"] for n in start_nodes]
         end_ids = {n["id"] for n in end_nodes}
 
         # BFS with path tracking: first over the calls that are certain, then
         # also through unresolved calls, each reaching one of its candidates.
         passes = (False, True) if self.candidate_incoming else (False,)
         for through_candidates in passes:
-            queue = deque([(start_id, [])])  # (node_id, path_so_far)
-            visited = {start_id}
+            # (node_id, path_so_far)
+            queue = deque((start_id, []) for start_id in start_ids)
+            visited = set(start_ids)
 
             while queue:
                 if time.time() > deadline:
                     return result("timeout")
-                if len(visited) >= node_budget:
+                if len(visited) - len(start_ids) >= node_budget:
                     return result("node_budget")
 
                 current_id, path = queue.popleft()
@@ -2411,7 +2412,7 @@ class GraphQuerier:
                         reached = ()
 
                     for next_id in reached:
-                        if next_id in visited:
+                        if next_id in visited and next_id not in end_ids:
                             continue
                         visited.add(next_id)
 

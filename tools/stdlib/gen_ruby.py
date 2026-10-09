@@ -25,9 +25,6 @@ _MEMBER = re.compile(
     r"^(def|include|extend|prepend|attr_reader|attr_writer|attr_accessor|alias)\b"
 )
 _DEF = re.compile(r"^def\s+(self\.)?([^\s:]+)\s*:\s*(.*)$")
-_TYPE_HEAD = re.compile(
-    r"([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)\s*(\[|\(|\{|$|[^[\](){}<>\w]*)"
-)
 _BASE = re.compile(r"^(include|extend|prepend)\s+(.+?)\s*$")
 _ALIAS = re.compile(r"^alias\s+([^\s]+)\s+([^\s]+)\s*$")
 _ATTR = re.compile(r"^(attr_reader|attr_writer|attr_accessor)\s+([^\s:]+)\s*:\s*(.*)$")

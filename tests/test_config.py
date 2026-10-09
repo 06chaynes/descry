@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from descry.handlers import DescryConfig
-from descry.scip.cache import ScipCacheManager
+from descry.scip.cache import ADAPTERS, ScipCacheManager
 
 # --- Default field values ---
 
@@ -414,8 +414,8 @@ class TestScipCacheManagerConfig:
         )
 
         mgr = ScipCacheManager(tmp_path, scip_skip_crates=["beta"])
-        crates = mgr.get_project_names("rust")
-        assert "beta" in crates  # get_project_names still discovers it
+        found = ADAPTERS["rust"].discover(tmp_path, mgr.excluded_dirs)
+        assert "beta" in [crate.name for crate in found]
 
         # But the indexer is only run on the crates that are not skipped.
         with patch("descry.scip.cache.subprocess.run") as run:

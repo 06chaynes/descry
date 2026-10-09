@@ -155,6 +155,8 @@ _RE_GOES_ON = re.compile(r"\s*[;,=(\[.]")
 # by, unless that is a macro invocation.
 _RE_ENUMERATOR = re.compile(r"(?:^|,)\s*([A-Za-z_]\w*)\b(?!\s*\()")
 _RE_TYPE_KEYWORD = re.compile(r"\b(?:struct|class|union|enum)\s+$")
+# A name in what follows a typedef's body, its qualifiers aside
+_RE_DECLARED_NAME = re.compile(r"\b(?!(?:const|volatile|restrict)\b)[A-Za-z_]\w*")
 _RE_LOCAL_TYPE = re.compile(
     r"\b(?:struct|class)\s+([A-Za-z_]\w*)\s*(?:final\s*)?(?::(?!:)|\{)"
 )
@@ -801,9 +803,9 @@ class ClangParser(BaseParser):
         stop = min(stop, end)
         tail = self._text[closer + 1 : stop]
         kind, name = declared["kind"], declared["name"]
-        names = re.findall(r"[A-Za-z_]\w*", tail) if declared["typedef"] else []
-        if name is None and names and re.match(r"\s*[A-Za-z_]", tail):
-            # `typedef struct { ... } Name;`
+        names = _RE_DECLARED_NAME.findall(tail) if declared["typedef"] else []
+        if name is None and names and re.match(r"[\s*]*[A-Za-z_]", tail):
+            # `typedef struct { ... } Name;`, `typedef struct { ... } *Name;`
             name = names[0]
         if name is None:
             # An unnamed struct or union that declares no variable is a
@@ -1207,18 +1209,20 @@ class ClangParser(BaseParser):
                     self._guarded[index]
                 )
         binding = self.binding_re.search(code)
-        if binding:
+        if binding and not code[binding.end() :].lstrip().startswith("["):
             # `auto name = call...` binds `name` to what the last call to
-            # close in its statement returns.
-            ends = code.find(";", binding.end())
-            closes = [
-                column
-                for column in self._closes
-                if binding.end() <= column and (ends < 0 or column < ends)
-            ]
-            if closes:
+            # close in its statement, outside any braces, returns; a lambda
+            # binds nothing.
+            depth, held = 0, None
+            for column in range(binding.end(), len(code)):
+                depth += (code[column] == "{") - (code[column] == "}")
+                if code[column] == ";" and not depth:
+                    break
+                if not depth:
+                    held = self._closes.get(column, held)
+            if held is not None:
                 self.declared.setdefault(binding["name"], []).append(
-                    (index + 1, f"#{self._closes[max(closes)]}", False)
+                    (index + 1, f"#{held}", False)
                 )
                 self.add_local(source_id, binding["name"])
 
