@@ -20,8 +20,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv pip install --system ruff==0.16.4
-      - run: ruff check src/ tests/
-      - run: ruff format --check src/ tests/
+      - run: ruff check src/ tests/ tools/
+      - run: ruff format --check src/ tests/ tools/
 
   test:
     runs-on: ubuntu-latest
