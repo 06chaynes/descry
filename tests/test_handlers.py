@@ -320,6 +320,9 @@ class TestDescryServiceSearch:
         assert "one of 2 candidates" in result
         data = await svc_with_graph.callers_data("validate_token")
         assert data["ambiguous"] == {"FILE:src/server.rs::run_server": 2}
+        # The certain callers are listed first.
+        assert data["callers"][-1] == "FILE:src/server.rs::run_server"
+        assert len(data["callers"]) > 1
         result = await svc_with_graph.path("run_server", "validate_token")
         assert "one of" not in result
         result = await svc_with_graph.path("run_server", "helper")

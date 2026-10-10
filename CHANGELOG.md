@@ -182,7 +182,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   between two looks is reported as missing. A streamed index run always
   ends with a `done` event. `ensure` refuses an age limit that is not a
   finite, non-negative number, and a negative `limit` is an error in every
-  interface. Callers come back in a stable order. `path` no longer follows
+  interface. Callers come back in a stable order, certain ones before
+  candidates, and `callers Type::name` lists the callers of that method
+  instead of every `name`. `path` no longer follows
   an unresolved call to the first definition of its name, and searches from
   every definition its start name matches; `flatten` follows an unresolved
   base only when one class has the name.

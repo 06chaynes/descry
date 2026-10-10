@@ -2210,25 +2210,22 @@ class GraphQuerier:
         """
         target_ids = set()
         base_name = func_name.split("::")[-1].split(".")[-1]
+        # `Type::name` asks for that one; a bare name for every `name`.
+        names = (func_name,) if "::" in func_name else (func_name, base_name)
 
         # Direct matches - these are the most common
         target_ids.add(func_name)
-        target_ids.add(f"REF:{func_name}")
-        target_ids.add(f"REF:{base_name}")
+        target_ids.update(f"REF:{name}" for name in names)
 
         # Find resolved nodes that match the name
         matches = self.find_nodes_by_name(func_name, fuzzy=fuzzy)
         for match in matches:
             target_ids.add(match["id"])
 
-        # For qualified names, also add the qualified REF
-        if "::" in func_name:
-            target_ids.add(f"REF:{func_name}")
-
         # Build additional targets from existing nodes/edges that end with our name
         # This catches cases like REF:Foo::Bar when searching for "Bar"
         for node_id in self.nodes:
-            if node_id.endswith((f"::{func_name}", f"::{base_name}")):
+            if node_id.endswith(tuple(f"::{name}" for name in names)):
                 target_ids.add(node_id)
 
         # Also check for REF targets in incoming edges (for unresolved calls)
@@ -2237,18 +2234,10 @@ class GraphQuerier:
             if target_id.startswith("REF:"):
                 ref_name = target_id.replace("REF:", "")
                 # Exact or suffix match
-                if (
-                    ref_name == func_name
-                    or ref_name == base_name
-                    or ref_name.endswith(
-                        (
-                            f"::{func_name}",
-                            f".{func_name}",
-                            f"::{base_name}",
-                            f".{base_name}",
-                        )
-                    )
-                ):
+                endings = tuple(
+                    f"{mark}{name}" for name in names for mark in ("::", ".")
+                )
+                if ref_name in names or ref_name.endswith(endings):
                     target_ids.add(target_id)
                 # Fuzzy prefix match
                 elif fuzzy and len(func_name) >= 3:

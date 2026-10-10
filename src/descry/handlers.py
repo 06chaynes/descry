@@ -1708,6 +1708,8 @@ class DescryService:
             all_callers = q.get_callers(name, fuzzy=True)
             ambiguous = q.get_ambiguous_callers(name, fuzzy=True)
             fuzzy = bool(all_callers)
+        # Certain callers come before those that are one of several candidates.
+        all_callers = sorted(all_callers, key=ambiguous.__contains__)
 
         return {
             "ok": True,

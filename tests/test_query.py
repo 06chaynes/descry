@@ -1224,6 +1224,37 @@ class TestUnresolvedCallsInPathsAndFlows:
             ("FILE:b.py::helper", "FILE:b.py::leaf")
         ]
 
+    def test_qualified_name_asks_for_that_method_alone(self, tmp_path):
+        nodes = [
+            _fn("FILE:a.py::Store::get"),
+            _fn("FILE:a.py::Cache::get"),
+            _fn("FILE:a.py::reads_store"),
+            _fn("FILE:a.py::reads_cache"),
+            _fn("FILE:a.py::reads_either"),
+        ]
+        edges = [
+            _calls("FILE:a.py::reads_store", "FILE:a.py::Store::get"),
+            _calls("FILE:a.py::reads_cache", "FILE:a.py::Cache::get"),
+            {
+                "source": "FILE:a.py::reads_either",
+                "target": "REF:held.get",
+                "relation": "CALLS",
+                "metadata": {
+                    "lineno": 9,
+                    "candidates": ["FILE:a.py::Store::get", "FILE:a.py::Cache::get"],
+                },
+            },
+        ]
+        querier = _querier(tmp_path, nodes, edges)
+        assert querier.get_callers("Store::get") == [
+            "FILE:a.py::reads_either",
+            "FILE:a.py::reads_store",
+        ]
+        assert querier.get_ambiguous_callers("Store::get") == {
+            "FILE:a.py::reads_either": 2
+        }
+        assert len(querier.get_callers("get")) == 3
+
     def test_path_between_two_definitions_of_one_name(self, tmp_path):
         nodes = [_fn("FILE:a.py::run"), _fn("FILE:b.py::run")]
         edges = [_calls("FILE:a.py::run", "FILE:b.py::run")]
