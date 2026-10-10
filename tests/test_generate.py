@@ -12323,11 +12323,12 @@ class TestClangCallResolution:
                 "a.c": """
                 typedef struct { int v; } *Ptr;
                 typedef struct { int v; } *const Fixed;
+                typedef struct { int v; } *__restrict Sole;
                 """,
             },
         )
         types = {node["id"] for node in builder.nodes if node["type"] == "Class"}
-        assert types == {"FILE:a.c::Ptr", "FILE:a.c::Fixed"}
+        assert types == {"FILE:a.c::Ptr", "FILE:a.c::Fixed", "FILE:a.c::Sole"}
 
 
 class TestRubyCallResolution:

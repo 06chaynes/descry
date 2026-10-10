@@ -61,7 +61,7 @@ class TestTypescriptImportResolution:
 
     def test_type_import_skipped(self):
         """Should identify type-only imports."""
-        table = TypeScriptSymbolTable("/project/lens/src/test.ts", "/project")
+        table = TypeScriptSymbolTable("/project/web/src/test.ts", "/project")
         table.imports = {
             "MyType": ("./types", "type"),
             "myFunc": ("./utils", "named"),
@@ -72,7 +72,7 @@ class TestTypescriptImportResolution:
 
     def test_unknown_import(self):
         """Should return None for unknown imports."""
-        table = TypeScriptSymbolTable("/project/lens/src/test.ts", "/project")
+        table = TypeScriptSymbolTable("/project/web/src/test.ts", "/project")
         table.imports = {}
 
         assert table.is_type_import("unknownFunc") is False
@@ -443,10 +443,13 @@ class TestScipIndexResolveLineSemantics:
         assert index.resolve("Self::run", "app/src/main.rs", 5) == self.BETA_NODE
         assert index.resolve("worker.run", "app/src/main.rs", 5) == self.BETA_NODE
 
-    def test_line_without_occurrence_falls_back_to_name(self, index):
-        assert index.resolve("run", "app/src/main.rs", 40) == (
-            "FILE:app/src/alpha.rs::Alpha::run"
-        )
+    def test_line_without_occurrence_falls_back_to_the_one_definition(
+        self, index, tmp_path
+    ):
+        assert index.resolve("run", "app/src/main.rs", 40) is None
+        documents = {"src/beta.rs": [(0, self.BETA_RUN, True)]}
+        single = ScipIndex([_write_scip(tmp_path / "one.scip", documents)])
+        assert single.resolve("run", "app/src/main.rs", 40) == self.BETA_NODE
 
     def test_definition_at_does_not_fall_back_to_name(self, index):
         assert index.definition_at("run", "app/src/main.rs", 5) == (

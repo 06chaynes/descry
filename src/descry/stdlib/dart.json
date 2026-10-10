@@ -1686,7 +1686,7 @@
   "encodeSuccess": "String",
   "equal": "bool",
   "exit": "Never",
-  "exitCode": "int",
+  "exitCode": null,
   "exp": "double",
   "exponentiate": "T",
   "externRefForJSAny": "WasmExternRef",
@@ -1727,7 +1727,6 @@
   "objectKeys": "List<Object?>",
   "onServerAddressChange": null,
   "or": "T",
-  "pid": "int",
   "postEvent": null,
   "pow": "num",
   "print": null,
@@ -1757,8 +1756,7 @@
   "tan": "double",
   "typeofEquals": "bool",
   "unawaited": null,
-  "unsignedRightShift": "num",
-  "window": "Window"
+  "unsignedRightShift": "num"
  },
  "scope": {},
  "source": "the Dart 3.7.0 SDK `sdk/lib` libraries",
@@ -1785,7 +1783,30 @@
    },
    "params": [],
    "statics": {
-    "current": "Abi"
+    "androidArm": null,
+    "androidArm64": null,
+    "androidIA32": null,
+    "androidRiscv64": null,
+    "androidX64": null,
+    "current": "Abi",
+    "fuchsiaArm64": null,
+    "fuchsiaRiscv64": null,
+    "fuchsiaX64": null,
+    "iosArm": null,
+    "iosArm64": null,
+    "iosX64": null,
+    "linuxArm": null,
+    "linuxArm64": null,
+    "linuxIA32": null,
+    "linuxRiscv32": null,
+    "linuxRiscv64": null,
+    "linuxX64": null,
+    "macosArm64": null,
+    "macosX64": null,
+    "values": null,
+    "windowsArm64": null,
+    "windowsIA32": null,
+    "windowsX64": null
    }
   },
   "AbiSpecificInteger": {
@@ -1868,7 +1889,9 @@
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "AbstractClassInstantiationError"
+   }
   },
   "AbstractWorker": {
    "bases": [
@@ -1878,7 +1901,9 @@
     "onError": "Stream<Event>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "errorEvent": "EventStreamProvider<Event>"
+   }
   },
   "Accelerometer": {
    "bases": [
@@ -1956,6 +1981,12 @@
    },
    "params": [],
    "statics": {
+    "accessibleClickEvent": "EventStreamProvider<Event>",
+    "accessibleContextMenuEvent": "EventStreamProvider<Event>",
+    "accessibleDecrementEvent": "EventStreamProvider<Event>",
+    "accessibleFocusEvent": "EventStreamProvider<Event>",
+    "accessibleIncrementEvent": "EventStreamProvider<Event>",
+    "accessibleScrollIntoViewEvent": "EventStreamProvider<Event>",
     "new": "AccessibleNode"
    }
   },
@@ -2075,7 +2106,13 @@
     "valueInSpecifiedUnits": "num"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "SVG_ANGLETYPE_DEG": "int",
+    "SVG_ANGLETYPE_GRAD": "int",
+    "SVG_ANGLETYPE_RAD": "int",
+    "SVG_ANGLETYPE_UNKNOWN": "int",
+    "SVG_ANGLETYPE_UNSPECIFIED": "int"
+   }
   },
   "AngleInstancedArrays": {
    "bases": [],
@@ -2085,7 +2122,9 @@
     "vertexAttribDivisorAngle": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "VERTEX_ATTRIB_ARRAY_DIVISOR_ANGLE": "int"
+   }
   },
   "AnimateElement": {
    "bases": [
@@ -2255,6 +2294,8 @@
    },
    "params": [],
    "statics": {
+    "cancelEvent": "EventStreamProvider<Event>",
+    "finishEvent": "EventStreamProvider<Event>",
     "new": "Animation",
     "supported": "bool"
    }
@@ -2387,7 +2428,21 @@
    },
    "params": [],
    "statics": {
-    "supported": "bool"
+    "CHECKING": "int",
+    "DOWNLOADING": "int",
+    "IDLE": "int",
+    "OBSOLETE": "int",
+    "UNCACHED": "int",
+    "UPDATEREADY": "int",
+    "cachedEvent": "EventStreamProvider<Event>",
+    "checkingEvent": "EventStreamProvider<Event>",
+    "downloadingEvent": "EventStreamProvider<Event>",
+    "errorEvent": "EventStreamProvider<Event>",
+    "noUpdateEvent": "EventStreamProvider<Event>",
+    "obsoleteEvent": "EventStreamProvider<Event>",
+    "progressEvent": "EventStreamProvider<ProgressEvent>",
+    "supported": "bool",
+    "updateReadyEvent": "EventStreamProvider<Event>"
    }
   },
   "ApplicationCacheErrorEvent": {
@@ -2460,7 +2515,13 @@
    "params": [
     "T"
    ],
-   "statics": {}
+   "statics": {
+    "multi": "Array",
+    "new": "Array",
+    "variable": "Array",
+    "variableMulti": "Array",
+    "variableWithVariableDimension": "Array"
+   }
   },
   "ArrayAddress": {
    "bases": [
@@ -2499,7 +2560,9 @@
     "name": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "AsciiCodec"
+   }
   },
   "AsciiDecoder": {
    "bases": [],
@@ -2747,7 +2810,9 @@
     "stop": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "endedEvent": "EventStreamProvider<Event>"
+   }
   },
   "AudioTrack": {
    "bases": [],
@@ -2772,7 +2837,9 @@
     "onChange": "Stream<Event>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "changeEvent": "EventStreamProvider<Event>"
+   }
   },
   "AudioWorkletGlobalScope": {
    "bases": [
@@ -2996,7 +3063,10 @@
     "startChunkedConversion": "ByteConversionSink"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Base64Encoder",
+    "urlSafe": "Base64Encoder"
+   }
   },
   "BaseAudioContext": {
    "bases": [
@@ -3226,8 +3296,21 @@
    },
    "params": [],
    "statics": {
+    "blurEvent": "EventStreamProvider<Event>",
     "created": "BodyElement",
-    "new": "BodyElement"
+    "errorEvent": "EventStreamProvider<Event>",
+    "focusEvent": "EventStreamProvider<Event>",
+    "hashChangeEvent": "EventStreamProvider<Event>",
+    "loadEvent": "EventStreamProvider<Event>",
+    "messageEvent": "EventStreamProvider<MessageEvent>",
+    "new": "BodyElement",
+    "offlineEvent": "EventStreamProvider<Event>",
+    "onlineEvent": "EventStreamProvider<Event>",
+    "popStateEvent": "EventStreamProvider<PopStateEvent>",
+    "resizeEvent": "EventStreamProvider<Event>",
+    "scrollEvent": "EventStreamProvider<Event>",
+    "storageEvent": "EventStreamProvider<StorageEvent>",
+    "unloadEvent": "EventStreamProvider<Event>"
    }
   },
   "Bool": {
@@ -3298,6 +3381,7 @@
    },
    "params": [],
    "statics": {
+    "messageEvent": "EventStreamProvider<MessageEvent>",
     "new": "BroadcastChannel"
    }
   },
@@ -3398,7 +3482,9 @@
    },
    "params": [],
    "statics": {
-    "new": "ByteConversionSink"
+    "from": "ByteConversionSink",
+    "new": "ByteConversionSink",
+    "withCallback": "ByteConversionSink"
    }
   },
   "ByteData": {
@@ -3522,7 +3608,9 @@
    "params": [],
    "statics": {
     "created": "CanvasElement",
-    "new": "CanvasElement"
+    "new": "CanvasElement",
+    "webGlContextLostEvent": "EventStreamProvider<gl.ContextEvent>",
+    "webGlContextRestoredEvent": "EventStreamProvider<gl.ContextEvent>"
    }
   },
   "CanvasGradient": {
@@ -3746,7 +3834,8 @@
     "T"
    ],
    "statics": {
-    "new": "ChunkedConversionSink"
+    "new": "ChunkedConversionSink",
+    "withCallback": "ChunkedConversionSink"
    }
   },
   "CircleElement": {
@@ -3798,8 +3887,12 @@
     "onResponse": null,
     "post": null,
     "postMessage": null,
+    "profilerUserTagFilters": null,
     "sendEvents": "bool",
     "service": "VMService",
+    "serviceHandles": null,
+    "services": null,
+    "streams": null,
     "toJson": "Map<String, dynamic>",
     "type": "String",
     "url": "String"
@@ -3853,7 +3946,9 @@
     "close": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "fromStringSink": "ClosableStringSink"
+   }
   },
   "CloseEvent": {
    "bases": [
@@ -3970,43 +4065,104 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "COMPRESSED_RGBA_ASTC_10x10_KHR": "int",
+    "COMPRESSED_RGBA_ASTC_10x5_KHR": "int",
+    "COMPRESSED_RGBA_ASTC_10x6_KHR": "int",
+    "COMPRESSED_RGBA_ASTC_10x8_KHR": "int",
+    "COMPRESSED_RGBA_ASTC_12x10_KHR": "int",
+    "COMPRESSED_RGBA_ASTC_12x12_KHR": "int",
+    "COMPRESSED_RGBA_ASTC_4x4_KHR": "int",
+    "COMPRESSED_RGBA_ASTC_5x4_KHR": "int",
+    "COMPRESSED_RGBA_ASTC_5x5_KHR": "int",
+    "COMPRESSED_RGBA_ASTC_6x5_KHR": "int",
+    "COMPRESSED_RGBA_ASTC_6x6_KHR": "int",
+    "COMPRESSED_RGBA_ASTC_8x5_KHR": "int",
+    "COMPRESSED_RGBA_ASTC_8x6_KHR": "int",
+    "COMPRESSED_RGBA_ASTC_8x8_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_10x5_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_10x6_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_5x4_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_5x5_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_6x5_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_6x6_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_8x5_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_8x6_KHR": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ASTC_8x8_KHR": "int"
+   }
   },
   "CompressedTextureAtc": {
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "COMPRESSED_RGBA_ATC_EXPLICIT_ALPHA_WEBGL": "int",
+    "COMPRESSED_RGBA_ATC_INTERPOLATED_ALPHA_WEBGL": "int",
+    "COMPRESSED_RGB_ATC_WEBGL": "int"
+   }
   },
   "CompressedTextureETC1": {
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "COMPRESSED_RGB_ETC1_WEBGL": "int"
+   }
   },
   "CompressedTextureEtc": {
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "COMPRESSED_R11_EAC": "int",
+    "COMPRESSED_RG11_EAC": "int",
+    "COMPRESSED_RGB8_ETC2": "int",
+    "COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2": "int",
+    "COMPRESSED_RGBA8_ETC2_EAC": "int",
+    "COMPRESSED_SIGNED_R11_EAC": "int",
+    "COMPRESSED_SIGNED_RG11_EAC": "int",
+    "COMPRESSED_SRGB8_ALPHA8_ETC2_EAC": "int",
+    "COMPRESSED_SRGB8_ETC2": "int",
+    "COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2": "int"
+   }
   },
   "CompressedTexturePvrtc": {
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "COMPRESSED_RGBA_PVRTC_2BPPV1_IMG": "int",
+    "COMPRESSED_RGBA_PVRTC_4BPPV1_IMG": "int",
+    "COMPRESSED_RGB_PVRTC_2BPPV1_IMG": "int",
+    "COMPRESSED_RGB_PVRTC_4BPPV1_IMG": "int"
+   }
   },
   "CompressedTextureS3TC": {
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "COMPRESSED_RGBA_S3TC_DXT1_EXT": "int",
+    "COMPRESSED_RGBA_S3TC_DXT3_EXT": "int",
+    "COMPRESSED_RGBA_S3TC_DXT5_EXT": "int",
+    "COMPRESSED_RGB_S3TC_DXT1_EXT": "int"
+   }
   },
   "CompressedTextureS3TCsRgb": {
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT": "int",
+    "COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT": "int",
+    "COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT": "int",
+    "COMPRESSED_SRGB_S3TC_DXT1_EXT": "int"
+   }
   },
   "CompressionOptions": {
    "bases": [],
@@ -4019,6 +4175,8 @@
    },
    "params": [],
    "statics": {
+    "compressionDefault": "CompressionOptions",
+    "compressionOff": "CompressionOptions",
     "new": "CompressionOptions"
    }
   },
@@ -4062,6 +4220,7 @@
   "Console": {
    "bases": [],
    "methods": {
+    "JS": "_isConsoleDefined",
     "assertCondition": null,
     "clear": null,
     "count": null,
@@ -4106,7 +4265,14 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "ISOLATE_SHUTDOWN_MESSAGE_ID": "int",
+    "ISOLATE_STARTUP_MESSAGE_ID": "int",
+    "METHOD_CALL_FROM_NATIVE": "int",
+    "SERVER_INFO_MESSAGE_ID": "int",
+    "SERVICE_EXIT_MESSAGE_ID": "int",
+    "WEB_SERVER_CONTROL_MESSAGE_ID": "int"
+   }
   },
   "ContentElement": {
    "bases": [
@@ -4135,8 +4301,12 @@
    },
    "params": [],
    "statics": {
+    "binary": null,
+    "html": null,
+    "json": null,
     "new": "ContentType",
-    "parse": "ContentType"
+    "parse": "ContentType",
+    "text": null
    }
   },
   "ContextAttributes": {
@@ -4205,10 +4375,12 @@
    "methods": {
     "domain": "String",
     "expires": "DateTime",
+    "httpOnly": "bool",
     "maxAge": "int",
     "name": "String",
     "path": "String",
     "sameSite": "SameSite",
+    "secure": "bool",
     "toString": "String",
     "value": "String"
    },
@@ -4657,7 +4829,19 @@
     "type": "int"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "CHARSET_RULE": "int",
+    "FONT_FACE_RULE": "int",
+    "IMPORT_RULE": "int",
+    "KEYFRAMES_RULE": "int",
+    "KEYFRAME_RULE": "int",
+    "MEDIA_RULE": "int",
+    "NAMESPACE_RULE": "int",
+    "PAGE_RULE": "int",
+    "STYLE_RULE": "int",
+    "SUPPORTS_RULE": "int",
+    "VIEWPORT_RULE": "int"
+   }
   },
   "CssScale": {
    "bases": [
@@ -5466,7 +5650,12 @@
     "version": "int"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "abortEvent": "EventStreamProvider<Event>",
+    "closeEvent": "EventStreamProvider<Event>",
+    "errorEvent": "EventStreamProvider<Event>",
+    "versionChangeEvent": "EventStreamProvider<VersionChangeEvent>"
+   }
   },
   "Datagram": {
    "bases": [],
@@ -5530,14 +5719,35 @@
    },
    "params": [],
    "statics": {
+    "april": "int",
+    "august": "int",
+    "daysPerWeek": "int",
+    "december": "int",
+    "february": "int",
+    "friday": "int",
     "fromMicrosecondsSinceEpoch": "DateTime",
     "fromMillisecondsSinceEpoch": "DateTime",
+    "january": "int",
+    "july": "int",
+    "june": "int",
+    "march": "int",
+    "may": "int",
+    "monday": "int",
+    "monthsPerYear": "int",
     "new": "DateTime",
+    "november": "int",
     "now": "DateTime",
+    "october": "int",
     "parse": "DateTime",
+    "saturday": "int",
+    "september": "int",
+    "sunday": "int",
+    "thursday": "int",
     "timestamp": "DateTime",
     "tryParse": "DateTime",
-    "utc": "DateTime"
+    "tuesday": "int",
+    "utc": "DateTime",
+    "wednesday": "int"
    }
   },
   "DateTimeCopyWith": {
@@ -5554,7 +5764,10 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "UNMASKED_RENDERER_WEBGL": "int",
+    "UNMASKED_VENDOR_WEBGL": "int"
+   }
   },
   "DebugShaders": {
    "bases": [],
@@ -5593,7 +5806,10 @@
    },
    "params": [],
    "statics": {
-    "instance": "DedicatedWorkerGlobalScope"
+    "PERSISTENT": "int",
+    "TEMPORARY": "int",
+    "instance": "DedicatedWorkerGlobalScope",
+    "messageEvent": "EventStreamProvider<MessageEvent>"
    }
   },
   "DefaultAsset": {
@@ -5614,7 +5830,9 @@
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "DeferredLoadException"
+   }
   },
   "DefsElement": {
    "bases": [
@@ -5657,7 +5875,10 @@
     "requestQuota": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "PERSISTENT": "int",
+    "TEMPORARY": "int"
+   }
   },
   "DeprecatedStorageQuota": {
    "bases": [],
@@ -5684,7 +5905,9 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "UNSIGNED_INT_24_8_WEBGL": "int"
+   }
   },
   "DescElement": {
    "bases": [
@@ -5762,7 +5985,13 @@
    "methods": {},
    "params": [],
    "statics": {
+    "cssPrefix": "String",
     "isEventTypeSupported": "bool",
+    "isFirefox": "bool",
+    "isIE": "bool",
+    "isOpera": "bool",
+    "isWebKit": "bool",
+    "propertyPrefix": "String",
     "userAgent": "String"
    }
   },
@@ -5839,7 +6068,18 @@
     "value": "num"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "cm": "Dimension",
+    "css": "Dimension",
+    "em": "Dimension",
+    "ex": "Dimension",
+    "inch": "Dimension",
+    "mm": "Dimension",
+    "pc": "Dimension",
+    "percent": "Dimension",
+    "pt": "Dimension",
+    "px": "Dimension"
+   }
   },
   "Directory": {
    "bases": [
@@ -6047,7 +6287,11 @@
    },
    "params": [],
    "statics": {
-    "new": "Document"
+    "new": "Document",
+    "pointerLockChangeEvent": "EventStreamProvider<Event>",
+    "pointerLockErrorEvent": "EventStreamProvider<Event>",
+    "readyStateChangeEvent": "EventStreamProvider<Event>",
+    "selectionChangeEvent": "EventStreamProvider<Event>"
    }
   },
   "DocumentFragment": {
@@ -6116,7 +6360,39 @@
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "ABORT": "String",
+    "CONSTRAINT": "String",
+    "DATA_CLONE": "String",
+    "ENCODING": "String",
+    "HIERARCHY_REQUEST": "String",
+    "INDEX_SIZE": "String",
+    "INVALID_ACCESS": "String",
+    "INVALID_CHARACTER": "String",
+    "INVALID_MODIFICATION": "String",
+    "INVALID_NODE_TYPE": "String",
+    "INVALID_STATE": "String",
+    "NAMESPACE": "String",
+    "NETWORK": "String",
+    "NOT_ALLOWED": "String",
+    "NOT_FOUND": "String",
+    "NOT_READABLE": "String",
+    "NOT_SUPPORTED": "String",
+    "NO_MODIFICATION_ALLOWED": "String",
+    "OPERATION": "String",
+    "QUOTA_EXCEEDED": "String",
+    "READ_ONLY": "String",
+    "SECURITY": "String",
+    "SYNTAX": "String",
+    "TIMEOUT": "String",
+    "TRANSACTION_INACTIVE": "String",
+    "TYPE_ERROR": "String",
+    "TYPE_MISMATCH": "String",
+    "UNKNOWN": "String",
+    "URL_MISMATCH": "String",
+    "VERSION": "String",
+    "WRONG_DOCUMENT": "String"
+   }
   },
   "DomImplementation": {
    "bases": [],
@@ -6538,7 +6814,23 @@
    },
    "params": [],
    "statics": {
-    "new": "Duration"
+    "hoursPerDay": "int",
+    "microsecondsPerDay": "int",
+    "microsecondsPerHour": "int",
+    "microsecondsPerMillisecond": "int",
+    "microsecondsPerMinute": "int",
+    "microsecondsPerSecond": "int",
+    "millisecondsPerDay": "int",
+    "millisecondsPerHour": "int",
+    "millisecondsPerMinute": "int",
+    "millisecondsPerSecond": "int",
+    "minutesPerDay": "int",
+    "minutesPerHour": "int",
+    "new": "Duration",
+    "secondsPerDay": "int",
+    "secondsPerHour": "int",
+    "secondsPerMinute": "int",
+    "zero": "Duration"
    }
   },
   "DynamicLibrary": {
@@ -6589,7 +6881,12 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING_EXT": "int",
+    "SRGB8_ALPHA8_EXT": "int",
+    "SRGB_ALPHA_EXT": "int",
+    "SRGB_EXT": "int"
+   }
   },
   "Element": {
    "bases": [
@@ -6784,38 +7081,108 @@
    "params": [],
    "statics": {
     "a": "Element",
+    "abortEvent": "EventStreamProvider<Event>",
     "article": "Element",
     "aside": "Element",
     "audio": "Element",
+    "beforeCopyEvent": "EventStreamProvider<Event>",
+    "beforeCutEvent": "EventStreamProvider<Event>",
+    "beforePasteEvent": "EventStreamProvider<Event>",
+    "blurEvent": "EventStreamProvider<Event>",
     "br": "Element",
+    "canPlayEvent": "EventStreamProvider<Event>",
+    "canPlayThroughEvent": "EventStreamProvider<Event>",
     "canvas": "Element",
+    "changeEvent": "EventStreamProvider<Event>",
+    "clickEvent": "EventStreamProvider<MouseEvent>",
+    "contextMenuEvent": "EventStreamProvider<MouseEvent>",
+    "copyEvent": "EventStreamProvider<ClipboardEvent>",
     "created": "Element",
+    "cutEvent": "EventStreamProvider<ClipboardEvent>",
     "div": "Element",
+    "doubleClickEvent": "EventStreamProvider<Event>",
+    "dragEndEvent": "EventStreamProvider<MouseEvent>",
+    "dragEnterEvent": "EventStreamProvider<MouseEvent>",
+    "dragEvent": "EventStreamProvider<MouseEvent>",
+    "dragLeaveEvent": "EventStreamProvider<MouseEvent>",
+    "dragOverEvent": "EventStreamProvider<MouseEvent>",
+    "dragStartEvent": "EventStreamProvider<MouseEvent>",
+    "dropEvent": "EventStreamProvider<MouseEvent>",
+    "durationChangeEvent": "EventStreamProvider<Event>",
+    "emptiedEvent": "EventStreamProvider<Event>",
+    "endedEvent": "EventStreamProvider<Event>",
+    "errorEvent": "EventStreamProvider<Event>",
+    "focusEvent": "EventStreamProvider<Event>",
     "footer": "Element",
+    "fullscreenChangeEvent": "EventStreamProvider<Event>",
+    "fullscreenErrorEvent": "EventStreamProvider<Event>",
     "header": "Element",
     "hr": "Element",
     "html": "Element",
     "iframe": "Element",
     "img": "Element",
+    "inputEvent": "EventStreamProvider<Event>",
+    "invalidEvent": "EventStreamProvider<Event>",
     "isTagSupported": "bool",
+    "keyDownEvent": "EventStreamProvider<KeyboardEvent>",
+    "keyPressEvent": "EventStreamProvider<KeyboardEvent>",
+    "keyUpEvent": "EventStreamProvider<KeyboardEvent>",
     "li": "Element",
+    "loadEvent": "EventStreamProvider<Event>",
+    "loadedDataEvent": "EventStreamProvider<Event>",
+    "loadedMetadataEvent": "EventStreamProvider<Event>",
+    "mouseDownEvent": "EventStreamProvider<MouseEvent>",
+    "mouseEnterEvent": "EventStreamProvider<MouseEvent>",
+    "mouseLeaveEvent": "EventStreamProvider<MouseEvent>",
+    "mouseMoveEvent": "EventStreamProvider<MouseEvent>",
+    "mouseOutEvent": "EventStreamProvider<MouseEvent>",
+    "mouseOverEvent": "EventStreamProvider<MouseEvent>",
+    "mouseUpEvent": "EventStreamProvider<MouseEvent>",
+    "mouseWheelEvent": "EventStreamProvider<WheelEvent>",
     "nav": "Element",
     "ol": "Element",
     "option": "Element",
     "p": "Element",
+    "pasteEvent": "EventStreamProvider<ClipboardEvent>",
+    "pauseEvent": "EventStreamProvider<Event>",
+    "playEvent": "EventStreamProvider<Event>",
+    "playingEvent": "EventStreamProvider<Event>",
     "pre": "Element",
+    "rateChangeEvent": "EventStreamProvider<Event>",
+    "resetEvent": "EventStreamProvider<Event>",
+    "resizeEvent": "EventStreamProvider<Event>",
+    "scrollEvent": "EventStreamProvider<Event>",
+    "searchEvent": "EventStreamProvider<Event>",
     "section": "Element",
+    "seekedEvent": "EventStreamProvider<Event>",
+    "seekingEvent": "EventStreamProvider<Event>",
     "select": "Element",
+    "selectEvent": "EventStreamProvider<Event>",
+    "selectStartEvent": "EventStreamProvider<Event>",
     "span": "Element",
+    "stalledEvent": "EventStreamProvider<Event>",
+    "submitEvent": "EventStreamProvider<Event>",
+    "suspendEvent": "EventStreamProvider<Event>",
     "svg": "Element",
     "table": "Element",
     "tag": "Element",
     "td": "Element",
     "textarea": "Element",
     "th": "Element",
+    "timeUpdateEvent": "EventStreamProvider<Event>",
+    "touchCancelEvent": "EventStreamProvider<TouchEvent>",
+    "touchEndEvent": "EventStreamProvider<TouchEvent>",
+    "touchEnterEvent": "EventStreamProvider<TouchEvent>",
+    "touchLeaveEvent": "EventStreamProvider<TouchEvent>",
+    "touchMoveEvent": "EventStreamProvider<TouchEvent>",
+    "touchStartEvent": "EventStreamProvider<TouchEvent>",
     "tr": "Element",
+    "transitionEndEvent": "EventStreamProvider<TransitionEvent>",
     "ul": "Element",
-    "video": "Element"
+    "video": "Element",
+    "volumeChangeEvent": "EventStreamProvider<Event>",
+    "waitingEvent": "EventStreamProvider<Event>",
+    "wheelEvent": "EventStreamProvider<WheelEvent>"
    }
   },
   "ElementEvents": {
@@ -6827,7 +7194,8 @@
    },
    "params": [],
    "statics": {
-    "new": "ElementEvents"
+    "new": "ElementEvents",
+    "webkitEvents": null
    }
   },
   "ElementList": {
@@ -7014,7 +7382,11 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "big": "Endian",
+    "host": "Endian",
+    "little": "Endian"
+   }
   },
   "Entry": {
    "bases": [],
@@ -7118,6 +7490,9 @@
    },
    "params": [],
    "statics": {
+    "AT_TARGET": "int",
+    "BUBBLING_PHASE": "int",
+    "CAPTURING_PHASE": "int",
     "eventType": "Event",
     "new": "Event"
    }
@@ -7151,7 +7526,13 @@
    },
    "params": [],
    "statics": {
-    "new": "EventSource"
+    "CLOSED": "int",
+    "CONNECTING": "int",
+    "OPEN": "int",
+    "errorEvent": "EventStreamProvider<Event>",
+    "messageEvent": "EventStreamProvider<MessageEvent>",
+    "new": "EventSource",
+    "openEvent": "EventStreamProvider<Event>"
    }
   },
   "EventStreamProvider": {
@@ -7224,7 +7605,10 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "MAX_EXT": "int",
+    "MIN_EXT": "int"
+   }
   },
   "ExtColorBufferFloat": {
    "bases": [],
@@ -7251,7 +7635,15 @@
     "queryCounterExt": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "CURRENT_QUERY_EXT": "int",
+    "GPU_DISJOINT_EXT": "int",
+    "QUERY_COUNTER_BITS_EXT": "int",
+    "QUERY_RESULT_AVAILABLE_EXT": "int",
+    "QUERY_RESULT_EXT": "int",
+    "TIMESTAMP_EXT": "int",
+    "TIME_ELAPSED_EXT": "int"
+   }
   },
   "ExtDisjointTimerQueryWebGL2": {
    "bases": [],
@@ -7259,7 +7651,12 @@
     "queryCounterExt": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "GPU_DISJOINT_EXT": "int",
+    "QUERY_COUNTER_BITS_EXT": "int",
+    "TIMESTAMP_EXT": "int",
+    "TIME_ELAPSED_EXT": "int"
+   }
   },
   "ExtFragDepth": {
    "bases": [],
@@ -7277,7 +7674,10 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "MAX_TEXTURE_MAX_ANISOTROPY_EXT": "int",
+    "TEXTURE_MAX_ANISOTROPY_EXT": "int"
+   }
   },
   "ExtendableEvent": {
    "bases": [
@@ -7391,6 +7791,12 @@
    },
    "params": [],
    "statics": {
+    "SVG_FEBLEND_MODE_DARKEN": "int",
+    "SVG_FEBLEND_MODE_LIGHTEN": "int",
+    "SVG_FEBLEND_MODE_MULTIPLY": "int",
+    "SVG_FEBLEND_MODE_NORMAL": "int",
+    "SVG_FEBLEND_MODE_SCREEN": "int",
+    "SVG_FEBLEND_MODE_UNKNOWN": "int",
     "created": "FEBlendElement",
     "new": "FEBlendElement",
     "supported": "bool"
@@ -7413,6 +7819,11 @@
    },
    "params": [],
    "statics": {
+    "SVG_FECOLORMATRIX_TYPE_HUEROTATE": "int",
+    "SVG_FECOLORMATRIX_TYPE_LUMINANCETOALPHA": "int",
+    "SVG_FECOLORMATRIX_TYPE_MATRIX": "int",
+    "SVG_FECOLORMATRIX_TYPE_SATURATE": "int",
+    "SVG_FECOLORMATRIX_TYPE_UNKNOWN": "int",
     "created": "FEColorMatrixElement",
     "new": "FEColorMatrixElement",
     "supported": "bool"
@@ -7458,6 +7869,13 @@
    },
    "params": [],
    "statics": {
+    "SVG_FECOMPOSITE_OPERATOR_ARITHMETIC": "int",
+    "SVG_FECOMPOSITE_OPERATOR_ATOP": "int",
+    "SVG_FECOMPOSITE_OPERATOR_IN": "int",
+    "SVG_FECOMPOSITE_OPERATOR_OUT": "int",
+    "SVG_FECOMPOSITE_OPERATOR_OVER": "int",
+    "SVG_FECOMPOSITE_OPERATOR_UNKNOWN": "int",
+    "SVG_FECOMPOSITE_OPERATOR_XOR": "int",
     "created": "FECompositeElement"
    }
   },
@@ -7487,6 +7905,10 @@
    },
    "params": [],
    "statics": {
+    "SVG_EDGEMODE_DUPLICATE": "int",
+    "SVG_EDGEMODE_NONE": "int",
+    "SVG_EDGEMODE_UNKNOWN": "int",
+    "SVG_EDGEMODE_WRAP": "int",
     "created": "FEConvolveMatrixElement",
     "new": "FEConvolveMatrixElement",
     "supported": "bool"
@@ -7535,6 +7957,11 @@
    },
    "params": [],
    "statics": {
+    "SVG_CHANNEL_A": "int",
+    "SVG_CHANNEL_B": "int",
+    "SVG_CHANNEL_G": "int",
+    "SVG_CHANNEL_R": "int",
+    "SVG_CHANNEL_UNKNOWN": "int",
     "created": "FEDisplacementMapElement",
     "new": "FEDisplacementMapElement",
     "supported": "bool"
@@ -7709,6 +8136,9 @@
    },
    "params": [],
    "statics": {
+    "SVG_MORPHOLOGY_OPERATOR_DILATE": "int",
+    "SVG_MORPHOLOGY_OPERATOR_ERODE": "int",
+    "SVG_MORPHOLOGY_OPERATOR_UNKNOWN": "int",
     "created": "FEMorphologyElement"
    }
   },
@@ -7836,6 +8266,12 @@
    },
    "params": [],
    "statics": {
+    "SVG_STITCHTYPE_NOSTITCH": "int",
+    "SVG_STITCHTYPE_STITCH": "int",
+    "SVG_STITCHTYPE_UNKNOWN": "int",
+    "SVG_TURBULENCE_TYPE_FRACTALNOISE": "int",
+    "SVG_TURBULENCE_TYPE_TURBULENCE": "int",
+    "SVG_TURBULENCE_TYPE_UNKNOWN": "int",
     "created": "FETurbulenceElement",
     "new": "FETurbulenceElement",
     "supported": "bool"
@@ -7990,13 +8426,24 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "blockingExclusive": null,
+    "blockingShared": null,
+    "exclusive": null,
+    "shared": null
+   }
   },
   "FileMode": {
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "append": null,
+    "read": null,
+    "write": null,
+    "writeOnly": null,
+    "writeOnlyAppend": null
+   }
   },
   "FileReader": {
    "bases": [
@@ -8019,7 +8466,16 @@
    },
    "params": [],
    "statics": {
-    "new": "FileReader"
+    "DONE": "int",
+    "EMPTY": "int",
+    "LOADING": "int",
+    "abortEvent": "EventStreamProvider<ProgressEvent>",
+    "errorEvent": "EventStreamProvider<ProgressEvent>",
+    "loadEndEvent": "EventStreamProvider<ProgressEvent>",
+    "loadEvent": "EventStreamProvider<ProgressEvent>",
+    "loadStartEvent": "EventStreamProvider<ProgressEvent>",
+    "new": "FileReader",
+    "progressEvent": "EventStreamProvider<ProgressEvent>"
    }
   },
   "FileStat": {
@@ -8118,7 +8574,15 @@
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "NOT_FOUND": null,
+    "directory": null,
+    "file": null,
+    "link": null,
+    "notFound": null,
+    "pipe": null,
+    "unixDomainSock": null
+   }
   },
   "FileSystemEvent": {
    "bases": [],
@@ -8128,7 +8592,13 @@
     "type": "int"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "all": "int",
+    "create": "int",
+    "delete": "int",
+    "modify": "int",
+    "move": "int"
+   }
   },
   "FileSystemException": {
    "bases": [
@@ -8207,7 +8677,17 @@
     "write": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "DONE": "int",
+    "INIT": "int",
+    "WRITING": "int",
+    "abortEvent": "EventStreamProvider<ProgressEvent>",
+    "errorEvent": "EventStreamProvider<Event>",
+    "progressEvent": "EventStreamProvider<ProgressEvent>",
+    "writeEndEvent": "EventStreamProvider<ProgressEvent>",
+    "writeEvent": "EventStreamProvider<ProgressEvent>",
+    "writeStartEvent": "EventStreamProvider<ProgressEvent>"
+   }
   },
   "FilterElement": {
    "bases": [
@@ -8271,7 +8751,9 @@
     "sort": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "FilteredElementList"
+   }
   },
   "Finalizable": {
    "bases": [],
@@ -8332,6 +8814,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Float32List",
     "new": "Float32List",
     "sublistView": "Float32List",
@@ -8397,7 +8880,263 @@
     "fromInt32x4Bits": "Float32x4",
     "new": "Float32x4",
     "splat": "Float32x4",
-    "zero": "Float32x4"
+    "wwww": "int",
+    "wwwx": "int",
+    "wwwy": "int",
+    "wwwz": "int",
+    "wwxw": "int",
+    "wwxx": "int",
+    "wwxy": "int",
+    "wwxz": "int",
+    "wwyw": "int",
+    "wwyx": "int",
+    "wwyy": "int",
+    "wwyz": "int",
+    "wwzw": "int",
+    "wwzx": "int",
+    "wwzy": "int",
+    "wwzz": "int",
+    "wxww": "int",
+    "wxwx": "int",
+    "wxwy": "int",
+    "wxwz": "int",
+    "wxxw": "int",
+    "wxxx": "int",
+    "wxxy": "int",
+    "wxxz": "int",
+    "wxyw": "int",
+    "wxyx": "int",
+    "wxyy": "int",
+    "wxyz": "int",
+    "wxzw": "int",
+    "wxzx": "int",
+    "wxzy": "int",
+    "wxzz": "int",
+    "wyww": "int",
+    "wywx": "int",
+    "wywy": "int",
+    "wywz": "int",
+    "wyxw": "int",
+    "wyxx": "int",
+    "wyxy": "int",
+    "wyxz": "int",
+    "wyyw": "int",
+    "wyyx": "int",
+    "wyyy": "int",
+    "wyyz": "int",
+    "wyzw": "int",
+    "wyzx": "int",
+    "wyzy": "int",
+    "wyzz": "int",
+    "wzww": "int",
+    "wzwx": "int",
+    "wzwy": "int",
+    "wzwz": "int",
+    "wzxw": "int",
+    "wzxx": "int",
+    "wzxy": "int",
+    "wzxz": "int",
+    "wzyw": "int",
+    "wzyx": "int",
+    "wzyy": "int",
+    "wzyz": "int",
+    "wzzw": "int",
+    "wzzx": "int",
+    "wzzy": "int",
+    "wzzz": "int",
+    "xwww": "int",
+    "xwwx": "int",
+    "xwwy": "int",
+    "xwwz": "int",
+    "xwxw": "int",
+    "xwxx": "int",
+    "xwxy": "int",
+    "xwxz": "int",
+    "xwyw": "int",
+    "xwyx": "int",
+    "xwyy": "int",
+    "xwyz": "int",
+    "xwzw": "int",
+    "xwzx": "int",
+    "xwzy": "int",
+    "xwzz": "int",
+    "xxww": "int",
+    "xxwx": "int",
+    "xxwy": "int",
+    "xxwz": "int",
+    "xxxw": "int",
+    "xxxx": "int",
+    "xxxy": "int",
+    "xxxz": "int",
+    "xxyw": "int",
+    "xxyx": "int",
+    "xxyy": "int",
+    "xxyz": "int",
+    "xxzw": "int",
+    "xxzx": "int",
+    "xxzy": "int",
+    "xxzz": "int",
+    "xyww": "int",
+    "xywx": "int",
+    "xywy": "int",
+    "xywz": "int",
+    "xyxw": "int",
+    "xyxx": "int",
+    "xyxy": "int",
+    "xyxz": "int",
+    "xyyw": "int",
+    "xyyx": "int",
+    "xyyy": "int",
+    "xyyz": "int",
+    "xyzw": "int",
+    "xyzx": "int",
+    "xyzy": "int",
+    "xyzz": "int",
+    "xzww": "int",
+    "xzwx": "int",
+    "xzwy": "int",
+    "xzwz": "int",
+    "xzxw": "int",
+    "xzxx": "int",
+    "xzxy": "int",
+    "xzxz": "int",
+    "xzyw": "int",
+    "xzyx": "int",
+    "xzyy": "int",
+    "xzyz": "int",
+    "xzzw": "int",
+    "xzzx": "int",
+    "xzzy": "int",
+    "xzzz": "int",
+    "ywww": "int",
+    "ywwx": "int",
+    "ywwy": "int",
+    "ywwz": "int",
+    "ywxw": "int",
+    "ywxx": "int",
+    "ywxy": "int",
+    "ywxz": "int",
+    "ywyw": "int",
+    "ywyx": "int",
+    "ywyy": "int",
+    "ywyz": "int",
+    "ywzw": "int",
+    "ywzx": "int",
+    "ywzy": "int",
+    "ywzz": "int",
+    "yxww": "int",
+    "yxwx": "int",
+    "yxwy": "int",
+    "yxwz": "int",
+    "yxxw": "int",
+    "yxxx": "int",
+    "yxxy": "int",
+    "yxxz": "int",
+    "yxyw": "int",
+    "yxyx": "int",
+    "yxyy": "int",
+    "yxyz": "int",
+    "yxzw": "int",
+    "yxzx": "int",
+    "yxzy": "int",
+    "yxzz": "int",
+    "yyww": "int",
+    "yywx": "int",
+    "yywy": "int",
+    "yywz": "int",
+    "yyxw": "int",
+    "yyxx": "int",
+    "yyxy": "int",
+    "yyxz": "int",
+    "yyyw": "int",
+    "yyyx": "int",
+    "yyyy": "int",
+    "yyyz": "int",
+    "yyzw": "int",
+    "yyzx": "int",
+    "yyzy": "int",
+    "yyzz": "int",
+    "yzww": "int",
+    "yzwx": "int",
+    "yzwy": "int",
+    "yzwz": "int",
+    "yzxw": "int",
+    "yzxx": "int",
+    "yzxy": "int",
+    "yzxz": "int",
+    "yzyw": "int",
+    "yzyx": "int",
+    "yzyy": "int",
+    "yzyz": "int",
+    "yzzw": "int",
+    "yzzx": "int",
+    "yzzy": "int",
+    "yzzz": "int",
+    "zero": "Float32x4",
+    "zwww": "int",
+    "zwwx": "int",
+    "zwwy": "int",
+    "zwwz": "int",
+    "zwxw": "int",
+    "zwxx": "int",
+    "zwxy": "int",
+    "zwxz": "int",
+    "zwyw": "int",
+    "zwyx": "int",
+    "zwyy": "int",
+    "zwyz": "int",
+    "zwzw": "int",
+    "zwzx": "int",
+    "zwzy": "int",
+    "zwzz": "int",
+    "zxww": "int",
+    "zxwx": "int",
+    "zxwy": "int",
+    "zxwz": "int",
+    "zxxw": "int",
+    "zxxx": "int",
+    "zxxy": "int",
+    "zxxz": "int",
+    "zxyw": "int",
+    "zxyx": "int",
+    "zxyy": "int",
+    "zxyz": "int",
+    "zxzw": "int",
+    "zxzx": "int",
+    "zxzy": "int",
+    "zxzz": "int",
+    "zyww": "int",
+    "zywx": "int",
+    "zywy": "int",
+    "zywz": "int",
+    "zyxw": "int",
+    "zyxx": "int",
+    "zyxy": "int",
+    "zyxz": "int",
+    "zyyw": "int",
+    "zyyx": "int",
+    "zyyy": "int",
+    "zyyz": "int",
+    "zyzw": "int",
+    "zyzx": "int",
+    "zyzy": "int",
+    "zyzz": "int",
+    "zzww": "int",
+    "zzwx": "int",
+    "zzwy": "int",
+    "zzwz": "int",
+    "zzxw": "int",
+    "zzxx": "int",
+    "zzxy": "int",
+    "zzxz": "int",
+    "zzyw": "int",
+    "zzyx": "int",
+    "zzyy": "int",
+    "zzyz": "int",
+    "zzzw": "int",
+    "zzzx": "int",
+    "zzzy": "int",
+    "zzzz": "int"
    }
   },
   "Float32x4List": {
@@ -8412,6 +9151,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Float32x4List",
     "new": "Float32x4List",
     "sublistView": "Float32x4List",
@@ -8426,6 +9166,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Float64List",
     "new": "Float64List",
     "sublistView": "Float64List",
@@ -8491,6 +9232,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Float64x2List",
     "new": "Float64x2List",
     "sublistView": "Float64x2List",
@@ -8585,7 +9327,11 @@
     "status": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "loadingDoneEvent": "EventStreamProvider<FontFaceSetLoadEvent>",
+    "loadingErrorEvent": "EventStreamProvider<FontFaceSetLoadEvent>",
+    "loadingEvent": "EventStreamProvider<FontFaceSetLoadEvent>"
+   }
   },
   "FontFaceSetLoadEvent": {
    "bases": [
@@ -9163,7 +9909,65 @@
     "removeEventListener": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "abortEvent": "EventStreamProvider<Event>",
+    "blurEvent": "EventStreamProvider<Event>",
+    "canPlayEvent": "EventStreamProvider<Event>",
+    "canPlayThroughEvent": "EventStreamProvider<Event>",
+    "changeEvent": "EventStreamProvider<Event>",
+    "clickEvent": "EventStreamProvider<MouseEvent>",
+    "contextMenuEvent": "EventStreamProvider<MouseEvent>",
+    "doubleClickEvent": "EventStreamProvider<Event>",
+    "dragEndEvent": "EventStreamProvider<MouseEvent>",
+    "dragEnterEvent": "EventStreamProvider<MouseEvent>",
+    "dragEvent": "EventStreamProvider<MouseEvent>",
+    "dragLeaveEvent": "EventStreamProvider<MouseEvent>",
+    "dragOverEvent": "EventStreamProvider<MouseEvent>",
+    "dragStartEvent": "EventStreamProvider<MouseEvent>",
+    "dropEvent": "EventStreamProvider<MouseEvent>",
+    "durationChangeEvent": "EventStreamProvider<Event>",
+    "emptiedEvent": "EventStreamProvider<Event>",
+    "endedEvent": "EventStreamProvider<Event>",
+    "errorEvent": "EventStreamProvider<Event>",
+    "focusEvent": "EventStreamProvider<Event>",
+    "inputEvent": "EventStreamProvider<Event>",
+    "invalidEvent": "EventStreamProvider<Event>",
+    "keyDownEvent": "EventStreamProvider<KeyboardEvent>",
+    "keyPressEvent": "EventStreamProvider<KeyboardEvent>",
+    "keyUpEvent": "EventStreamProvider<KeyboardEvent>",
+    "loadEvent": "EventStreamProvider<Event>",
+    "loadedDataEvent": "EventStreamProvider<Event>",
+    "loadedMetadataEvent": "EventStreamProvider<Event>",
+    "mouseDownEvent": "EventStreamProvider<MouseEvent>",
+    "mouseEnterEvent": "EventStreamProvider<MouseEvent>",
+    "mouseLeaveEvent": "EventStreamProvider<MouseEvent>",
+    "mouseMoveEvent": "EventStreamProvider<MouseEvent>",
+    "mouseOutEvent": "EventStreamProvider<MouseEvent>",
+    "mouseOverEvent": "EventStreamProvider<MouseEvent>",
+    "mouseUpEvent": "EventStreamProvider<MouseEvent>",
+    "mouseWheelEvent": "EventStreamProvider<WheelEvent>",
+    "pauseEvent": "EventStreamProvider<Event>",
+    "playEvent": "EventStreamProvider<Event>",
+    "playingEvent": "EventStreamProvider<Event>",
+    "rateChangeEvent": "EventStreamProvider<Event>",
+    "resetEvent": "EventStreamProvider<Event>",
+    "resizeEvent": "EventStreamProvider<Event>",
+    "scrollEvent": "EventStreamProvider<Event>",
+    "seekedEvent": "EventStreamProvider<Event>",
+    "seekingEvent": "EventStreamProvider<Event>",
+    "selectEvent": "EventStreamProvider<Event>",
+    "stalledEvent": "EventStreamProvider<Event>",
+    "submitEvent": "EventStreamProvider<Event>",
+    "suspendEvent": "EventStreamProvider<Event>",
+    "timeUpdateEvent": "EventStreamProvider<Event>",
+    "touchCancelEvent": "EventStreamProvider<TouchEvent>",
+    "touchEndEvent": "EventStreamProvider<TouchEvent>",
+    "touchMoveEvent": "EventStreamProvider<TouchEvent>",
+    "touchStartEvent": "EventStreamProvider<TouchEvent>",
+    "volumeChangeEvent": "EventStreamProvider<Event>",
+    "waitingEvent": "EventStreamProvider<Event>",
+    "wheelEvent": "EventStreamProvider<WheelEvent>"
+   }
   },
   "GraphicsElement": {
    "bases": [
@@ -9239,7 +10043,9 @@
    "params": [
     "E"
    ],
-   "statics": {}
+   "statics": {
+    "new": "HasNextIterator"
+   }
   },
   "HashChangeEvent": {
    "bases": [
@@ -9417,7 +10223,9 @@
     "title": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "visibilityChangeEvent": "EventStreamProvider<Event>"
+   }
   },
   "HtmlElement": {
    "bases": [
@@ -9457,7 +10265,13 @@
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "attribute": "HtmlEscapeMode",
+    "element": "HtmlEscapeMode",
+    "new": "HtmlEscapeMode",
+    "sqAttribute": "HtmlEscapeMode",
+    "unknown": "HtmlEscapeMode"
+   }
   },
   "HtmlFormControlsCollection": {
    "bases": [
@@ -9513,6 +10327,7 @@
     "addProxyCredentials": null,
     "authenticate": null,
     "authenticateProxy": null,
+    "autoUncompress": "bool",
     "badCertificateCallback": null,
     "close": null,
     "connectionFactory": null,
@@ -9524,6 +10339,7 @@
     "getUrl": "Future<HttpClientRequest>",
     "head": "Future<HttpClientRequest>",
     "headUrl": "Future<HttpClientRequest>",
+    "idleTimeout": "Duration",
     "keyLog": null,
     "maxConnectionsPerHost": "int",
     "open": "Future<HttpClientRequest>",
@@ -9538,6 +10354,8 @@
    },
    "params": [],
    "statics": {
+    "defaultHttpPort": "int",
+    "defaultHttpsPort": "int",
     "enableTimelineLogging": null,
     "findProxyFromEnvironment": "String",
     "new": "HttpClient"
@@ -9575,12 +10393,17 @@
    ],
    "methods": {
     "abort": null,
+    "bufferOutput": "bool",
     "close": "Future<HttpClientResponse>",
     "connectionInfo": "HttpConnectionInfo",
+    "contentLength": "int",
     "cookies": "List<Cookie>",
     "done": "Future<HttpClientResponse>",
+    "followRedirects": "bool",
     "headers": "HttpHeaders",
+    "maxRedirects": "int",
     "method": "String",
+    "persistentConnection": "bool",
     "uri": "Uri"
    },
    "params": [],
@@ -9626,7 +10449,12 @@
   },
   "HttpConnectionsInfo": {
    "bases": [],
-   "methods": {},
+   "methods": {
+    "active": "int",
+    "closing": "int",
+    "idle": "int",
+    "total": "int"
+   },
    "params": [],
    "statics": {}
   },
@@ -9659,6 +10487,7 @@
     "add": null,
     "chunkedTransferEncoding": "bool",
     "clear": null,
+    "contentLength": "int",
     "contentType": "ContentType",
     "date": "DateTime",
     "expires": "DateTime",
@@ -9675,7 +10504,70 @@
     "value": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "acceptCharsetHeader": null,
+    "acceptEncodingHeader": null,
+    "acceptHeader": null,
+    "acceptLanguageHeader": null,
+    "acceptRangesHeader": null,
+    "accessControlAllowCredentialsHeader": null,
+    "accessControlAllowHeadersHeader": null,
+    "accessControlAllowMethodsHeader": null,
+    "accessControlAllowOriginHeader": null,
+    "accessControlExposeHeadersHeader": null,
+    "accessControlMaxAgeHeader": null,
+    "accessControlRequestHeadersHeader": null,
+    "accessControlRequestMethodHeader": null,
+    "ageHeader": null,
+    "allowHeader": null,
+    "authorizationHeader": null,
+    "cacheControlHeader": null,
+    "connectionHeader": null,
+    "contentDisposition": null,
+    "contentEncodingHeader": null,
+    "contentLanguageHeader": null,
+    "contentLengthHeader": null,
+    "contentLocationHeader": null,
+    "contentMD5Header": null,
+    "contentRangeHeader": null,
+    "contentTypeHeader": null,
+    "cookieHeader": null,
+    "dateHeader": null,
+    "entityHeaders": null,
+    "etagHeader": null,
+    "expectHeader": null,
+    "expiresHeader": null,
+    "fromHeader": null,
+    "generalHeaders": null,
+    "hostHeader": null,
+    "ifMatchHeader": null,
+    "ifModifiedSinceHeader": null,
+    "ifNoneMatchHeader": null,
+    "ifRangeHeader": null,
+    "ifUnmodifiedSinceHeader": null,
+    "lastModifiedHeader": null,
+    "locationHeader": null,
+    "maxForwardsHeader": null,
+    "pragmaHeader": null,
+    "proxyAuthenticateHeader": null,
+    "proxyAuthorizationHeader": null,
+    "rangeHeader": null,
+    "refererHeader": null,
+    "requestHeaders": null,
+    "responseHeaders": null,
+    "retryAfterHeader": null,
+    "serverHeader": null,
+    "setCookieHeader": null,
+    "teHeader": null,
+    "trailerHeader": null,
+    "transferEncodingHeader": null,
+    "upgradeHeader": null,
+    "userAgentHeader": null,
+    "varyHeader": null,
+    "viaHeader": null,
+    "warningHeader": null,
+    "wwwAuthenticateHeader": null
+   }
   },
   "HttpOverrides": {
    "bases": [],
@@ -9742,9 +10634,15 @@
    },
    "params": [],
    "statics": {
+    "DONE": "int",
+    "HEADERS_RECEIVED": "int",
+    "LOADING": "int",
+    "OPENED": "int",
+    "UNSENT": "int",
     "getString": "Future<String>",
     "new": "HttpRequest",
     "postFormData": "Future<HttpRequest>",
+    "readyStateChangeEvent": "EventStreamProvider<Event>",
     "request": "Future<HttpRequest>",
     "requestCrossOrigin": "Future<String>",
     "supportsCrossOrigin": "bool",
@@ -9767,7 +10665,15 @@
     "onTimeout": "Stream<ProgressEvent>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "abortEvent": "EventStreamProvider<ProgressEvent>",
+    "errorEvent": "EventStreamProvider<ProgressEvent>",
+    "loadEndEvent": "EventStreamProvider<ProgressEvent>",
+    "loadEvent": "EventStreamProvider<ProgressEvent>",
+    "loadStartEvent": "EventStreamProvider<ProgressEvent>",
+    "progressEvent": "EventStreamProvider<ProgressEvent>",
+    "timeoutEvent": "EventStreamProvider<ProgressEvent>"
+   }
   },
   "HttpRequestUpload": {
    "bases": [
@@ -9782,14 +10688,17 @@
     "IOSink"
    ],
    "methods": {
+    "bufferOutput": "bool",
     "connectionInfo": "HttpConnectionInfo",
+    "contentLength": "int",
     "cookies": "List<Cookie>",
     "deadline": "Duration",
     "detachSocket": "Future<Socket>",
     "headers": "HttpHeaders",
     "persistentConnection": "bool",
     "reasonPhrase": "String",
-    "redirect": "Future"
+    "redirect": "Future",
+    "statusCode": "int"
    },
    "params": [],
    "statics": {}
@@ -9800,9 +10709,11 @@
    ],
    "methods": {
     "address": "InternetAddress",
+    "autoCompress": "bool",
     "close": "Future",
     "connectionsInfo": "HttpConnectionsInfo",
     "defaultResponseHeaders": "HttpHeaders",
+    "idleTimeout": "Duration",
     "port": "int",
     "serverHeader": "String"
    },
@@ -10260,6 +11171,7 @@
    "params": [],
    "statics": {
     "check": "int",
+    "new": "IndexError",
     "withLength": "IndexError"
    }
   },
@@ -10446,6 +11358,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Int16List",
     "new": "Int16List",
     "sublistView": "Int16List",
@@ -10515,6 +11428,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Int32List",
     "new": "Int32List",
     "sublistView": "Int32List",
@@ -10590,7 +11504,263 @@
    "statics": {
     "bool": "Int32x4",
     "fromFloat32x4Bits": "Int32x4",
-    "new": "Int32x4"
+    "new": "Int32x4",
+    "wwww": "int",
+    "wwwx": "int",
+    "wwwy": "int",
+    "wwwz": "int",
+    "wwxw": "int",
+    "wwxx": "int",
+    "wwxy": "int",
+    "wwxz": "int",
+    "wwyw": "int",
+    "wwyx": "int",
+    "wwyy": "int",
+    "wwyz": "int",
+    "wwzw": "int",
+    "wwzx": "int",
+    "wwzy": "int",
+    "wwzz": "int",
+    "wxww": "int",
+    "wxwx": "int",
+    "wxwy": "int",
+    "wxwz": "int",
+    "wxxw": "int",
+    "wxxx": "int",
+    "wxxy": "int",
+    "wxxz": "int",
+    "wxyw": "int",
+    "wxyx": "int",
+    "wxyy": "int",
+    "wxyz": "int",
+    "wxzw": "int",
+    "wxzx": "int",
+    "wxzy": "int",
+    "wxzz": "int",
+    "wyww": "int",
+    "wywx": "int",
+    "wywy": "int",
+    "wywz": "int",
+    "wyxw": "int",
+    "wyxx": "int",
+    "wyxy": "int",
+    "wyxz": "int",
+    "wyyw": "int",
+    "wyyx": "int",
+    "wyyy": "int",
+    "wyyz": "int",
+    "wyzw": "int",
+    "wyzx": "int",
+    "wyzy": "int",
+    "wyzz": "int",
+    "wzww": "int",
+    "wzwx": "int",
+    "wzwy": "int",
+    "wzwz": "int",
+    "wzxw": "int",
+    "wzxx": "int",
+    "wzxy": "int",
+    "wzxz": "int",
+    "wzyw": "int",
+    "wzyx": "int",
+    "wzyy": "int",
+    "wzyz": "int",
+    "wzzw": "int",
+    "wzzx": "int",
+    "wzzy": "int",
+    "wzzz": "int",
+    "xwww": "int",
+    "xwwx": "int",
+    "xwwy": "int",
+    "xwwz": "int",
+    "xwxw": "int",
+    "xwxx": "int",
+    "xwxy": "int",
+    "xwxz": "int",
+    "xwyw": "int",
+    "xwyx": "int",
+    "xwyy": "int",
+    "xwyz": "int",
+    "xwzw": "int",
+    "xwzx": "int",
+    "xwzy": "int",
+    "xwzz": "int",
+    "xxww": "int",
+    "xxwx": "int",
+    "xxwy": "int",
+    "xxwz": "int",
+    "xxxw": "int",
+    "xxxx": "int",
+    "xxxy": "int",
+    "xxxz": "int",
+    "xxyw": "int",
+    "xxyx": "int",
+    "xxyy": "int",
+    "xxyz": "int",
+    "xxzw": "int",
+    "xxzx": "int",
+    "xxzy": "int",
+    "xxzz": "int",
+    "xyww": "int",
+    "xywx": "int",
+    "xywy": "int",
+    "xywz": "int",
+    "xyxw": "int",
+    "xyxx": "int",
+    "xyxy": "int",
+    "xyxz": "int",
+    "xyyw": "int",
+    "xyyx": "int",
+    "xyyy": "int",
+    "xyyz": "int",
+    "xyzw": "int",
+    "xyzx": "int",
+    "xyzy": "int",
+    "xyzz": "int",
+    "xzww": "int",
+    "xzwx": "int",
+    "xzwy": "int",
+    "xzwz": "int",
+    "xzxw": "int",
+    "xzxx": "int",
+    "xzxy": "int",
+    "xzxz": "int",
+    "xzyw": "int",
+    "xzyx": "int",
+    "xzyy": "int",
+    "xzyz": "int",
+    "xzzw": "int",
+    "xzzx": "int",
+    "xzzy": "int",
+    "xzzz": "int",
+    "ywww": "int",
+    "ywwx": "int",
+    "ywwy": "int",
+    "ywwz": "int",
+    "ywxw": "int",
+    "ywxx": "int",
+    "ywxy": "int",
+    "ywxz": "int",
+    "ywyw": "int",
+    "ywyx": "int",
+    "ywyy": "int",
+    "ywyz": "int",
+    "ywzw": "int",
+    "ywzx": "int",
+    "ywzy": "int",
+    "ywzz": "int",
+    "yxww": "int",
+    "yxwx": "int",
+    "yxwy": "int",
+    "yxwz": "int",
+    "yxxw": "int",
+    "yxxx": "int",
+    "yxxy": "int",
+    "yxxz": "int",
+    "yxyw": "int",
+    "yxyx": "int",
+    "yxyy": "int",
+    "yxyz": "int",
+    "yxzw": "int",
+    "yxzx": "int",
+    "yxzy": "int",
+    "yxzz": "int",
+    "yyww": "int",
+    "yywx": "int",
+    "yywy": "int",
+    "yywz": "int",
+    "yyxw": "int",
+    "yyxx": "int",
+    "yyxy": "int",
+    "yyxz": "int",
+    "yyyw": "int",
+    "yyyx": "int",
+    "yyyy": "int",
+    "yyyz": "int",
+    "yyzw": "int",
+    "yyzx": "int",
+    "yyzy": "int",
+    "yyzz": "int",
+    "yzww": "int",
+    "yzwx": "int",
+    "yzwy": "int",
+    "yzwz": "int",
+    "yzxw": "int",
+    "yzxx": "int",
+    "yzxy": "int",
+    "yzxz": "int",
+    "yzyw": "int",
+    "yzyx": "int",
+    "yzyy": "int",
+    "yzyz": "int",
+    "yzzw": "int",
+    "yzzx": "int",
+    "yzzy": "int",
+    "yzzz": "int",
+    "zwww": "int",
+    "zwwx": "int",
+    "zwwy": "int",
+    "zwwz": "int",
+    "zwxw": "int",
+    "zwxx": "int",
+    "zwxy": "int",
+    "zwxz": "int",
+    "zwyw": "int",
+    "zwyx": "int",
+    "zwyy": "int",
+    "zwyz": "int",
+    "zwzw": "int",
+    "zwzx": "int",
+    "zwzy": "int",
+    "zwzz": "int",
+    "zxww": "int",
+    "zxwx": "int",
+    "zxwy": "int",
+    "zxwz": "int",
+    "zxxw": "int",
+    "zxxx": "int",
+    "zxxy": "int",
+    "zxxz": "int",
+    "zxyw": "int",
+    "zxyx": "int",
+    "zxyy": "int",
+    "zxyz": "int",
+    "zxzw": "int",
+    "zxzx": "int",
+    "zxzy": "int",
+    "zxzz": "int",
+    "zyww": "int",
+    "zywx": "int",
+    "zywy": "int",
+    "zywz": "int",
+    "zyxw": "int",
+    "zyxx": "int",
+    "zyxy": "int",
+    "zyxz": "int",
+    "zyyw": "int",
+    "zyyx": "int",
+    "zyyy": "int",
+    "zyyz": "int",
+    "zyzw": "int",
+    "zyzx": "int",
+    "zyzy": "int",
+    "zyzz": "int",
+    "zzww": "int",
+    "zzwx": "int",
+    "zzwy": "int",
+    "zzwz": "int",
+    "zzxw": "int",
+    "zzxx": "int",
+    "zzxy": "int",
+    "zzxz": "int",
+    "zzyw": "int",
+    "zzyx": "int",
+    "zzyy": "int",
+    "zzyz": "int",
+    "zzzw": "int",
+    "zzzx": "int",
+    "zzzy": "int",
+    "zzzz": "int"
    }
   },
   "Int32x4List": {
@@ -10605,6 +11775,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Int32x4List",
     "new": "Int32x4List",
     "sublistView": "Int32x4List",
@@ -10638,6 +11809,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Int64List",
     "new": "Int64List",
     "sublistView": "Int64List",
@@ -10697,6 +11869,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Int8List",
     "new": "Int8List",
     "sublistView": "Int8List",
@@ -10845,7 +12018,12 @@
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "IPv4": "InternetAddressType",
+    "IPv6": "InternetAddressType",
+    "any": "InternetAddressType",
+    "unix": "InternetAddressType"
+   }
   },
   "IntersectionObserver": {
    "bases": [],
@@ -10904,8 +12082,10 @@
    "params": [],
    "statics": {
     "genericMethod": "Invocation",
+    "getter": "Invocation",
     "method": "Invocation",
-    "new": "Invocation"
+    "new": "Invocation",
+    "setter": "Invocation"
    }
   },
   "Isolate": {
@@ -10928,8 +12108,10 @@
    },
    "params": [],
    "statics": {
+    "beforeNextEvent": "int",
     "current": "Isolate",
     "exit": "Never",
+    "immediate": "int",
     "new": "Isolate",
     "packageConfig": "Future<Uri?>",
     "packageConfigSync": "Uri",
@@ -11007,6 +12189,7 @@
    ],
    "statics": {
     "castFrom": "Iterable<T>",
+    "empty": "Iterable",
     "generate": "Iterable",
     "iterableToFullString": "String",
     "iterableToShortString": "String",
@@ -11551,6 +12734,7 @@
    },
    "params": [],
    "statics": {
+    "new": "JsonCodec",
     "withReviver": "JsonCodec"
    }
   },
@@ -11593,7 +12777,8 @@
    },
    "params": [],
    "statics": {
-    "new": "JsonEncoder"
+    "new": "JsonEncoder",
+    "withIndent": "JsonEncoder"
    }
   },
   "JsonUnsupportedObjectError": {
@@ -11621,13 +12806,139 @@
     "startChunkedConversion": "ChunkedConversionSink<Object?>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "JsonUtf8Encoder"
+   }
   },
   "KeyCode": {
    "bases": [],
    "methods": {},
    "params": [],
    "statics": {
+    "A": "int",
+    "ALT": "int",
+    "APOSTROPHE": "int",
+    "B": "int",
+    "BACKSLASH": "int",
+    "BACKSPACE": "int",
+    "C": "int",
+    "CAPS_LOCK": "int",
+    "CLOSE_SQUARE_BRACKET": "int",
+    "COMMA": "int",
+    "CONTEXT_MENU": "int",
+    "CTRL": "int",
+    "D": "int",
+    "DASH": "int",
+    "DELETE": "int",
+    "DOWN": "int",
+    "E": "int",
+    "EIGHT": "int",
+    "END": "int",
+    "ENTER": "int",
+    "EQUALS": "int",
+    "ESC": "int",
+    "F": "int",
+    "F1": "int",
+    "F10": "int",
+    "F11": "int",
+    "F12": "int",
+    "F2": "int",
+    "F3": "int",
+    "F4": "int",
+    "F5": "int",
+    "F6": "int",
+    "F7": "int",
+    "F8": "int",
+    "F9": "int",
+    "FF_EQUALS": "int",
+    "FF_SEMICOLON": "int",
+    "FIRST_MEDIA_KEY": "int",
+    "FIVE": "int",
+    "FOUR": "int",
+    "G": "int",
+    "H": "int",
+    "HOME": "int",
+    "I": "int",
+    "INSERT": "int",
+    "J": "int",
+    "K": "int",
+    "L": "int",
+    "LAST_MEDIA_KEY": "int",
+    "LEFT": "int",
+    "M": "int",
+    "MAC_ENTER": "int",
+    "MAC_FF_META": "int",
+    "META": "int",
+    "N": "int",
+    "NINE": "int",
+    "NUMLOCK": "int",
+    "NUM_CENTER": "int",
+    "NUM_DELETE": "int",
+    "NUM_DIVISION": "int",
+    "NUM_EAST": "int",
+    "NUM_EIGHT": "int",
+    "NUM_FIVE": "int",
+    "NUM_FOUR": "int",
+    "NUM_INSERT": "int",
+    "NUM_MINUS": "int",
+    "NUM_MULTIPLY": "int",
+    "NUM_NINE": "int",
+    "NUM_NORTH": "int",
+    "NUM_NORTH_EAST": "int",
+    "NUM_NORTH_WEST": "int",
+    "NUM_ONE": "int",
+    "NUM_PERIOD": "int",
+    "NUM_PLUS": "int",
+    "NUM_SEVEN": "int",
+    "NUM_SIX": "int",
+    "NUM_SOUTH": "int",
+    "NUM_SOUTH_EAST": "int",
+    "NUM_SOUTH_WEST": "int",
+    "NUM_THREE": "int",
+    "NUM_TWO": "int",
+    "NUM_WEST": "int",
+    "NUM_ZERO": "int",
+    "O": "int",
+    "ONE": "int",
+    "OPEN_SQUARE_BRACKET": "int",
+    "P": "int",
+    "PAGE_DOWN": "int",
+    "PAGE_UP": "int",
+    "PAUSE": "int",
+    "PERIOD": "int",
+    "PRINT_SCREEN": "int",
+    "Q": "int",
+    "QUESTION_MARK": "int",
+    "R": "int",
+    "RIGHT": "int",
+    "S": "int",
+    "SCROLL_LOCK": "int",
+    "SEMICOLON": "int",
+    "SEVEN": "int",
+    "SHIFT": "int",
+    "SINGLE_QUOTE": "int",
+    "SIX": "int",
+    "SLASH": "int",
+    "SPACE": "int",
+    "T": "int",
+    "TAB": "int",
+    "THREE": "int",
+    "TILDE": "int",
+    "TWO": "int",
+    "U": "int",
+    "UNKNOWN": "int",
+    "UP": "int",
+    "V": "int",
+    "W": "int",
+    "WIN_IME": "int",
+    "WIN_KEY": "int",
+    "WIN_KEY_FF_LINUX": "int",
+    "WIN_KEY_LEFT": "int",
+    "WIN_KEY_RIGHT": "int",
+    "X": "int",
+    "Y": "int",
+    "Z": "int",
+    "ZERO": "int",
     "isCharacterKey": "bool"
    }
   },
@@ -11658,6 +12969,9 @@
    "params": [],
    "statics": {
     "canUseDispatchEvent": "bool",
+    "keyDownEvent": "EventStreamProvider<KeyEvent>",
+    "keyPressEvent": "EventStreamProvider<KeyEvent>",
+    "keyUpEvent": "EventStreamProvider<KeyEvent>",
     "new": "KeyEvent",
     "wrap": "KeyEvent"
    }
@@ -11666,7 +12980,14 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "JOYSTICK": "int",
+    "LEFT": "int",
+    "MOBILE": "int",
+    "NUMPAD": "int",
+    "RIGHT": "int",
+    "STANDARD": "int"
+   }
   },
   "KeyRange": {
    "bases": [],
@@ -11710,6 +13031,10 @@
    },
    "params": [],
    "statics": {
+    "DOM_KEY_LOCATION_LEFT": "int",
+    "DOM_KEY_LOCATION_NUMPAD": "int",
+    "DOM_KEY_LOCATION_RIGHT": "int",
+    "DOM_KEY_LOCATION_STANDARD": "int",
     "new": "KeyboardEvent"
    }
   },
@@ -11783,7 +13108,9 @@
     "name": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "Latin1Codec"
+   }
   },
   "Latin1Decoder": {
    "bases": [],
@@ -11827,7 +13154,19 @@
     "valueInSpecifiedUnits": "num"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "SVG_LENGTHTYPE_CM": "int",
+    "SVG_LENGTHTYPE_EMS": "int",
+    "SVG_LENGTHTYPE_EXS": "int",
+    "SVG_LENGTHTYPE_IN": "int",
+    "SVG_LENGTHTYPE_MM": "int",
+    "SVG_LENGTHTYPE_NUMBER": "int",
+    "SVG_LENGTHTYPE_PC": "int",
+    "SVG_LENGTHTYPE_PERCENTAGE": "int",
+    "SVG_LENGTHTYPE_PT": "int",
+    "SVG_LENGTHTYPE_PX": "int",
+    "SVG_LENGTHTYPE_UNKNOWN": "int"
+   }
   },
   "LengthList": {
    "bases": [
@@ -12373,8 +13712,13 @@
    ],
    "statics": {
     "castFrom": "Map<K2, V2>",
+    "from": "Map",
     "fromEntries": "Map",
+    "fromIterable": "Map",
+    "fromIterables": "Map",
+    "identity": "Map",
     "new": "Map",
+    "of": "Map",
     "unmodifiable": "Map"
    }
   },
@@ -12439,7 +13783,9 @@
     "K",
     "V"
    ],
-   "statics": {}
+   "statics": {
+    "new": "MapEntry"
+   }
   },
   "MapView": {
    "bases": [
@@ -12473,7 +13819,9 @@
     "K",
     "V"
    ],
-   "statics": {}
+   "statics": {
+    "new": "MapView"
+   }
   },
   "MarkerElement": {
    "bases": [
@@ -12495,6 +13843,12 @@
    },
    "params": [],
    "statics": {
+    "SVG_MARKERUNITS_STROKEWIDTH": "int",
+    "SVG_MARKERUNITS_UNKNOWN": "int",
+    "SVG_MARKERUNITS_USERSPACEONUSE": "int",
+    "SVG_MARKER_ORIENT_ANGLE": "int",
+    "SVG_MARKER_ORIENT_AUTO": "int",
+    "SVG_MARKER_ORIENT_UNKNOWN": "int",
     "created": "MarkerElement",
     "new": "MarkerElement"
    }
@@ -12661,6 +14015,15 @@
    },
    "params": [],
    "statics": {
+    "HAVE_CURRENT_DATA": "int",
+    "HAVE_ENOUGH_DATA": "int",
+    "HAVE_FUTURE_DATA": "int",
+    "HAVE_METADATA": "int",
+    "HAVE_NOTHING": "int",
+    "NETWORK_EMPTY": "int",
+    "NETWORK_IDLE": "int",
+    "NETWORK_LOADING": "int",
+    "NETWORK_NO_SOURCE": "int",
     "created": "MediaElement"
    }
   },
@@ -12696,7 +14059,12 @@
     "message": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "MEDIA_ERR_ABORTED": "int",
+    "MEDIA_ERR_DECODE": "int",
+    "MEDIA_ERR_NETWORK": "int",
+    "MEDIA_ERR_SRC_NOT_SUPPORTED": "int"
+   }
   },
   "MediaKeyMessageEvent": {
    "bases": [
@@ -12727,7 +14095,9 @@
     "sessionId": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "messageEvent": "EventStreamProvider<MessageEvent>"
+   }
   },
   "MediaKeyStatusMap": {
    "bases": [],
@@ -12805,7 +14175,9 @@
     "removeListener": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "changeEvent": "EventStreamProvider<Event>"
+   }
   },
   "MediaQueryListEvent": {
    "bases": [
@@ -12840,8 +14212,10 @@
    },
    "params": [],
    "statics": {
+    "errorEvent": "EventStreamProvider<Event>",
     "isTypeSupported": "bool",
-    "new": "MediaRecorder"
+    "new": "MediaRecorder",
+    "pauseEvent": "EventStreamProvider<Event>"
    }
   },
   "MediaSession": {
@@ -12905,7 +14279,9 @@
    },
    "params": [],
    "statics": {
+    "addTrackEvent": "EventStreamProvider<Event>",
     "new": "MediaStream",
+    "removeTrackEvent": "EventStreamProvider<Event>",
     "supported": "bool"
    }
   },
@@ -12969,7 +14345,11 @@
     "stop": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "endedEvent": "EventStreamProvider<Event>",
+    "muteEvent": "EventStreamProvider<Event>",
+    "unmuteEvent": "EventStreamProvider<Event>"
+   }
   },
   "MediaStreamTrackEvent": {
    "bases": [
@@ -13010,9 +14390,12 @@
    "methods": {
     "client": "Client",
     "completed": "bool",
+    "error": null,
     "forwardToJson": "Map<String, dynamic>",
     "method": "String",
+    "params": null,
     "response": "Future<Response>",
+    "result": null,
     "sendToIsolate": "Future<Response>",
     "sendToVM": "Future<Response>",
     "serial": null,
@@ -13069,7 +14452,9 @@
     "postMessage": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "messageEvent": "EventStreamProvider<MessageEvent>"
+   }
   },
   "MessageRouter": {
    "bases": [],
@@ -13194,7 +14579,9 @@
     "onMidiMessage": "Stream<MidiMessageEvent>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "midiMessageEvent": "EventStreamProvider<MidiMessageEvent>"
+   }
   },
   "MidiInputMap": {
    "bases": [],
@@ -13432,7 +14819,11 @@
     "relatedNode": "Node"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "ADDITION": "int",
+    "MODIFICATION": "int",
+    "REMOVAL": "int"
+   }
   },
   "MutationObserver": {
    "bases": [],
@@ -13768,7 +15159,9 @@
     "type": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "changeEvent": "EventStreamProvider<Event>"
+   }
   },
   "NetworkInterface": {
    "bases": [],
@@ -13827,13 +15220,38 @@
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "ATTRIBUTE_NODE": "int",
+    "CDATA_SECTION_NODE": "int",
+    "COMMENT_NODE": "int",
+    "DOCUMENT_FRAGMENT_NODE": "int",
+    "DOCUMENT_NODE": "int",
+    "DOCUMENT_TYPE_NODE": "int",
+    "ELEMENT_NODE": "int",
+    "ENTITY_NODE": "int",
+    "ENTITY_REFERENCE_NODE": "int",
+    "NOTATION_NODE": "int",
+    "PROCESSING_INSTRUCTION_NODE": "int",
+    "TEXT_NODE": "int"
+   }
   },
   "NodeFilter": {
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "FILTER_ACCEPT": "int",
+    "FILTER_REJECT": "int",
+    "FILTER_SKIP": "int",
+    "SHOW_ALL": "int",
+    "SHOW_COMMENT": "int",
+    "SHOW_DOCUMENT": "int",
+    "SHOW_DOCUMENT_FRAGMENT": "int",
+    "SHOW_DOCUMENT_TYPE": "int",
+    "SHOW_ELEMENT": "int",
+    "SHOW_PROCESSING_INSTRUCTION": "int",
+    "SHOW_TEXT": "int"
+   }
   },
   "NodeIterator": {
    "bases": [],
@@ -13883,7 +15301,8 @@
    },
    "params": [],
    "statics": {
-    "new": "NodeTreeSanitizer"
+    "new": "NodeTreeSanitizer",
+    "trusted": null
    }
   },
   "NodeValidator": {
@@ -13976,10 +15395,14 @@
    },
    "params": [],
    "statics": {
+    "clickEvent": "EventStreamProvider<Event>",
+    "closeEvent": "EventStreamProvider<Event>",
+    "errorEvent": "EventStreamProvider<Event>",
     "maxActions": "int",
     "new": "Notification",
     "permission": "String",
     "requestPermission": "Future<String>",
+    "showEvent": "EventStreamProvider<Event>",
     "supported": "bool"
    }
   },
@@ -14146,7 +15569,8 @@
    },
    "params": [],
    "statics": {
-    "new": "OSError"
+    "new": "OSError",
+    "noErrorCode": "int"
    }
   },
   "Object": {
@@ -14292,7 +15716,9 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "FRAGMENT_SHADER_DERIVATIVE_HINT_OES": "int"
+   }
   },
   "OesTextureFloat": {
    "bases": [],
@@ -14310,7 +15736,9 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "HALF_FLOAT_OES": "int"
+   }
   },
   "OesTextureHalfFloatLinear": {
    "bases": [],
@@ -14327,7 +15755,9 @@
     "isVertexArray": "bool"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "VERTEX_ARRAY_BINDING_OES": "int"
+   }
   },
   "OfflineAudioCompletionEvent": {
    "bases": [
@@ -14455,7 +15885,10 @@
     "onUpgradeNeeded": "Stream<VersionChangeEvent>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "blockedEvent": "EventStreamProvider<Event>",
+    "upgradeNeededEvent": "EventStreamProvider<VersionChangeEvent>"
+   }
   },
   "OptGroupElement": {
    "bases": [
@@ -14717,7 +16150,9 @@
     "V",
     "E"
    ],
-   "statics": {}
+   "statics": {
+    "new": "ParallelWaitError"
+   }
   },
   "ParamElement": {
    "bases": [
@@ -15060,7 +16495,12 @@
     "type": "int"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "TYPE_BACK_FORWARD": "int",
+    "TYPE_NAVIGATE": "int",
+    "TYPE_RELOAD": "int",
+    "TYPE_RESERVED": "int"
+   }
   },
   "PerformanceNavigationTiming": {
    "bases": [
@@ -15192,7 +16632,9 @@
     "state": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "changeEvent": "EventStreamProvider<Event>"
+   }
   },
   "Permissions": {
    "bases": [],
@@ -15246,11 +16688,25 @@
     "environment": "Map<String, String>",
     "executable": "String",
     "executableArguments": "List<String>",
+    "isAndroid": "bool",
+    "isFuchsia": "bool",
+    "isIOS": "bool",
+    "isLinux": "bool",
+    "isMacOS": "bool",
+    "isWindows": "bool",
     "lineTerminator": "String",
+    "localHostname": null,
     "localeName": "String",
+    "numberOfProcessors": null,
+    "operatingSystem": null,
+    "operatingSystemVersion": null,
     "packageConfig": "String",
+    "pathSeparator": null,
     "resolvedExecutable": "String",
-    "script": "Uri"
+    "script": "Uri",
+    "supportsSimd": null,
+    "supportsTypedData": "bool",
+    "version": null
    }
   },
   "Plugin": {
@@ -15305,7 +16761,9 @@
    "params": [
     "T"
    ],
-   "statics": {}
+   "statics": {
+    "new": "Point"
+   }
   },
   "PointList": {
    "bases": [],
@@ -15441,7 +16899,11 @@
     "message": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "PERMISSION_DENIED": "int",
+    "POSITION_UNAVAILABLE": "int",
+    "TIMEOUT": "int"
+   }
   },
   "PreElement": {
    "bases": [
@@ -15472,7 +16934,9 @@
     "value": "bool"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "changeEvent": "EventStreamProvider<Event>"
+   }
   },
   "PresentationConnection": {
    "bases": [
@@ -15489,7 +16953,9 @@
     "url": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "messageEvent": "EventStreamProvider<MessageEvent>"
+   }
   },
   "PresentationConnectionAvailableEvent": {
    "bases": [
@@ -15555,7 +17021,22 @@
     "meetOrSlice": "int"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "SVG_MEETORSLICE_MEET": "int",
+    "SVG_MEETORSLICE_SLICE": "int",
+    "SVG_MEETORSLICE_UNKNOWN": "int",
+    "SVG_PRESERVEASPECTRATIO_NONE": "int",
+    "SVG_PRESERVEASPECTRATIO_UNKNOWN": "int",
+    "SVG_PRESERVEASPECTRATIO_XMAXYMAX": "int",
+    "SVG_PRESERVEASPECTRATIO_XMAXYMID": "int",
+    "SVG_PRESERVEASPECTRATIO_XMAXYMIN": "int",
+    "SVG_PRESERVEASPECTRATIO_XMIDYMAX": "int",
+    "SVG_PRESERVEASPECTRATIO_XMIDYMID": "int",
+    "SVG_PRESERVEASPECTRATIO_XMIDYMIN": "int",
+    "SVG_PRESERVEASPECTRATIO_XMINYMAX": "int",
+    "SVG_PRESERVEASPECTRATIO_XMINYMID": "int",
+    "SVG_PRESERVEASPECTRATIO_XMINYMIN": "int"
+   }
   },
   "Process": {
    "bases": [],
@@ -15622,7 +17103,37 @@
     "watch": "Stream<ProcessSignal>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "sigabrt": "ProcessSignal",
+    "sigalrm": "ProcessSignal",
+    "sigbus": "ProcessSignal",
+    "sigchld": "ProcessSignal",
+    "sigcont": "ProcessSignal",
+    "sigfpe": "ProcessSignal",
+    "sighup": "ProcessSignal",
+    "sigill": "ProcessSignal",
+    "sigint": "ProcessSignal",
+    "sigkill": "ProcessSignal",
+    "sigpipe": "ProcessSignal",
+    "sigpoll": "ProcessSignal",
+    "sigprof": "ProcessSignal",
+    "sigquit": "ProcessSignal",
+    "sigsegv": "ProcessSignal",
+    "sigstop": "ProcessSignal",
+    "sigsys": "ProcessSignal",
+    "sigterm": "ProcessSignal",
+    "sigtrap": "ProcessSignal",
+    "sigtstp": "ProcessSignal",
+    "sigttin": "ProcessSignal",
+    "sigttou": "ProcessSignal",
+    "sigurg": "ProcessSignal",
+    "sigusr1": "ProcessSignal",
+    "sigusr2": "ProcessSignal",
+    "sigvtalrm": "ProcessSignal",
+    "sigwinch": "ProcessSignal",
+    "sigxcpu": "ProcessSignal",
+    "sigxfsz": "ProcessSignal"
+   }
   },
   "ProcessStartMode": {
    "bases": [],
@@ -15631,6 +17142,10 @@
    },
    "params": [],
    "statics": {
+    "detached": null,
+    "detachedWithStdio": null,
+    "inheritStdio": null,
+    "normal": null,
     "values": "List<ProcessStartMode>"
    }
   },
@@ -15789,7 +17304,10 @@
     "E"
    ],
    "statics": {
-    "castFrom": "Queue<T>"
+    "castFrom": "Queue<T>",
+    "from": "Queue",
+    "new": "Queue",
+    "of": "Queue"
    }
   },
   "QuoteElement": {
@@ -15919,6 +17437,10 @@
    },
    "params": [],
    "statics": {
+    "END_TO_END": "int",
+    "END_TO_START": "int",
+    "START_TO_END": "int",
+    "START_TO_START": "int",
     "fromPoint": "Range",
     "new": "Range",
     "supportsCreateContextualFragment": "bool"
@@ -15939,7 +17461,9 @@
     "checkValidIndex": "int",
     "checkValidRange": "int",
     "checkValueInInterval": "int",
+    "index": "RangeError",
     "new": "RangeError",
+    "range": "RangeError",
     "value": "RangeError"
    }
   },
@@ -16092,7 +17616,12 @@
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "closed": "RawSocketEvent",
+    "read": "RawSocketEvent",
+    "readClosed": "RawSocketEvent",
+    "write": "RawSocketEvent"
+   }
   },
   "RawSocketOption": {
    "bases": [],
@@ -16158,7 +17687,11 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "COMPLETE": "String",
+    "INTERACTIVE": "String",
+    "LOADING": "String"
+   }
   },
   "ReceivePort": {
    "bases": [
@@ -16786,7 +18319,10 @@
     "transaction": "Transaction"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "errorEvent": "EventStreamProvider<Event>",
+    "successEvent": "EventStreamProvider<Event>"
+   }
   },
   "ResetButtonInputElement": {
    "bases": [
@@ -16900,7 +18436,12 @@
     "sendTypedData": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "closeEvent": "EventStreamProvider<Event>",
+    "errorEvent": "EventStreamProvider<Event>",
+    "messageEvent": "EventStreamProvider<MessageEvent>",
+    "openEvent": "EventStreamProvider<Event>"
+   }
   },
   "RtcDataChannelEvent": {
    "bases": [
@@ -16928,7 +18469,9 @@
     "track": "MediaStreamTrack"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "toneChangeEvent": "EventStreamProvider<RtcDtmfToneChangeEvent>"
+   }
   },
   "RtcDtmfToneChangeEvent": {
    "bases": [
@@ -17008,9 +18551,17 @@
    },
    "params": [],
    "statics": {
+    "addStreamEvent": "EventStreamProvider<MediaStreamEvent>",
+    "connectionStateChangeEvent": "EventStreamProvider<Event>",
+    "dataChannelEvent": "EventStreamProvider<RtcDataChannelEvent>",
     "generateCertificate": "Future",
+    "iceConnectionStateChangeEvent": "EventStreamProvider<Event>",
+    "negotiationNeededEvent": "EventStreamProvider<Event>",
     "new": "RtcPeerConnection",
-    "supported": "bool"
+    "removeStreamEvent": "EventStreamProvider<MediaStreamEvent>",
+    "signalingStateChangeEvent": "EventStreamProvider<Event>",
+    "supported": "bool",
+    "trackEvent": "EventStreamProvider<RtcTrackEvent>"
    }
   },
   "RtcPeerConnectionIceEvent": {
@@ -17147,6 +18698,7 @@
    "methods": {
     "name": "String",
     "onIsolateExit": null,
+    "pendingMessagesReceivePorts": null,
     "portId": "int",
     "routeRequest": "Future<Response>",
     "routeResponse": null,
@@ -17165,6 +18717,7 @@
    "methods": {
     "isolateShutdown": null,
     "isolateStartup": null,
+    "isolates": null,
     "routeRequest": "Future<Response>",
     "routeResponse": null
    },
@@ -17180,7 +18733,12 @@
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "lax": null,
+    "none": null,
+    "strict": null,
+    "values": "List<SameSite>"
+   }
   },
   "Sampler": {
    "bases": [],
@@ -17214,7 +18772,9 @@
     "unlock": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "changeEvent": "EventStreamProvider<Event>"
+   }
   },
   "ScriptElement": {
    "bases": [
@@ -17249,13 +18809,19 @@
     "setEventListener": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "audioProcessEvent": "EventStreamProvider<AudioProcessingEvent>"
+   }
   },
   "ScrollAlignment": {
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "BOTTOM": null,
+    "CENTER": null,
+    "TOP": null
+   }
   },
   "ScrollState": {
    "bases": [],
@@ -17479,7 +19045,9 @@
     "timestamp": "num"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "errorEvent": "EventStreamProvider<Event>"
+   }
   },
   "SensorErrorEvent": {
    "bases": [
@@ -17542,12 +19110,18 @@
    "params": [],
    "statics": {
     "error": "ServiceExtensionResponse",
+    "extensionError": null,
+    "extensionErrorMax": null,
+    "extensionErrorMin": null,
+    "invalidParams": null,
     "result": "ServiceExtensionResponse"
    }
   },
   "ServiceProtocolInfo": {
    "bases": [],
    "methods": {
+    "majorVersion": "int",
+    "minorVersion": "int",
     "serverUri": "Uri",
     "serverWebSocketUri": "Uri",
     "toString": "String"
@@ -17569,7 +19143,9 @@
     "state": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "errorEvent": "EventStreamProvider<Event>"
+   }
   },
   "ServiceWorkerContainer": {
    "bases": [
@@ -17584,7 +19160,9 @@
     "register": "Future<ServiceWorkerRegistration>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "messageEvent": "EventStreamProvider<MessageEvent>"
+   }
   },
   "ServiceWorkerGlobalScope": {
    "bases": [
@@ -17602,7 +19180,12 @@
    },
    "params": [],
    "statics": {
-    "instance": "ServiceWorkerGlobalScope"
+    "activateEvent": "EventStreamProvider<Event>",
+    "fetchEvent": "EventStreamProvider<Event>",
+    "foreignfetchEvent": "EventStreamProvider<ForeignFetchEvent>",
+    "installEvent": "EventStreamProvider<Event>",
+    "instance": "ServiceWorkerGlobalScope",
+    "messageEvent": "EventStreamProvider<MessageEvent>"
    }
   },
   "ServiceWorkerRegistration": {
@@ -17655,6 +19238,10 @@
    ],
    "statics": {
     "castFrom": "Set<T>",
+    "from": "Set",
+    "identity": "Set",
+    "new": "Set",
+    "of": "Set",
     "unmodifiable": "Set"
    }
   },
@@ -17806,6 +19393,7 @@
    },
    "params": [],
    "statics": {
+    "errorEvent": "EventStreamProvider<Event>",
     "new": "SharedWorker"
    }
   },
@@ -17822,6 +19410,9 @@
    },
    "params": [],
    "statics": {
+    "PERSISTENT": "int",
+    "TEMPORARY": "int",
+    "connectEvent": "EventStreamProvider<Event>",
     "instance": "SharedWorkerGlobalScope"
    }
   },
@@ -17941,7 +19532,11 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "both": "SocketDirection",
+    "receive": "SocketDirection",
+    "send": "SocketDirection"
+   }
   },
   "SocketException": {
    "bases": [
@@ -17975,7 +19570,9 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "tcpNoDelay": "SocketOption"
+   }
   },
   "SourceBuffer": {
    "bases": [
@@ -17999,7 +19596,10 @@
     "videoTracks": "VideoTrackList"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "abortEvent": "EventStreamProvider<Event>",
+    "errorEvent": "EventStreamProvider<Event>"
+   }
   },
   "SourceBufferList": {
    "bases": [
@@ -18119,7 +19719,18 @@
    },
    "params": [],
    "statics": {
+    "audioEndEvent": "EventStreamProvider<Event>",
+    "audioStartEvent": "EventStreamProvider<Event>",
+    "endEvent": "EventStreamProvider<Event>",
+    "errorEvent": "EventStreamProvider<SpeechRecognitionError>",
     "new": "SpeechRecognition",
+    "noMatchEvent": "EventStreamProvider<SpeechRecognitionEvent>",
+    "resultEvent": "EventStreamProvider<SpeechRecognitionEvent>",
+    "soundEndEvent": "EventStreamProvider<Event>",
+    "soundStartEvent": "EventStreamProvider<Event>",
+    "speechEndEvent": "EventStreamProvider<Event>",
+    "speechStartEvent": "EventStreamProvider<Event>",
+    "startEvent": "EventStreamProvider<Event>",
     "supported": "bool"
    }
   },
@@ -18221,7 +19832,14 @@
    },
    "params": [],
    "statics": {
-    "new": "SpeechSynthesisUtterance"
+    "boundaryEvent": "EventStreamProvider<SpeechSynthesisEvent>",
+    "endEvent": "EventStreamProvider<SpeechSynthesisEvent>",
+    "errorEvent": "EventStreamProvider<Event>",
+    "markEvent": "EventStreamProvider<SpeechSynthesisEvent>",
+    "new": "SpeechSynthesisUtterance",
+    "pauseEvent": "EventStreamProvider<Event>",
+    "resumeEvent": "EventStreamProvider<SpeechSynthesisEvent>",
+    "startEvent": "EventStreamProvider<SpeechSynthesisEvent>"
    }
   },
   "SpeechSynthesisVoice": {
@@ -18269,6 +19887,7 @@
     "from": "SplayTreeMap",
     "fromIterable": "SplayTreeMap",
     "fromIterables": "SplayTreeMap",
+    "new": "SplayTreeMap",
     "of": "SplayTreeMap"
    }
   },
@@ -18329,7 +19948,16 @@
     "message": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "CONSTRAINT_ERR": "int",
+    "DATABASE_ERR": "int",
+    "QUOTA_ERR": "int",
+    "SYNTAX_ERR": "int",
+    "TIMEOUT_ERR": "int",
+    "TOO_LARGE_ERR": "int",
+    "UNKNOWN_ERR": "int",
+    "VERSION_ERR": "int"
+   }
   },
   "SqlResultSet": {
    "bases": [],
@@ -18388,6 +20016,8 @@
    "params": [],
    "statics": {
     "current": "StackTrace",
+    "empty": null,
+    "fromString": "StackTrace",
     "new": "StackTrace"
    }
   },
@@ -18453,7 +20083,12 @@
     "toString": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "file": "StdioType",
+    "other": "StdioType",
+    "pipe": "StdioType",
+    "terminal": "StdioType"
+   }
   },
   "Stdout": {
    "bases": [
@@ -18619,6 +20254,7 @@
    ],
    "statics": {
     "castFrom": "Stream<T>",
+    "empty": "Stream",
     "error": "Stream",
     "eventTransformed": "Stream",
     "fromFuture": "Stream",
@@ -18721,7 +20357,10 @@
     "T"
    ],
    "statics": {
-    "castFrom": "StreamTransformer<TS, TT>"
+    "castFrom": "StreamTransformer<TS, TT>",
+    "fromBind": "StreamTransformer",
+    "fromHandlers": "StreamTransformer",
+    "new": "StreamTransformer"
    }
   },
   "StreamTransformerBase": {
@@ -18751,7 +20390,9 @@
    "params": [
     "T"
    ],
-   "statics": {}
+   "statics": {
+    "new": "StreamView"
+   }
   },
   "String": {
    "bases": [
@@ -18831,7 +20472,10 @@
    },
    "params": [],
    "statics": {
-    "new": "StringConversionSink"
+    "from": "StringConversionSink",
+    "fromStringSink": "StringConversionSink",
+    "new": "StringConversionSink",
+    "withCallback": "StringConversionSink"
    }
   },
   "StringList": {
@@ -19018,6 +20662,11 @@
    },
    "params": [],
    "statics": {
+    "CHROME": "String",
+    "FIREFOX": "String",
+    "IE": "String",
+    "OPERA": "String",
+    "SAFARI": "String",
     "new": "SupportedBrowser"
    }
   },
@@ -19103,10 +20752,67 @@
    },
    "params": [],
    "statics": {
+    "abortEvent": "EventStreamProvider<Event>",
+    "blurEvent": "EventStreamProvider<Event>",
+    "canPlayEvent": "EventStreamProvider<Event>",
+    "canPlayThroughEvent": "EventStreamProvider<Event>",
+    "changeEvent": "EventStreamProvider<Event>",
+    "clickEvent": "EventStreamProvider<MouseEvent>",
+    "contextMenuEvent": "EventStreamProvider<MouseEvent>",
     "created": "SvgElement",
+    "doubleClickEvent": "EventStreamProvider<Event>",
+    "dragEndEvent": "EventStreamProvider<MouseEvent>",
+    "dragEnterEvent": "EventStreamProvider<MouseEvent>",
+    "dragEvent": "EventStreamProvider<MouseEvent>",
+    "dragLeaveEvent": "EventStreamProvider<MouseEvent>",
+    "dragOverEvent": "EventStreamProvider<MouseEvent>",
+    "dragStartEvent": "EventStreamProvider<MouseEvent>",
+    "dropEvent": "EventStreamProvider<MouseEvent>",
+    "durationChangeEvent": "EventStreamProvider<Event>",
+    "emptiedEvent": "EventStreamProvider<Event>",
+    "endedEvent": "EventStreamProvider<Event>",
+    "errorEvent": "EventStreamProvider<Event>",
+    "focusEvent": "EventStreamProvider<Event>",
+    "inputEvent": "EventStreamProvider<Event>",
+    "invalidEvent": "EventStreamProvider<Event>",
     "isTagSupported": "bool",
+    "keyDownEvent": "EventStreamProvider<KeyboardEvent>",
+    "keyPressEvent": "EventStreamProvider<KeyboardEvent>",
+    "keyUpEvent": "EventStreamProvider<KeyboardEvent>",
+    "loadEvent": "EventStreamProvider<Event>",
+    "loadedDataEvent": "EventStreamProvider<Event>",
+    "loadedMetadataEvent": "EventStreamProvider<Event>",
+    "mouseDownEvent": "EventStreamProvider<MouseEvent>",
+    "mouseEnterEvent": "EventStreamProvider<MouseEvent>",
+    "mouseLeaveEvent": "EventStreamProvider<MouseEvent>",
+    "mouseMoveEvent": "EventStreamProvider<MouseEvent>",
+    "mouseOutEvent": "EventStreamProvider<MouseEvent>",
+    "mouseOverEvent": "EventStreamProvider<MouseEvent>",
+    "mouseUpEvent": "EventStreamProvider<MouseEvent>",
+    "mouseWheelEvent": "EventStreamProvider<WheelEvent>",
+    "pauseEvent": "EventStreamProvider<Event>",
+    "playEvent": "EventStreamProvider<Event>",
+    "playingEvent": "EventStreamProvider<Event>",
+    "rateChangeEvent": "EventStreamProvider<Event>",
+    "resetEvent": "EventStreamProvider<Event>",
+    "resizeEvent": "EventStreamProvider<Event>",
+    "scrollEvent": "EventStreamProvider<Event>",
+    "seekedEvent": "EventStreamProvider<Event>",
+    "seekingEvent": "EventStreamProvider<Event>",
+    "selectEvent": "EventStreamProvider<Event>",
+    "stalledEvent": "EventStreamProvider<Event>",
+    "submitEvent": "EventStreamProvider<Event>",
+    "suspendEvent": "EventStreamProvider<Event>",
     "svg": "SvgElement",
-    "tag": "SvgElement"
+    "tag": "SvgElement",
+    "timeUpdateEvent": "EventStreamProvider<Event>",
+    "touchCancelEvent": "EventStreamProvider<TouchEvent>",
+    "touchEndEvent": "EventStreamProvider<TouchEvent>",
+    "touchMoveEvent": "EventStreamProvider<TouchEvent>",
+    "touchStartEvent": "EventStreamProvider<TouchEvent>",
+    "volumeChangeEvent": "EventStreamProvider<Event>",
+    "waitingEvent": "EventStreamProvider<Event>",
+    "wheelEvent": "EventStreamProvider<WheelEvent>"
    }
   },
   "SvgSvgElement": {
@@ -19173,7 +20879,11 @@
     "operator ==": "bool"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "empty": "Symbol",
+    "new": "Symbol",
+    "unaryMinus": "Symbol"
+   }
   },
   "SymbolElement": {
    "bases": [
@@ -19527,6 +21237,9 @@
    },
    "params": [],
    "statics": {
+    "LENGTHADJUST_SPACING": "int",
+    "LENGTHADJUST_SPACINGANDGLYPHS": "int",
+    "LENGTHADJUST_UNKNOWN": "int",
     "created": "TextContentElement"
    }
   },
@@ -19629,6 +21342,12 @@
    },
    "params": [],
    "statics": {
+    "TEXTPATH_METHODTYPE_ALIGN": "int",
+    "TEXTPATH_METHODTYPE_STRETCH": "int",
+    "TEXTPATH_METHODTYPE_UNKNOWN": "int",
+    "TEXTPATH_SPACINGTYPE_AUTO": "int",
+    "TEXTPATH_SPACINGTYPE_EXACT": "int",
+    "TEXTPATH_SPACINGTYPE_UNKNOWN": "int",
     "created": "TextPathElement"
    }
   },
@@ -19665,7 +21384,9 @@
     "removeCue": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "cueChangeEvent": "EventStreamProvider<Event>"
+   }
   },
   "TextTrackCue": {
    "bases": [
@@ -19681,7 +21402,10 @@
     "track": "TextTrack"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "enterEvent": "EventStreamProvider<Event>",
+    "exitEvent": "EventStreamProvider<Event>"
+   }
   },
   "TextTrackCueList": {
    "bases": [
@@ -19720,7 +21444,10 @@
     "single": "TextTrack"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "addTrackEvent": "EventStreamProvider<TrackEvent>",
+    "changeEvent": "EventStreamProvider<Event>"
+   }
   },
   "Texture": {
    "bases": [],
@@ -19861,7 +21588,10 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "tls1_2": null,
+    "tls1_3": null
+   }
   },
   "Touch": {
    "bases": [],
@@ -19961,6 +21691,10 @@
    },
    "params": [],
    "statics": {
+    "ERROR": "int",
+    "LOADED": "int",
+    "LOADING": "int",
+    "NONE": "int",
     "created": "TrackElement",
     "new": "TrackElement",
     "supported": "bool"
@@ -19995,7 +21729,11 @@
     "onError": "Stream<Event>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "abortEvent": "EventStreamProvider<Event>",
+    "completeEvent": "EventStreamProvider<Event>",
+    "errorEvent": "EventStreamProvider<Event>"
+   }
   },
   "TransferableTypedData": {
    "bases": [],
@@ -20021,7 +21759,15 @@
     "type": "int"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "SVG_TRANSFORM_MATRIX": "int",
+    "SVG_TRANSFORM_ROTATE": "int",
+    "SVG_TRANSFORM_SCALE": "int",
+    "SVG_TRANSFORM_SKEWX": "int",
+    "SVG_TRANSFORM_SKEWY": "int",
+    "SVG_TRANSFORM_TRANSLATE": "int",
+    "SVG_TRANSFORM_UNKNOWN": "int"
+   }
   },
   "TransformFeedback": {
    "bases": [],
@@ -20247,6 +21993,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Uint16List",
     "new": "Uint16List",
     "sublistView": "Uint16List",
@@ -20316,6 +22063,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Uint32List",
     "new": "Uint32List",
     "sublistView": "Uint32List",
@@ -20385,6 +22133,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Uint64List",
     "new": "Uint64List",
     "sublistView": "Uint64List",
@@ -20444,6 +22193,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Uint8ClampedList",
     "new": "Uint8ClampedList",
     "sublistView": "Uint8ClampedList",
@@ -20469,6 +22219,7 @@
    },
    "params": [],
    "statics": {
+    "bytesPerElement": "int",
     "fromList": "Uint8List",
     "new": "Uint8List",
     "sublistView": "Uint8List",
@@ -20608,7 +22359,11 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "SVG_UNIT_TYPE_OBJECTBOUNDINGBOX": "int",
+    "SVG_UNIT_TYPE_UNKNOWN": "int",
+    "SVG_UNIT_TYPE_USERSPACEONUSE": "int"
+   }
   },
   "UnknownElement": {
    "bases": [
@@ -20630,7 +22385,9 @@
    "params": [
     "E"
    ],
-   "statics": {}
+   "statics": {
+    "new": "UnmodifiableListView"
+   }
   },
   "UnmodifiableMapView": {
    "bases": [
@@ -20661,7 +22418,9 @@
    "params": [
     "E"
    ],
-   "statics": {}
+   "statics": {
+    "new": "UnmodifiableSetView"
+   }
   },
   "UnsignedChar": {
    "bases": [
@@ -20777,9 +22536,14 @@
     "decodeComponent": "String",
     "decodeFull": "String",
     "decodeQueryComponent": "String",
+    "directory": "Uri",
     "encodeComponent": "String",
     "encodeFull": "String",
     "encodeQueryComponent": "String",
+    "file": "Uri",
+    "http": "Uri",
+    "https": "Uri",
+    "new": "Uri",
     "parse": "Uri",
     "parseIPv4Address": "List<int>",
     "parseIPv6Address": "List<int>",
@@ -20927,6 +22691,7 @@
    "params": [],
    "statics": {
     "defaultTag": "UserTag",
+    "maxUserTags": null,
     "new": "UserTag"
    }
   },
@@ -20980,15 +22745,21 @@
     "MessageRouter"
    ],
    "methods": {
+    "clients": null,
     "ddsUri": "Uri",
+    "devfs": null,
     "eventPort": "RawReceivePort",
     "isExiting": "bool",
     "messageHandler": null,
-    "routeResponse": null
+    "routeResponse": null,
+    "runningIsolates": null
    },
    "params": [],
    "statics": {
-    "new": "VMService"
+    "kServiceStream": null,
+    "new": "VMService",
+    "serviceNamespace": null,
+    "serviceStreams": null
    }
   },
   "VMServiceEmbedderHooks": {
@@ -21165,7 +22936,10 @@
     "requestFrameOfReference": "Future"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "blurEvent": "EventStreamProvider<Event>",
+    "focusEvent": "EventStreamProvider<Event>"
+   }
   },
   "VRSessionEvent": {
    "bases": [
@@ -21336,7 +23110,9 @@
     "selectedIndex": "int"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "changeEvent": "EventStreamProvider<Event>"
+   }
   },
   "ViewElement": {
    "bases": [
@@ -21371,7 +23147,10 @@
     "width": "num"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "resizeEvent": "EventStreamProvider<Event>",
+    "scrollEvent": "EventStreamProvider<Event>"
+   }
   },
   "Void": {
    "bases": [
@@ -21676,7 +23455,601 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "ACTIVE_ATTRIBUTES": "int",
+    "ACTIVE_TEXTURE": "int",
+    "ACTIVE_UNIFORMS": "int",
+    "ACTIVE_UNIFORM_BLOCKS": "int",
+    "ALIASED_LINE_WIDTH_RANGE": "int",
+    "ALIASED_POINT_SIZE_RANGE": "int",
+    "ALPHA": "int",
+    "ALPHA_BITS": "int",
+    "ALREADY_SIGNALED": "int",
+    "ALWAYS": "int",
+    "ANY_SAMPLES_PASSED": "int",
+    "ANY_SAMPLES_PASSED_CONSERVATIVE": "int",
+    "ARRAY_BUFFER": "int",
+    "ARRAY_BUFFER_BINDING": "int",
+    "ATTACHED_SHADERS": "int",
+    "BACK": "int",
+    "BLEND": "int",
+    "BLEND_COLOR": "int",
+    "BLEND_DST_ALPHA": "int",
+    "BLEND_DST_RGB": "int",
+    "BLEND_EQUATION": "int",
+    "BLEND_EQUATION_ALPHA": "int",
+    "BLEND_EQUATION_RGB": "int",
+    "BLEND_SRC_ALPHA": "int",
+    "BLEND_SRC_RGB": "int",
+    "BLUE_BITS": "int",
+    "BOOL": "int",
+    "BOOL_VEC2": "int",
+    "BOOL_VEC3": "int",
+    "BOOL_VEC4": "int",
+    "BROWSER_DEFAULT_WEBGL": "int",
+    "BUFFER_SIZE": "int",
+    "BUFFER_USAGE": "int",
+    "BYTE": "int",
+    "CCW": "int",
+    "CLAMP_TO_EDGE": "int",
+    "COLOR": "int",
+    "COLOR_ATTACHMENT0": "int",
+    "COLOR_ATTACHMENT0_WEBGL": "int",
+    "COLOR_ATTACHMENT1": "int",
+    "COLOR_ATTACHMENT10": "int",
+    "COLOR_ATTACHMENT10_WEBGL": "int",
+    "COLOR_ATTACHMENT11": "int",
+    "COLOR_ATTACHMENT11_WEBGL": "int",
+    "COLOR_ATTACHMENT12": "int",
+    "COLOR_ATTACHMENT12_WEBGL": "int",
+    "COLOR_ATTACHMENT13": "int",
+    "COLOR_ATTACHMENT13_WEBGL": "int",
+    "COLOR_ATTACHMENT14": "int",
+    "COLOR_ATTACHMENT14_WEBGL": "int",
+    "COLOR_ATTACHMENT15": "int",
+    "COLOR_ATTACHMENT15_WEBGL": "int",
+    "COLOR_ATTACHMENT1_WEBGL": "int",
+    "COLOR_ATTACHMENT2": "int",
+    "COLOR_ATTACHMENT2_WEBGL": "int",
+    "COLOR_ATTACHMENT3": "int",
+    "COLOR_ATTACHMENT3_WEBGL": "int",
+    "COLOR_ATTACHMENT4": "int",
+    "COLOR_ATTACHMENT4_WEBGL": "int",
+    "COLOR_ATTACHMENT5": "int",
+    "COLOR_ATTACHMENT5_WEBGL": "int",
+    "COLOR_ATTACHMENT6": "int",
+    "COLOR_ATTACHMENT6_WEBGL": "int",
+    "COLOR_ATTACHMENT7": "int",
+    "COLOR_ATTACHMENT7_WEBGL": "int",
+    "COLOR_ATTACHMENT8": "int",
+    "COLOR_ATTACHMENT8_WEBGL": "int",
+    "COLOR_ATTACHMENT9": "int",
+    "COLOR_ATTACHMENT9_WEBGL": "int",
+    "COLOR_BUFFER_BIT": "int",
+    "COLOR_CLEAR_VALUE": "int",
+    "COLOR_WRITEMASK": "int",
+    "COMPARE_REF_TO_TEXTURE": "int",
+    "COMPILE_STATUS": "int",
+    "COMPRESSED_TEXTURE_FORMATS": "int",
+    "CONDITION_SATISFIED": "int",
+    "CONSTANT_ALPHA": "int",
+    "CONSTANT_COLOR": "int",
+    "CONTEXT_LOST_WEBGL": "int",
+    "COPY_READ_BUFFER": "int",
+    "COPY_READ_BUFFER_BINDING": "int",
+    "COPY_WRITE_BUFFER": "int",
+    "COPY_WRITE_BUFFER_BINDING": "int",
+    "CULL_FACE": "int",
+    "CULL_FACE_MODE": "int",
+    "CURRENT_PROGRAM": "int",
+    "CURRENT_QUERY": "int",
+    "CURRENT_VERTEX_ATTRIB": "int",
+    "CW": "int",
+    "DECR": "int",
+    "DECR_WRAP": "int",
+    "DELETE_STATUS": "int",
+    "DEPTH": "int",
+    "DEPTH24_STENCIL8": "int",
+    "DEPTH32F_STENCIL8": "int",
+    "DEPTH_ATTACHMENT": "int",
+    "DEPTH_BITS": "int",
+    "DEPTH_BUFFER_BIT": "int",
+    "DEPTH_CLEAR_VALUE": "int",
+    "DEPTH_COMPONENT": "int",
+    "DEPTH_COMPONENT16": "int",
+    "DEPTH_COMPONENT24": "int",
+    "DEPTH_COMPONENT32F": "int",
+    "DEPTH_FUNC": "int",
+    "DEPTH_RANGE": "int",
+    "DEPTH_STENCIL": "int",
+    "DEPTH_STENCIL_ATTACHMENT": "int",
+    "DEPTH_TEST": "int",
+    "DEPTH_WRITEMASK": "int",
+    "DITHER": "int",
+    "DONT_CARE": "int",
+    "DRAW_BUFFER0": "int",
+    "DRAW_BUFFER0_WEBGL": "int",
+    "DRAW_BUFFER1": "int",
+    "DRAW_BUFFER10": "int",
+    "DRAW_BUFFER10_WEBGL": "int",
+    "DRAW_BUFFER11": "int",
+    "DRAW_BUFFER11_WEBGL": "int",
+    "DRAW_BUFFER12": "int",
+    "DRAW_BUFFER12_WEBGL": "int",
+    "DRAW_BUFFER13": "int",
+    "DRAW_BUFFER13_WEBGL": "int",
+    "DRAW_BUFFER14": "int",
+    "DRAW_BUFFER14_WEBGL": "int",
+    "DRAW_BUFFER15": "int",
+    "DRAW_BUFFER15_WEBGL": "int",
+    "DRAW_BUFFER1_WEBGL": "int",
+    "DRAW_BUFFER2": "int",
+    "DRAW_BUFFER2_WEBGL": "int",
+    "DRAW_BUFFER3": "int",
+    "DRAW_BUFFER3_WEBGL": "int",
+    "DRAW_BUFFER4": "int",
+    "DRAW_BUFFER4_WEBGL": "int",
+    "DRAW_BUFFER5": "int",
+    "DRAW_BUFFER5_WEBGL": "int",
+    "DRAW_BUFFER6": "int",
+    "DRAW_BUFFER6_WEBGL": "int",
+    "DRAW_BUFFER7": "int",
+    "DRAW_BUFFER7_WEBGL": "int",
+    "DRAW_BUFFER8": "int",
+    "DRAW_BUFFER8_WEBGL": "int",
+    "DRAW_BUFFER9": "int",
+    "DRAW_BUFFER9_WEBGL": "int",
+    "DRAW_FRAMEBUFFER": "int",
+    "DRAW_FRAMEBUFFER_BINDING": "int",
+    "DST_ALPHA": "int",
+    "DST_COLOR": "int",
+    "DYNAMIC_COPY": "int",
+    "DYNAMIC_DRAW": "int",
+    "DYNAMIC_READ": "int",
+    "ELEMENT_ARRAY_BUFFER": "int",
+    "ELEMENT_ARRAY_BUFFER_BINDING": "int",
+    "EQUAL": "int",
+    "FASTEST": "int",
+    "FLOAT": "int",
+    "FLOAT_32_UNSIGNED_INT_24_8_REV": "int",
+    "FLOAT_MAT2": "int",
+    "FLOAT_MAT2x3": "int",
+    "FLOAT_MAT2x4": "int",
+    "FLOAT_MAT3": "int",
+    "FLOAT_MAT3x2": "int",
+    "FLOAT_MAT3x4": "int",
+    "FLOAT_MAT4": "int",
+    "FLOAT_MAT4x2": "int",
+    "FLOAT_MAT4x3": "int",
+    "FLOAT_VEC2": "int",
+    "FLOAT_VEC3": "int",
+    "FLOAT_VEC4": "int",
+    "FRAGMENT_SHADER": "int",
+    "FRAGMENT_SHADER_DERIVATIVE_HINT": "int",
+    "FRAMEBUFFER": "int",
+    "FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE": "int",
+    "FRAMEBUFFER_ATTACHMENT_BLUE_SIZE": "int",
+    "FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING": "int",
+    "FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE": "int",
+    "FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE": "int",
+    "FRAMEBUFFER_ATTACHMENT_GREEN_SIZE": "int",
+    "FRAMEBUFFER_ATTACHMENT_OBJECT_NAME": "int",
+    "FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE": "int",
+    "FRAMEBUFFER_ATTACHMENT_RED_SIZE": "int",
+    "FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE": "int",
+    "FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE": "int",
+    "FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER": "int",
+    "FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL": "int",
+    "FRAMEBUFFER_BINDING": "int",
+    "FRAMEBUFFER_COMPLETE": "int",
+    "FRAMEBUFFER_DEFAULT": "int",
+    "FRAMEBUFFER_INCOMPLETE_ATTACHMENT": "int",
+    "FRAMEBUFFER_INCOMPLETE_DIMENSIONS": "int",
+    "FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT": "int",
+    "FRAMEBUFFER_INCOMPLETE_MULTISAMPLE": "int",
+    "FRAMEBUFFER_UNSUPPORTED": "int",
+    "FRONT": "int",
+    "FRONT_AND_BACK": "int",
+    "FRONT_FACE": "int",
+    "FUNC_ADD": "int",
+    "FUNC_REVERSE_SUBTRACT": "int",
+    "FUNC_SUBTRACT": "int",
+    "GENERATE_MIPMAP_HINT": "int",
+    "GEQUAL": "int",
+    "GREATER": "int",
+    "GREEN_BITS": "int",
+    "HALF_FLOAT": "int",
+    "HIGH_FLOAT": "int",
+    "HIGH_INT": "int",
+    "IMPLEMENTATION_COLOR_READ_FORMAT": "int",
+    "IMPLEMENTATION_COLOR_READ_TYPE": "int",
+    "INCR": "int",
+    "INCR_WRAP": "int",
+    "INT": "int",
+    "INTERLEAVED_ATTRIBS": "int",
+    "INT_2_10_10_10_REV": "int",
+    "INT_SAMPLER_2D": "int",
+    "INT_SAMPLER_2D_ARRAY": "int",
+    "INT_SAMPLER_3D": "int",
+    "INT_SAMPLER_CUBE": "int",
+    "INT_VEC2": "int",
+    "INT_VEC3": "int",
+    "INT_VEC4": "int",
+    "INVALID_ENUM": "int",
+    "INVALID_FRAMEBUFFER_OPERATION": "int",
+    "INVALID_INDEX": "int",
+    "INVALID_OPERATION": "int",
+    "INVALID_VALUE": "int",
+    "INVERT": "int",
+    "KEEP": "int",
+    "LEQUAL": "int",
+    "LESS": "int",
+    "LINEAR": "int",
+    "LINEAR_MIPMAP_LINEAR": "int",
+    "LINEAR_MIPMAP_NEAREST": "int",
+    "LINES": "int",
+    "LINE_LOOP": "int",
+    "LINE_STRIP": "int",
+    "LINE_WIDTH": "int",
+    "LINK_STATUS": "int",
+    "LOW_FLOAT": "int",
+    "LOW_INT": "int",
+    "LUMINANCE": "int",
+    "LUMINANCE_ALPHA": "int",
+    "MAX": "int",
+    "MAX_3D_TEXTURE_SIZE": "int",
+    "MAX_ARRAY_TEXTURE_LAYERS": "int",
+    "MAX_CLIENT_WAIT_TIMEOUT_WEBGL": "int",
+    "MAX_COLOR_ATTACHMENTS": "int",
+    "MAX_COLOR_ATTACHMENTS_WEBGL": "int",
+    "MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS": "int",
+    "MAX_COMBINED_TEXTURE_IMAGE_UNITS": "int",
+    "MAX_COMBINED_UNIFORM_BLOCKS": "int",
+    "MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS": "int",
+    "MAX_CUBE_MAP_TEXTURE_SIZE": "int",
+    "MAX_DRAW_BUFFERS": "int",
+    "MAX_DRAW_BUFFERS_WEBGL": "int",
+    "MAX_ELEMENTS_INDICES": "int",
+    "MAX_ELEMENTS_VERTICES": "int",
+    "MAX_ELEMENT_INDEX": "int",
+    "MAX_FRAGMENT_INPUT_COMPONENTS": "int",
+    "MAX_FRAGMENT_UNIFORM_BLOCKS": "int",
+    "MAX_FRAGMENT_UNIFORM_COMPONENTS": "int",
+    "MAX_FRAGMENT_UNIFORM_VECTORS": "int",
+    "MAX_PROGRAM_TEXEL_OFFSET": "int",
+    "MAX_RENDERBUFFER_SIZE": "int",
+    "MAX_SAMPLES": "int",
+    "MAX_SERVER_WAIT_TIMEOUT": "int",
+    "MAX_TEXTURE_IMAGE_UNITS": "int",
+    "MAX_TEXTURE_LOD_BIAS": "int",
+    "MAX_TEXTURE_SIZE": "int",
+    "MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS": "int",
+    "MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS": "int",
+    "MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS": "int",
+    "MAX_UNIFORM_BLOCK_SIZE": "int",
+    "MAX_UNIFORM_BUFFER_BINDINGS": "int",
+    "MAX_VARYING_COMPONENTS": "int",
+    "MAX_VARYING_VECTORS": "int",
+    "MAX_VERTEX_ATTRIBS": "int",
+    "MAX_VERTEX_OUTPUT_COMPONENTS": "int",
+    "MAX_VERTEX_TEXTURE_IMAGE_UNITS": "int",
+    "MAX_VERTEX_UNIFORM_BLOCKS": "int",
+    "MAX_VERTEX_UNIFORM_COMPONENTS": "int",
+    "MAX_VERTEX_UNIFORM_VECTORS": "int",
+    "MAX_VIEWPORT_DIMS": "int",
+    "MEDIUM_FLOAT": "int",
+    "MEDIUM_INT": "int",
+    "MIN": "int",
+    "MIN_PROGRAM_TEXEL_OFFSET": "int",
+    "MIRRORED_REPEAT": "int",
+    "NEAREST": "int",
+    "NEAREST_MIPMAP_LINEAR": "int",
+    "NEAREST_MIPMAP_NEAREST": "int",
+    "NEVER": "int",
+    "NICEST": "int",
+    "NONE": "int",
+    "NOTEQUAL": "int",
+    "NO_ERROR": "int",
+    "OBJECT_TYPE": "int",
+    "ONE": "int",
+    "ONE_MINUS_CONSTANT_ALPHA": "int",
+    "ONE_MINUS_CONSTANT_COLOR": "int",
+    "ONE_MINUS_DST_ALPHA": "int",
+    "ONE_MINUS_DST_COLOR": "int",
+    "ONE_MINUS_SRC_ALPHA": "int",
+    "ONE_MINUS_SRC_COLOR": "int",
+    "OUT_OF_MEMORY": "int",
+    "PACK_ALIGNMENT": "int",
+    "PACK_ROW_LENGTH": "int",
+    "PACK_SKIP_PIXELS": "int",
+    "PACK_SKIP_ROWS": "int",
+    "PIXEL_PACK_BUFFER": "int",
+    "PIXEL_PACK_BUFFER_BINDING": "int",
+    "PIXEL_UNPACK_BUFFER": "int",
+    "PIXEL_UNPACK_BUFFER_BINDING": "int",
+    "POINTS": "int",
+    "POLYGON_OFFSET_FACTOR": "int",
+    "POLYGON_OFFSET_FILL": "int",
+    "POLYGON_OFFSET_UNITS": "int",
+    "QUERY_RESULT": "int",
+    "QUERY_RESULT_AVAILABLE": "int",
+    "R11F_G11F_B10F": "int",
+    "R16F": "int",
+    "R16I": "int",
+    "R16UI": "int",
+    "R32F": "int",
+    "R32I": "int",
+    "R32UI": "int",
+    "R8": "int",
+    "R8I": "int",
+    "R8UI": "int",
+    "R8_SNORM": "int",
+    "RASTERIZER_DISCARD": "int",
+    "READ_BUFFER": "int",
+    "READ_FRAMEBUFFER": "int",
+    "READ_FRAMEBUFFER_BINDING": "int",
+    "RED": "int",
+    "RED_BITS": "int",
+    "RED_INTEGER": "int",
+    "RENDERBUFFER": "int",
+    "RENDERBUFFER_ALPHA_SIZE": "int",
+    "RENDERBUFFER_BINDING": "int",
+    "RENDERBUFFER_BLUE_SIZE": "int",
+    "RENDERBUFFER_DEPTH_SIZE": "int",
+    "RENDERBUFFER_GREEN_SIZE": "int",
+    "RENDERBUFFER_HEIGHT": "int",
+    "RENDERBUFFER_INTERNAL_FORMAT": "int",
+    "RENDERBUFFER_RED_SIZE": "int",
+    "RENDERBUFFER_SAMPLES": "int",
+    "RENDERBUFFER_STENCIL_SIZE": "int",
+    "RENDERBUFFER_WIDTH": "int",
+    "RENDERER": "int",
+    "REPEAT": "int",
+    "REPLACE": "int",
+    "RG": "int",
+    "RG16F": "int",
+    "RG16I": "int",
+    "RG16UI": "int",
+    "RG32F": "int",
+    "RG32I": "int",
+    "RG32UI": "int",
+    "RG8": "int",
+    "RG8I": "int",
+    "RG8UI": "int",
+    "RG8_SNORM": "int",
+    "RGB": "int",
+    "RGB10_A2": "int",
+    "RGB10_A2UI": "int",
+    "RGB16F": "int",
+    "RGB16I": "int",
+    "RGB16UI": "int",
+    "RGB32F": "int",
+    "RGB32I": "int",
+    "RGB32UI": "int",
+    "RGB565": "int",
+    "RGB5_A1": "int",
+    "RGB8": "int",
+    "RGB8I": "int",
+    "RGB8UI": "int",
+    "RGB8_SNORM": "int",
+    "RGB9_E5": "int",
+    "RGBA": "int",
+    "RGBA16F": "int",
+    "RGBA16I": "int",
+    "RGBA16UI": "int",
+    "RGBA32F": "int",
+    "RGBA32I": "int",
+    "RGBA32UI": "int",
+    "RGBA4": "int",
+    "RGBA8": "int",
+    "RGBA8I": "int",
+    "RGBA8UI": "int",
+    "RGBA8_SNORM": "int",
+    "RGBA_INTEGER": "int",
+    "RGB_INTEGER": "int",
+    "RG_INTEGER": "int",
+    "SAMPLER_2D": "int",
+    "SAMPLER_2D_ARRAY": "int",
+    "SAMPLER_2D_ARRAY_SHADOW": "int",
+    "SAMPLER_2D_SHADOW": "int",
+    "SAMPLER_3D": "int",
+    "SAMPLER_BINDING": "int",
+    "SAMPLER_CUBE": "int",
+    "SAMPLER_CUBE_SHADOW": "int",
+    "SAMPLES": "int",
+    "SAMPLE_ALPHA_TO_COVERAGE": "int",
+    "SAMPLE_BUFFERS": "int",
+    "SAMPLE_COVERAGE": "int",
+    "SAMPLE_COVERAGE_INVERT": "int",
+    "SAMPLE_COVERAGE_VALUE": "int",
+    "SCISSOR_BOX": "int",
+    "SCISSOR_TEST": "int",
+    "SEPARATE_ATTRIBS": "int",
+    "SHADER_TYPE": "int",
+    "SHADING_LANGUAGE_VERSION": "int",
+    "SHORT": "int",
+    "SIGNALED": "int",
+    "SIGNED_NORMALIZED": "int",
+    "SRC_ALPHA": "int",
+    "SRC_ALPHA_SATURATE": "int",
+    "SRC_COLOR": "int",
+    "SRGB": "int",
+    "SRGB8": "int",
+    "SRGB8_ALPHA8": "int",
+    "STATIC_COPY": "int",
+    "STATIC_DRAW": "int",
+    "STATIC_READ": "int",
+    "STENCIL": "int",
+    "STENCIL_ATTACHMENT": "int",
+    "STENCIL_BACK_FAIL": "int",
+    "STENCIL_BACK_FUNC": "int",
+    "STENCIL_BACK_PASS_DEPTH_FAIL": "int",
+    "STENCIL_BACK_PASS_DEPTH_PASS": "int",
+    "STENCIL_BACK_REF": "int",
+    "STENCIL_BACK_VALUE_MASK": "int",
+    "STENCIL_BACK_WRITEMASK": "int",
+    "STENCIL_BITS": "int",
+    "STENCIL_BUFFER_BIT": "int",
+    "STENCIL_CLEAR_VALUE": "int",
+    "STENCIL_FAIL": "int",
+    "STENCIL_FUNC": "int",
+    "STENCIL_INDEX8": "int",
+    "STENCIL_PASS_DEPTH_FAIL": "int",
+    "STENCIL_PASS_DEPTH_PASS": "int",
+    "STENCIL_REF": "int",
+    "STENCIL_TEST": "int",
+    "STENCIL_VALUE_MASK": "int",
+    "STENCIL_WRITEMASK": "int",
+    "STREAM_COPY": "int",
+    "STREAM_DRAW": "int",
+    "STREAM_READ": "int",
+    "SUBPIXEL_BITS": "int",
+    "SYNC_CONDITION": "int",
+    "SYNC_FENCE": "int",
+    "SYNC_FLAGS": "int",
+    "SYNC_FLUSH_COMMANDS_BIT": "int",
+    "SYNC_GPU_COMMANDS_COMPLETE": "int",
+    "SYNC_STATUS": "int",
+    "TEXTURE": "int",
+    "TEXTURE0": "int",
+    "TEXTURE1": "int",
+    "TEXTURE10": "int",
+    "TEXTURE11": "int",
+    "TEXTURE12": "int",
+    "TEXTURE13": "int",
+    "TEXTURE14": "int",
+    "TEXTURE15": "int",
+    "TEXTURE16": "int",
+    "TEXTURE17": "int",
+    "TEXTURE18": "int",
+    "TEXTURE19": "int",
+    "TEXTURE2": "int",
+    "TEXTURE20": "int",
+    "TEXTURE21": "int",
+    "TEXTURE22": "int",
+    "TEXTURE23": "int",
+    "TEXTURE24": "int",
+    "TEXTURE25": "int",
+    "TEXTURE26": "int",
+    "TEXTURE27": "int",
+    "TEXTURE28": "int",
+    "TEXTURE29": "int",
+    "TEXTURE3": "int",
+    "TEXTURE30": "int",
+    "TEXTURE31": "int",
+    "TEXTURE4": "int",
+    "TEXTURE5": "int",
+    "TEXTURE6": "int",
+    "TEXTURE7": "int",
+    "TEXTURE8": "int",
+    "TEXTURE9": "int",
+    "TEXTURE_2D": "int",
+    "TEXTURE_2D_ARRAY": "int",
+    "TEXTURE_3D": "int",
+    "TEXTURE_BASE_LEVEL": "int",
+    "TEXTURE_BINDING_2D": "int",
+    "TEXTURE_BINDING_2D_ARRAY": "int",
+    "TEXTURE_BINDING_3D": "int",
+    "TEXTURE_BINDING_CUBE_MAP": "int",
+    "TEXTURE_COMPARE_FUNC": "int",
+    "TEXTURE_COMPARE_MODE": "int",
+    "TEXTURE_CUBE_MAP": "int",
+    "TEXTURE_CUBE_MAP_NEGATIVE_X": "int",
+    "TEXTURE_CUBE_MAP_NEGATIVE_Y": "int",
+    "TEXTURE_CUBE_MAP_NEGATIVE_Z": "int",
+    "TEXTURE_CUBE_MAP_POSITIVE_X": "int",
+    "TEXTURE_CUBE_MAP_POSITIVE_Y": "int",
+    "TEXTURE_CUBE_MAP_POSITIVE_Z": "int",
+    "TEXTURE_IMMUTABLE_FORMAT": "int",
+    "TEXTURE_IMMUTABLE_LEVELS": "int",
+    "TEXTURE_MAG_FILTER": "int",
+    "TEXTURE_MAX_LEVEL": "int",
+    "TEXTURE_MAX_LOD": "int",
+    "TEXTURE_MIN_FILTER": "int",
+    "TEXTURE_MIN_LOD": "int",
+    "TEXTURE_WRAP_R": "int",
+    "TEXTURE_WRAP_S": "int",
+    "TEXTURE_WRAP_T": "int",
+    "TIMEOUT_EXPIRED": "int",
+    "TIMEOUT_IGNORED": "int",
+    "TRANSFORM_FEEDBACK": "int",
+    "TRANSFORM_FEEDBACK_ACTIVE": "int",
+    "TRANSFORM_FEEDBACK_BINDING": "int",
+    "TRANSFORM_FEEDBACK_BUFFER": "int",
+    "TRANSFORM_FEEDBACK_BUFFER_BINDING": "int",
+    "TRANSFORM_FEEDBACK_BUFFER_MODE": "int",
+    "TRANSFORM_FEEDBACK_BUFFER_SIZE": "int",
+    "TRANSFORM_FEEDBACK_BUFFER_START": "int",
+    "TRANSFORM_FEEDBACK_PAUSED": "int",
+    "TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN": "int",
+    "TRANSFORM_FEEDBACK_VARYINGS": "int",
+    "TRIANGLES": "int",
+    "TRIANGLE_FAN": "int",
+    "TRIANGLE_STRIP": "int",
+    "UNIFORM_ARRAY_STRIDE": "int",
+    "UNIFORM_BLOCK_ACTIVE_UNIFORMS": "int",
+    "UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES": "int",
+    "UNIFORM_BLOCK_BINDING": "int",
+    "UNIFORM_BLOCK_DATA_SIZE": "int",
+    "UNIFORM_BLOCK_INDEX": "int",
+    "UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER": "int",
+    "UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER": "int",
+    "UNIFORM_BUFFER": "int",
+    "UNIFORM_BUFFER_BINDING": "int",
+    "UNIFORM_BUFFER_OFFSET_ALIGNMENT": "int",
+    "UNIFORM_BUFFER_SIZE": "int",
+    "UNIFORM_BUFFER_START": "int",
+    "UNIFORM_IS_ROW_MAJOR": "int",
+    "UNIFORM_MATRIX_STRIDE": "int",
+    "UNIFORM_OFFSET": "int",
+    "UNIFORM_SIZE": "int",
+    "UNIFORM_TYPE": "int",
+    "UNPACK_ALIGNMENT": "int",
+    "UNPACK_COLORSPACE_CONVERSION_WEBGL": "int",
+    "UNPACK_FLIP_Y_WEBGL": "int",
+    "UNPACK_IMAGE_HEIGHT": "int",
+    "UNPACK_PREMULTIPLY_ALPHA_WEBGL": "int",
+    "UNPACK_ROW_LENGTH": "int",
+    "UNPACK_SKIP_IMAGES": "int",
+    "UNPACK_SKIP_PIXELS": "int",
+    "UNPACK_SKIP_ROWS": "int",
+    "UNSIGNALED": "int",
+    "UNSIGNED_BYTE": "int",
+    "UNSIGNED_INT": "int",
+    "UNSIGNED_INT_10F_11F_11F_REV": "int",
+    "UNSIGNED_INT_24_8": "int",
+    "UNSIGNED_INT_2_10_10_10_REV": "int",
+    "UNSIGNED_INT_5_9_9_9_REV": "int",
+    "UNSIGNED_INT_SAMPLER_2D": "int",
+    "UNSIGNED_INT_SAMPLER_2D_ARRAY": "int",
+    "UNSIGNED_INT_SAMPLER_3D": "int",
+    "UNSIGNED_INT_SAMPLER_CUBE": "int",
+    "UNSIGNED_INT_VEC2": "int",
+    "UNSIGNED_INT_VEC3": "int",
+    "UNSIGNED_INT_VEC4": "int",
+    "UNSIGNED_NORMALIZED": "int",
+    "UNSIGNED_SHORT": "int",
+    "UNSIGNED_SHORT_4_4_4_4": "int",
+    "UNSIGNED_SHORT_5_5_5_1": "int",
+    "UNSIGNED_SHORT_5_6_5": "int",
+    "VALIDATE_STATUS": "int",
+    "VENDOR": "int",
+    "VERSION": "int",
+    "VERTEX_ARRAY_BINDING": "int",
+    "VERTEX_ATTRIB_ARRAY_BUFFER_BINDING": "int",
+    "VERTEX_ATTRIB_ARRAY_DIVISOR": "int",
+    "VERTEX_ATTRIB_ARRAY_ENABLED": "int",
+    "VERTEX_ATTRIB_ARRAY_INTEGER": "int",
+    "VERTEX_ATTRIB_ARRAY_NORMALIZED": "int",
+    "VERTEX_ATTRIB_ARRAY_POINTER": "int",
+    "VERTEX_ATTRIB_ARRAY_SIZE": "int",
+    "VERTEX_ATTRIB_ARRAY_STRIDE": "int",
+    "VERTEX_ATTRIB_ARRAY_TYPE": "int",
+    "VERTEX_SHADER": "int",
+    "VIEWPORT": "int",
+    "WAIT_FAILED": "int",
+    "ZERO": "int"
+   }
   },
   "WebSocket": {
    "bases": [
@@ -21710,9 +24083,21 @@
    },
    "params": [],
    "statics": {
+    "CLOSED": "int",
+    "CLOSING": "int",
+    "CONNECTING": "int",
+    "OPEN": "int",
+    "closeEvent": "EventStreamProvider<CloseEvent>",
+    "closed": "int",
+    "closing": "int",
     "connect": "Future<WebSocket>",
+    "connecting": "int",
+    "errorEvent": "EventStreamProvider<Event>",
     "fromUpgradedSocket": "WebSocket",
+    "messageEvent": "EventStreamProvider<MessageEvent>",
     "new": "WebSocket",
+    "open": "int",
+    "openEvent": "EventStreamProvider<Event>",
     "supported": "bool",
     "userAgent": null
    }
@@ -21735,7 +24120,21 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "abnormalClosure": "int",
+    "goingAway": "int",
+    "internalServerError": "int",
+    "invalidFramePayloadData": "int",
+    "messageTooBig": "int",
+    "missingMandatoryExtension": "int",
+    "noStatusReceived": "int",
+    "normalClosure": "int",
+    "policyViolation": "int",
+    "protocolError": "int",
+    "reserved1004": "int",
+    "reserved1015": "int",
+    "unsupportedData": "int"
+   }
   },
   "WebSocketTransformer": {
    "bases": [
@@ -21776,6 +24175,9 @@
    },
    "params": [],
    "statics": {
+    "DOM_DELTA_LINE": "int",
+    "DOM_DELTA_PAGE": "int",
+    "DOM_DELTA_PIXEL": "int",
     "new": "WheelEvent"
    }
   },
@@ -21950,7 +24352,26 @@
    },
    "params": [],
    "statics": {
-    "supportsPointConversions": "bool"
+    "PERSISTENT": "int",
+    "TEMPORARY": "int",
+    "animationEndEvent": "EventStreamProvider<AnimationEvent>",
+    "animationIterationEvent": "EventStreamProvider<AnimationEvent>",
+    "animationStartEvent": "EventStreamProvider<AnimationEvent>",
+    "beforeUnloadEvent": "EventStreamProvider<BeforeUnloadEvent>",
+    "contentLoadedEvent": "EventStreamProvider<Event>",
+    "deviceMotionEvent": "EventStreamProvider<DeviceMotionEvent>",
+    "hashChangeEvent": "EventStreamProvider<Event>",
+    "loadStartEvent": "EventStreamProvider<Event>",
+    "messageEvent": "EventStreamProvider<MessageEvent>",
+    "offlineEvent": "EventStreamProvider<Event>",
+    "onlineEvent": "EventStreamProvider<Event>",
+    "pageHideEvent": "EventStreamProvider<Event>",
+    "pageShowEvent": "EventStreamProvider<Event>",
+    "popStateEvent": "EventStreamProvider<PopStateEvent>",
+    "progressEvent": "EventStreamProvider<Event>",
+    "storageEvent": "EventStreamProvider<StorageEvent>",
+    "supportsPointConversions": "bool",
+    "unloadEvent": "EventStreamProvider<Event>"
    }
   },
   "WindowBase": {
@@ -22006,7 +24427,15 @@
     "onUnload": "Stream<Event>"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "hashChangeEvent": "EventStreamProvider<Event>",
+    "messageEvent": "EventStreamProvider<MessageEvent>",
+    "offlineEvent": "EventStreamProvider<Event>",
+    "onlineEvent": "EventStreamProvider<Event>",
+    "popStateEvent": "EventStreamProvider<PopStateEvent>",
+    "storageEvent": "EventStreamProvider<StorageEvent>",
+    "unloadEvent": "EventStreamProvider<Event>"
+   }
   },
   "Worker": {
    "bases": [
@@ -22021,6 +24450,8 @@
    },
    "params": [],
    "statics": {
+    "errorEvent": "EventStreamProvider<Event>",
+    "messageEvent": "EventStreamProvider<MessageEvent>",
     "new": "Worker",
     "supported": "bool"
    }
@@ -22049,6 +24480,7 @@
    },
    "params": [],
    "statics": {
+    "errorEvent": "EventStreamProvider<Event>",
     "instance": "WorkerGlobalScope"
    }
   },
@@ -22155,7 +24587,18 @@
     "stringValue": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "ANY_TYPE": "int",
+    "ANY_UNORDERED_NODE_TYPE": "int",
+    "BOOLEAN_TYPE": "int",
+    "FIRST_ORDERED_NODE_TYPE": "int",
+    "NUMBER_TYPE": "int",
+    "ORDERED_NODE_ITERATOR_TYPE": "int",
+    "ORDERED_NODE_SNAPSHOT_TYPE": "int",
+    "STRING_TYPE": "int",
+    "UNORDERED_NODE_ITERATOR_TYPE": "int",
+    "UNORDERED_NODE_SNAPSHOT_TYPE": "int"
+   }
   },
   "XmlDocument": {
    "bases": [
@@ -22254,7 +24697,22 @@
    "bases": [],
    "methods": {},
    "params": [],
-   "statics": {}
+   "statics": {
+    "defaultLevel": "int",
+    "defaultMemLevel": "int",
+    "defaultWindowBits": "int",
+    "maxLevel": "int",
+    "maxMemLevel": "int",
+    "maxWindowBits": "int",
+    "minLevel": "int",
+    "minMemLevel": "int",
+    "minWindowBits": "int",
+    "strategyDefault": "int",
+    "strategyFiltered": "int",
+    "strategyFixed": "int",
+    "strategyHuffmanOnly": "int",
+    "strategyRle": "int"
+   }
   },
   "Zone": {
    "bases": [],
@@ -22285,7 +24743,8 @@
    },
    "params": [],
    "statics": {
-    "current": "Zone"
+    "current": "Zone",
+    "root": "Zone"
    }
   },
   "ZoneDelegate": {
@@ -22327,7 +24786,8 @@
    },
    "params": [],
    "statics": {
-    "from": "ZoneSpecification"
+    "from": "ZoneSpecification",
+    "new": "ZoneSpecification"
    }
   },
   "ZoomAndPan": {
@@ -22336,7 +24796,11 @@
     "zoomAndPan": "int"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "SVG_ZOOMANDPAN_DISABLE": "int",
+    "SVG_ZOOMANDPAN_MAGNIFY": "int",
+    "SVG_ZOOMANDPAN_UNKNOWN": "int"
+   }
   },
   "bool": {
    "bases": [],
@@ -22381,6 +24845,11 @@
    },
    "params": [],
    "statics": {
+    "infinity": "double",
+    "maxFinite": "double",
+    "minPositive": "double",
+    "nan": "double",
+    "negativeInfinity": "double",
     "parse": "double",
     "tryParse": "double"
    }
@@ -22480,7 +24949,9 @@
     "options": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "new": "pragma"
+   }
   }
  }
 }

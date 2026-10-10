@@ -156,7 +156,9 @@ _RE_GOES_ON = re.compile(r"\s*[;,=(\[.]")
 _RE_ENUMERATOR = re.compile(r"(?:^|,)\s*([A-Za-z_]\w*)\b(?!\s*\()")
 _RE_TYPE_KEYWORD = re.compile(r"\b(?:struct|class|union|enum)\s+$")
 # A name in what follows a typedef's body, its qualifiers aside
-_RE_DECLARED_NAME = re.compile(r"\b(?!(?:const|volatile|restrict)\b)[A-Za-z_]\w*")
+_RE_DECLARED_NAME = re.compile(
+    r"\b(?!(?:const|volatile|restrict|__restrict|__restrict__|_Atomic)\b)[A-Za-z_]\w*"
+)
 _RE_LOCAL_TYPE = re.compile(
     r"\b(?:struct|class)\s+([A-Za-z_]\w*)\s*(?:final\s*)?(?::(?!:)|\{)"
 )

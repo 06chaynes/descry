@@ -368,7 +368,7 @@ class ScipIndex:
             Descry node ID if found, None otherwise
         """
         # Extract simple name from qualified references
-        # e.g., "ThoraxServer::start" -> "start"
+        # e.g., "Server::start" -> "start"
         simple_name = self._simple_name(ref_name)
 
         if simple_name in self.name_to_symbols:
@@ -385,11 +385,11 @@ class ScipIndex:
                         def_file, _ = self.definitions[sym_id]
                         return self._to_node_id(sym_id, def_file)
 
-            # Fall back to first match
-            for sym_id in symbol_ids:
-                if sym_id in self.definitions:
-                    def_file, _ = self.definitions[sym_id]
-                    return self._to_node_id(sym_id, def_file)
+            # Else the one definition of the name, where there is one.
+            defined = [sym_id for sym_id in symbol_ids if sym_id in self.definitions]
+            if len(defined) == 1:
+                def_file, _ = self.definitions[defined[0]]
+                return self._to_node_id(defined[0], def_file)
 
         return None
 
@@ -503,10 +503,6 @@ class ScipIndex:
 
             # Skip impl keyword but include the type name in brackets
             if name == "impl":
-                continue
-
-            # Skip 'tests' module in test paths
-            if name == "tests" and suffix == "/":
                 continue
 
             # Include types (#), terms (.), and methods (())

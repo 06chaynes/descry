@@ -39,10 +39,10 @@ _TYPE_DECL = re.compile(
 _NO_TYPE = "new|as|with|class|implements|typedef|get|set|return|await|throw"
 _MEMBER = re.compile(
     r"^\s*(?:@[\w$.]+(?![\w$.])(?:\([^)]*\))?\s*)*"
-    r"(?:(static|factory|abstract|covariant|external|late|final|const|static\s+late)\s+)*"
+    r"((?:(?:static|factory|abstract|covariant|external|late|final|const)\s+)*)"
     rf"(?:(?!(?:{_NO_TYPE})\b)([A-Za-z_][\w$.<>,? ]*?|operator|void|dynamic)\s+)?"
     r"(get\s+|set\s+|operator\s*)?(?!Function\b)([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?|operator\s*[<>=!+\-*/%&|^~\[\]]+|[\w$]+)"
-    r"\s*(?:(?:<[\w$,\s]*>)?\s*\((.*)\))?\s*(?:native\s*)?(?:=>|;|\{|$)"
+    r"\s*(?:(?:<[\w$,\s]*>)?\s*\((.*)\))?\s*(?:native\s*)?(?:=(?!=)|:|;|\{|$)"
 )
 _FUNC_PARAM = re.compile(
     r"(?:required\s+|covariant\s+)?"
@@ -221,7 +221,7 @@ def build(origin):
                 if (
                     at_depth == 0
                     and member
-                    and "(" in stripped
+                    and member[5] is not None
                     and not member[4].startswith("_")
                     and (
                         member[2]
@@ -239,7 +239,6 @@ def build(origin):
             if not member or not member[4]:
                 continue
             modifiers, ret_type, accessor, name, sig = member.groups()
-            modifiers = modifiers or ""
             constructs = (
                 "factory" in modifiers
                 or name == current
@@ -257,7 +256,7 @@ def build(origin):
             own = params + (
                 [p.strip() for p in gparams[1].split(",")] if gparams else []
             )
-            static = "static" in modifiers or "static late" in modifiers
+            static = "static" in modifiers
             if name.rpartition(".")[2].startswith("_"):
                 continue
             table = types[current]["statics" if static else "methods"]

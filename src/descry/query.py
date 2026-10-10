@@ -2009,7 +2009,7 @@ class GraphQuerier:
         Supports:
         - Exact name match: "start" matches any node with name="start"
         - Naming convention variants: "getClient" matches "get_client" (camelCase/snake_case)
-        - Qualified name: "ThoraxServer::start" matches node IDs ending with that pattern
+        - Qualified name: "Server::start" matches node IDs ending with that pattern
         - File path suffix: "server.rs" matches files ending with that path
         - Partial qualified: "auth::check_permission" matches IDs containing that pattern
         - Fuzzy/prefix matching (when fuzzy=True): "validate_token" matches "validate_token_format"
@@ -2052,7 +2052,7 @@ class GraphQuerier:
                 exact_matches.append(node)
                 continue
 
-            # Qualified name match (e.g., "ThoraxServer::start")
+            # Qualified name match (e.g., "Server::start")
             if "::" in name:
                 # Check if node ID ends with the qualified name
                 if node_id.endswith((f"::{name}", name)):
@@ -2138,7 +2138,7 @@ class GraphQuerier:
 
         Supports:
         - Simple name: "start" matches calls to any function named start
-        - Qualified name: "ThoraxServer::start" matches that specific method
+        - Qualified name: "Server::start" matches that specific method
         - Full node ID: "FILE:path::Class::method" for exact matching
         - Struct names: includes INSTANTIATES edges for struct usage tracking
         - Fuzzy matching (when fuzzy=True): "validate_token" matches "validate_token_format"

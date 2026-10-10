@@ -221,7 +221,7 @@ timeout = 45
         toml_content = """\
 [scip]
 extra_args = ["--exclude-vendored-libraries", "--custom-flag"]
-skip_crates = ["mandible", "tarsus"]
+skip_crates = ["alpha", "beta"]
 """
         (tmp_path / ".descry.toml").write_text(toml_content)
 
@@ -232,7 +232,7 @@ skip_crates = ["mandible", "tarsus"]
             "--exclude-vendored-libraries",
             "--custom-flag",
         ]
-        assert config.scip_skip_crates == ["mandible", "tarsus"]
+        assert config.scip_skip_crates == ["alpha", "beta"]
 
     def test_scip_rust_toolchain_from_toml(self, tmp_path):
         """SCIP rust toolchain loads from TOML."""
@@ -395,8 +395,8 @@ class TestScipCacheManagerConfig:
         assert mgr._scip_skip_crates == set()
 
     def test_custom_skip_crates(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path, scip_skip_crates=["mandible", "tarsus"])
-        assert mgr._scip_skip_crates == {"mandible", "tarsus"}
+        mgr = ScipCacheManager(tmp_path, scip_skip_crates=["alpha", "beta"])
+        assert mgr._scip_skip_crates == {"alpha", "beta"}
 
     def test_skip_crates_filters_rust_crates(self, tmp_path):
         """Skipped crates are excluded from update_changed_rust."""

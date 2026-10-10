@@ -34,15 +34,6 @@ _ATTR = re.compile(r"^(attr_reader|attr_writer|attr_accessor)\s+([^\s:]+)\s*:\s*
 _OVERLOAD = re.compile(r"^\s*\|")
 
 
-def _types(text):
-    """The types ``text`` writes, as written, one where a union writes
-    several (the resolver cannot pick between them and leaves the
-    name)."""
-    text = re.sub(r"\{.*?\}", "{}", text, flags=re.DOTALL)
-    parts = split(text, "|", "(", ")")
-    return [p.strip() for p in parts]
-
-
 def _written(type_, _params):
     """The type ``type_`` as the data writes it: ``Array[Integer]`` with
     the brackets Ruby writes; ``untyped``/``void``/``self``/a union or a
