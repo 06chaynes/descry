@@ -373,20 +373,13 @@ class ScipIndex:
 
         if simple_name in self.name_to_symbols:
             symbol_ids = self.name_to_symbols[simple_name]
-            # Prefer symbols that match more of the qualified name
-            if "::" in ref_name:
-                type_name = ref_name.split("::")[-2] if "::" in ref_name else ""
-                for sym_id in symbol_ids:
-                    if (
-                        type_name
-                        and type_name.lower() in sym_id.lower()
-                        and sym_id in self.definitions
-                    ):
-                        def_file, _ = self.definitions[sym_id]
-                        return self._to_node_id(sym_id, def_file)
-
-            # Else the one definition of the name, where there is one.
             defined = [sym_id for sym_id in symbol_ids if sym_id in self.definitions]
+            if "::" in ref_name:
+                # Those of the type the name is qualified with, if any is.
+                type_name = ref_name.split("::")[-2].lower()
+                typed = [sym_id for sym_id in defined if type_name in sym_id.lower()]
+                defined = typed or defined
+            # The one definition left, where there is one.
             if len(defined) == 1:
                 def_file, _ = self.definitions[defined[0]]
                 return self._to_node_id(defined[0], def_file)

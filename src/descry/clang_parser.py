@@ -16,6 +16,7 @@ from bisect import bisect_right
 from descry.generate import (
     BaseParser,
     _bracketed_parts,
+    _casts,
     _flip_sign,
     _strip_generics,
     blank_strings,
@@ -108,9 +109,6 @@ _RE_NAMESPACE = re.compile(
 # extern "C" {, its string blanked
 _RE_LINKAGE = re.compile(r"\s*extern\s*")
 
-# An attribute written as a call, what its parentheses hold blanked
-_ATTRIBUTE_CALL = r"(?:alignas|__\w+)\s*\(\s*\)"
-
 # class Foo : public Bar  /  struct Foo  /  union Foo  /  enum [class] Foo,
 # read from a head without its template arguments. Between the keyword and
 # the name stand attributes: `alignas(...)`, `__attribute__((...))`, and
@@ -119,7 +117,7 @@ _RE_TYPE = re.compile(
     r"\s*(?P<typedef>typedef\b)?"
     r"(?:\s*(?:static|const|extern|[A-Z_][A-Z0-9_]*)\b(?:\s*\(\s*\))?)*\s*"
     r"(?P<kind>class|struct|union|enum)\b(?:\s+(?:class|struct)\b)?"
-    rf"(?:\s*(?:{_ATTRIBUTE_CALL}"
+    r"(?:\s*(?:(?:alignas|__\w+)\s*\(\s*\)"
     r"|[A-Z_][A-Z0-9_]*\b(?=\s+(?!final\b)[A-Za-z_])))*"
     r"\s*(?P<name>(?:[A-Za-z_]\w*\s*::\s*)*[A-Za-z_]\w*)?\s*(?:final\b\s*)?"
     r"(?::(?!:)(?P<bases>.*))?",
@@ -398,11 +396,13 @@ def _closers(text: str) -> dict[int, int]:
 
 def _declarators(tail: str) -> list[str]:
     """The declarators in ``tail``, what follows the body of a typedef,
-    each without its attributes and with what parentheses hold taken out."""
+    each without `[[...]]` and without the calls in it: an attribute or a
+    macro, or the parameters of a function type, none of which names the
+    type."""
     flat, previous = _RE_ATTRIBUTE.sub("", tail), None
     while flat != previous:
         previous, flat = flat, re.sub(r"\((?:[^()]|\(\))+\)", "()", flat)
-    return re.sub(_ATTRIBUTE_CALL, "", flat).split(",")
+    return re.sub(r"\w+\s*\(\)", "", flat).split(",")
 
 
 def _blank(match: re.Match) -> str:
@@ -1224,10 +1224,11 @@ class ClangParser(BaseParser):
                     self._guarded[index]
                 )
         binding = self.binding_re.search(code)
-        if binding and not code[binding.end() :].lstrip().startswith("["):
+        value = code[binding.end() :].lstrip() if binding else "["
+        if value[:1] != "[" and not _casts(value):
             # `auto name = call...` binds `name` to what the last call to
             # close in its statement, outside any braces, returns; a lambda
-            # binds nothing.
+            # and a cast bind nothing.
             depth, held = 0, None
             for column in range(binding.end(), len(code)):
                 depth += (code[column] == "{") - (code[column] == "}")

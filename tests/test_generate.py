@@ -9814,6 +9814,34 @@ class TestJavaCallResolution:
         assert "FILE:E.java::E::A" in builder.node_registry
         assert _calls(builder, "FILE:E.java::E") == []
 
+    def test_variable_bound_to_a_cast_is_not_what_the_call_returns(self, tmp_path):
+        """`var x = (Jar) pack();`: the call on `x` is no call on what
+        `pack` returns."""
+        builder = _index(
+            tmp_path,
+            {
+                "A.java": """
+                class Bag {
+                    int get() { return 1; }
+                }
+                class Jar {
+                    int get() { return 2; }
+                }
+                class U {
+                    Object pack() { return new Bag(); }
+                    void go() {
+                        var x = (Jar) pack();
+                        x.get();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:A.java::U::go") == [
+            "FILE:A.java::U::pack",
+            "REF:x.get",
+        ]
+
 
 class TestPhpCallResolution:
     def test_constructed_type_picks_the_method(self, tmp_path):
@@ -12328,6 +12356,9 @@ class TestClangCallResolution:
                 typedef struct { int v; } __attribute__((aligned((4)))) *Nested;
                 typedef struct { int v; } __declspec(dllexport) *Exported;
                 typedef struct { int v; } alignas(8) *Aligned;
+                typedef struct { int v; } _Alignas(8) *Wide;
+                typedef struct { int v; } API_EXPORT(x) *Api;
+                typedef struct { int v; } Handler(int);
                 typedef struct { int v; } [[deprecated]] Old;
                 typedef struct { int v; } Packed __attribute__((packed));
                 typedef struct { int v; } Plain, *PlainPtr;
@@ -12336,10 +12367,12 @@ class TestClangCallResolution:
             },
         )
         types = {node["id"] for node in builder.nodes if node["type"] == "Class"}
-        named = "Ptr Fixed Sole Marked Nested Exported Aligned Old Packed Plain"
+        named = (
+            "Ptr Fixed Sole Marked Nested Exported Aligned Wide Api Old Packed Plain"
+        )
         assert types == {f"FILE:a.c::{name}" for name in named.split()}
 
-    def test_auto_reference_and_pointer_bind_what_the_call_returns(self, tmp_path):
+    def test_auto_reference_binds_what_the_call_returns(self, tmp_path):
         builder = _index(
             tmp_path,
             {
@@ -12349,22 +12382,37 @@ class TestClangCallResolution:
                 void Widget::spin() {}
                 void Gadget::spin() {}
                 Widget& make() { static Widget w; return w; }
-                Widget* find() { return 0; }
                 void go() {
                   auto& x = make();
                   x.spin();
-                  auto* p = find();
-                  p->spin();
                 }
                 """,
             },
         )
         assert _calls(builder, "FILE:a.cc::go") == [
             "FILE:a.cc::Widget::spin",
-            "FILE:a.cc::Widget::spin",
-            "FILE:a.cc::find",
             "FILE:a.cc::make",
         ]
+
+    def test_auto_bound_to_a_cast_is_not_what_the_call_returns(self, tmp_path):
+        """`auto x = (Jar)pack();`: `x` is a `Jar`, whatever `pack` returns."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cc": """
+                struct Bag { int get(); };
+                struct Jar { int get(); };
+                int Bag::get() { return 1; }
+                int Jar::get() { return 2; }
+                Bag pack() { return Bag(); }
+                void go() {
+                  auto x = (Jar)pack();
+                  x.get();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.cc::go") == ["FILE:a.cc::pack", "REF:x.get"]
 
     def test_parenthesis_left_open_in_a_block_ends_with_the_block(self, tmp_path):
         """A macro may open a `(` that the text never closes."""

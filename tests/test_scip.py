@@ -451,6 +451,23 @@ class TestScipIndexResolveLineSemantics:
         single = ScipIndex([_write_scip(tmp_path / "one.scip", documents)])
         assert single.resolve("run", "app/src/main.rs", 40) == self.BETA_NODE
 
+    def test_qualified_name_resolves_to_the_one_type_of_that_name(
+        self, index, tmp_path
+    ):
+        assert index.resolve("Alpha::run", "app/src/main.rs", 40) == (
+            "FILE:app/src/alpha.rs::Alpha::run"
+        )
+        documents = {
+            "src/one.rs": [
+                (0, "rust-analyzer cargo app 0.1.0 one/Shared#run().", True)
+            ],
+            "src/two.rs": [
+                (0, "rust-analyzer cargo app 0.1.0 two/Shared#run().", True)
+            ],
+        }
+        twice = ScipIndex([_write_scip(tmp_path / "two.scip", documents)])
+        assert twice.resolve("Shared::run", "app/src/main.rs", 40) is None
+
     def test_definition_at_does_not_fall_back_to_name(self, index):
         assert index.definition_at("run", "app/src/main.rs", 5) == (
             self.BETA_NODE,

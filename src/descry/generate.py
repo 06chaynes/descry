@@ -6273,11 +6273,26 @@ def _strip_parens(text: str) -> str:
     return text
 
 
+def _casts(expression: str) -> bool:
+    """Whether ``expression`` opens with a type in parentheses that what
+    follows is cast to: `(T) value`, where `(value).member` reads a member."""
+    grouped = expression.lstrip()
+    if not grouped.startswith("("):
+        return False
+    depth = 0
+    for at, char in enumerate(grouped):
+        depth += (char == "(") - (char == ")")
+        if not depth:
+            break
+    return grouped[at + 1 :].lstrip()[:1] not in ("", ".", "?", ";", ")")
+
+
 def _is_call_chain(expression: str) -> bool:
     """Whether ``expression``, once the arguments of its calls are taken
     out, is one chain of names: `a.b(x).c()`, `new T(x)`, `await f()`, or
-    the `).c()` such a chain goes on with on a later line."""
-    return bool(
+    the `).c()` such a chain goes on with on a later line. A cast is none:
+    its value has the type it is cast to."""
+    return not _casts(expression) and bool(
         re.fullmatch(
             r"[\s)]*(?:(?:await|new)\s+|&(?:mut\s+)?)*[\w$.:?\s]*;?\s*",
             _strip_parens(expression),
