@@ -116,7 +116,11 @@ Python SDK v2, and a full-tree review's findings are fixed.
   re-exports.
 - **SCIP.** Rust workspace indexes map onto graph nodes (they did not
   before, and every SCIP-labelled edge fell back to name matching).
-  Occurrences are matched by line and column. Index files are named
+  Occurrences are matched by line and column. A call that a Rust index
+  records as one of a function, of a concrete type's method or of a trait
+  the project implements nowhere, outside the project, is external, where
+  it was kept as one of the project definitions of its name. Index files
+  are named
   `<adapter>--<project>.scip`. The SCIP cache follows `DESCRY_CACHE_DIR`,
   and `DESCRY_SCIP_TIMEOUT` overrides the configured timeout.
 - **Semantic search embeds one text per symbol**: name, signature,

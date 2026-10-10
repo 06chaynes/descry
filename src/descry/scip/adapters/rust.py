@@ -18,6 +18,8 @@ from descry.scip.adapter import (
 logger = logging.getLogger(__name__)
 
 
+# `impl#[Type][Trait]`: the trait an `impl` block is for
+_RUST_TRAIT_IMPL = re.compile(r"impl#\[[^\]]*\]\[([^\]]+)\]")
 _RUST_DESCRIPTOR_PATTERN = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)(\([^)]*\)|[#./\[\]])?")
 
 
@@ -191,6 +193,25 @@ class RustAdapter:
         )
         argv.extend(config.extra_args)
         return CommandSpec(argv=argv, cwd=project.root)
+
+    def leaving(self, defined):
+        """A test of whether a call of a symbol outside the project, given
+        by its descriptors, cannot reach the project: it names a function, a
+        method of a concrete type (`impl#[String]len().`), or a method of a
+        trait (`Display#fmt().`) that no `impl` among ``defined``, the
+        descriptors of the project's own symbols, is for."""
+        found = (_RUST_TRAIT_IMPL.search(descriptors) for descriptors in defined)
+        implemented = {impl[1].partition("<")[0] for impl in found if impl}
+
+        def leaves(descriptors: str) -> bool:
+            if not descriptors.endswith(")."):
+                return False
+            if "impl#[" in descriptors or "#" not in descriptors:
+                return True
+            trait = descriptors.rpartition("#")[0].rpartition("/")[2]
+            return trait not in implemented
+
+        return leaves
 
     def parse_descriptors(self, raw: str) -> list[str]:
         """Parse Rust-flavored SCIP descriptors into name components.

@@ -486,6 +486,33 @@ class TestScipIndexResolveLineSemantics:
             "FILE:app/src/single.rs::Single::run"
         )
 
+    @pytest.mark.parametrize(
+        ("called", "outside"),
+        [
+            # A method of a concrete type and a function of another crate.
+            ("rust-analyzer cargo std 1.0 fs/impl#[DirEntry]path().", True),
+            ("rust-analyzer cargo other 1.0 util/path().", True),
+            # A method of a trait the project implements, and of one it does not.
+            ("rust-analyzer cargo core 1.0 fmt/Display#path().", False),
+            ("rust-analyzer cargo other 1.0 dsl/QueryDsl#path().", True),
+            # No call, and a project symbol.
+            ("rust-analyzer cargo std 1.0 fs/DirEntry#path.", False),
+            ("rust-analyzer cargo app 0.1.0 alpha/impl#[Alpha]path().", False),
+        ],
+    )
+    def test_call_of_an_outside_symbol_that_cannot_reach_the_project(
+        self, tmp_path, called, outside
+    ):
+        own = "rust-analyzer cargo app 0.1.0 alpha/impl#[Alpha]path()."
+        shown = "rust-analyzer cargo app 0.1.0 alpha/impl#[Alpha][Display]fmt()."
+        documents = {
+            "src/alpha.rs": [(0, own, True), (1, shown, True)],
+            "src/main.rs": [(4, called, False)],
+        }
+        index = ScipIndex([_write_scip(tmp_path / "app.scip", documents)])
+        assert index.outside_at("entry.path", "app/src/main.rs", 5) is outside
+        assert index.outside_at("entry.path", "app/src/main.rs", 6) is False
+
     def test_definition_at_does_not_fall_back_to_name(self, index):
         assert index.definition_at("run", "app/src/main.rs", 5) == (
             self.BETA_NODE,

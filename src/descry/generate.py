@@ -15215,6 +15215,12 @@ class CodeGraphBuilder:
                             nodes_at.get((*found[1:], _split_callee(ref_name)[1]))
                             or found[0]
                         )
+                        # What SCIP saw go to code outside the project is
+                        # no call of a project definition of that name.
+                        if not found and scip_index.outside_at(
+                            ref_name, source_file, lineno
+                        ):
+                            resolution_source = _EXTERNAL
                     else:
                         scip_resolved = scip_index.resolve(
                             ref_name, source_file, lineno
@@ -15256,7 +15262,7 @@ class CodeGraphBuilder:
                             resolution_source = "scip"
 
                 if is_call:
-                    if not resolved:
+                    if not resolved and resolution_source != _EXTERNAL:
                         resolved, resolution_source = call_resolver.resolve(
                             ref_name, source_id, origin, arguments
                         )

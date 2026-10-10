@@ -1016,13 +1016,17 @@ class _ScipStub:
     """A SCIP index that knows references: ``(file, line)`` or ``(file,
     line, column)`` -> the ``(node_id, file, line)`` of the definition."""
 
-    def __init__(self, references):
+    def __init__(self, references, outside=()):
         self.references = references
+        self.outside = outside
 
     def definition_at(self, ref_name, source_file, line, column):
         return self.references.get(
             (source_file, line, column), self.references.get((source_file, line))
         )
+
+    def outside_at(self, ref_name, source_file, line):
+        return (source_file, line) in self.outside
 
 
 class TestScipCallResolution:
@@ -1052,6 +1056,16 @@ class TestScipCallResolution:
         (edge,) = self._resolve(tmp_path, ("FILE:lib.rs::probe", "lib.rs", 5))
         assert edge["target"] == "FILE:lib.rs::tests::probe"
         assert edge["metadata"]["resolution_source"] == "scip"
+
+    def test_call_scip_saw_leave_the_project_is_external(self, tmp_path):
+        """`probe()` has two project definitions to be one of, but SCIP
+        recorded it as a call of code outside the project."""
+        (tmp_path / "lib.rs").write_text(textwrap.dedent(self.SOURCE))
+        builder = CodeGraphBuilder(tmp_path)
+        builder.use_ast_grep = False
+        builder.process_directory()
+        builder.resolve_references(_ScipStub({}, outside={("lib.rs", 9)}))
+        assert not [e for e in builder.edges if e["source"] == "FILE:lib.rs::run"]
 
     def test_scip_target_that_is_no_node_is_not_used(self, tmp_path):
         (edge,) = self._resolve(tmp_path, ("FILE:app/lib.rs::probe", "app/lib.rs", 2))

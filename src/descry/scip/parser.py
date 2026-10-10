@@ -85,6 +85,9 @@ class ScipIndex:
         # Simple name -> list of symbol_ids (for fuzzy matching)
         self.name_to_symbols: dict[str, list[str]] = {}
 
+        # scheme -> test of whether an outside symbol's call leaves the project
+        self._leaving: dict[str, object] = {}
+
         # Resolution statistics by language, driven by the adapter registry
         # so new SCIP languages automatically get a stats bucket.
         self._resolution_stats: dict[str, dict[str, int]] = {
@@ -311,11 +314,52 @@ class ScipIndex:
             self._resolution_stats[lang]["attempted"] += 1
         return lang
 
+    def outside_at(self, ref_name: str, source_file: str, line: int) -> bool:
+        """Whether every symbol SCIP recorded at ``source_file``:``line``
+        under ``ref_name``'s last segment is one outside the project whose
+        call cannot reach it, as the adapter of its scheme tells."""
+        named = self._named_at(ref_name, source_file, line)[1]
+        return bool(named) and all(self._leaves(symbol) for symbol in named)
+
+    def _leaves(self, symbol: str) -> bool:
+        if symbol in self.definitions:
+            return False
+        scheme, _, rest = symbol.partition(" ")
+        if scheme not in self._leaving:
+            adapter = adapter_for_scheme(scheme)
+            defined = (
+                " ".join(known.split(" ")[4:])
+                for known in self.definitions
+                if known.startswith(f"{scheme} ")
+            )
+            # An adapter that cannot tell says nothing leaves.
+            build = getattr(adapter, "leaving", None)
+            self._leaving[scheme] = build(defined) if build else (lambda _: False)
+        return self._leaving[scheme](" ".join(rest.split(" ")[3:]))
+
     def _symbol_at(
         self, ref_name: str, source_file: str, line: int, column: int | None = None
     ) -> str | None:
         """The defined symbol referenced at ``source_file``:``line`` under
         ``ref_name``'s last segment, if any."""
+        path, named = self._named_at(ref_name, source_file, line)
+        named = [cid for cid in named if cid in self.definitions]
+        if column is not None and len(named) > 1:
+            # A column given in several units is read in the document's;
+            # where the index does not say which, any of them may match.
+            if isinstance(column, int):
+                columns = {column}
+            else:
+                unit = self._position_encodings.get(path)
+                columns = {column[unit - 1]} if unit else set(column)
+            exact = {self._columns.get((path, line, c)) for c in columns}
+            exact &= set(named)
+            return exact.pop() if len(exact) == 1 else None
+        return named[0] if named else None
+
+    def _named_at(self, ref_name: str, source_file: str, line: int):
+        """The path SCIP has ``source_file`` under, and the symbols it
+        recorded on ``line`` of it under ``ref_name``'s last segment."""
         # Strategy 1: Try exact location lookup with full path
         candidates = self.references.get((source_file, line)) or []
         path = source_file
@@ -335,23 +379,7 @@ class ScipIndex:
         # call, closing punctuation). SCIP names are unqualified, so
         # compare against the last segment of ref_name.
         simple_name = self._simple_name(ref_name)
-        named = [
-            cid
-            for cid in candidates
-            if cid in self.definitions and self._extract_name(cid) == simple_name
-        ]
-        if column is not None and len(named) > 1:
-            # A column given in several units is read in the document's;
-            # where the index does not say which, any of them may match.
-            if isinstance(column, int):
-                columns = {column}
-            else:
-                unit = self._position_encodings.get(path)
-                columns = {column[unit - 1]} if unit else set(column)
-            exact = {self._columns.get((path, line, c)) for c in columns}
-            exact &= set(named)
-            return exact.pop() if len(exact) == 1 else None
-        return named[0] if named else None
+        return path, [c for c in candidates if self._extract_name(c) == simple_name]
 
     @staticmethod
     def _simple_name(ref_name: str) -> str:
