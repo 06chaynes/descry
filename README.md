@@ -205,6 +205,9 @@ For customization, add a `.descry.toml` to your project root.
 # OPTIONAL — REPLACES the 25-element default. Leave unset to keep defaults
 # (.git, .gradle, .next, .svelte-kit, .venv, node_modules, target, build, …).
 # excluded_dirs = ["target", "node_modules", "dist", "build", "vendor"]
+# OPTIONAL — in a git repository, files git ignores are not indexed.
+# Default true; false indexes them too.
+# respect_gitignore = true
 max_stale_hours = 24
 
 [features]
@@ -229,6 +232,10 @@ model = "embeddinggemma"   # see "Embedding models"; `descry embedding-models` l
 # OPTIONAL — larger files are skipped by the indexer (it logs each one) and
 # refused by the web source view. Default 10; 0 = no limit.
 # max_file_mb = 10
+# OPTIONAL — a file whose parsing takes longer is left as far as it got (the
+# indexer logs it) and the next one is read. Default 120; 0 = no limit. Not
+# enforced on Windows.
+# max_parse_seconds = 120
 
 [git]
 # OPTIONAL — REPLACES defaults (.descry_cache/, .beads/, Cargo.lock,

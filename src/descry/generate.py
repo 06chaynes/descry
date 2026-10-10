@@ -1,11 +1,14 @@
 """Generate codebase knowledge graph with optional SCIP-based type-aware resolution."""
 
 import ast
+import contextlib
 import json
 import logging
 import os
 import posixpath
 import re
+import signal
+import threading
 from collections import deque
 from functools import cache
 from pathlib import Path
@@ -14635,6 +14638,33 @@ class CallResolver:
         return True
 
 
+class _OverTime(BaseException):
+    """The block `_time_limit` runs has used up its time. No `Exception`, so
+    that no handler inside the block takes it for a failure of its own."""
+
+
+@contextlib.contextmanager
+def _time_limit(seconds):
+    """Raise `_OverTime` in the block once it has run for ``seconds``. There
+    is no limit for 0, off the main thread, or on a platform without
+    interval timers."""
+    main = threading.current_thread() is threading.main_thread()
+    if not (seconds and main and hasattr(signal, "setitimer")):
+        yield
+        return
+
+    def over(_signum, _frame):
+        raise _OverTime
+
+    previous = signal.signal(signal.SIGALRM, over)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 class CodeGraphBuilder:
     # ast-grep is invoked as a subprocess **per file** for TS/JS parsing
     # (imports + calls). On macOS each `fork+exec` costs ~10ms, so a
@@ -14645,10 +14675,22 @@ class CodeGraphBuilder:
     # actually completes. Overridable via ``DESCRY_AST_GREP_MAX_FILES``.
     _AST_GREP_MAX_FILES_DEFAULT = 5000
 
-    def __init__(self, root_dir, excluded_dirs=None, rel_base=None, max_file_bytes=0):
+    def __init__(
+        self,
+        root_dir,
+        excluded_dirs=None,
+        rel_base=None,
+        max_file_bytes=0,
+        max_parse_seconds=0,
+        respect_gitignore=False,
+    ):
         self.root_dir = Path(root_dir).resolve()
         # Larger source files are skipped; 0 walks files of any size.
         self.max_file_bytes = max_file_bytes
+        # A file is parsed for no longer than this; 0 sets no limit.
+        self.max_parse_seconds = max_parse_seconds
+        # Whether the files git ignores are left out.
+        self.respect_gitignore = respect_gitignore
         # What node-ID paths are relative to: the project root, which is
         # above root_dir when only a subtree is indexed.
         self.rel_base = Path(rel_base).resolve() if rel_base else self.root_dir
@@ -14765,10 +14807,31 @@ class CodeGraphBuilder:
         # queryable on Linux/macOS, and vice versa).
         return path.relative_to(self.rel_base).as_posix()
 
+    def _git_ignored(self) -> set[str]:
+        """Paths under the root that git ignores, relative to it: files, and
+        directories ignored whole. Empty outside a git repository, without
+        git, and where ignored files are to be indexed."""
+        if not self.respect_gitignore:
+            return set()
+        from descry.git_history import GitError, GitHistoryAnalyzer
+
+        listing = "ls-files -z --others --ignored --exclude-standard --directory"
+        try:
+            listed = GitHistoryAnalyzer(self.root_dir)._run_git(listing.split())
+        except (GitError, OSError):
+            return set()
+        return {path.rstrip("/") for path in listed.split("\0") if path}
+
     def process_directory(self):
         # Resolve root once; reject entering any child directory whose resolved
         # path escapes the project root (defends against malicious symlinks).
         root_real = Path(self.root_dir).resolve()
+        ignored = self._git_ignored()
+
+        def kept(root, names):
+            """``names`` in directory ``root`` without those git ignores."""
+            under = Path(root).relative_to(self.root_dir)
+            return [name for name in names if (under / name).as_posix() not in ignored]
 
         # First pass: count TS/JS files to decide ast-grep opt-out for
         # large corpora. Cheap walk — stats filenames only.
@@ -14777,10 +14840,10 @@ class CodeGraphBuilder:
             for _r, _d, _f in os.walk(self.root_dir, followlinks=False):
                 _d[:] = [
                     d
-                    for d in _d
+                    for d in kept(_r, _d)
                     if not d.startswith(".") and d not in self.excluded_dirs
                 ]
-                for fn in _f:
+                for fn in kept(_r, _f):
                     if fn.endswith(_JSTS_EXTENSIONS):
                         ts_js_count += 1
             self._decide_ast_grep(ts_js_count)
@@ -14788,9 +14851,12 @@ class CodeGraphBuilder:
         for root, dirs, files in os.walk(self.root_dir, followlinks=False):
             dirs.sort()
             files.sort()
-            # Filter by name first (excluded dirs, dotfiles).
+            # Filter by name first (excluded dirs, dotfiles), and by what git
+            # ignores.
             dirs[:] = [
-                d for d in dirs if not d.startswith(".") and d not in self.excluded_dirs
+                d
+                for d in kept(root, dirs)
+                if not d.startswith(".") and d not in self.excluded_dirs
             ]
             # Then filter by realpath containment — drop directories that are
             # symlinks pointing outside the project root.
@@ -14808,7 +14874,7 @@ class CodeGraphBuilder:
                 except OSError:
                     continue
             dirs[:] = safe_dirs
-            for file in files:
+            for file in kept(root, files):
                 if not (
                     file.endswith(_INDEXED_EXTENSIONS)
                     or file in _MANIFESTS
@@ -14855,117 +14921,128 @@ class CodeGraphBuilder:
                 except ValueError as e:
                     logger.warning(f"Error reading {rel_path}: {e}")
                     continue
-                # A file one parser chokes on must not abort the whole index.
+                # A file one parser chokes on, or does not finish in time,
+                # must not abort the whole index.
                 try:
-                    if file.endswith(".py"):
-                        PythonParser(self).parse(file_path, rel_path, content)
-                    elif file.endswith(".rs"):
-                        RustParser(self).parse(file_path, rel_path, content)
-                    elif file.endswith(".proto"):
-                        ProtoParser(self).parse(file_path, rel_path, content)
-                    elif file.endswith(".java"):
-                        from descry.java_parser import JavaParser
-
-                        JavaParser(self).parse(file_path, rel_path, content)
-                    elif file.endswith(".go"):
-                        from descry.go_parser import GoParser
-
-                        GoParser(self).parse(file_path, rel_path, content)
-                    elif file == "go.mod":
-                        if match := _GO_MODULE_RE.search(content):
-                            folder = rel_path.rpartition("/")[0]
-                            self.go_modules[folder] = match.group(1)
-                    elif file == "Cargo.toml":
-                        if match := _CARGO_PACKAGE_RE.search(content):
-                            crate = match.group(1).replace("-", "_")
-                            self.rust_crates[crate] = rel_path.rpartition("/")[0]
-                    elif file == "pubspec.yaml":
-                        if match := _PUBSPEC_NAME_RE.search(content):
-                            folder = rel_path.rpartition("/")[0]
-                            self.dart_packages[match.group(1)] = folder
-                    elif file == "package.json":
-                        manifest = json.loads(content)
-                        folder = rel_path.rpartition("/")[0]
-                        exports = manifest.get("exports")
-                        self.js_packages[manifest.get("name")] = (folder, exports)
-                        for key, value in manifest.items():
-                            if key.endswith("ependencies") and isinstance(value, dict):
-                                self.js_dependencies.update(value)
-                    elif _TSCONFIG_RE.fullmatch(file):
-                        config = _loads_jsonc(content)
-                        options = config.get("compilerOptions") or {}
-                        extends = config.get("extends")
-                        if isinstance(extends, str):
-                            extends = [extends]
-                        base, paths = options.get("baseUrl"), options.get("paths")
-                        self.ts_configs[rel_path] = (
-                            [e for e in extends or () if isinstance(e, str)],
-                            base if isinstance(base, str) else None,
-                            {
-                                str(pattern): [t for t in targets if isinstance(t, str)]
-                                for pattern, targets in paths.items()
-                                if isinstance(targets, list)
-                            }
-                            if isinstance(paths, dict)
-                            else None,
-                        )
-                    elif file.endswith(_RUBY_EXTENSIONS):
-                        from descry.ruby_parser import RubyParser
-
-                        RubyParser(self).parse(file_path, rel_path, content)
-                    elif file.endswith(".php"):
-                        from descry.php_parser import PhpParser
-
-                        PhpParser(self).parse(file_path, rel_path, content)
-                    elif file.endswith(_DOTNET_EXTENSIONS):
-                        from descry.dotnet_parser import DotnetParser
-
-                        DotnetParser(self).parse(file_path, rel_path, content)
-                    elif file.endswith(_CLANG_EXTENSIONS):
-                        from descry.clang_parser import ClangParser
-
-                        ClangParser(self).parse(file_path, rel_path, content)
-                    elif file.endswith(".dart"):
-                        from descry.dart_parser import DartParser
-
-                        DartParser(self).parse(file_path, rel_path, content)
-                    elif file.endswith(_JSTS_EXTENSIONS):
-                        TSParser(self).parse(file_path, rel_path, content)
-                    elif file.endswith(".svelte"):
-                        # Iterate all <script> blocks and shift each block's
-                        # parsed linenos by its offset within the .svelte file.
-                        pos = 0
-                        while True:
-                            start_tag = content.find("<script", pos)
-                            if start_tag == -1:
-                                break
-                            gt = content.find(">", start_tag)
-                            if gt == -1:
-                                break
-                            close = content.find("</script>", gt)
-                            if close == -1:
-                                break
-                            body = content[gt + 1 : close]
-                            # Lines before the script body (the character after '>').
-                            line_offset = content.count("\n", 0, gt + 1)
-                            before = len(self.nodes)
-                            edges_before = len(self.edges)
-                            TSParser(self).parse(
-                                file_path, rel_path, body, line_offset=line_offset
-                            )
-                            # Shift newly-added node and edge linenos by the offset.
-                            for node in self.nodes[before:]:
-                                meta = node.get("metadata", {})
-                                for k in ("lineno", "end_lineno"):
-                                    v = meta.get(k)
-                                    if isinstance(v, int):
-                                        meta[k] = v + line_offset
-                            for edge in self.edges[edges_before:]:
-                                if "lineno" in edge.get("metadata", {}):
-                                    edge["metadata"]["lineno"] += line_offset
-                            pos = close + len("</script>")
+                    with _time_limit(self.max_parse_seconds):
+                        self._parse(file, file_path, rel_path, content)
+                except _OverTime:
+                    logger.warning(
+                        "Stopped parsing %s after %g s ([code_files] "
+                        "max_parse_seconds); it is indexed as far as it got",
+                        rel_path,
+                        self.max_parse_seconds,
+                    )
                 except Exception as e:  # noqa: BLE001 — boundary over every parser and the external ast-grep binary
                     logger.warning(f"Failed to parse {rel_path}: {e!r}")
+
+    def _parse(self, file, file_path, rel_path, content):
+        """Parse ``content``, the text of ``file``, with its language's parser."""
+        if file.endswith(".py"):
+            PythonParser(self).parse(file_path, rel_path, content)
+        elif file.endswith(".rs"):
+            RustParser(self).parse(file_path, rel_path, content)
+        elif file.endswith(".proto"):
+            ProtoParser(self).parse(file_path, rel_path, content)
+        elif file.endswith(".java"):
+            from descry.java_parser import JavaParser
+
+            JavaParser(self).parse(file_path, rel_path, content)
+        elif file.endswith(".go"):
+            from descry.go_parser import GoParser
+
+            GoParser(self).parse(file_path, rel_path, content)
+        elif file == "go.mod":
+            if match := _GO_MODULE_RE.search(content):
+                folder = rel_path.rpartition("/")[0]
+                self.go_modules[folder] = match.group(1)
+        elif file == "Cargo.toml":
+            if match := _CARGO_PACKAGE_RE.search(content):
+                crate = match.group(1).replace("-", "_")
+                self.rust_crates[crate] = rel_path.rpartition("/")[0]
+        elif file == "pubspec.yaml":
+            if match := _PUBSPEC_NAME_RE.search(content):
+                folder = rel_path.rpartition("/")[0]
+                self.dart_packages[match.group(1)] = folder
+        elif file == "package.json":
+            manifest = json.loads(content)
+            folder = rel_path.rpartition("/")[0]
+            exports = manifest.get("exports")
+            self.js_packages[manifest.get("name")] = (folder, exports)
+            for key, value in manifest.items():
+                if key.endswith("ependencies") and isinstance(value, dict):
+                    self.js_dependencies.update(value)
+        elif _TSCONFIG_RE.fullmatch(file):
+            config = _loads_jsonc(content)
+            options = config.get("compilerOptions") or {}
+            extends = config.get("extends")
+            if isinstance(extends, str):
+                extends = [extends]
+            base, paths = options.get("baseUrl"), options.get("paths")
+            self.ts_configs[rel_path] = (
+                [e for e in extends or () if isinstance(e, str)],
+                base if isinstance(base, str) else None,
+                {
+                    str(pattern): [t for t in targets if isinstance(t, str)]
+                    for pattern, targets in paths.items()
+                    if isinstance(targets, list)
+                }
+                if isinstance(paths, dict)
+                else None,
+            )
+        elif file.endswith(_RUBY_EXTENSIONS):
+            from descry.ruby_parser import RubyParser
+
+            RubyParser(self).parse(file_path, rel_path, content)
+        elif file.endswith(".php"):
+            from descry.php_parser import PhpParser
+
+            PhpParser(self).parse(file_path, rel_path, content)
+        elif file.endswith(_DOTNET_EXTENSIONS):
+            from descry.dotnet_parser import DotnetParser
+
+            DotnetParser(self).parse(file_path, rel_path, content)
+        elif file.endswith(_CLANG_EXTENSIONS):
+            from descry.clang_parser import ClangParser
+
+            ClangParser(self).parse(file_path, rel_path, content)
+        elif file.endswith(".dart"):
+            from descry.dart_parser import DartParser
+
+            DartParser(self).parse(file_path, rel_path, content)
+        elif file.endswith(_JSTS_EXTENSIONS):
+            TSParser(self).parse(file_path, rel_path, content)
+        elif file.endswith(".svelte"):
+            # Iterate all <script> blocks and shift each block's
+            # parsed linenos by its offset within the .svelte file.
+            pos = 0
+            while True:
+                start_tag = content.find("<script", pos)
+                if start_tag == -1:
+                    break
+                gt = content.find(">", start_tag)
+                if gt == -1:
+                    break
+                close = content.find("</script>", gt)
+                if close == -1:
+                    break
+                body = content[gt + 1 : close]
+                # Lines before the script body (the character after '>').
+                line_offset = content.count("\n", 0, gt + 1)
+                before = len(self.nodes)
+                edges_before = len(self.edges)
+                TSParser(self).parse(file_path, rel_path, body, line_offset=line_offset)
+                # Shift newly-added node and edge linenos by the offset.
+                for node in self.nodes[before:]:
+                    meta = node.get("metadata", {})
+                    for k in ("lineno", "end_lineno"):
+                        v = meta.get(k)
+                        if isinstance(v, int):
+                            meta[k] = v + line_offset
+                for edge in self.edges[edges_before:]:
+                    if "lineno" in edge.get("metadata", {}):
+                        edge["metadata"]["lineno"] += line_offset
+                pos = close + len("</script>")
 
     def _get_language(self, node_id: str) -> str:
         """Extract language from node ID based on file extension."""
@@ -15378,6 +15455,8 @@ def main():
         excluded_dirs=config_excluded_dirs,
         rel_base=project_root,
         max_file_bytes=config.max_file_bytes,
+        max_parse_seconds=config.max_parse_seconds,
+        respect_gitignore=config.respect_gitignore,
     )
     builder.process_directory()
 

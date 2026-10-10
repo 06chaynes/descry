@@ -359,6 +359,10 @@ class DescryConfig:
     max_file_mb: float = (
         10  # larger files are not indexed, read or served; 0 = unlimited
     )
+    # A file whose parsing takes longer is left as far as it got; 0 = unlimited
+    max_parse_seconds: float = 120
+    # In a git repository, files git ignores are not indexed
+    respect_gitignore: bool = True
 
     # Git
     churn_exclusions: list[str] = field(
@@ -469,6 +473,8 @@ class DescryConfig:
         project = data.get("project", {})
         if "excluded_dirs" in project:
             self.excluded_dirs = set(project["excluded_dirs"])
+        if "respect_gitignore" in project:
+            self.respect_gitignore = project["respect_gitignore"]
         if "max_stale_hours" in project:
             self.max_stale_hours = _toml_number(
                 "project",
@@ -508,17 +514,17 @@ class DescryConfig:
         code_files = data.get("code_files", {})
         if "extensions" in code_files:
             self.code_extensions = set(code_files["extensions"])
-        if "max_file_mb" in code_files:
-            max_file_mb = _toml_number(
-                "code_files", "max_file_mb", code_files["max_file_mb"], self.max_file_mb
-            )
-            if max_file_mb < 0:
-                logger.warning(
-                    f"Invalid [code_files] max_file_mb in .descry.toml: "
-                    f"{max_file_mb!r} is negative; keeping {self.max_file_mb!r}"
-                )
-            else:
-                self.max_file_mb = max_file_mb
+        for key in ("max_file_mb", "max_parse_seconds"):
+            if key in code_files:
+                kept = getattr(self, key)
+                limit = _toml_number("code_files", key, code_files[key], kept)
+                if limit < 0:
+                    logger.warning(
+                        f"Invalid [code_files] {key} in .descry.toml: "
+                        f"{limit!r} is negative; keeping {kept!r}"
+                    )
+                else:
+                    setattr(self, key, limit)
 
         # [git]
         git = data.get("git", {})

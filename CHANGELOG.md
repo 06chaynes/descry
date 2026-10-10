@@ -133,6 +133,11 @@ Python SDK v2, and a full-tree review's findings are fixed.
   reports whether a search found a path, found none, timed out or ran out
   of budget. `/api/health`, `/api/status`, `/api/ensure` and
   `/api/examples` follow the service's view of the graph.
+- **Files git ignores are not indexed.** In a git repository the indexer
+  leaves out what `.gitignore` and git's other exclude files ignore: build
+  output, vendored bundles, caches. A tracked file is always indexed.
+  `[project] respect_gitignore = false` indexes ignored files as before;
+  outside a repository nothing changes.
 - **CLI and tools.** `ensure` uses `[project] max_stale_hours` unless given
   an age. `index <subdir>` narrows the walk and writes the root's graph.
   `--lang` covers every indexed language and accepts `ts`, `js`, `py`,
@@ -211,6 +216,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
 - `[code_files] max_file_mb` (default 10, `0` for no limit): the size above
   which a file is skipped by the indexer, not read for source snippets and
   refused by `/api/source`.
+- `[code_files] max_parse_seconds` (default 120, `0` for no limit): a file
+  whose parsing takes longer is left as far as it got and logged, so one
+  file cannot keep an index run from finishing. Not enforced on Windows.
 - `tools/stdlib/` — the generators of the standard-library data, one per
   language, each reproducible from a pinned source.
 - `THIRD-PARTY-NOTICES.md`, shipped in the wheel and the sdist: the source,

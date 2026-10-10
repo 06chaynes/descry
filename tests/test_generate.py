@@ -8,6 +8,7 @@ import sys
 import tempfile
 import textwrap
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -13952,6 +13953,61 @@ class TestProcessDirectory:
         builder = CodeGraphBuilder(tmp_path)
         builder.use_ast_grep = False
         return builder
+
+    @staticmethod
+    def _files(builder):
+        builder.use_ast_grep = False
+        builder.process_directory()
+        return {node["id"] for node in builder.nodes if node["type"] == "File"}
+
+    @pytest.fixture
+    def ignoring_tree(self, tmp_path):
+        """A git repository that ignores `out/` and two files, one of which
+        it tracks all the same."""
+        for name in ("src.py", "local.py", "tracked.py", "out/built.py"):
+            (tmp_path / name).parent.mkdir(exist_ok=True)
+            (tmp_path / name).write_text("def f():\n    pass\n")
+        (tmp_path / ".gitignore").write_text("out/\nlocal.py\ntracked.py\n")
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "add", "-f", "tracked.py"], cwd=tmp_path, check=True)
+        return tmp_path
+
+    def test_files_git_ignores_are_not_indexed(self, ignoring_tree):
+        builder = CodeGraphBuilder(ignoring_tree, respect_gitignore=True)
+        assert self._files(builder) == {"FILE:src.py", "FILE:tracked.py"}
+
+    def test_files_git_ignores_are_indexed_on_request(self, ignoring_tree):
+        assert self._files(CodeGraphBuilder(ignoring_tree)) == {
+            "FILE:src.py",
+            "FILE:tracked.py",
+            "FILE:local.py",
+            "FILE:out/built.py",
+        }
+
+    def test_tree_outside_a_repository_is_walked_whole(self, tmp_path):
+        (tmp_path / "src.py").write_text("def f():\n    pass\n")
+        (tmp_path / ".gitignore").write_text("src.py\n")
+        builder = CodeGraphBuilder(tmp_path, respect_gitignore=True)
+        assert self._files(builder) == {"FILE:src.py"}
+
+    def test_file_over_its_parse_time_is_left_and_the_next_is_parsed(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        (tmp_path / "a_endless.py").write_text("def never():\n    pass\n")
+        (tmp_path / "b.py").write_text("def reached():\n    pass\n")
+        parse = generate.PythonParser.parse
+
+        def stuck_on_the_first(self, file_path, rel_path, content):
+            while rel_path == "a_endless.py":
+                time.sleep(0.01)
+            return parse(self, file_path, rel_path, content)
+
+        monkeypatch.setattr(generate.PythonParser, "parse", stuck_on_the_first)
+        builder = CodeGraphBuilder(tmp_path, max_parse_seconds=0.2)
+        with caplog.at_level(logging.WARNING):
+            builder.process_directory()
+        assert "FILE:b.py::reached" in builder.node_registry
+        assert "Stopped parsing a_endless.py" in caplog.text
 
     @pytest.mark.parametrize("ext", [".jsx", ".mjs", ".cjs", ".mts", ".cts"])
     def test_js_family_extensions_parsed(self, regex_builder, tmp_path, ext):

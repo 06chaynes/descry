@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from descry.handlers import DescryConfig
 from descry.scip.cache import ADAPTERS, ScipCacheManager
 
@@ -198,13 +200,26 @@ timeout = 45
         assert config.max_nodes == 100
         assert config.embedding_model is None
 
-    def test_negative_max_file_mb_is_refused(self, tmp_path, caplog):
-        (tmp_path / ".descry.toml").write_text("[code_files]\nmax_file_mb = -5\n")
+    @pytest.mark.parametrize(
+        ("key", "kept"), [("max_file_mb", 10), ("max_parse_seconds", 120)]
+    )
+    def test_negative_limit_is_refused(self, tmp_path, caplog, key, kept):
+        (tmp_path / ".descry.toml").write_text(f"[code_files]\n{key} = -5\n")
         with caplog.at_level(logging.WARNING):
             config = DescryConfig()
             config._apply_toml(DescryConfig._load_toml(tmp_path))
-        assert config.max_file_mb == 10
+        assert getattr(config, key) == kept
         assert any("is negative" in r.message for r in caplog.records)
+
+    def test_parse_time_and_gitignore_settings(self, tmp_path):
+        (tmp_path / ".descry.toml").write_text(
+            "[project]\nrespect_gitignore = false\n"
+            "[code_files]\nmax_parse_seconds = 0\n"
+        )
+        config = DescryConfig()
+        assert (config.respect_gitignore, config.max_parse_seconds) == (True, 120)
+        config._apply_toml(DescryConfig._load_toml(tmp_path))
+        assert (config.respect_gitignore, config.max_parse_seconds) == (False, 0)
 
     def test_from_toml_invalid(self, tmp_path, caplog):
         """Malformed TOML falls back to defaults with warning."""
