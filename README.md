@@ -268,9 +268,15 @@ toolchain = "1.92.0"     # Pin rust-analyzer version via rustup
 ".proto" = "protobuf"
 
 [cross_lang]
-# Frontend -> backend handler tracing via OpenAPI spec.
+# Frontend -> backend handler tracing via OpenAPI spec. An operation's handler
+# is the function its operationId names; where several functions share the
+# name, the one whose attributes or decorators write the operation's path
+# (`#[utoipa::path(.., path = "/x")]`, `@app.get("/x")`), else the one outside
+# test code. A handler named otherwise is found by the path it declares.
 openapi_path = "public/api/openapi.json"   # must resolve inside project_root
-backend_handler_patterns = ["backend/src/routes"]  # path substrings; empty = no filter
+# OPTIONAL — only functions in files whose path holds one of these are
+# handlers. Needed only where the rules above leave a name ambiguous.
+# backend_handler_patterns = ["backend/src/routes"]
 api_prefixes = ["/api/v1", "/api/v2", "/api"]      # stripped when matching spec paths
 ```
 

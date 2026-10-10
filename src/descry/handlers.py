@@ -2771,6 +2771,8 @@ class DescryService:
             graph_path,
             backend_handler_patterns=self.config.backend_handler_patterns or None,
             api_prefixes=self.config.api_prefixes or None,
+            is_test=(await self._get_querier()).is_test if graph_path else None,
+            project_root=self.config.project_root,
         )
 
         if mode == "stats":

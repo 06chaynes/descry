@@ -139,6 +139,12 @@ Python SDK v2, and a full-tree review's findings are fixed.
   output, vendored bundles, caches. A tracked file is always indexed.
   `[project] respect_gitignore = false` indexes ignored files as before;
   outside a repository nothing changes.
+- **Cross-language tracing links an endpoint by what the code declares.**
+  Where several functions have an operation's name, its handler is the one
+  whose attributes or decorators write the operation's path, else the one
+  outside test code; with more than one left, none is linked. It was the
+  last function of that name in the graph. A handler whose name is not the
+  operationId is found by the path it declares.
 - **CLI and tools.** `ensure` uses `[project] max_stale_hours` unless given
   an age. `index <subdir>` narrows the walk and writes the root's graph.
   `--lang` covers every indexed language and accepts `ts`, `js`, `py`,

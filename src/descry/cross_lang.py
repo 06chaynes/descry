@@ -19,11 +19,45 @@ Usage:
 import json
 import logging
 import re
+from collections import defaultdict
 from pathlib import Path
 
 from descry._graph import GraphSchemaError, load_graph_with_schema
+from descry.query import source_path
 
 logger = logging.getLogger(__name__)
+
+# A string literal on one line
+_RE_STRING = re.compile(r"""["']([^"'\n]*)["']""")
+
+
+# What a line of an attribute, a decorator or a comment starts with
+_HEADS = ("#", "@", "[", "//", "/*", "*")
+
+
+def _head(lines: list[str]) -> str:
+    """What heads the definition below ``lines``: its attributes, decorators
+    and comments, a blank line between them and it left out."""
+    head, depth = [], 0
+    for line in reversed(lines):
+        text = line.strip()
+        if not text:
+            if head:
+                break
+            continue
+        # Read upwards, a `)` or `]` opens what a `(` or `[` closes.
+        opened = depth + sum(map(text.count, ")]")) - sum(map(text.count, "(["))
+        if depth <= 0 and opened <= 0 and not text.startswith(_HEADS):
+            break
+        head.append(text)
+        depth = max(opened, 0)
+    return "\n".join(head)
+
+
+def _route(path: str | None) -> str | None:
+    """``path`` with each parameter, written `{id}`, `:id` or `<id>`, as
+    `{}`, so that a route reads the same in a specification and in code."""
+    return path and re.sub(r"\{[^}/]*\}|:\w+|<[^>/]*>", "{}", path).rstrip("/")
 
 
 class CrossLangTracer:
@@ -35,6 +69,8 @@ class CrossLangTracer:
         graph_path: str | None = None,
         backend_handler_patterns: list[str] | None = None,
         api_prefixes: list[str] | None = None,
+        is_test=None,
+        project_root=None,
     ):
         """Initialize the tracer with OpenAPI spec.
 
@@ -45,7 +81,12 @@ class CrossLangTracer:
                 (e.g., ["backend/src/routes"]). If empty, handler filtering is skipped.
             api_prefixes: API version prefixes to strip when matching endpoints
                 (defaults to ["/api/v1", "/api/v2", "/api"]).
+            is_test: Tells whether a node ID is test code.
+            project_root: Where the graph's files are, to read what heads a
+                function that shares its name with another.
         """
+        self.is_test = is_test
+        self.project_root = project_root
         self.openapi_path = Path(openapi_path)
         self.graph_path = Path(graph_path) if graph_path else None
         self.backend_handler_patterns = backend_handler_patterns or []
@@ -123,7 +164,11 @@ class CrossLangTracer:
         )
 
     def _link_to_graph(self):
-        """Link operationIds to graph node IDs for backend handlers."""
+        """Link each operation to the graph node of its handler, the function
+        its operationId names. Where several functions have the name, the
+        handler is the one whose attributes or decorators write the
+        operation's path, else the one outside test code; while more than
+        one is left, none is linked."""
         if not self.graph_path or not self.graph_path.exists():
             return
 
@@ -133,30 +178,73 @@ class CrossLangTracer:
             logger.error(f"Failed to load graph: {e}")
             return
 
-        # Build index of function/method names to node IDs
-        # Looking for handlers matching backend_handler_patterns
-        handler_index = {}
+        # The functions and methods of each name and of each file, in the
+        # files that backend_handler_patterns allows.
+        named, filed = defaultdict(list), defaultdict(list)
         for node in graph.get("nodes", []):
             if node["type"] not in ("Function", "Method"):
                 continue
-            node_id = node["id"]
-            # If patterns are configured, filter to matching files only
             if self.backend_handler_patterns and not any(
-                pat in node_id for pat in self.backend_handler_patterns
+                pat in node["id"] for pat in self.backend_handler_patterns
             ):
                 continue
             name = node.get("metadata", {}).get("name", "")
             if name:
-                handler_index[name] = node_id
+                named[name].append(node)
+                filed[node["id"].split("::")[0]].append(node)
 
-        # Map operationIds to handlers
+        sources, declared, pending = {}, set(), []
+        tested = self.is_test or (lambda _node_id: False)
         for info in self.path_to_operation.values():
-            op_id = info["operationId"]
-            if op_id in handler_index:
-                self.operation_to_handler[op_id] = handler_index[op_id]
+            found = named.get(info["operationId"], [])
+            declaring = [n for n in found if self._declares(n, info, sources)]
+            if len(declaring) == 1:
+                declared.add(declaring[0]["id"].split("::")[0])
+            else:
+                pending.append(info)
+            for narrowed in (declaring, [n for n in found if not tested(n["id"])]):
+                if len(found) > 1 and narrowed:
+                    found = [n for n in found if n in narrowed]
+            if len(found) == 1:
+                self.operation_to_handler[info["operationId"]] = found[0]["id"]
+        # A handler need not have its operation's name: one is looked for
+        # among the functions of the files that hold the declared handlers.
+        for info in pending:
+            declaring = [
+                node
+                for file_id in declared
+                for node in filed[file_id]
+                if self._declares(node, info, sources, method=True)
+            ]
+            if len(declaring) == 1:
+                self.operation_to_handler[info["operationId"]] = declaring[0]["id"]
 
         logger.info(
             f"Linked {len(self.operation_to_handler)} operationIds to graph nodes"
+        )
+
+    def _declares(self, node, info, sources, method=False) -> bool:
+        """Whether what heads ``node``'s definition, its attributes or
+        decorators, writes the path of the operation ``info`` in a string,
+        with or without its API prefix, and for ``method`` names its HTTP
+        method too. ``sources`` keeps the lines of the files read."""
+        rel_path = node["id"][5:].split("::")[0]
+        lineno = node.get("metadata", {}).get("lineno")
+        if rel_path not in sources:
+            located = self.project_root and source_path(self.project_root, rel_path)
+            text = Path(located).read_text("utf-8", "ignore") if located else ""
+            sources[rel_path] = text.split("\n")
+        if not isinstance(lineno, int):
+            return False
+        head = _head(sources[rel_path][: lineno - 1])
+        if method and info["method"].lower() not in head.lower():
+            return False
+
+        def routes(text):
+            return {_route(text), _route(self._strip_api_prefix(text))} - {None}
+
+        return any(
+            routes(text) & routes(info["path"]) for text in _RE_STRING.findall(head)
         )
 
     def _strip_api_prefix(self, path: str) -> str | None:

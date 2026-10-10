@@ -272,6 +272,12 @@ class GraphQuerier:
         except OSError as e:
             return f"<Error reading file: {e}>"
 
+    def is_test(self, node_id):
+        """Whether ``node_id`` is test code: in a test file, or a test
+        function by its name."""
+        self._ensure_filter_indices()
+        return node_id in self._index_is_test
+
     def _ensure_filter_indices(self):
         """Build filter indices lazily on first use.
 

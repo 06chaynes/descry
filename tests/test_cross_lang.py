@@ -250,13 +250,51 @@ class TestGraphLinking:
             ),
         }
 
-    def test_without_patterns_any_function_of_that_name_links(
-        self, spec_path, graph_path
-    ):
+    def test_name_that_two_functions_have_links_neither(self, spec_path, graph_path):
         tracer = CrossLangTracer(str(spec_path), str(graph_path))
-        assert (
-            tracer.operation_to_handler["list_actions"]
-            == "FILE:backend/tests/helpers.rs::list_actions"
+        assert "list_actions" not in tracer.operation_to_handler
+        assert "get_action" in tracer.operation_to_handler
+
+    def test_function_outside_test_code_is_the_handler(self, spec_path, graph_path):
+        tracer = CrossLangTracer(
+            str(spec_path),
+            str(graph_path),
+            is_test=lambda node_id: "/tests/" in node_id,
+        )
+        assert tracer.operation_to_handler["list_actions"] == (
+            "FILE:backend/src/routes/actions.rs::list_actions"
+        )
+
+    @pytest.mark.parametrize("route", ["/api/v1/actions", "/actions"])
+    def test_function_that_declares_the_path_is_the_handler(
+        self, spec_path, tmp_path, route
+    ):
+        sources = {
+            "client/api.rs": (
+                'fn url() -> String {\n    api("/actions")\n}\n\n'
+                "/// Lists them.\nasync fn list_actions() {}\n"
+            ),
+            "server/routes.rs": (
+                f'#[utoipa::path(\n    get,\n    path = "{route}",\n)]\n\n'
+                "async fn list_actions() {}\n"
+            ),
+        }
+        nodes = []
+        for rel_path, text in sources.items():
+            (tmp_path / rel_path).parent.mkdir()
+            (tmp_path / rel_path).write_text(text)
+            nodes.append(
+                {
+                    "id": f"FILE:{rel_path}::list_actions",
+                    "type": "Function",
+                    "metadata": {"name": "list_actions", "lineno": text.count("\n")},
+                }
+            )
+        graph = tmp_path / "graph.json"
+        graph.write_text(json.dumps({**GRAPH, "nodes": nodes}))
+        tracer = CrossLangTracer(str(spec_path), str(graph), project_root=tmp_path)
+        assert tracer.operation_to_handler["list_actions"] == (
+            "FILE:server/routes.rs::list_actions"
         )
 
     def test_non_callable_nodes_are_not_handlers(self, spec_path, graph_path):
