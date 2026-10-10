@@ -325,13 +325,17 @@ the rest of the `dart:` libraries:
     python -I tools/stdlib/gen_dart.py "$DESCRY_STDLIB_SOURCES/dart-sdk" \
         src/descry/stdlib/dart.json
 
-Sources under `_internal`, `js`, `wasm` and `web` are not read, nor are
-members declared in a type's implementation (class-body lines only).
-Classes, mixins, enums, extension types and named extensions are types;
-an unnamed `extension on T` is `T`'s members. `extends`, `with`,
+Sources under `_internal`, `internal`, `native`, `js`, `wasm` and `web`
+are not read, nor are members declared in a type's implementation
+(class-body lines only), nor private names. A parameter list and the
+header of a type are read as one line each. Classes, mixins, enums,
+extension types and named extensions are types; an unnamed `extension on
+T` is `T`'s members. Types of one name in two libraries are one type,
+and a member they type differently has no type. `extends`, `with`,
 `implements` and `on` name `bases` — one the file does not hold is left
-out. `static`, `factory` and constructor members are `statics`. `get`
-members and `set` members share a name: the getter's return type is the
-member's. A parameter written as a function signature — `T toElement(E
+out. `static` and `factory` members are `statics`, as are constructors:
+the unnamed one as `new`, a named one under its name. Top-level
+functions are `functions`. `get` members and `set` members share a name:
+the getter's return type is the member's. A parameter written as a function signature — `T toElement(E
 e)`, `void action(E element)` — records `callbacks` for argument 0, its
 return a type parameter where the signature writes one.

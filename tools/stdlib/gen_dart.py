@@ -17,12 +17,23 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from common import new_type, record, split
 
-_TYPE_DECL = re.compile(
+# A comment or a string literal, whichever starts first
+_LEXEME = re.compile(
+    r"//[^\n]*|/\*.*?\*/"
+    r"|(?<![\w$])r?(?:'''.*?'''|\"\"\".*?\"\"\")"
+    r"|(?<![\w$])r(?:'[^'\n]*'|\"[^\"\n]*\")"
+    r"|'(?:[^'\\\n$]|\\.|\$\{[^{}]*\}|\$)*'"
+    r"|\"(?:[^\"\\\n$]|\\.|\$\{[^{}]*\}|\$)*\"",
+    re.DOTALL,
+)
+_TYPE_HEAD = (
     r"^\s*(?:abstract\s+|base\s+|final\s+|sealed\s+|interface\s+)*"
     r"(class|mixin\s+class|mixin|enum|extension\s+type|extension)\s+"
-    r"(?:name\s+)?([A-Za-z_]\w*)?\s*"
+)
+_TYPE_DECL = re.compile(
+    _TYPE_HEAD + r"(?:name\s+)?([A-Za-z_$][\w$]*)?\s*"
     r"(?:<([A-Za-z_][\w\s,]*(?:extends\s+[^{}]*)?)>)?\s*"
-    r"(.*?)\s*{\s*$"
+    r"(.*?)\s*{\s*}?\s*$"
 )
 # Words before a name that are no return type
 _NO_TYPE = "new|as|with|class|implements|typedef|get|set|return|await|throw"
@@ -30,13 +41,28 @@ _MEMBER = re.compile(
     r"^\s*(?:@[\w$.]+(?![\w$.])(?:\([^)]*\))?\s*)*"
     r"(?:(static|factory|abstract|covariant|external|late|final|const|static\s+late)\s+)*"
     rf"(?:(?!(?:{_NO_TYPE})\b)([A-Za-z_][\w$.<>,? ]*?|operator|void|dynamic)\s+)?"
-    r"(get\s+|set\s+|operator\s*)?(?!Function\b)([A-Za-z_][\w$]*|operator\s*[<>=!+\-*/%&|^~\[\]]+|[\w$]+)"
-    r"\s*(?:<[\w$,\s]*>)?\s*(?:\((.*)\))?\s*(?:=>|;|\{|$)"
+    r"(get\s+|set\s+|operator\s*)?(?!Function\b)([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?|operator\s*[<>=!+\-*/%&|^~\[\]]+|[\w$]+)"
+    r"\s*(?:(?:<[\w$,\s]*>)?\s*\((.*)\))?\s*(?:native\s*)?(?:=>|;|\{|$)"
 )
 _FUNC_PARAM = re.compile(
     r"(?:required\s+|covariant\s+)?"
     r"([A-Za-z_][\w$.<>,? ]*?\s+Function\s*(?:\([^)]*\))?\??)\s+([\w$]+)"
 )
+
+
+def _lines(text):
+    """The lines of ``text``, with a parameter list and the header of a type
+    declaration each on one line."""
+    held, parens, header = "", 0, False
+    for line in text.splitlines():
+        if not held:
+            header = bool(re.match(_TYPE_HEAD, line))
+        held = f"{held} {line.strip()}".lstrip()
+        parens += line.count("(") - line.count(")")
+        if parens > 0 or header and not re.search(r"[{;]", held):
+            continue
+        yield held
+        held, parens = "", 0
 
 
 def _written(type_, params):
@@ -151,16 +177,12 @@ def build(origin):
     ]
     for path in files:
         text = path.read_text("utf-8", errors="replace")
-        text = re.sub(r"//.*", "", text)
-        text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-        # String literals may carry unbalanced braces or `//` comments.
-        text = re.sub(r"\$\{[^}]*\}", "$_", text)
-        text = re.sub(r"'(?:[^'\\]|\\.)*'", "''", text)
-        text = re.sub(r'"(?:[^"\\]|\\.)*"', '""', text)
+        # A string literal may hold braces, parentheses or `//`.
+        text = _LEXEME.sub(lambda found: "" if found[0][0] == "/" else "''", text)
         current = None
         params = []
         depth = 0
-        for line in text.splitlines():
+        for line in _lines(text):
             stripped = line.strip()
             if not stripped:
                 continue
@@ -223,9 +245,11 @@ def build(origin):
                 or name == current
                 or name.startswith(current + ".")
             )
-            untyped = ret_type is None and not accessor
-            if untyped and (not modifiers or sig is not None and not constructs):
-                # A bare name, a statement, or a call a value goes on with.
+            # Without a type: a constructor with its parameters, or a field
+            # with a modifier. Any other is a bare name, a statement, or a
+            # call a value goes on with.
+            kept = sig is not None if constructs else modifiers and sig is None
+            if ret_type is None and not accessor and not kept:
                 continue
             if (ret_type or "").endswith(".") or name in _STATEMENTS:
                 continue
@@ -234,7 +258,7 @@ def build(origin):
                 [p.strip() for p in gparams[1].split(",")] if gparams else []
             )
             static = "static" in modifiers or "static late" in modifiers
-            if name.startswith("_"):
+            if name.rpartition(".")[2].startswith("_"):
                 continue
             table = types[current]["statics" if static else "methods"]
             if accessor == "get" or (

@@ -331,6 +331,11 @@ FACTS = [
     ("dart", ("types", "String", "methods", "length"), "int"),
     ("dart", ("types", "AsciiDecoder", "statics", "new"), "AsciiDecoder"),
     ("dart", ("types", "CustomEvent", "methods", "detail"), None),
+    ("dart", ("types", "DateTime", "statics", "now"), "DateTime"),
+    ("dart", ("types", "Stopwatch", "statics", "new"), "Stopwatch"),
+    ("dart", ("types", "UriData", "methods", "mimeType"), "String"),
+    ("dart", ("types", "Element", "methods", "id"), "String"),
+    ("dart", ("functions", "runZonedGuarded"), "R"),
     (
         "dart",
         ("callbacks", "Iterable", "forEach", "0", "params"),
@@ -369,6 +374,8 @@ BASES = [
     ("ruby", "Array", "Enumerable[Elem]"),
     ("ruby", "String", "Comparable"),
     ("dart", "List", "Iterable<E>"),
+    ("dart", "StreamSink", "EventSink<S>"),
+    ("dart", "TypeError", "Error"),
 ]
 
 
