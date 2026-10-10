@@ -4220,7 +4220,6 @@
   "Console": {
    "bases": [],
    "methods": {
-    "JS": "_isConsoleDefined",
     "assertCondition": null,
     "clear": null,
     "count": null,

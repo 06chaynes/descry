@@ -967,6 +967,7 @@ async def _process_tree(argv: list[str], **kwargs):
 
     handlers = {}
     # Windows starts no session, and only the main thread may set handlers.
+    # A signal this process ignores, as under `nohup`, stays ignored.
     if (
         sys.platform != "win32"
         and threading.current_thread() is threading.main_thread()
@@ -974,6 +975,7 @@ async def _process_tree(argv: list[str], **kwargs):
         handlers = {
             signum: signal.signal(signum, stop)
             for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+            if signal.getsignal(signum) != signal.SIG_IGN
         }
     try:
         yield proc

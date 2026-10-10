@@ -5476,7 +5476,6 @@ _LIBRARY_PREFIXES = (
     "Issuer::",
     "ClientTlsConfig::",
     "FieldValue::",
-    "ProtoDeploymentSourceType::",
     "Identity::",
     "SetResponseHeaderLayer::",
     "EncodingKey::",
@@ -15120,7 +15119,7 @@ class CodeGraphBuilder:
                         )
 
                         # If cross-crate, verify ref_name looks related to the target
-                        # This prevents spurious matches like EnvFilter -> AuthInterceptor
+                        # This prevents spurious matches like EnvFilter -> RequestFilter
                         if (
                             source_crate
                             and target_crate

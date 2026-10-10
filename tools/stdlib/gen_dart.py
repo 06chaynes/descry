@@ -42,7 +42,7 @@ _MEMBER = re.compile(
     r"((?:(?:static|factory|abstract|covariant|external|late|final|const)\s+)*)"
     rf"(?:(?!(?:{_NO_TYPE})\b)([A-Za-z_][\w$.<>,? ]*?|operator|void|dynamic)\s+)?"
     r"(get\s+|set\s+|operator\s*)?(?!Function\b)([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?|operator\s*[<>=!+\-*/%&|^~\[\]]+|[\w$]+)"
-    r"\s*(?:(?:<[\w$,\s]*>)?\s*\((.*)\))?\s*(?:native\s*)?(?:=(?!=)|:|;|\{|$)"
+    r"\s*(?:(?:<[\w$,\s]*>)?\s*\((.*)\))?\s*(?:native\s*)?(=(?!=)|:|;|\{|$)"
 )
 _FUNC_PARAM = re.compile(
     r"(?:required\s+|covariant\s+)?"
@@ -238,7 +238,7 @@ def build(origin):
             member = _MEMBER.match(stripped)
             if not member or not member[4]:
                 continue
-            modifiers, ret_type, accessor, name, sig = member.groups()
+            modifiers, ret_type, accessor, name, sig, end = member.groups()
             constructs = (
                 "factory" in modifiers
                 or name == current
@@ -251,6 +251,10 @@ def build(origin):
             if ret_type is None and not accessor and not kept:
                 continue
             if (ret_type or "").endswith(".") or name in _STATEMENTS:
+                continue
+            if end == ":" and not constructs:
+                # Only a constructor goes on with `:`; the rest of a
+                # conditional expression does too.
                 continue
             gparams = re.search(r"<([\w$,\s]+)>\s*\(", stripped)
             own = params + (

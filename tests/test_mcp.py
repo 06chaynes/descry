@@ -258,12 +258,15 @@ _HANDSHAKE = [
 ]
 
 # descry-mcp in a project whose indexer is the stand-in named by argv[1].
+# The server with the stand-in indexer `sys.argv[1]` gives, its Ctrl-C
+# handled as a foreground shell leaves it.
 _SERVE_WITH_INDEXER = """
-import json, os, sys
+import json, os, signal, sys
 from descry import mcp_server
 from descry.handlers import DescryService
 
 argv = json.loads(sys.argv[1])
+signal.signal(signal.SIGINT, signal.default_int_handler)
 DescryService._indexer_child = lambda self, _path: (argv, dict(os.environ))
 mcp_server.main()
 """

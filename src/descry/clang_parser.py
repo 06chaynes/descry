@@ -155,10 +155,9 @@ _RE_GOES_ON = re.compile(r"\s*[;,=(\[.]")
 # by, unless that is a macro invocation.
 _RE_ENUMERATOR = re.compile(r"(?:^|,)\s*([A-Za-z_]\w*)\b(?!\s*\()")
 _RE_TYPE_KEYWORD = re.compile(r"\b(?:struct|class|union|enum)\s+$")
-# A name in what follows a typedef's body, its qualifiers aside
-_RE_DECLARED_NAME = re.compile(
-    r"\b(?!(?:const|volatile|restrict|__restrict|__restrict__|_Atomic)\b)[A-Za-z_]\w*"
-)
+# The name a declarator gives: the last word of those it opens with
+_RE_DECLARED_NAME = re.compile(r"[\s*]*(?:\w+[\s*]+)*([A-Za-z_]\w*)")
+_RE_GNU_ATTRIBUTE = re.compile(r"__attribute__\s*\(\(.*?\)\)")
 _RE_LOCAL_TYPE = re.compile(
     r"\b(?:struct|class)\s+([A-Za-z_]\w*)\s*(?:final\s*)?(?::(?!:)|\{)"
 )
@@ -805,7 +804,11 @@ class ClangParser(BaseParser):
         stop = min(stop, end)
         tail = self._text[closer + 1 : stop]
         kind, name = declared["kind"], declared["name"]
-        names = _RE_DECLARED_NAME.findall(tail) if declared["typedef"] else []
+        names = []
+        if declared["typedef"]:
+            declarators = _RE_GNU_ATTRIBUTE.sub("", tail).split(",")
+            named = map(_RE_DECLARED_NAME.match, declarators)
+            names = [found[1] for found in named if found]
         if name is None and names and re.match(r"[\s*]*[A-Za-z_]", tail):
             # `typedef struct { ... } Name;`, `typedef struct { ... } *Name;`
             name = names[0]

@@ -148,7 +148,7 @@ class TestFindTraitImpls:
             "schema_version": 2,
             "nodes": [
                 {
-                    "id": "FILE:auth.rs::JwtAuth::from_request_parts",
+                    "id": "FILE:auth.rs::TokenAuth::from_request_parts",
                     "type": "Method",
                     "metadata": {
                         "name": "from_request_parts",
@@ -158,7 +158,7 @@ class TestFindTraitImpls:
                     },
                 },
                 {
-                    "id": "FILE:auth.rs::OptionalJwtAuth::from_request_parts",
+                    "id": "FILE:auth.rs::OptionalAuth::from_request_parts",
                     "type": "Method",
                     "metadata": {
                         "name": "from_request_parts",
@@ -215,7 +215,7 @@ class TestFindTraitImpls:
 
         assert len(results) == 3
         names = {r["id"].split("::")[-2] for r in results}
-        assert names == {"JwtAuth", "OptionalJwtAuth", "Pagination"}
+        assert names == {"TokenAuth", "OptionalAuth", "Pagination"}
 
     def test_find_impls_filtered_by_trait(self, trait_impl_graph):
         """Should filter by trait name."""

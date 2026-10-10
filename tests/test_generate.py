@@ -12324,11 +12324,26 @@ class TestClangCallResolution:
                 typedef struct { int v; } *Ptr;
                 typedef struct { int v; } *const Fixed;
                 typedef struct { int v; } *__restrict Sole;
+                typedef struct { int v; } __attribute__((unused)) *Marked;
+                typedef struct { int v; } Plain, *PlainPtr;
                 """,
             },
         )
         types = {node["id"] for node in builder.nodes if node["type"] == "Class"}
-        assert types == {"FILE:a.c::Ptr", "FILE:a.c::Fixed", "FILE:a.c::Sole"}
+        assert types == {
+            "FILE:a.c::Ptr",
+            "FILE:a.c::Fixed",
+            "FILE:a.c::Sole",
+            "FILE:a.c::Marked",
+            "FILE:a.c::Plain",
+        }
+
+    def test_attribute_before_the_name_of_a_type(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {"a.cc": "enum class [[deprecated]] Level : int { low = 1 };\n"},
+        )
+        assert "FILE:a.cc::Level" in builder.node_registry
 
 
 class TestRubyCallResolution:
@@ -14318,11 +14333,11 @@ class TestTraitImplMetadata:
     def test_rust_parser_adds_trait_impl_metadata(self):
         """Should add trait_impl metadata when parsing impl Trait for Struct."""
         content = """
-struct JwtAuth;
+struct TokenAuth;
 
-impl FromRequestParts<AppState> for JwtAuth {
+impl FromRequestParts<AppState> for TokenAuth {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
-        Ok(JwtAuth)
+        Ok(TokenAuth)
     }
 }
 """

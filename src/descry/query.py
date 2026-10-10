@@ -803,7 +803,7 @@ class GraphQuerier:
         """Find Configuration nodes in the same file (interceptors, middleware, event handlers).
 
         This helps users understand the full setup when looking at related functions.
-        For example, when viewing setAuthTokenGetter, show the request interceptor that uses it.
+        For example, when viewing set_token_getter, show the request interceptor that uses it.
 
         Args:
             file_id: The file ID (e.g., "FILE:webapp/src/lib/api/client.ts")
@@ -1055,7 +1055,7 @@ class GraphQuerier:
 
         Handles partial matches for:
         - Symbol name only (e.g., "authenticate" finds "FILE:auth.rs::authenticate")
-        - Class::method format (e.g., "JwtAuth::from_request_parts")
+        - Class::method format (e.g., "TokenAuth::from_request_parts")
         - Partial paths (e.g., "auth.rs::validate_token")
         - Naming convention variants (camelCase vs snake_case)
 
@@ -1950,7 +1950,7 @@ class GraphQuerier:
                     score = 1000 + score * 2  # Base tier + amplified TF-IDF
 
                     # Check for adjacent terms (phrase proximity)
-                    phrase = "_".join(terms)  # e.g., "deployment_dispatch"
+                    phrase = "_".join(terms)  # e.g., "order_dispatch"
                     phrase_space = " ".join(terms)  # e.g., "deployment dispatch"
 
                     if phrase in name or phrase in full_text:
@@ -2074,7 +2074,7 @@ class GraphQuerier:
                 if node_name.startswith(name):
                     fuzzy_matches.append(node)
                     continue
-                # Contains match in node ID (for cases like searching "dispatch" finding "dispatch_to_handler")
+                # Contains match in node ID (for cases like searching "dispatch" finding "dispatch_order")
                 if f"::{name}" in node_id.lower() or node_id.lower().endswith(
                     name.lower()
                 ):
@@ -2105,7 +2105,7 @@ class GraphQuerier:
 
         Example:
             find_trait_impls("from_request_parts")
-            # Returns JwtAuth, OptionalJwtAuth, SseAuth, Pagination, etc.
+            # Returns the extractor types: an auth guard, a pagination query, etc.
 
             find_trait_impls("from_request_parts", "FromRequestParts")
             # Returns only FromRequestParts implementations
@@ -2339,7 +2339,7 @@ class GraphQuerier:
               definitions the call may reach; absent on a resolved call
 
         Example:
-            find_call_path_result("create_deployment", "dispatch_to_handler")
+            find_call_path_result("create_order", "dispatch_order")
             # Returns the direct path with code snippets at each hop
         """
         from collections import deque

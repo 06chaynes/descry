@@ -169,12 +169,19 @@ class TestCliExitStatus:
 
 
 # `descry index` in a project whose indexer is the stand-in named by argv[1].
+# `descry index` with the stand-in indexer `sys.argv[1]` gives, its signals
+# handled as a foreground shell leaves them but for those named after it,
+# which are ignored.
 _INDEX_WITH = """
-import json, os, sys
+import json, os, signal, sys
 from descry import cli
 from descry.handlers import DescryService
 
 argv = json.loads(sys.argv[1])
+signal.signal(signal.SIGINT, signal.default_int_handler)
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
+for name in sys.argv[2:]:
+    signal.signal(getattr(signal, name), signal.SIG_IGN)
 DescryService._indexer_child = lambda self, _path: (argv, dict(os.environ))
 sys.argv = ["descry", "index"]
 cli.main()
@@ -182,28 +189,39 @@ cli.main()
 
 
 class TestCliStopped:
-    @pytest.mark.parametrize("stop", ["SIGINT", "SIGTERM", "SIGHUP"])
-    def test_stopping_an_index_run_stops_what_the_indexer_started(
-        self, tmp_path, indexer_tree, stop
-    ):
-        """The indexer has a session of its own, so neither Ctrl-C nor a
-        signal sent to the CLI's process group reaches it."""
+    @pytest.fixture
+    def index(self, tmp_path, indexer_tree, request):
+        """`descry index` running the stand-in indexer, ignoring the signals
+        the test is parametrized with."""
         (tmp_path / ".git").mkdir()
         env = {**os.environ, "DESCRY_NO_EMBEDDINGS": "1"}
         env.pop("DESCRY_CACHE_DIR", None)
+        script = [sys.executable, "-c", _INDEX_WITH, json.dumps(indexer_tree.argv)]
         index = subprocess.Popen(
-            [sys.executable, "-c", _INDEX_WITH, json.dumps(indexer_tree.argv)],
+            [*script, *getattr(request, "param", ())],
             cwd=tmp_path,
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        try:
-            indexer_tree.wait_started()
-            index.send_signal(getattr(signal, stop))
-            assert index.wait(timeout=30) == -getattr(signal, stop)
-        finally:
-            index.kill()
-            index.wait()
+        indexer_tree.wait_started()
+        yield index
+        index.kill()
+        index.wait()
 
+    @pytest.mark.parametrize("stop", ["SIGINT", "SIGTERM", "SIGHUP"])
+    def test_stopping_an_index_run_stops_what_the_indexer_started(
+        self, index, indexer_tree, stop
+    ):
+        """The indexer has a session of its own, so neither Ctrl-C nor a
+        signal sent to the CLI's process group reaches it."""
+        index.send_signal(getattr(signal, stop))
+        assert index.wait(timeout=30) == -getattr(signal, stop)
         assert indexer_tree.grandchild_exited()
+
+    @pytest.mark.parametrize("index", [("SIGHUP",)], indirect=True)
+    def test_a_signal_the_run_ignores_does_not_stop_it(self, index, indexer_tree):
+        """Under `nohup` a hangup leaves the indexer running."""
+        index.send_signal(signal.SIGHUP)
+        assert not indexer_tree.grandchild_exited(timeout=1)
+        assert index.poll() is None
