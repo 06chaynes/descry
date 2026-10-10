@@ -12325,18 +12325,75 @@ class TestClangCallResolution:
                 typedef struct { int v; } *const Fixed;
                 typedef struct { int v; } *__restrict Sole;
                 typedef struct { int v; } __attribute__((unused)) *Marked;
+                typedef struct { int v; } __attribute__((aligned((4)))) *Nested;
+                typedef struct { int v; } __declspec(dllexport) *Exported;
+                typedef struct { int v; } alignas(8) *Aligned;
+                typedef struct { int v; } [[deprecated]] Old;
+                typedef struct { int v; } Packed __attribute__((packed));
                 typedef struct { int v; } Plain, *PlainPtr;
+                typedef struct { int v; } (*Callback)(int, int);
                 """,
             },
         )
         types = {node["id"] for node in builder.nodes if node["type"] == "Class"}
-        assert types == {
-            "FILE:a.c::Ptr",
-            "FILE:a.c::Fixed",
-            "FILE:a.c::Sole",
-            "FILE:a.c::Marked",
-            "FILE:a.c::Plain",
-        }
+        named = "Ptr Fixed Sole Marked Nested Exported Aligned Old Packed Plain"
+        assert types == {f"FILE:a.c::{name}" for name in named.split()}
+
+    def test_auto_reference_and_pointer_bind_what_the_call_returns(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "a.cc": """
+                struct Widget { void spin(); };
+                struct Gadget { void spin(); };
+                void Widget::spin() {}
+                void Gadget::spin() {}
+                Widget& make() { static Widget w; return w; }
+                Widget* find() { return 0; }
+                void go() {
+                  auto& x = make();
+                  x.spin();
+                  auto* p = find();
+                  p->spin();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.cc::go") == [
+            "FILE:a.cc::Widget::spin",
+            "FILE:a.cc::Widget::spin",
+            "FILE:a.cc::find",
+            "FILE:a.cc::make",
+        ]
+
+    def test_parenthesis_left_open_in_a_block_ends_with_the_block(self, tmp_path):
+        """A macro may open a `(` that the text never closes."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.c": """
+                void k(void) {}
+                void f(void) { BEGIN( 1; }
+                void h(void) { k(); }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.c::h") == ["FILE:a.c::k"]
+
+    def test_macro_call_among_enumerators_is_no_enumerator(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "a.c": """
+                enum Kind {
+                  KIND_A,
+                  KIND_LIST(X)
+                };
+                """,
+            },
+        )
+        constants = {n["id"] for n in builder.nodes if n["type"] == "Constant"}
+        assert constants == {"FILE:a.c::Kind::KIND_A"}
 
     def test_attribute_before_the_name_of_a_type(self, tmp_path):
         builder = _index(

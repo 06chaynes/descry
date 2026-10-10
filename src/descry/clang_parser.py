@@ -108,6 +108,9 @@ _RE_NAMESPACE = re.compile(
 # extern "C" {, its string blanked
 _RE_LINKAGE = re.compile(r"\s*extern\s*")
 
+# An attribute written as a call, what its parentheses hold blanked
+_ATTRIBUTE_CALL = r"(?:alignas|__\w+)\s*\(\s*\)"
+
 # class Foo : public Bar  /  struct Foo  /  union Foo  /  enum [class] Foo,
 # read from a head without its template arguments. Between the keyword and
 # the name stand attributes: `alignas(...)`, `__attribute__((...))`, and
@@ -116,7 +119,7 @@ _RE_TYPE = re.compile(
     r"\s*(?P<typedef>typedef\b)?"
     r"(?:\s*(?:static|const|extern|[A-Z_][A-Z0-9_]*)\b(?:\s*\(\s*\))?)*\s*"
     r"(?P<kind>class|struct|union|enum)\b(?:\s+(?:class|struct)\b)?"
-    r"(?:\s*(?:(?:alignas|__\w+)\s*\(\s*\)"
+    rf"(?:\s*(?:{_ATTRIBUTE_CALL}"
     r"|[A-Z_][A-Z0-9_]*\b(?=\s+(?!final\b)[A-Za-z_])))*"
     r"\s*(?P<name>(?:[A-Za-z_]\w*\s*::\s*)*[A-Za-z_]\w*)?\s*(?:final\b\s*)?"
     r"(?::(?!:)(?P<bases>.*))?",
@@ -157,7 +160,6 @@ _RE_ENUMERATOR = re.compile(r"(?:^|,)\s*([A-Za-z_]\w*)\b(?!\s*\()")
 _RE_TYPE_KEYWORD = re.compile(r"\b(?:struct|class|union|enum)\s+$")
 # The name a declarator gives: the last word of those it opens with
 _RE_DECLARED_NAME = re.compile(r"[\s*]*(?:\w+[\s*]+)*([A-Za-z_]\w*)")
-_RE_GNU_ATTRIBUTE = re.compile(r"__attribute__\s*\(\(.*?\)\)")
 _RE_LOCAL_TYPE = re.compile(
     r"\b(?:struct|class)\s+([A-Za-z_]\w*)\s*(?:final\s*)?(?::(?!:)|\{)"
 )
@@ -392,6 +394,15 @@ def _closers(text: str) -> dict[int, int]:
         if stack and (text[stack[-1]] == "(") == (char == ")"):
             closers[stack.pop()] = at
     return closers
+
+
+def _declarators(tail: str) -> list[str]:
+    """The declarators in ``tail``, what follows the body of a typedef,
+    each without its attributes and with what parentheses hold taken out."""
+    flat, previous = _RE_ATTRIBUTE.sub("", tail), None
+    while flat != previous:
+        previous, flat = flat, re.sub(r"\((?:[^()]|\(\))+\)", "()", flat)
+    return re.sub(_ATTRIBUTE_CALL, "", flat).split(",")
 
 
 def _blank(match: re.Match) -> str:
@@ -804,12 +815,11 @@ class ClangParser(BaseParser):
         stop = min(stop, end)
         tail = self._text[closer + 1 : stop]
         kind, name = declared["kind"], declared["name"]
-        names = []
+        named = []
         if declared["typedef"]:
-            declarators = _RE_GNU_ATTRIBUTE.sub("", tail).split(",")
-            named = map(_RE_DECLARED_NAME.match, declarators)
-            names = [found[1] for found in named if found]
-        if name is None and names and re.match(r"[\s*]*[A-Za-z_]", tail):
+            named = [_RE_DECLARED_NAME.match(part) for part in _declarators(tail)]
+        names = [found[1] for found in named if found]
+        if name is None and named and named[0]:
             # `typedef struct { ... } Name;`, `typedef struct { ... } *Name;`
             name = names[0]
         if name is None:
