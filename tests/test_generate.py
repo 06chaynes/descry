@@ -3128,6 +3128,60 @@ class TestRustCallResolution:
             "FILE:lib.rs::twice",
         ]
 
+    def test_function_after_an_impl_in_a_module_is_no_method_of_it(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "a.rs": """
+                mod tests {
+                    struct Recording;
+                    impl Service for Recording {
+                        fn update(&self) -> u8 {
+                            1
+                        }
+                    }
+                    fn helper() -> u8 {
+                        2
+                    }
+                    fn uses() {
+                        helper();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.rs::tests::uses") == ["FILE:a.rs::tests::helper"]
+
+    def test_impl_whose_brace_follows_a_where_clause(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "a.rs": """
+                struct Reader<R>(R);
+                impl<R> Reader<R>
+                where
+                    R: std::io::Read,
+                {
+                    fn first(&self) {
+                        self.second();
+                    }
+                    fn second(&self) {}
+                }
+                fn after() {}
+                """,
+            },
+        )
+        functions = {
+            node["id"]: node["type"]
+            for node in builder.nodes
+            if node["type"] in ("Function", "Method")
+        }
+        assert functions == {
+            "FILE:a.rs::Reader::first": "Method",
+            "FILE:a.rs::Reader::second": "Method",
+            "FILE:a.rs::after": "Function",
+        }
+
     def test_body_on_the_signature_line(self, tmp_path):
         """A body written on the line of its `fn` makes its calls from
         that function, in a file and in an `impl` alike."""
@@ -13943,6 +13997,42 @@ class TestDartCallResolution:
             },
         )
         assert "FILE:a.dart::Widget::spin" in _calls(builder, "FILE:a.dart::go")
+
+
+class TestModuleAliases:
+    """A module specifier that is no relative path and no package."""
+
+    STORE = """
+    export const store = {
+        list: (page?: number): Promise<void> => Promise.resolve(),
+    };
+    """
+    PAGE = """
+    import { store } from '%s';
+    export async function load() {
+        await store.list(1);
+    }
+    """
+
+    def _load_calls(self, tmp_path, specifier, **more):
+        files = {"ui/src/lib/store.ts": self.STORE, **more}
+        files["ui/src/routes/page.ts"] = self.PAGE % specifier
+        return _calls(_index(tmp_path, files), "FILE:ui/src/routes/page.ts::load")
+
+    def test_sveltekit_lib_is_src_lib_beside_the_configuration(self, tmp_path):
+        config = {"ui/svelte.config.js": "export default {};\n"}
+        assert self._load_calls(tmp_path, "$lib/store", **config) == [
+            "FILE:ui/src/lib/store.ts::store::list"
+        ]
+
+    @pytest.mark.parametrize("specifier", ["$lib/store", "@/lib/store", "#lib/store"])
+    def test_alias_that_cannot_be_located_leaves_the_call_unresolved(
+        self, tmp_path, specifier
+    ):
+        assert self._load_calls(tmp_path, specifier) == ["REF:store.list"]
+
+    def test_package_that_is_not_declared_stays_outside(self, tmp_path):
+        assert self._load_calls(tmp_path, "some-package/store") == []
 
 
 class TestProcessDirectory:

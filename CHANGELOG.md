@@ -68,7 +68,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
 ### Changed
 
 - **Call resolution is decided from evidence.** Imports (including
-  `go.mod`, `Cargo.toml`, `package.json` and `tsconfig.json`), declared and
+  `go.mod`, `Cargo.toml`, `package.json`, `tsconfig.json` and SvelteKit's
+  `$lib`), declared and
   returned types, lexical scope, the class hierarchy and each language's
   visibility rules decide each call. Names bound by loops, patterns,
   destructuring and closure or lambda parameters are typed from
@@ -153,8 +154,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
 ### Fixed
 
 - **Parsers.** Rust `pub(crate)`/`pub(super)` items, `const fn`,
-  `extern fn`, one-line blocks, calls in a body on the `fn` line and
-  `impl` edges; Python definitions under
+  `extern fn`, one-line blocks, calls in a body on the `fn` line, `impl`
+  edges, functions after an `impl` inside a module and methods of an
+  `impl` whose brace follows a `where` clause; Python definitions under
   `if`/`try`/`with`/`for` and calls counted twice in nested functions;
   Java Allman braces, class scope ended by a `'}'` literal, calls
   attributed to the class instead of the method; Go unexported types,

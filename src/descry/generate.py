@@ -8300,7 +8300,7 @@ class RustParser(BaseParser):
                     # Reset enum tracking when leaving enum scope
                     if current_enum_id and popped_id == current_enum_id:
                         current_enum_id = None
-                    if len(current_context) == 1:
+                    if popped_id == f"{file_id}::{current_impl_target}":
                         current_impl_target = None
                         current_trait_impl = None
 
@@ -8481,10 +8481,11 @@ class RustParser(BaseParser):
                 else:
                     current_trait_impl = None  # Inherent impl, no trait
 
-                if opens_block(line):
+                if opens_block(line) or "{" not in line:
+                    # The body opens here or, after a `where` clause, below.
                     current_context.append(struct_id)
                     context_indent.append(indent)
-                elif "{" in line:  # `impl Marker for Foo {}`
+                else:  # `impl Marker for Foo {}`
                     # Methods of a block written on one line.
                     body = line.index("{")
                     self.begin_line(code, lineno, raw=lines[i])
@@ -10554,6 +10555,20 @@ _SELF_RECEIVERS = {
     "dart": frozenset({"this"}),
 }
 _EXTERNAL = "external"
+# The name of an npm package, scoped or not
+_NPM_PACKAGE_RE = re.compile(r"(?:@[a-z0-9~-][a-z0-9._~-]*/)?[a-z0-9~-][a-z0-9._~-]*")
+
+
+def _ancestors(folder):
+    """``folder`` and each directory above it, nearest first."""
+    while True:
+        yield folder
+        parent = posixpath.dirname(folder)
+        if parent == folder:
+            return
+        folder = parent
+
+
 _UNRESOLVED = "unresolved"
 # What a call returns when nothing is known of it, not even that it comes
 # from outside the project.
@@ -11638,8 +11653,9 @@ class CallResolver:
 
     def _js_module(self, specifier, file_id):
         """Resolve a module specifier written in ``file_id``: ``[file ID]``
-        for a project module, ``[]`` for one that cannot be located,
-        ``"external"`` for a declared dependency, None for anything else."""
+        for a project module, ``[]`` for one of the project's that cannot be
+        located, ``"external"`` for a declared dependency, None for anything
+        else."""
         folder = posixpath.dirname(file_id[5:])
         if specifier.startswith("."):
             found = self._js_file(posixpath.join(folder, specifier))
@@ -11647,6 +11663,13 @@ class CallResolver:
         aliased = self._js_alias(specifier, folder)
         if aliased is not None:
             return aliased
+        if specifier.partition("/")[0] == "$lib":
+            # SvelteKit: `$lib` is `src/lib` beside the nearest configuration.
+            for above in _ancestors(folder):
+                if self._js_file(posixpath.join(above, "svelte.config")):
+                    library = posixpath.join(above, "src/lib", specifier[5:])
+                    found = self._js_file(library)
+                    return [found] if found else []
         for name, (folder, exports) in self.builder.js_packages.items():
             if specifier != name and not specifier.startswith(f"{name}/"):
                 continue
@@ -11674,7 +11697,11 @@ class CallResolver:
             return []
         package = "/".join(specifier.split("/")[: 2 if specifier[0] == "@" else 1])
         outside = package in self.builder.js_dependencies
-        return _EXTERNAL if outside or specifier.startswith("node:") else None
+        if outside or specifier.startswith("node:"):
+            return _EXTERNAL
+        # A name no package can have (`$lib`, `#internal`, `@/x`) is an alias
+        # of the project's own.
+        return None if _NPM_PACKAGE_RE.fullmatch(package) else []
 
     def _js_alias(self, specifier, folder):
         """Resolve ``specifier`` through the `paths` and `baseUrl` of the
@@ -11682,15 +11709,12 @@ class CallResolver:
         pattern matches but no target is a project module, None when the
         configuration says nothing about it."""
         configs = self.builder.ts_configs
-        while True:
-            names = (
-                posixpath.join(folder, n) for n in ("tsconfig.json", "jsconfig.json")
-            )
-            config = next((name for name in names if name in configs), None)
-            parent = posixpath.dirname(folder)
-            if config or parent == folder:
-                break
-            folder = parent
+        names = (
+            posixpath.join(above, name)
+            for above in _ancestors(folder)
+            for name in ("tsconfig.json", "jsconfig.json")
+        )
+        config = next((name for name in names if name in configs), None)
         if config is None:
             return None
         base, paths = self._ts_options(config, set())
