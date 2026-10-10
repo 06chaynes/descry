@@ -468,6 +468,24 @@ class TestScipIndexResolveLineSemantics:
         twice = ScipIndex([_write_scip(tmp_path / "two.scip", documents)])
         assert twice.resolve("Shared::run", "app/src/main.rs", 40) is None
 
+    @pytest.mark.parametrize(
+        "other", ["shared/Util#run().", "state/SharedState#run()."]
+    )
+    def test_qualifier_is_a_type_not_a_part_of_a_path_or_a_longer_name(
+        self, tmp_path, other
+    ):
+        documents = {
+            "src/other.rs": [(0, f"rust-analyzer cargo app 0.1.0 {other}", True)],
+            "src/single.rs": [
+                (0, "rust-analyzer cargo app 0.1.0 core/Single#run().", True)
+            ],
+        }
+        index = ScipIndex([_write_scip(tmp_path / "app.scip", documents)])
+        assert index.resolve("Shared::run", "app/src/main.rs", 40) is None
+        assert index.resolve("Single::run", "app/src/main.rs", 40) == (
+            "FILE:app/src/single.rs::Single::run"
+        )
+
     def test_definition_at_does_not_fall_back_to_name(self, index):
         assert index.definition_at("run", "app/src/main.rs", 5) == (
             self.BETA_NODE,
