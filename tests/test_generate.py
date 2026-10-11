@@ -5788,9 +5788,60 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:b.ts::run") == ["FILE:c.ts::helper"]
 
+    def test_object_is_an_owner_where_it_holds_a_member_node(self, tmp_path):
+        """An accessor is a member; an object that holds no function, or is
+        written on one line with its `return`, gets no `object@` node, and a
+        call of a function written on that line is no other definition's."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export function data(id: string) {
+                    return {
+                        id,
+                        size: id.length,
+                    };
+                }
+
+                export function oneLine(text: string) {
+                    return { error: () => text };
+                }
+
+                export function accessors(items: string[]) {
+                    return {
+                        get size() {
+                            return items.length;
+                        },
+                        set size(count) {
+                            items.length = count;
+                        },
+                    };
+                }
+
+                export function use() {
+                    const { error } = oneLine("x");
+                    error();
+                }
+                """,
+                "b.ts": """
+                export class Log {
+                    error() {}
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::use") == ["FILE:a.ts::oneLine"]
+        assert sorted(
+            node["id"] for node in builder.nodes if "object@" in node["id"]
+        ) == [
+            "FILE:a.ts::accessors::object@14",
+            "FILE:a.ts::accessors::object@14::get_size",
+            "FILE:a.ts::accessors::object@14::set_size",
+        ]
+
     def test_constant_bound_to_a_library_value_is_the_library_s(self, tmp_path):
         """A module-level name bound to what a library constructs is read
-        as that type in the module's functions, in a script and in an
+        as that type in a callback of a script and in the functions of an
         indented `<script>` block: its methods are no project method's."""
         builder = _index(
             tmp_path,
@@ -5803,10 +5854,14 @@ class TestTypeScriptCallResolution:
                 """,
                 "worker.js": """
                 const ids = new Set()
+                /**
+                 * @type {Map<string, Set<number>>}
+                 */
+                const pending = new Map()
 
-                function drop(id) {
-                    ids.delete(id)
-                }
+                addEventListener('message', async function (event) {
+                    ids.delete(event.id)
+                })
                 """,
                 "View.svelte": (
                     '<script lang="ts">\n'
@@ -5818,7 +5873,7 @@ class TestTypeScriptCallResolution:
                 ),
             },
         )
-        assert _calls(builder, "FILE:worker.js::drop") == []
+        assert _calls(builder, "FILE:worker.js") == []
         assert _calls(builder, "FILE:View.svelte::accept") == []
 
     def test_members_of_the_object_a_function_returns(self, tmp_path):

@@ -9735,7 +9735,7 @@ class TSParser(BaseParser):
         them, is left out."""
         last = self._find_block_end(lines, index, column)
         written, commented = [], False
-        for line in (lines[index][column:], *lines[index + 1 : last + 1]):
+        for line in (lines[index][column:], *lines[index + 1 : last]):
             line, commented = strip_block_comments(line, commented)
             line = strip_line_comment(line, backticks=True)
             written.append(_blank_js_strings(line))
@@ -9750,7 +9750,7 @@ class TSParser(BaseParser):
         # the object's own ID — where the object is written over lines. One
         # written on a single line shares it with the `return`, so its
         # properties get no node of their own.
-        holds_members = last > index
+        holds_members = last > index + 1
         # The text around a nested part keeps the column it is written at.
         while (reduced := _JS_NESTED_RE.sub(_nested_part, body)) != body:
             body = reduced
@@ -9764,9 +9764,13 @@ class TSParser(BaseParser):
                 continue
             head, colon, tail = part.partition(":")
             name, value = head.strip(), tail.strip()
-            method = re.fullmatch(r"(?:async\s+)?\*?\s*([\w$]+)\s*\0\s*\0", name)
+            method = re.fullmatch(
+                r"(?:async\s+|(get|set)\s+)?\*?\s*([\w$]+)\s*\0\s*\0", name
+            )
             if method and not colon:
-                held[method[1]] = f"={method[1]}" if holds_members else method[1]
+                # An accessor is filed as `get_name` or `set_name`.
+                member = "_".join(filter(None, method.groups()))
+                held[member] = f"={member}" if holds_members else member
             elif not re.fullmatch(r"[\w$]+", name):
                 continue
             elif not colon or re.fullmatch(r"[\w$]+(?:\.[\w$]+)*", value):
@@ -9775,8 +9779,8 @@ class TSParser(BaseParser):
                 made = "=>" in value or re.match(r"(?:async\s+)?function\b", value)
                 value_at = start + len(head) + 1 + len(tail) - len(tail.lstrip())
                 held[name] = (
-                    f"={name}"
-                    if made and holds_members
+                    (f"={name}" if holds_members else name)
+                    if made
                     else self._call_held(
                         index, column, value_at, at - 1, len(written[0]), since, owner
                     )
