@@ -270,7 +270,7 @@ class TestGraphLinking:
         [
             '#[utoipa::path(\n    get,\n    path = "/api/v1/actions",\n)]\n\n',
             '#[get("/actions")]\n/// Lists them.\n',
-            '/**\n * @Route("/actions")\n */\n',
+            '@Get("/actions")\n/** Lists them. */\n',
         ],
     )
     def test_function_that_declares_the_path_is_the_handler(
@@ -279,7 +279,8 @@ class TestGraphLinking:
         sources = {
             "client/api.rs": (
                 'fn url() -> String {\n    api("/actions")\n}\n\n'
-                '/// Lists what "/actions" answers.\nasync fn list_actions() {}\n'
+                '/// Lists what "/actions" answers.\n/// [see "/actions"]\n'
+                '/** @see "/actions" */\nasync fn list_actions() {}\n'
             ),
             "server/routes.rs": f"{head}async fn list_actions() {{}}\n",
         }

@@ -31,15 +31,15 @@ logger = logging.getLogger(__name__)
 _RE_STRING = re.compile(r"""["']([^"'\n]*)["']""")
 
 
-# What a line of a comment starts with
+# What a line of an attribute or a decorator starts with, and of a comment
+_HEADS = ("@", "[", "#[")
 _COMMENTS = ("#", "//", "/*", "*")
 
 
 def _head(lines: list[str]) -> str:
     """What heads the definition below ``lines``: its attributes and
-    decorators, those written in a comment (`* @Route(...)`) too. Other
-    comment lines, and a blank line between the head and the definition, are
-    passed over."""
+    decorators. Comment lines, and a blank line between the head and the
+    definition, are passed over."""
     head, depth = [], 0
     for line in reversed(lines):
         text = line.strip()
@@ -49,7 +49,7 @@ def _head(lines: list[str]) -> str:
             continue
         # Read upwards, a `)` or `]` opens what a `(` or `[` closes.
         opened = depth + sum(map(text.count, ")]")) - sum(map(text.count, "(["))
-        if depth <= 0 and not text.lstrip("/*# ").startswith(("@", "[")):
+        if depth <= 0 and not text.startswith(_HEADS):
             if text.startswith(_COMMENTS):
                 continue
             if opened <= 0:
