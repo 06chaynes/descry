@@ -5759,6 +5759,168 @@ class TestTypeScriptCallResolution:
         calls = [e for e in builder.edges if e["relation"].startswith("CALLS")]
         assert calls == []
 
+    def test_a_brace_in_a_regex_or_template_ends_no_block(self, tmp_path):
+        """A `/` that opens a regular expression, a template literal that
+        goes on over lines and a block comment do not open or close the
+        block that `_find_block_end` reads them in."""
+        builder = _index(
+            tmp_path,
+            {
+                "f.ts": """
+                export function a(s: string) {
+                    if (/}/.test(s)) {
+                        first();
+                    }
+                    second();
+                }
+
+                export function b(s: string) {
+                    if (!/^https?:\\/\\//i.test(s)) { third(); }
+                    fourth();
+                }
+
+                export function c(s: string) {
+                    const t = `a {
+                        ${s}`;
+                    fifth();
+                }
+
+                export function d(s: string) {
+                    const open = /[{]/;
+                    sixth();
+                }
+
+                export class K {
+                    m(s: string) {
+                        return s.replace(/{/g, "(");
+                    }
+                    n() {
+                        seventh();
+                    }
+                }
+
+                function first() {}
+                function second() {}
+                function third() {}
+                function fourth() {}
+                function fifth() {}
+                function sixth() {}
+                function seventh() {}
+                """,
+            },
+        )
+        span = {
+            n["id"].rpartition("::")[2]: (
+                n["id"].count("::"),
+                n["metadata"]["lineno"],
+                n["metadata"].get("end_lineno"),
+            )
+            for n in builder.nodes
+            if n["id"] != "FILE:f.ts"
+        }
+        assert span == {
+            "a": (1, 2, 7),
+            "b": (1, 9, 12),
+            "c": (1, 14, 18),
+            "t": (2, 15, None),
+            "d": (1, 20, 23),
+            "open": (2, 21, None),
+            "K": (1, 25, 32),
+            "m": (2, 26, 28),
+            "n": (2, 29, 31),
+            "first": (1, 34, 34),
+            "second": (1, 35, 35),
+            "third": (1, 36, 36),
+            "fourth": (1, 37, 37),
+            "fifth": (1, 38, 38),
+            "sixth": (1, 39, 39),
+            "seventh": (1, 40, 40),
+        }
+        assert _calls(builder, "FILE:f.ts::a") == [
+            "FILE:f.ts::first",
+            "FILE:f.ts::second",
+        ]
+        assert _calls(builder, "FILE:f.ts::b") == [
+            "FILE:f.ts::fourth",
+            "FILE:f.ts::third",
+        ]
+        assert _calls(builder, "FILE:f.ts::c") == ["FILE:f.ts::fifth"]
+        assert _calls(builder, "FILE:f.ts::d") == ["FILE:f.ts::sixth"]
+        assert _calls(builder, "FILE:f.ts::K::n") == ["FILE:f.ts::seventh"]
+
+    def test_a_regex_holding_slashes_and_a_carried_template(self, tmp_path):
+        """The shapes that beat a line-at-a-time reading: a `//` inside a
+        regular expression is no comment, and a template literal opened
+        with `${` on one line and closed on a later one keeps the lines
+        between out of the block count."""
+        builder = _index(
+            tmp_path,
+            {
+                "g.ts": """
+                function parseUrl(s: string) {
+                    if (!/^https?:\\/\\//i.test(s)) {
+                        return null;
+                    }
+                    return parse(s);
+                }
+
+                function describe(label: string) {
+                    const body = `starts
+                        ${label}
+                        ends`;
+                    return emit(body);
+                }
+
+                function parse(s: string) {}
+                function emit(s: string) {}
+                """,
+            },
+        )
+        span = {
+            n["id"].rpartition("::")[2]: (
+                n["metadata"]["lineno"],
+                n["metadata"].get("end_lineno"),
+            )
+            for n in builder.nodes
+            if n["id"] != "FILE:g.ts"
+        }
+        assert span["parseUrl"] == (2, 7)
+        assert span["describe"] == (9, 14)
+        assert _calls(builder, "FILE:g.ts::parseUrl") == ["FILE:g.ts::parse"]
+        assert _calls(builder, "FILE:g.ts::describe") == ["FILE:g.ts::emit"]
+
+    def test_a_literal_keeps_its_text_where_it_opens(self, tmp_path):
+        """A constant's value and an import's module are read with the text
+        of their literals; the lines a template literal goes on over are no
+        code."""
+        builder = _index(
+            tmp_path,
+            {
+                "h.ts": """
+                import { helper } from "./lib";
+                export const API = "/api/v1/users";
+                const slug = API.replace(/\\//g, "-");
+                const sample = `
+                    import { other } from "./nowhere";
+                    const inner = "x";
+                `;
+                """,
+                "lib.ts": "export function helper() {}",
+            },
+        )
+        assert {
+            node["metadata"]["name"]: node["metadata"]["value"]
+            for node in builder.nodes
+            if node["type"] == "Constant"
+        } == {
+            "API": '"/api/v1/users"',
+            "slug": 'API.replace(/\\//g, "-")',
+            "sample": None,
+        }
+        assert [
+            edge["target"] for edge in builder.edges if edge["relation"] == "IMPORTS"
+        ] == ["MODULE:./lib"]
+
     def test_bare_call_in_a_module_reaches_only_its_own_bindings(self, tmp_path):
         """A file that imports is a module: a bare name in it is no global
         of another file, and never a member of a class."""

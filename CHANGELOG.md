@@ -215,7 +215,11 @@ Python SDK v2, and a full-tree review's findings are fixed.
   calls inside string literals in C#, PHP, Dart and C/C++; a licence notice
   inside a file read as the next symbol's docstring; inheritance from a
   project type named like a standard one; calls in a second Svelte
-  `<script>` block; calls in a nested Python function's default arguments.
+  `<script>` block; calls in a nested Python function's default arguments;
+  a `{` or `}` in a JavaScript or TypeScript regular expression, template
+  literal or block comment ending or opening a block the definitions
+  after it are filed under, and a `//` inside a regular expression cut
+  as a comment, taking the calls after it on the line with it.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer
   aborts the whole index. `index` no longer encodes every symbol twice.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root

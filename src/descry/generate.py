@@ -14,7 +14,7 @@ from functools import cache
 from pathlib import Path
 
 from descry import _stdlib
-from descry._comments import strip_block_comments, strip_line_comment
+from descry._comments import strip_block_comments
 
 # Configure logging for consistent error reporting
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -9398,12 +9398,52 @@ _TS_IMPORT_RE = re.compile(
 # A '...' literal closed on its line; a lone apostrophe, as in JSX text, is not one.
 _JS_SINGLE_QUOTED_RE = re.compile(r"'(?:[^'\\]|\\.)*'")
 # A /.../ literal with its flags, before what can follow a value. One starts
-# where a value can: at the start of a line, or after what _JS_OPERAND_RE ends
+# where a value can: at the start of a line, or after what no value ends
 # with.
 _JS_REGEX_RE = re.compile(
-    r"/(?:[^/\\\[]|\\.|\[(?:[^\]\\]|\\.)*\])+/[a-z]*(?=\s*(?:[.,;:)\]}|&?]|$))"
+    r"/(?:[^/\\\[*]|\\.|\[(?:[^\]\\]|\\.)*\])(?:[^/\\\[]|\\.|\[(?:[^\]\\]|\\.)*\])*/[a-z]*(?=\s*(?:[.,;:)\]}|&?/]|$))"
 )
-_JS_OPERAND_RE = re.compile(r"(?:^|[(,=:\[!&|?{;]|\breturn)\s*$")
+_JS_OPERAND_WORD_RE = re.compile(r"[\w$]+$")
+# A keyword that expects an operand where it ends the text before a `/`, so
+# the `/` opens a regular expression (ECMAScript reads `/` for a literal
+# where an operand is expected and for a division where a value just
+# ended). `if`/`for`/`while`/`switch` take `(`, not a literal; `async`,
+# `get` and `static` are names.
+_JS_OPERAND_WORDS = {
+    "return",
+    "typeof",
+    "instanceof",
+    "in",
+    "of",
+    "new",
+    "delete",
+    "void",
+    "case",
+    "throw",
+    "yield",
+    "await",
+    "do",
+    "else",
+}
+
+
+def _js_regex_position(text):
+    """Whether a ``/`` after ``text`` can open a regular expression: true
+    where no value precedes it, so at a line's start or after an operator,
+    a bracket that opens, or a keyword that expects an operand. False after
+    what ends a value: a word, `)`, `]`, `}`, `.`, a postfix `++`/`--`, a
+    quote a blanked literal leaves, and ``/`` itself (`x / /re/`)."""
+    tail = text.rstrip()
+    if not tail:
+        return True
+    if tail.endswith(("++", "--")):
+        return False
+    word = _JS_OPERAND_WORD_RE.search(tail)
+    if word:
+        return word.group() in _JS_OPERAND_WORDS
+    return tail[-1] not in ")]}.`'\""
+
+
 # The end of a blanked /.../, "...", '...' or `...` literal a member is read of
 _JS_LITERAL_RECEIVER_RE = re.compile(r"""([/"'`])\s*\.\s*$""")
 # The type arguments a call is written with: `name<T, U>(`
@@ -9486,23 +9526,40 @@ def _js_bindings(pattern, steps=()):
                 yield from _js_bindings(inner or name, (*steps, name.strip()))
 
 
-def _blank_js_strings(line: str, stack: list | None = None) -> str:
+def _blank_js_strings(line: str, stack: list | None = None, keep=False) -> str:
     """Return ``line`` with the text of "...", '...', `...` and /.../
-    literals turned to spaces. The `${...}` expressions of a template literal
-    are kept. ``stack`` holds the template literals open where the line
-    starts and is left holding those open where it ends; one carried over
-    from an earlier line is blanked together with the quote that closes it."""
+    literals and of ``/* */`` comments turned to spaces, and everything a
+    ``//`` comment covers cut. The `${...}` expressions of a template
+    literal are kept. ``stack`` holds the literals and comments open where
+    the line starts and is left holding those open where it ends; a literal
+    carried over from an earlier line is blanked together with the quote
+    that closes it. ``keep`` leaves the text of the literals that open on
+    the line where it is, for a reader of what a literal holds: an import's
+    module, a constant's value."""
     out = []
-    # open literals: a quote character, or a `${`'s brace depth
+    # open literals and comments: a quote character, a `${`'s brace depth,
+    # or `/*` for a comment still open
     stack = [] if stack is None else stack
     carried = len(stack)
     i = 0
     while i < len(line):
         ch = line[i]
         top = stack[-1] if stack else None
-        if isinstance(top, str):
+        if top == "/*":
+            end = line.find("*/", i)
+            if end == -1:
+                out.append(" " * (len(line) - i))
+                break
+            stack.pop()
+            # A comment carried over has ended.
+            carried = min(carried, len(stack))
+            out.append(" " * (end + 2 - i))
+            i = end + 2
+        elif isinstance(top, str):
+            # The text of a literal that opened on this line.
+            kept = keep and len(stack) > carried
             if ch == "\\":
-                out.append("  ")
+                out.append(line[i : i + 2] if kept else "  ")
                 i += 2
                 continue
             if top == "`" and line.startswith("${", i):
@@ -9516,17 +9573,27 @@ def _blank_js_strings(line: str, stack: list | None = None) -> str:
                 # A literal carried over has ended.
                 carried = len(stack)
                 ch = " "
-            out.append(ch if ch == top else " ")
+            out.append(ch if ch == top or kept else " ")
         else:
             if ch in ('"', "`") or (ch == "'" and _JS_SINGLE_QUOTED_RE.match(line, i)):
                 stack.append(ch)
             elif (
                 ch == "/"
                 and (regex := _JS_REGEX_RE.match(line, i))
-                and _JS_OPERAND_RE.search("".join(out))
+                and _js_regex_position("".join(out))
             ):
-                out.append(f"/{' ' * (len(regex.group()) - 1)}")
+                if keep:
+                    out.append(regex.group())
+                else:
+                    out.append(f"/{' ' * (len(regex.group()) - 1)}")
                 i = regex.end()
+                continue
+            elif ch == "/" and line[i + 1 : i + 2] == "/":
+                break
+            elif ch == "/" and line[i + 1 : i + 2] == "*":
+                stack.append("/*")
+                out.append("  ")
+                i += 2
                 continue
             elif ch == "{" and top is not None:
                 stack[-1] += 1
@@ -9537,7 +9604,7 @@ def _blank_js_strings(line: str, stack: list | None = None) -> str:
                     stack[-1] -= 1
             out.append(ch)
         i += 1
-    # Only a template literal goes on over the next line.
+    # Only a template literal or a block comment goes on over the next line.
     while stack[-1:] in (['"'], ["'"]):
         stack.pop()
     return "".join(out)[: len(line)]
@@ -9733,7 +9800,7 @@ class TSParser(BaseParser):
         a method or a function written there, None where it is anything
         else. A property under a name that is no plain one, a spread among
         them, is left out. With it, the number of the line that closes the
-        object. ``lines`` are the file's without their comments."""
+        object. ``lines`` are the file's code lines."""
         written, depth = [], 0
         for line in (lines[index][column:], *lines[index + 1 :]):
             written.append(_blank_js_strings(line))
@@ -9822,10 +9889,7 @@ class TSParser(BaseParser):
         opened = sorted(column for column in self._opens if column >= start)
         if not opened or not _is_call_chain(code[start : opened[0]]):
             return None
-        below = (
-            _blank_js_strings(strip_line_comment(line, backticks=True))
-            for line in lines[index + 1 :]
-        )
+        below = lines[index + 1 :]
         depth = 0
         for line in (code[opened[0] :], *below):
             for column, char in enumerate(line):
@@ -10009,24 +10073,19 @@ class TSParser(BaseParser):
             if end_lineno > lineno:
                 self.enter_context(node_id, lineno, end_lineno, _ts_params(signature))
 
-        # Each line without its comments, and without the text of a template
-        # literal that began on a line before it, which is no comment.
-        code_lines = []
+        # Which characters are code is read once for the file. Each of
+        # ``code_lines`` is a line without its comments and with the text of
+        # its literals blanked, for the braces counted on it; each of
+        # ``text_lines`` keeps the text of the literals that open on it, and
+        # is the line the loop below reads.
         literals = []
-        in_comment = False
-        for line in lines:
-            carried = bool(literals)
-            if carried:
-                line = _blank_js_strings(line, literals)
-            line, in_comment = strip_block_comments(line, in_comment)
-            line = strip_line_comment(line, backticks=True)
-            if not carried:
-                _blank_js_strings(line, literals)
-            code_lines.append(line)
+        code_lines = [_blank_js_strings(line, literals) for line in lines]
+        literals = []
+        text_lines = [_blank_js_strings(line, literals, keep=True) for line in lines]
 
         i = 0
         while i < len(lines):
-            line = code_lines[i]
+            line = text_lines[i]
             lineno = i + 1
             # Column of a function/method name declared on this line, which
             # the regex call fallback must not read as a call.
@@ -10058,7 +10117,7 @@ class TSParser(BaseParser):
                 index and what ``_arrow_function`` makes of the statement."""
                 text = ""
                 for j in range(idx, min(idx + 40, len(lines))):
-                    text = f"{text} {lines[j].strip()}".lstrip()
+                    text = f"{text} {text_lines[j].strip()}".lstrip()
                     arrow = _arrow_function(text)
                     code = _NON_CODE_RE.sub("", text).rstrip()
                     # The value may start on the line after the `=`.
@@ -10076,15 +10135,15 @@ class TSParser(BaseParser):
                 stack = []  # brackets left open
                 closed = False  # a parameter list has been read
                 for j in range(idx, min(idx + 40, len(lines))):
-                    text = code_lines[j]
-                    code = _blank_js_strings(text)
+                    text = text_lines[j]
+                    code = code_lines[j]
                     for column, char in enumerate(code):
                         if (
                             char == "{"
                             and not stack
                             and not _TS_TYPE_EXPECTED_RE.search(sig + text[:column])
                         ):
-                            end = self._find_block_end(lines, j, column)
+                            end = self._find_block_end(code_lines, j, column)
                             return j, sig + text[: column + 1].lstrip(), end
                         # `a < b` compares; `Type<` opens type arguments.
                         if char in "([{" or (
@@ -10142,7 +10201,7 @@ class TSParser(BaseParser):
                 if parent_id == file_id and re.search(r"=\s*\{\s*$", line):
                     # The functions it holds are its members.
                     object_ids.add(cid)
-                    enter(cid, lineno, self._find_block_end(lines, i))
+                    enter(cid, lineno, self._find_block_end(code_lines, i))
             elif match := re_enum.search(line):
                 name = match.group(1)
                 doc = self.get_leading_docstring(lines, i)
@@ -10153,7 +10212,7 @@ class TSParser(BaseParser):
                 self.builder.add_edge(parent_id, cid, "DEFINES")
                 class_ids.add(cid)
                 if "{" in line:
-                    enter(cid, lineno, self._find_block_end(lines, i))
+                    enter(cid, lineno, self._find_block_end(code_lines, i))
             elif match := re_class.search(line):
                 name = match.group(1)
                 docstring = self.get_leading_docstring(lines, i)
@@ -10249,9 +10308,9 @@ class TSParser(BaseParser):
                 fid = f"{object_id or parent_id}::{name}"
                 # A block is left open where the statement stops; an
                 # expression body ends there.
-                last = _NON_CODE_RE.sub("", lines[j])
+                last = _NON_CODE_RE.sub("", code_lines[j])
                 end_lineno = (
-                    self._find_block_end(lines, j)
+                    self._find_block_end(code_lines, j)
                     if last.count("{") > last.count("}")
                     else j + 1
                 )
@@ -10389,7 +10448,7 @@ class TSParser(BaseParser):
                 config_id = f"{file_id}::{config_name}"
                 # Find the callback's end by tracking braces
                 end_lineno = (
-                    self._find_block_end(lines, i)
+                    self._find_block_end(code_lines, i)
                     if "{" in line or "=>" in line
                     else lineno
                 )
@@ -10397,7 +10456,7 @@ class TSParser(BaseParser):
                 if end_lineno == lineno:
                     for j in range(i + 1, min(i + 5, len(lines))):
                         if "{" in lines[j] or "=>" in lines[j]:
-                            end_lineno = self._find_block_end(lines, j)
+                            end_lineno = self._find_block_end(code_lines, j)
                             break
                 token_count = max((end_lineno - lineno + 1) * 10, 50)
                 docstring = self.get_leading_docstring(lines, i)
@@ -10420,7 +10479,7 @@ class TSParser(BaseParser):
                     config_name = f"middleware_{middleware_name.replace('/', '_').replace('.', '_')}"
                     config_id = f"{file_id}::{config_name}"
                     end_lineno = (
-                        self._find_block_end(lines, i) if "{" in line else lineno
+                        self._find_block_end(code_lines, i) if "{" in line else lineno
                     )
                     token_count = max((end_lineno - lineno + 1) * 10, 30)
                     self.add_config_node(
@@ -10440,7 +10499,7 @@ class TSParser(BaseParser):
                 config_name = f"{emitter_name}_on_{event_name.replace(':', '_')}"
                 config_id = f"{file_id}::{config_name}"
                 end_lineno = (
-                    self._find_block_end(lines, i)
+                    self._find_block_end(code_lines, i)
                     if "{" in line or "=>" in line
                     else lineno
                 )
@@ -10683,10 +10742,10 @@ class TSParser(BaseParser):
                     and _JS_BLOCK_FUNCTION_RE.search(code)
                     and self.context_at(lineno + 1)[0] == parent_id
                 ):
-                    nameless[parent_id] = self._find_block_end(lines, i)
-                self._bind_closures(code, i, lines, len(code))
+                    nameless[parent_id] = self._find_block_end(code_lines, i)
+                self._bind_closures(code, i, code_lines, len(code))
                 self._name_results(code, lineno, since, owner)
-                self._bind_patterns(code, i, lines, since, owner)
+                self._bind_patterns(code, i, code_lines, since, owner)
                 for index, paren, _ in calls:
                     # What a call closed on its line is passed, unless it
                     # spreads a value over several arguments.
