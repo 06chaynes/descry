@@ -3259,6 +3259,37 @@ class TestRustCallResolution:
         assert call["target"] == "REF:Mode::parse"
         assert "candidates" not in call["metadata"]
 
+    def test_trait_written_with_a_path_is_the_type_the_path_leads_to(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "x"\n',
+                "src/traits.rs": """
+                pub trait Mark {
+                    fn mark(&self);
+                }
+                """,
+                "src/lib.rs": """
+                pub mod traits;
+                pub struct Index;
+                pub struct Own;
+                pub struct Table;
+                impl crate::traits::Mark for Own {
+                    fn mark(&self) {}
+                }
+                impl std::ops::Index<usize> for Table {
+                    fn index(&self) {}
+                }
+                """,
+            },
+        )
+        bases = {
+            edge["source"]: edge["target"]
+            for edge in builder.edges
+            if edge["relation"] == "INHERITS"
+        }
+        assert bases == {"FILE:src/lib.rs::Own": "FILE:src/traits.rs::Mark"}
+
     def test_impl_whose_brace_follows_a_where_clause(self, tmp_path):
         builder = _index(
             tmp_path,
@@ -8718,6 +8749,9 @@ class TestOwnersSourceCannotName:
                 impl Mark for Vec<u8> {
                     fn mark(&self) {}
                 }
+                impl Mark for made!() {
+                    fn mark(&self) {}
+                }
                 macro_rules! marked {
                     ($name:ident) => {
                         impl Mark for $name {
@@ -8740,8 +8774,16 @@ class TestOwnersSourceCannotName:
                         };
                     }
                 }
+                enum Mode {
+                    ON {
+                        void apply() {}
+                        void more() {}
+                    },
+                    OFF;
+                    void apply() {}
+                }
                 """,
-                {"A": ["make", "run"]},
+                {"A": ["make", "run"], "Mode": ["apply"]},
             ),
             (
                 "a.php",

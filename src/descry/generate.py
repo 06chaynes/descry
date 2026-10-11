@@ -8116,9 +8116,11 @@ _RUST_HEADER_RE = re.compile(r"->|[<(\[]|[>)\]]|\bfor\b|\bwhere\b|[{;]")
 
 def _rust_named(text):
     """The path a type or trait is written with, behind `&`, `dyn` and the
-    like; None where it is not written with a path."""
-    named = re.match(r"(?:\w*::)*(?!fn\b)\w+", _RUST_BORROW_RE.sub("", text))
-    return named and named[0]
+    like; None where it is not written with a path, as a macro call is not."""
+    text = _RUST_BORROW_RE.sub("", text)
+    named = re.match(r"(?:\w*::)*(?!fn\b)\w+", text)
+    called = named and text[named.end() :].lstrip().startswith("!")
+    return named[0] if named and not called else None
 
 
 def _last_segment(path):
@@ -8570,8 +8572,13 @@ class RustParser(BaseParser):
                 )
 
                 if trait:
-                    # By its path, which says where the trait is from.
-                    self.builder.add_edge(struct_id, f"REF:{trait}", "INHERITS")
+                    # A path says where the trait is from.
+                    self.builder.add_edge(
+                        struct_id,
+                        f"REF:{current_trait_impl}",
+                        "INHERITS",
+                        {"origin": trait} if "::" in trait else None,
+                    )
 
                 if opens_block(line) or "{" not in line:
                     # The body opens here or, after a `where` clause, below.
@@ -11037,9 +11044,11 @@ class CallResolver:
                 base = edge["target"][4:]
                 # A PHP base is written by its full name, which names one
                 # type; a Ruby constant is looked up by its whole path.
-                if self.lang(edge["source"]) not in ("php", "ruby"):
+                lang = self.lang(edge["source"])
+                if lang not in ("php", "ruby"):
                     base = _split_callee(base)[1]
-                base = edge.get("metadata", {}).get("origin", base)
+                if lang == "python":
+                    base = edge.get("metadata", {}).get("origin", base)
                 self.bases.setdefault(edge["source"], []).append(base)
         # A Go struct has the methods of the types it embeds, listed under
         # None among its fields.
@@ -13970,6 +13979,17 @@ class CallResolver:
         open_ended = any(d in self.bases for d in self.constants.get(root, ()))
         return None if open_ended and path[1:] else _EXTERNAL
 
+    def type_at(self, path, scope_id):
+        """The project type that the Rust path ``path``, written in
+        ``scope_id``, leads to; ``"external"`` where it leads outside the
+        project, None where it does not tell."""
+        found = self._type_named(path, scope_id)
+        if found in (None, _EXTERNAL):
+            return found
+        # A type the project only writes impl blocks for is declared outside.
+        declared = self.nodes[found]["metadata"].get("kind") != "impl"
+        return found if declared else _EXTERNAL
+
     def type_in_scope(self, name, scope_id, origin=None):
         """The project type that ``name``, written in ``scope_id``, is shown
         to be by its origin path, by an import or by a definition in an
@@ -15280,9 +15300,19 @@ class CodeGraphBuilder:
                 )
                 call_resolver.call_guards = edge.get("metadata", {}).get("guards")
 
+                # A Rust trait written with a path is the type the path
+                # leads to; one the path does not place is read by its name.
+                placed = None
+                if not is_call and source_lang == "rust" and origin:
+                    placed, origin = call_resolver.type_at(origin, source_id), None
+                if placed == _EXTERNAL:
+                    edges_to_remove.add(idx)
+                    continue
+                if placed:
+                    resolved, resolution_source = placed, "regex"
                 # The parser writes a PHP type by its full name, which no
                 # other type of that name answers to.
-                if not is_call and source_lang == "php":
+                elif not is_call and source_lang == "php":
                     resolved = call_resolver.type_in_scope(
                         ref_name, source_id, ref_name
                     )

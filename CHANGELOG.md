@@ -81,8 +81,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
   `CALLS Resolution: P% of N project calls (...); E external calls not counted`.
 - **A block for no type source can name has an owner source cannot name.**
   A Rust `impl` for a tuple, a slice or a type parameter is filed under
-  `<Trait for (A, B)>`, and the members of a Java anonymous class under
-  `class@<line>`, as PHP, Dart and Ruby already did; they were filed under
+  `<Trait for (A, B)>`, and the members of a Java anonymous class or enum
+  constant body under `class@<line>`, as PHP, Dart and Ruby already did; they were filed under
   the trait's name, the parameter's or the enclosing class. A blanket
   `impl` gives its methods to a type only where the type can meet its
   bounds, and a Rust trait written with a path is looked up by that path.

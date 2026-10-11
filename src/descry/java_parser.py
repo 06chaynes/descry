@@ -268,6 +268,25 @@ class JavaParser(BaseParser):
         if re.fullmatch(r"\s*[\w$]+\s*", param):
             yield param.strip(), ()
 
+    def _anonymous(self, parent_id, base, lineno, last):
+        """Open the body, lines ``lineno`` to ``last``, of a class source
+        cannot name: a subclass of ``base`` made in ``parent_id``, whose
+        members are its own."""
+        anonymous_id = f"{parent_id}::class@{lineno}"
+        self.builder.add_node(
+            anonymous_id,
+            "Class",
+            name=f"class@{lineno}",
+            kind="class",
+            lineno=lineno,
+            end_lineno=last,
+            token_count=(last - lineno + 1) * 10,
+            docstring="",
+        )
+        self.builder.add_edge(parent_id, anonymous_id, "DEFINES")
+        self.builder.add_edge(anonymous_id, f"REF:{base}", "INHERITS")
+        self.enter_context(anonymous_id, lineno + 1, last - 1)
+
     def call_origin(self, callee, lineno, since, owner=None):
         """Origin path of a callee that starts at a name. A local stands
         for its declared type or the call it was bound to, `?` where it has
@@ -602,6 +621,11 @@ class JavaParser(BaseParser):
                         value_type=context_id.rpartition("::")[2],
                     )
                     self.builder.add_edge(context_id, constant_id, "DEFINES")
+                    if code.rstrip().endswith("{"):
+                        # The constant's body is a subclass of the enum.
+                        last = self._find_block_end(lines, i)
+                        enum = context_id.rpartition("::")[2]
+                        self._anonymous(constant_id, enum, lineno, last)
 
             # 4. Calls. ast-grep has no Java backend today, so we always
             #    run the regex extractor (rather than gating on
@@ -713,23 +737,7 @@ class JavaParser(BaseParser):
                     last = self._find_block_end(lines, i)
                     anonymous[last] = created[0]
                     self._supers.append((last, subclassed[2].replace(".", "::")))
-                    # Its members are those of a class source cannot name.
-                    anonymous_id = f"{parent_id}::class@{lineno}"
-                    self.builder.add_node(
-                        anonymous_id,
-                        "Class",
-                        name=f"class@{lineno}",
-                        kind="class",
-                        lineno=lineno,
-                        end_lineno=last,
-                        token_count=(last - lineno + 1) * 10,
-                        docstring="",
-                    )
-                    self.builder.add_edge(parent_id, anonymous_id, "DEFINES")
-                    self.builder.add_edge(
-                        anonymous_id, f"REF:{subclassed[2]}", "INHERITS"
-                    )
-                    self.enter_context(anonymous_id, lineno + 1, last - 1)
+                    self._anonymous(parent_id, subclassed[2], lineno, last)
 
             # A block opened outside every method is a body of the type's.
             opened = bodies and bodies[-1][1] == lineno
