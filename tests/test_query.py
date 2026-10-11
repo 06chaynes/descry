@@ -1262,6 +1262,29 @@ class TestUnresolvedCallsInPathsAndFlows:
         found = querier.find_nodes_by_name("Foo::mi", fuzzy=True)
         assert [node["id"] for node in found] == ["FILE:a.py::Foo::mid"]
 
+    def test_accessor_is_found_by_the_name_source_gives_it(self, tmp_path):
+        """An accessor is filed as `get size` and named `size`: either
+        finds it, alone or after its type."""
+        nodes = [
+            _fn("FILE:a.ts::Box::get size", name="size"),
+            _fn("FILE:a.ts::Box::set size", name="size"),
+            _fn("FILE:a.ts::Box::get_size"),
+            _fn("FILE:a.ts::BigBox::get size", name="size"),
+        ]
+        querier = _querier(tmp_path, nodes, [])
+
+        def found(name):
+            return [
+                node["id"].partition("::")[2]
+                for node in querier.find_nodes_by_name(name)
+            ]
+
+        assert found("get size") == ["Box::get size", "BigBox::get size"]
+        assert found("Box::get size") == ["Box::get size"]
+        assert found("Box::size") == ["Box::get size", "Box::set size"]
+        assert found("Box.size") == ["Box::get size", "Box::set size"]
+        assert found("get_size") == ["Box::get_size"]
+
     def test_qualified_name_asks_for_that_method_alone(self, tmp_path):
         nodes = [
             _fn("FILE:a.py::Store::get"),

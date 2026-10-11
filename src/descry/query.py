@@ -2047,9 +2047,11 @@ class GraphQuerier:
             node_id = node["id"]
             node_name = meta.get("name", "")
             node_name_normalized = _normalize_name(node_name) if node_name else ""
+            owner, _, filed = node_id.rpartition("::")
 
-            # Exact name match
-            if node_name == name:
+            # Exact name match: the name source gives it, or the one it is
+            # filed under where that is another (an accessor's `get size`).
+            if name in (node_name, filed):
                 exact_matches.append(node)
                 continue
 
@@ -2070,7 +2072,9 @@ class GraphQuerier:
             # contains the name is a fuzzy match.
             if "::" in name:
                 lowered = node_id.lower()
-                if _ends_at_segment(node_id, name):
+                if _ends_at_segment(node_id, name) or _ends_at_segment(
+                    f"{owner}::{node_name}", name
+                ):
                     exact_matches.append(node)
                 elif any(_ends_at_segment(lowered, v) for v in name_variants):
                     variant_matches.append(node)
