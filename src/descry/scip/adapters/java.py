@@ -283,7 +283,20 @@ class JavaAdapter:
 
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
 
-        init_script = _compat_init_script()
+        # The init-script and the default task list are Gradle arguments:
+        # scip-java forwards everything after `--` to the build tool it
+        # detects, and on a Maven (or sbt) project those flags reach `mvn`
+        # (or `sbt`), which rejects them and writes no index. scip-java
+        # checks Maven before Gradle, so a `pom.xml` decides it even beside
+        # Gradle files.
+        gradle = (
+            any(
+                (project.root / m).exists()
+                for m in ("build.gradle", "build.gradle.kts")
+            )
+            and not (project.root / "pom.xml").exists()
+        )
+        init_script = _compat_init_script() if gradle else None
         pass_through: list[str] = []
         if init_script is not None:
             pass_through.extend(

@@ -113,7 +113,8 @@ class TestJavaAdapterBuildCommand:
     def test_compat_init_script_included_by_default(self, tmp_path):
         """Descry ships a Gradle init-script that strips -Werror from
         JavaCompile tasks so scip-java works out of the box on Kafka-style
-        conservative builds. Verify it gets added."""
+        conservative builds. Verify it gets added on a Gradle project."""
+        (tmp_path / "build.gradle").write_text("// gradle")
         project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
         spec = JavaAdapter().build_command(
             project, tmp_path / "out.scip", AdapterConfig()
@@ -127,6 +128,39 @@ class TestJavaAdapterBuildCommand:
         assert "clean" in spec.argv
         assert "scipPrintDependencies" in spec.argv
         assert "scipCompileAll" in spec.argv
+
+    def test_no_gradle_args_on_a_maven_project(self, tmp_path):
+        """The init-script and task list are Gradle arguments: scip-java
+        forwards everything after `--` to the build tool it detects, and
+        Maven rejects them with no index written."""
+        (tmp_path / "pom.xml").write_text("<project/>")
+        project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
+        spec = JavaAdapter().build_command(
+            project, tmp_path / "out.scip", AdapterConfig()
+        )
+
+        assert "--" not in spec.argv
+
+    def test_no_gradle_args_when_pom_sits_beside_gradle(self, tmp_path):
+        """scip-java checks Maven before Gradle, so a `pom.xml` decides it
+        even when Gradle files exist."""
+        (tmp_path / "pom.xml").write_text("<project/>")
+        (tmp_path / "build.gradle").write_text("// gradle")
+        project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
+        spec = JavaAdapter().build_command(
+            project, tmp_path / "out.scip", AdapterConfig()
+        )
+
+        assert "--" not in spec.argv
+
+    def test_no_gradle_args_on_an_sbt_project(self, tmp_path):
+        (tmp_path / "build.sbt").write_text('scalaVersion := "2.13.14"')
+        project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
+        spec = JavaAdapter().build_command(
+            project, tmp_path / "out.scip", AdapterConfig()
+        )
+
+        assert "--" not in spec.argv
 
 
 class TestJavaAdapterKotlinDslPreflight:
