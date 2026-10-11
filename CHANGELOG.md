@@ -86,6 +86,15 @@ Python SDK v2, and a full-tree review's findings are fixed.
   the trait's name, the parameter's or the enclosing class. A blanket
   `impl` gives its methods to a type only where the type can meet its
   bounds, and a Rust trait written with a path is looked up by that path.
+- **The object a JavaScript or TypeScript function returns is followed.**
+  `make().load()`, `const h = make(); h.load()` and `const { load } =
+  make(); load()` reach the function that `make` returns under that name,
+  whatever return type it declares, also where the pattern's call goes on
+  over lines. A `const` at a module's margin is in scope in the module's
+  functions unless a parameter or a local hides it.
+- **A Rust method name the standard library has does not pin a call.** On
+  a receiver of unknown type such a call is left unresolved with the
+  project's method as its candidate; it was resolved to that method.
 - **Unresolved calls name their candidates.** A `CALLS` edge that could
   reach several definitions carries them in `metadata.candidates`.
   `callers` and backward `flow` mark such a caller "one of N candidates"

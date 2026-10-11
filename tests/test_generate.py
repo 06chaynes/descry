@@ -5786,6 +5786,92 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:b.ts::run") == ["FILE:c.ts::helper"]
 
+    def test_members_of_the_object_a_function_returns(self, tmp_path):
+        """What a function returns as an object has the members the object
+        names, read where the function is written: through the result, a
+        name bound to it and a pattern that takes it apart, whatever return
+        type the function declares."""
+        builder = _index(
+            tmp_path,
+            {
+                "make.ts": """
+                export interface Store {
+                    load(): void;
+                    clear(): void;
+                }
+
+                export function plain(api: string) {
+                    function load() {}
+                    function fetchAll() {}
+                    return { load, all: fetchAll, count: api.length };
+                }
+
+                export function typed(api: string): Store {
+                    function load() {}
+                    return {
+                        load,
+                        clear: () => api.trim(),
+                    };
+                }
+                """,
+                "use.ts": """
+                import { plain, typed } from './make';
+
+                const shared = plain('s');
+                const { all: everything } = plain(
+                    'p'
+                );
+
+                export function direct() {
+                    plain('a').load();
+                    const made = plain('b');
+                    made.all();
+                    const { load } = plain('c');
+                    load();
+                }
+
+                export function fromModule() {
+                    shared.load();
+                    everything();
+                }
+
+                export function hidden(shared) {
+                    shared.load();
+                }
+
+                export function declared() {
+                    const store = typed('d');
+                    store.load();
+                    store.clear();
+                }
+                """,
+                "Comp.svelte": (
+                    '<script lang="ts">\n'
+                    "\timport { plain } from './make';\n"
+                    "\tconst { load } = plain('e');\n"
+                    "\tfunction run() {\n"
+                    "\t\tload();\n"
+                    "\t}\n"
+                    "</script>\n"
+                ),
+            },
+        )
+        assert _calls(builder, "FILE:Comp.svelte::run") == ["FILE:make.ts::plain::load"]
+        made = ["FILE:make.ts::plain", "FILE:make.ts::plain::load"]
+        assert _calls(builder, "FILE:use.ts::direct") == sorted(
+            [*made, *made[:1], "FILE:make.ts::plain::fetchAll", *made]
+        )
+        assert _calls(builder, "FILE:use.ts::fromModule") == [
+            "FILE:make.ts::plain::fetchAll",
+            "FILE:make.ts::plain::load",
+        ]
+        assert _calls(builder, "FILE:use.ts::hidden") == ["REF:shared.load"]
+        assert _calls(builder, "FILE:use.ts::declared") == [
+            "FILE:make.ts::Store::clear",
+            "FILE:make.ts::typed",
+            "FILE:make.ts::typed::load",
+        ]
+
     def test_member_call_is_not_pinned_to_a_function_of_another_module(self, tmp_path):
         """`x.make()` reaches a module's `make` only through a binding of
         that module, which `require` and `import()` give as well."""
