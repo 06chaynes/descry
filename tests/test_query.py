@@ -1224,6 +1224,20 @@ class TestUnresolvedCallsInPathsAndFlows:
             ("FILE:b.py::helper", "FILE:b.py::leaf")
         ]
 
+    def test_qualified_name_is_no_part_of_a_longer_one(self, tmp_path):
+        names = ("Foo::m", "Foo::mid", "BigFoo::m", "one", "two", "three")
+        nodes = [_fn(f"FILE:a.py::{name}") for name in names]
+        edges = [
+            _calls("FILE:a.py::one", "FILE:a.py::Foo::m"),
+            _calls("FILE:a.py::two", "FILE:a.py::Foo::mid"),
+            _calls("FILE:a.py::three", "FILE:a.py::BigFoo::m"),
+        ]
+        querier = _querier(tmp_path, nodes, edges)
+        assert querier.get_callers("Foo::m") == ["FILE:a.py::one"]
+        assert querier.find_nodes_by_name("Foo::mi") == []
+        found = querier.find_nodes_by_name("Foo::mi", fuzzy=True)
+        assert [node["id"] for node in found] == ["FILE:a.py::Foo::mid"]
+
     def test_qualified_name_asks_for_that_method_alone(self, tmp_path):
         nodes = [
             _fn("FILE:a.py::Store::get"),

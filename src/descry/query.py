@@ -160,6 +160,13 @@ def _get_name_variants(name: str) -> list[str]:
     return list(set(variants))  # Deduplicate
 
 
+def _ends_at_segment(node_id: str, name: str) -> bool:
+    """Whether ``node_id`` ends with ``name`` where one of its segments
+    starts: `Foo::m` ends `a.py::Foo::m` and not `a.py::BigFoo::m`."""
+    before = node_id[: -len(name)][-1:]
+    return node_id.endswith(name) and not (before.isalnum() or before == "_")
+
+
 def _clean_ref_name(ref_name: str, max_len: int = 60) -> str:
     """Clean up an unresolved reference name for display.
 
@@ -2017,7 +2024,7 @@ class GraphQuerier:
         - Naming convention variants: "getClient" matches "get_client" (camelCase/snake_case)
         - Qualified name: "Server::start" matches node IDs ending with that pattern
         - File path suffix: "server.rs" matches files ending with that path
-        - Partial qualified: "auth::check_permission" matches IDs containing that pattern
+        - Partial qualified (when fuzzy=True): "Server::sta" matches IDs containing that pattern
         - Fuzzy/prefix matching (when fuzzy=True): "validate_token" matches "validate_token_format"
 
         Args:
@@ -2058,21 +2065,16 @@ class GraphQuerier:
                 exact_matches.append(node)
                 continue
 
-            # Qualified name match (e.g., "Server::start")
+            # Qualified name match (e.g., "Server::start"); an ID that only
+            # contains the name is a fuzzy match.
             if "::" in name:
-                # Check if node ID ends with the qualified name
-                if node_id.endswith((f"::{name}", name)):
+                lowered = node_id.lower()
+                if _ends_at_segment(node_id, name):
                     exact_matches.append(node)
-                    continue
-                # Check if the qualified pattern appears in the node ID
-                if name in node_id:
-                    exact_matches.append(node)
-                    continue
-                # Also try with normalized variants
-                for variant in name_variants:
-                    if variant in node_id.lower():
-                        variant_matches.append(node)
-                        break
+                elif any(_ends_at_segment(lowered, v) for v in name_variants):
+                    variant_matches.append(node)
+                elif fuzzy and name.lower() in lowered:
+                    fuzzy_matches.append(node)
 
             # Fuzzy matching: prefix or contains (for simple names)
             if fuzzy and "::" not in name and len(name) >= 3:
