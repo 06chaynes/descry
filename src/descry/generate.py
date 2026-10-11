@@ -6597,8 +6597,8 @@ class BaseParser:
             unwraps = max(unwrap, len(statement) - len(value))
             origin = f"#{self._tail}" + ".?" * unwraps
             entries = self.declared.setdefault(name, [])
-            # A type the line declares the name with is what it is read as.
-            typed = any(line == self._line and held for line, held, _ in entries)
+            # A type the file declares the name with is what it is read as.
+            typed = any(held and top for _, held, top in entries)
             entries.append((self._line, origin, self._binds_file(name) and not typed))
 
     def call_closed_at(self, column):
@@ -6663,7 +6663,8 @@ class BaseParser:
         was read as of no declared type, the origin path ``origin``, up to
         line ``until`` where the pattern's block ends there."""
         entries = self.declared.setdefault(name, [])
-        top = self._binds_file(name)
+        # What a block binds, as a `for` does, is the block's.
+        top = not until and self._binds_file(name)
         bound = [entry for entry in entries if entry[0] == lineno and not entry[2]]
         if bound:
             # The first of a line is what the name is read as.
@@ -9628,14 +9629,16 @@ class TSParser(BaseParser):
         """What each property of the object literal that opens at ``column``
         of line ``index`` holds, by name: the origin path of the name or
         member it is given as, its own name where it is a method or a
-        function written there, None where it is anything else. None for a
-        literal that spreads another or computes a name."""
+        function written there, None where it is anything else. A property
+        under a name that is no plain one, a spread among them, is left
+        out."""
         last = self._find_block_end(lines, index, column)
-        written = (
-            _blank_js_strings(strip_line_comment(line, backticks=True))
-            for line in lines[index : last + 1]
-        )
-        text = "\n".join(written)[column:]
+        written, commented = [], False
+        for line in (lines[index][column:], *lines[index + 1 : last + 1]):
+            line, commented = strip_block_comments(line, commented)
+            line = strip_line_comment(line, backticks=True)
+            written.append(_blank_js_strings(line))
+        text = "\n".join(written)
         depth = 0
         for end, char in enumerate(text):
             depth += (char == "{") - (char == "}")
@@ -9651,7 +9654,7 @@ class TSParser(BaseParser):
             if method and not colon:
                 held[method[1]] = method[1]
             elif not re.fullmatch(r"[\w$]+", name):
-                return None
+                continue
             elif not colon or re.fullmatch(r"[\w$]+(?:\.[\w$]+)*", value):
                 held[name] = value or name
             else:
@@ -10460,12 +10463,14 @@ class TSParser(BaseParser):
                         # An object: its properties are read where the
                         # function is written.
                         opened = code.index("{", found.end())
+                        key = f"[{len(self.builder.literals)}]"
                         held = self._object_held(lines, i, opened)
-                        if held is not None:
-                            key = f"[{len(self.builder.literals)}]"
-                            self.builder.literals[key] = [held]
-                            self.builder.literal_scopes[key] = parent_id
-                            record = "", key
+                        self.builder.literals[key] = [held]
+                        self.builder.literal_scopes[key] = parent_id
+                        record = "", key
+                        # A `return` on a line of the object is one of a
+                        # function written in it.
+                        nameless = max(nameless, self._find_block_end(lines, i, opened))
                     returned.append(record)
                 if (
                     lineno > nameless

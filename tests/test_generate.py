@@ -5813,10 +5813,27 @@ class TestTypeScriptCallResolution:
                         clear: () => api.trim(),
                     };
                 }
+
+                export function odd(api: string) {
+                    function parse() {}
+                    return {
+                        'a-b': api, /* one, two */
+                        get size() { return 1; },
+                        ...api,
+                        parse,
+                    };
+                }
+
+                export class Registry {
+                    has(key: string) { return true; }
+                }
                 """,
                 "use.ts": """
-                import { plain, typed } from './make';
+                import { odd, plain, typed } from './make';
 
+                const WORDS = new Set(
+                    ['a']
+                );
                 const shared = plain('s');
                 const { all: everything } = plain(
                     'p'
@@ -5843,6 +5860,19 @@ class TestTypeScriptCallResolution:
                     const store = typed('d');
                     store.load();
                     store.clear();
+                }
+
+                export function oddly(key: string) {
+                    odd('o').parse();
+                    return WORDS.has(key);
+                }
+
+                for (const looped of [plain('f')]) {
+                    looped.load();
+                }
+
+                export function after() {
+                    looped.load();
                 }
                 """,
                 "Comp.svelte": (
@@ -5871,6 +5901,11 @@ class TestTypeScriptCallResolution:
             "FILE:make.ts::typed",
             "FILE:make.ts::typed::load",
         ]
+        assert _calls(builder, "FILE:use.ts::oddly") == [
+            "FILE:make.ts::odd",
+            "FILE:make.ts::odd::parse",
+        ]
+        assert _calls(builder, "FILE:use.ts::after") == ["REF:looped.load"]
 
     def test_member_call_is_not_pinned_to_a_function_of_another_module(self, tmp_path):
         """`x.make()` reaches a module's `make` only through a binding of
