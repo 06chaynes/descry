@@ -5786,6 +5786,39 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:b.ts::run") == ["FILE:c.ts::helper"]
 
+    def test_constant_bound_to_a_library_value_is_the_library_s(self, tmp_path):
+        """A module-level name bound to what a library constructs is read
+        as that type in the module's functions, in a script and in an
+        indented `<script>` block: its methods are no project method's."""
+        builder = _index(
+            tmp_path,
+            {
+                "reg.js": """
+                export class Registry {
+                    add(key) {}
+                    delete(key) {}
+                }
+                """,
+                "worker.js": """
+                const ids = new Set()
+
+                function drop(id) {
+                    ids.delete(id)
+                }
+                """,
+                "View.svelte": (
+                    '<script lang="ts">\n'
+                    "\tlet seen = new Set<string>();\n"
+                    "\tfunction accept(key: string) {\n"
+                    "\t\tseen.add(key);\n"
+                    "\t}\n"
+                    "</script>\n"
+                ),
+            },
+        )
+        assert _calls(builder, "FILE:worker.js::drop") == []
+        assert _calls(builder, "FILE:View.svelte::accept") == []
+
     def test_members_of_the_object_a_function_returns(self, tmp_path):
         """What a function returns as an object has the members the object
         names, read where the function is written: through the result, a
@@ -5897,8 +5930,8 @@ class TestTypeScriptCallResolution:
         ]
         assert _calls(builder, "FILE:use.ts::hidden") == ["REF:shared.load"]
         assert _calls(builder, "FILE:use.ts::declared") == [
-            "FILE:make.ts::Store::clear",
             "FILE:make.ts::typed",
+            "FILE:make.ts::typed::clear",
             "FILE:make.ts::typed::load",
         ]
         assert _calls(builder, "FILE:use.ts::oddly") == [
@@ -5906,6 +5939,303 @@ class TestTypeScriptCallResolution:
             "FILE:make.ts::odd::parse",
         ]
         assert _calls(builder, "FILE:use.ts::after") == ["REF:looped.load"]
+
+    def test_a_constant_declared_with_a_type_reads_what_its_value_returns(
+        self, tmp_path
+    ):
+        """A constant declared with a type, whose value is a call returning
+        an object, is read as that object's members and as the type for the
+        ones the object names none of. A value that is no such call keeps
+        the type alone, and a parameter of the name hides the constant."""
+        builder = _index(
+            tmp_path,
+            {
+                "make.ts": """
+                export interface Store {
+                    load(): void;
+                    clear(): void;
+                }
+
+                export class Thing {
+                    show() {}
+                }
+
+                export function createStore(name: string): Store {
+                    function load() {}
+                    return {
+                        load,
+                        clear: () => name.trim(),
+                    };
+                }
+
+                export function openStore(name: string) {
+                    function load() {}
+                    return { load };
+                }
+
+                export function makeThing(): Thing {
+                    return new Thing();
+                }
+                """,
+                "use.ts": """
+                import { createStore, openStore, Store, Thing } from './make';
+
+                const base: Store = createStore('a');
+                let mutable: Store = openStore('b');
+                const cast = createStore('c') as Store;
+                const made: Thing = makeThing();
+                const words: Set<string> = new Set();
+                const fromLib: Store = lib.make('d');
+                const wrapped = (openStore as any)(createStore('e'));
+
+                export function run() {
+                    base.load();
+                    base.clear();
+                    mutable.load();
+                    mutable.clear();
+                    cast.load();
+                    made.show();
+                    words.has('a');
+                    fromLib.load();
+                }
+
+                export function local() {
+                    const one: Store = createStore('f');
+                    one.load();
+                    one.clear();
+                }
+
+                export function hidden(base) {
+                    base.load();
+                }
+                """,
+            },
+        )
+        # A cast is no part of the value: the calls written after one are
+        # read, and the name is the call's alone.
+        assert _calls(builder, "FILE:use.ts") == [
+            "FILE:make.ts::createStore",
+            "FILE:make.ts::createStore",
+            "FILE:make.ts::createStore",
+            "FILE:make.ts::openStore",
+        ]
+        # The object's `load`, the type's `clear`, the object's `clear`, the
+        # object's `load` and the type's `load` where the call is a
+        # library's, and the type `Thing` declares.
+        assert _calls(builder, "FILE:use.ts::run") == [
+            "FILE:make.ts::Store::clear",
+            "FILE:make.ts::Store::load",
+            "FILE:make.ts::Thing::show",
+            "FILE:make.ts::createStore::clear",
+            "FILE:make.ts::createStore::load",
+            "FILE:make.ts::createStore::load",
+            "FILE:make.ts::openStore::load",
+        ]
+        assert _calls(builder, "FILE:use.ts::local") == [
+            "FILE:make.ts::createStore",
+            "FILE:make.ts::createStore::clear",
+            "FILE:make.ts::createStore::load",
+        ]
+        assert _calls(builder, "FILE:use.ts::hidden") == ["FILE:make.ts::Store::load"]
+
+    def test_a_helper_returns_what_its_body_reaches(self, tmp_path):
+        """A helper whose body hands back the result of a call that returns
+        an object is read as returning that object, wherever the helper is
+        written: in a callback, as an arrow over lines, through arguments
+        passed on, and through a second helper."""
+        builder = _index(
+            tmp_path,
+            {
+                "thing.ts": """
+                export interface ThingApi {
+                    show(label: string): void;
+                }
+
+                export function useThing(options: { label: string }): ThingApi {
+                    function show(label: string) {}
+                    return { show };
+                }
+                """,
+                "thing.test.ts": """
+                import { useThing } from './thing';
+
+                describe('thing', () => {
+                    function make() {
+                        return useThing({ label: 'solution' });
+                    }
+
+                    const open = () => useThing({
+                        label: 'open',
+                    });
+
+                    function passed(options) {
+                        return useThing(options);
+                    }
+
+                    it('shows', () => {
+                        const detail = make();
+                        detail.show('a');
+                        const other = open();
+                        other.show('b');
+                        const third = passed({ label: 'c' });
+                        third.show('c');
+                    });
+                });
+                """,
+                "deep.ts": """
+                import { useThing } from './thing';
+
+                function first() {
+                    return useThing({ label: 'first' });
+                }
+
+                export function second() {
+                    return first();
+                }
+
+                export function run() {
+                    second().show('d');
+                }
+                """,
+                "guards.ts": """
+                import { useThing, other } from './thing';
+
+                function disagree(flag) {
+                    if (flag) {
+                        return useThing({ label: 'a' });
+                    }
+                    return other();
+                }
+
+                function recursive(n) {
+                    if (!n) {
+                        return recursive(n - 1);
+                    }
+                    return useThing({ label: 'b' });
+                }
+
+                disagree(true).show('e');
+                recursive(1).show('f');
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:thing.test.ts") == [
+            "FILE:thing.test.ts::make",
+            "FILE:thing.test.ts::open",
+            "FILE:thing.test.ts::passed",
+            "FILE:thing.ts::useThing",
+            "FILE:thing.ts::useThing::show",
+            "FILE:thing.ts::useThing::show",
+            "FILE:thing.ts::useThing::show",
+        ]
+        assert _calls(builder, "FILE:deep.ts::run") == [
+            "FILE:deep.ts::second",
+            "FILE:thing.ts::useThing::show",
+        ]
+        # Ways out that disagree, and a helper that returns its own call,
+        # leave the result unknown.
+        assert _calls(builder, "FILE:guards.ts") == [
+            "FILE:guards.ts::disagree",
+            "FILE:guards.ts::recursive",
+            "REF:show",
+            "REF:show",
+        ]
+
+    def test_a_property_holds_what_its_value_holds(self, tmp_path):
+        """A property of the object a function returns holds what the value
+        written for it holds: a name a local of the function was bound to,
+        the local's own origin path, or the call written there — on the
+        line the property is on."""
+        builder = _index(
+            tmp_path,
+            {
+                "make.ts": """
+                export function useSelection(keys: string[]) {
+                    function toggle(key: string) {}
+                    return { toggle };
+                }
+
+                export function named(keys: string[]) {
+                    const api = useSelection(keys);
+                    return { api, keys };
+                }
+
+                export function called(keys: string[]) {
+                    return { api: useSelection(keys), keys };
+                }
+
+                export function wide(keys: string[]) {
+                    const api = useSelection(keys);
+                    return {
+                        api,
+                        keys,
+                    };
+                }
+
+                export function taken(keys: string[]) {
+                    const { toggle } = useSelection(keys);
+                    return { toggle };
+                }
+                """,
+                "use.ts": """
+                import { called, named, taken, wide } from './make';
+
+                export function run() {
+                    named([]).api.toggle('a');
+                    called([]).api.toggle('b');
+                    wide([]).api.toggle('c');
+                    taken([]).toggle('d');
+                    const { api } = named(['e']);
+                    api.toggle('e');
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:use.ts::run") == [
+            "FILE:make.ts::called",
+            "FILE:make.ts::named",
+            "FILE:make.ts::named",
+            "FILE:make.ts::taken",
+            "FILE:make.ts::useSelection::toggle",
+            "FILE:make.ts::useSelection::toggle",
+            "FILE:make.ts::useSelection::toggle",
+            "FILE:make.ts::useSelection::toggle",
+            "FILE:make.ts::useSelection::toggle",
+            "FILE:make.ts::wide",
+        ]
+
+    def test_a_function_written_in_the_object_a_function_returns(self, tmp_path):
+        """A property of that object which holds a function written there is
+        a member of the function returning it, named as a method of the
+        object is, and is what a call of the property reaches."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export function createOps(prefix: string) {
+                    return {
+                        create: (id: string) => save(prefix + id),
+                        clear: () => {},
+                        plain(id: string) { return save(id); },
+                    };
+                }
+
+                function save(id: string) {}
+
+                createOps('a').create('1');
+                createOps('b').clear();
+                createOps('c').plain('2');
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.ts") == [
+            "FILE:a.ts::createOps",
+            "FILE:a.ts::createOps",
+            "FILE:a.ts::createOps",
+            "FILE:a.ts::createOps::clear",
+            "FILE:a.ts::createOps::create",
+            "FILE:a.ts::createOps::plain",
+        ]
 
     def test_member_call_is_not_pinned_to_a_function_of_another_module(self, tmp_path):
         """`x.make()` reaches a module's `make` only through a binding of

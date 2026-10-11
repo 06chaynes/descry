@@ -91,7 +91,13 @@ Python SDK v2, and a full-tree review's findings are fixed.
   make(); load()` reach the function that `make` returns under that name,
   whatever return type it declares, also where the pattern's call goes on
   over lines. A `const` at a module's margin is in scope in the module's
-  functions unless a parameter or a local hides it.
+  functions unless a parameter or a local hides it. A constant declared
+  with a type is read as what its value's call returns, and as the type
+  for the members the object names none of. A helper that hands back a
+  call's result returns that object as well. A property of the object
+  holds what the value written for it holds: a name a local was bound to a
+  call's result, or the call itself. A function written there is a member
+  of the function returning it, named as a method of the object is.
 - **A Rust method name the standard library has does not pin a call.** On
   a receiver of unknown type such a call is left unresolved with the
   project's method as its candidate; it was resolved to that method.
