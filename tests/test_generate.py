@@ -3166,6 +3166,99 @@ class TestRustCallResolution:
         )
         assert _calls(builder, "FILE:a.rs::tests::uses") == ["FILE:a.rs::tests::helper"]
 
+    def test_impl_is_filed_under_the_type_its_header_is_for(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "a.rs": """
+                struct User;
+                struct Core;
+                impl From<&User> for Core {
+                    fn from(user: &User) -> Self {
+                        Core
+                    }
+                }
+                impl<'de> Deserialize<'de> for Core {
+                    fn deserialize(input: &'de str) -> Self {
+                        Core
+                    }
+                }
+                impl<
+                    T,
+                > Mark<Box<dyn Fn(T) -> T>>
+                    for &mut Core
+                {
+                    fn mark(&self) {}
+                }
+                unsafe impl Send for Core {}
+                impl From<Core> for (u8, u8) {
+                    fn from(core: Core) -> Self {
+                        (0, 0)
+                    }
+                }
+                impl<'a, M: Mark<u8>> Mark<u8> for &'a M {
+                    fn marked(&self) {}
+                }
+                fn make(user: &User) {
+                    Core::from(user).mark();
+                }
+                """,
+            },
+        )
+        methods = sorted(
+            node["id"] for node in builder.nodes if node["type"] == "Method"
+        )
+        assert methods == [
+            "FILE:a.rs::<From for (u8, u8)>::from",
+            "FILE:a.rs::<Mark for &'a M>::marked",
+            "FILE:a.rs::Core::deserialize",
+            "FILE:a.rs::Core::from",
+            "FILE:a.rs::Core::mark",
+        ]
+        assert _calls(builder, "FILE:a.rs::make") == [
+            "FILE:a.rs::Core::from",
+            "FILE:a.rs::Core::mark",
+        ]
+
+    def test_types_a_base_name_may_stand_for_are_no_candidates(self, tmp_path):
+        marked = """
+        impl Mark for Outer {
+            fn mark(&self) {}
+        }
+        """
+        builder = _index(
+            tmp_path,
+            {
+                "a.rs": marked,
+                "b.rs": marked,
+                "c.rs": """
+                pub enum Mode {
+                    On,
+                }
+                impl Outer for Mode {
+                    fn fmt(&self) {}
+                }
+                pub struct Other;
+                impl Other {
+                    pub fn parse(x: u8) {}
+                }
+                """,
+                "d.rs": """
+                use crate::c::Mode;
+                pub fn go() {
+                    Mode::parse(1);
+                }
+                """,
+            },
+        )
+        (call,) = (
+            edge
+            for edge in builder.edges
+            if edge["source"] == "FILE:d.rs::go" and edge["relation"] == "CALLS"
+        )
+        assert call["target"] == "REF:Mode::parse"
+        assert "candidates" not in call["metadata"]
+
     def test_impl_whose_brace_follows_a_where_clause(self, tmp_path):
         builder = _index(
             tmp_path,
@@ -3451,6 +3544,60 @@ class TestRustCallResolution:
             },
         )
         assert _calls(builder, "FILE:src/lib.rs::Bag::size") != []
+
+    def test_blanket_impl_is_for_the_types_that_meet_its_bounds(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub trait Sink {
+                    fn context(&self) -> u8;
+                }
+
+                impl<'a, S: Sink> Sink for &'a mut S {
+                    fn context(&self) -> u8 { 0 }
+                }
+
+                pub trait Loud {
+                    fn shout(&self) -> u8;
+                }
+
+                impl<T: std::fmt::Display> Loud for T {
+                    fn shout(&self) -> u8 { 0 }
+                }
+
+                pub struct Engine<S> {
+                    sink: S,
+                }
+
+                impl<S: Sink> Engine<S> {
+                    pub fn run(&self) -> u8 {
+                        self.sink.context()
+                    }
+                }
+
+                pub fn go(text: String) {
+                    text.context();
+                    text.shout();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::go") == [
+            "FILE:src/lib.rs::<Loud for T>::shout"
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::Engine::run") == [
+            "FILE:src/lib.rs::Sink::context"
+        ]
+        blanket = {
+            node["metadata"]["name"]: node["metadata"]["bounds"]
+            for node in builder.nodes
+            if "bounds" in node["metadata"]
+        }
+        assert blanket == {
+            "<Sink for &'a mut S>": ["Sink"],
+            "<Loud for T>": ["Display"],
+        }
 
     def test_name_bound_by_a_pattern_has_no_declared_type(self, tmp_path):
         """A match arm that binds a name shadows the parameter of that name:
@@ -8541,6 +8688,111 @@ class TestGoCallResolution:
         ]
 
 
+class TestOwnersSourceCannotName:
+    """Members of a block that is for no type source can name are filed
+    under an owner no source can name either, so no lookup of a type, a base
+    or a qualified call lands on it."""
+
+    @pytest.mark.parametrize(
+        ("path", "source", "named"),
+        [
+            (
+                "a.rs",
+                """
+                pub struct Core;
+                pub trait Mark {
+                    fn mark(&self);
+                }
+                impl Mark for (u8, u8) {
+                    fn mark(&self) {}
+                }
+                impl<T: Mark> Mark for &T {
+                    fn mark(&self) {}
+                }
+                impl<T> Mark for [T] {
+                    fn mark(&self) {}
+                }
+                impl<T> Mark for T {
+                    fn mark(&self) {}
+                }
+                impl Mark for Vec<u8> {
+                    fn mark(&self) {}
+                }
+                macro_rules! marked {
+                    ($name:ident) => {
+                        impl Mark for $name {
+                            fn mark(&self) {}
+                        }
+                    };
+                }
+                """,
+                {"Core": [], "Mark": ["mark"], "Vec": ["mark"]},
+            ),
+            (
+                "A.java",
+                """
+                class A {
+                    void run() {}
+                    Runnable make() {
+                        return new Runnable() {
+                            public void run() {}
+                            void stop() {}
+                        };
+                    }
+                }
+                """,
+                {"A": ["make", "run"]},
+            ),
+            (
+                "a.php",
+                """
+                <?php
+                function make() {
+                    return new class implements Countable {
+                        public function count(): int { return 0; }
+                    };
+                }
+                """,
+                {},
+            ),
+            (
+                "a.dart",
+                """
+                extension on String {
+                  int twice() => length * 2;
+                }
+                """,
+                {},
+            ),
+            (
+                "a.rb",
+                """
+                handler = Class.new(StandardError) do
+                  def message; "x"; end
+                end
+                """,
+                {},
+            ),
+        ],
+    )
+    def test_only_a_type_source_names_has_a_name_source_can_write(
+        self, tmp_path, path, source, named
+    ):
+        builder = _index(tmp_path, {path: source})
+        written = {
+            node["id"]: []
+            for node in builder.nodes
+            if node["type"] == "Class" and node["metadata"]["name"].isidentifier()
+        }
+        for node in builder.nodes:
+            owner, _, name = node["id"].rpartition("::")
+            if owner in written and node["type"] in ("Method", "Function"):
+                written[owner].append(name)
+        assert {
+            owner.rpartition("::")[2]: sorted(names) for owner, names in written.items()
+        } == named
+
+
 class TestJavaCallResolution:
     def test_lambda_parameter_reads_the_interfaces_abstract_method(self, tmp_path):
         """`x -> x.tally()` given for a `Mapper<Item, String>` parameter:
@@ -9407,9 +9659,9 @@ class TestJavaCallResolution:
         assert _calls(builder, "FILE:app/Shapes.java::Circle::Edge::outer") == [
             "FILE:app/Shapes.java::Circle::draw"
         ]
-        assert "FILE:app/Shapes.java::Shape::draw" in _calls(
-            builder, "FILE:app/Shapes.java::Use::draw"
-        )
+        body = "FILE:app/Shapes.java::Use::anonymous::class@28"
+        assert _calls(builder, f"{body}::draw") == ["FILE:app/Shapes.java::Shape::draw"]
+        assert _calls(builder, "FILE:app/Shapes.java::Use::draw") == []
 
     def test_type_name_is_read_in_its_package(self, tmp_path):
         """A simple type name is the type of the file's own package, not a

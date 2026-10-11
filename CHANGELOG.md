@@ -79,6 +79,13 @@ Python SDK v2, and a full-tree review's findings are fixed.
   most call sites before counting, and ties were broken by file path. The
   summary line is now
   `CALLS Resolution: P% of N project calls (...); E external calls not counted`.
+- **A block for no type source can name has an owner source cannot name.**
+  A Rust `impl` for a tuple, a slice or a type parameter is filed under
+  `<Trait for (A, B)>`, and the members of a Java anonymous class under
+  `class@<line>`, as PHP, Dart and Ruby already did; they were filed under
+  the trait's name, the parameter's or the enclosing class. A blanket
+  `impl` gives its methods to a type only where the type can meet its
+  bounds, and a Rust trait written with a path is looked up by that path.
 - **Unresolved calls name their candidates.** A `CALLS` edge that could
   reach several definitions carries them in `metadata.candidates`.
   `callers` and backward `flow` mark such a caller "one of N candidates"
@@ -165,11 +172,14 @@ Python SDK v2, and a full-tree review's findings are fixed.
 
 - **Parsers.** Rust `pub(crate)`/`pub(super)` items, `const fn`,
   `extern fn`, one-line blocks, calls in a body on the `fn` line, `impl`
-  edges, functions after an `impl` inside a module and methods of an
-  `impl` whose brace follows a `where` clause; Python definitions under
+  edges, functions after an `impl` inside a module, methods of an
+  `impl` whose brace follows a `where` clause, and `impl` headers with
+  references, lifetimes, `unsafe` or wrapped lines, which were filed under
+  the trait; Python definitions under
   `if`/`try`/`with`/`for` and calls counted twice in nested functions;
   Java Allman braces, class scope ended by a `'}'` literal, calls
-  attributed to the class instead of the method; Go unexported types,
+  attributed to the class instead of the method, members of an anonymous
+  class filed under the enclosing one; Go unexported types,
   generic receivers, one-line functions; Ruby one-line classes and modules,
   `#` docstrings; C# properties and verbatim strings; TypeScript and
   JavaScript `.jsx`/`.mjs`/`.cjs`/`.mts`/`.cts` files, `$` identifiers,
@@ -194,7 +204,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
   finite, non-negative number, and a negative `limit` is an error in every
   interface. Callers come back in a stable order, certain ones before
   candidates, and `callers Type::name` lists the callers of that method
-  instead of every `name`. `path` no longer follows
+  instead of every `name`; `Type.name` is read the same way, and a
+  qualified name no longer matches inside a longer one. `path` no longer follows
   an unresolved call to the first definition of its name, and searches from
   every definition its start name matches; `flatten` follows an unresolved
   base only when one class has the name.

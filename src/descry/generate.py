@@ -8106,6 +8106,88 @@ _RUST_INLINE_FN_RE = re.compile(
 )
 
 
+# Where an `impl` block's header starts
+_RUST_IMPL_RE = re.compile(r"^\s*(?:unsafe\s+)?impl(?=[<\s]|$)")
+# A bracketed group that holds no other
+_RUST_GROUP_RE = re.compile(r"\([^()]*\)|\[[^\[\]]*\]|<[^<>]*>")
+# What an `impl` header is cut at, and the brackets that nest
+_RUST_HEADER_RE = re.compile(r"->|[<(\[]|[>)\]]|\bfor\b|\bwhere\b|[{;]")
+
+
+def _rust_named(text):
+    """The path a type or trait is written with, behind `&`, `dyn` and the
+    like; None where it is not written with a path."""
+    named = re.match(r"(?:\w*::)*(?!fn\b)\w+", _RUST_BORROW_RE.sub("", text))
+    return named and named[0]
+
+
+def _last_segment(path):
+    """The last segment of ``path``, None for None."""
+    return path and path.rpartition("::")[2]
+
+
+def _rust_impl(text):
+    """What ``text``, an `impl` header read from after `impl`, says: the
+    trait, the owner of the block's items, and the bounds of a blanket `impl`.
+
+    The trait is given by its path as written, the owner by the last
+    segment of its type's: `<'de> de::Deserialize<'de> for Wrap<T> {` gives
+    `("de::Deserialize", "Wrap", None)`. An inherent `impl` has no trait. A
+    type source cannot name, as a tuple or a parameter of the block, gives
+    an owner no source can name either: `<Trait for (A, B)>`. Where the type
+    is a parameter of the block, or a reference to one, the block is for
+    every type that meets the parameter's bounds, which are given by name;
+    otherwise the bounds are None."""
+    # The text is cut where no bracket is open: after the block's own
+    # parameters, at `for`, and at `where` or the `{` that ends the header.
+    depth, cuts = 0, {}
+    for found in _RUST_HEADER_RE.finditer(text):
+        token = found[0]
+        if token in "<([":
+            depth += 1
+        elif token in ">)]":
+            depth -= 1
+            if not depth:
+                cuts.setdefault("<", found.end())
+        elif token != "->" and not depth:
+            if token in "{;":
+                cuts["{"] = found.start()
+                break
+            cuts.setdefault(token, found.start())
+    opened = cuts.get("<", 0) if text.lstrip().startswith("<") else 0
+    end = cuts.get("{", len(text))
+    constrained = cuts.get("where", end)
+    named = text[opened:constrained]
+    trait = None
+    if "for" in cuts and opened <= cuts["for"] < constrained:
+        trait = _rust_named(text[opened : cuts["for"]])
+        named = text[cuts["for"] + 3 : constrained]
+    # Each parameter and each `where` predicate, without what it nests.
+    declared = f"{text[:opened].strip()[1:-1]},{text[constrained:end][5:]}"
+    while (reduced := _RUST_GROUP_RE.sub("", declared)) != declared:
+        declared = reduced
+    parameters = dict(
+        re.findall(r"(?:^|,)\s*(?:const\s+)?(\w+)\s*(?::([^,]*))?", declared)
+    )
+    owner = _last_segment(_rust_named(named))
+    if owner not in parameters:
+        bounds = None
+    else:
+        bounds = []
+        for part in declared.split(","):
+            name, _, bound = part.partition(":")
+            if name.strip() == owner:
+                # `for<'a> Trait<'a>` is a bound by `Trait`.
+                traits = re.sub(r"\bfor\b", "", bound).split("+")
+                bounds += filter(None, map(_last_segment, map(_rust_named, traits)))
+    if not owner or bounds is not None:
+        if not trait:
+            return None, None, None
+        written = re.sub(r"(?:\w*::)+", "", " ".join(named.split()))
+        owner = f"<{_last_segment(trait)} for {written}>"
+    return trait, owner, bounds
+
+
 class RustParser(BaseParser):
     binding_re = re.compile(r"\blet\s+(?:mut\s+)?(?P<name>\w+)\s*=(?!=)")
     bindings = staticmethod(_rust_bindings)
@@ -8188,9 +8270,6 @@ class RustParser(BaseParser):
         re_enum = re.compile(rf"^\s*{_RUST_VIS}enum\s+([a-zA-Z0-9_]+)")
         # Enum variant patterns: Name, Name(Type), Name { field: Type }
         re_enum_variant = re.compile(r"^\s*([A-Z][a-zA-Z0-9_]*)\s*(?:[({\,]|$)")
-        re_impl = re.compile(
-            r"^\s*impl(?:<.*?>)?\s+(?:([a-zA-Z0-9_:<>,\s]+?)\s+for\s+)?([a-zA-Z0-9_:]+)"
-        )
         re_mod = re.compile(rf"^\s*{_RUST_VIS}mod\s+([a-zA-Z0-9_]+)\s*\{{?")
         re_const = re.compile(
             r"^\s*(?:pub(?:\(.*?\))?\s+)?(?:const|static)\s+([A-Z0-9_]+)\s*:\s*.*?\s*=\s*(.*?);"
@@ -8214,7 +8293,8 @@ class RustParser(BaseParser):
             None  # Track trait name when in "impl Trait for Struct" block
         )
         current_enum_id = None  # Track if we're inside an enum for variant parsing
-        impl_targets = {}  # id of each impl block's type -> (name, lineno)
+        # id of each impl block's owner -> (name, lineno, bounds of a blanket one)
+        impl_targets = {}
         fn_start = 0  # first line of the function being read
         fn_ids = set()  # functions whose body is a context; a `fn` in one is nested
         self._matches = []  # (indentation, origin of the value) of each open `match`
@@ -8281,6 +8361,19 @@ class RustParser(BaseParser):
                 for trait in re.findall(r"(\w+)\s*(?:,|$)", derives)
                 if trait in scope
             ]
+
+        def impl_at(index, line):
+            """What ``_rust_impl`` reads in the header of the `impl` block
+            that starts with ``line``, line ``index``; three None where none
+            does. The header runs to its `{`, on that line or a later one."""
+            if not _RUST_IMPL_RE.match(line):
+                return None, None, None
+            header = []
+            for code, _ in codes[index:]:
+                header.append(code)
+                if "{" in code or ";" in code:
+                    break
+            return _rust_impl(_RUST_IMPL_RE.sub("", " ".join(header), count=1))
 
         i = 0
         while i < len(lines):
@@ -8467,19 +8560,18 @@ class RustParser(BaseParser):
                         self.builder.fields[variant_id] = held
 
             # 3. Impl
-            elif match := re_impl.search(line):
-                trait, target = match.groups()
-                real_target = (target if target else trait).split("<")[0]
-                current_impl_target = real_target.split("::")[-1]
+            elif (named := impl_at(i, line))[1]:
+                # The trait is tracked for method metadata.
+                trait, current_impl_target, bounds = named
+                current_trait_impl = _last_segment(trait)
                 struct_id = f"{file_id}::{current_impl_target}"
-                impl_targets.setdefault(struct_id, (current_impl_target, lineno))
+                impl_targets.setdefault(
+                    struct_id, (current_impl_target, lineno, bounds)
+                )
 
                 if trait:
-                    trait_name = trait.split("<")[0].split("::")[-1]
-                    current_trait_impl = trait_name  # Track trait for method metadata
-                    self.builder.add_edge(struct_id, f"REF:{trait_name}", "INHERITS")
-                else:
-                    current_trait_impl = None  # Inherent impl, no trait
+                    # By its path, which says where the trait is from.
+                    self.builder.add_edge(struct_id, f"REF:{trait}", "INHERITS")
 
                 if opens_block(line) or "{" not in line:
                     # The body opens here or, after a `where` clause, below.
@@ -8589,7 +8681,7 @@ class RustParser(BaseParser):
 
         # An impl block's edges are sourced at its type. A type declared in
         # another file has no node here, so give it one.
-        for struct_id, (name, impl_lineno) in impl_targets.items():
+        for struct_id, (name, impl_lineno, bounds) in impl_targets.items():
             if struct_id not in self.builder.node_registry:
                 self.builder.add_node(
                     struct_id,
@@ -8598,6 +8690,8 @@ class RustParser(BaseParser):
                     kind="impl",
                     lineno=impl_lineno,
                     docstring="",
+                    # The traits a type must have for a blanket impl to be its.
+                    **({} if bounds is None else {"bounds": bounds}),
                 )
                 self.builder.add_edge(file_id, struct_id, "DEFINES")
 
@@ -11056,14 +11150,13 @@ class CallResolver:
             "clang": _ClangLibrary(_clang_type_parts, self._clang_std_key),
         }
         # Types from outside that the project implements traits for, by
-        # name; under "" those a type parameter of the impl stands for.
+        # name; under "" the blanket impls, which are for a type parameter.
         self.impl_types = {}
         for node_id, node in self.nodes.items():
             name = self._name(node_id)
             if node["metadata"].get("kind") == "impl" and not self._declares_type(name):
-                imported = name in builder.imports.get(node_id.split("::")[0], {})
-                named = imported or self._standard_type(name, node_id)
-                self.impl_types.setdefault(name if named else "", []).append(node_id)
+                blanket = "bounds" in node["metadata"]
+                self.impl_types.setdefault("" if blanket else name, []).append(node_id)
             if node["metadata"].get("kind") == "extension":
                 # A Dart extension gives its members to the type it is on.
                 for base in self.bases.get(node_id, ()):
@@ -12343,9 +12436,7 @@ class CallResolver:
                 direct = {
                     self._find_member(t, step)[0] for t in self.impl_types.get(name, [])
                 }
-                blanket = {
-                    self._find_member(t, step)[0] for t in self.impl_types.get("", [])
-                }
+                blanket = {self._find_member(t, step)[0] for t in self._blanket(name)}
                 given = (direct | blanket) - {None}
                 known, held = False, value
                 if library:
@@ -12927,6 +13018,24 @@ class CallResolver:
         value = self._value(name, scope_id, set()) if name else None
         library = isinstance(value, tuple) and value[0] == "library"
         return value[1] if library else None
+
+    def _blanket(self, name):
+        """The blanket impls that are for the outside type ``name``: those
+        whose every bound it may meet. A trait the project declares it meets
+        only where the project implements that trait for it."""
+        met = {
+            base
+            for given in self.impl_types.get(name, ())
+            for base in self.bases.get(given, ())
+        }
+        return [
+            given
+            for given in self.impl_types.get("", ())
+            if all(
+                bound in met or not self._declares_type(bound)
+                for bound in self.nodes[given]["metadata"]["bounds"]
+            )
+        ]
 
     def _declares_type(self, name):
         """Whether the project declares a Rust type ``name``, rather than
@@ -14239,8 +14348,10 @@ class CallResolver:
             for base in self.bases.get(declaration, ()):
                 # The base is the type its name stands for where the
                 # subtype is declared; every type of that name when that
-                # cannot be told.
+                # cannot be told. Those types are not what the call may reach.
+                reached = self._candidates_now
                 named = self._type_named(base, declaration)
+                self._candidates_now = reached
                 if named == _EXTERNAL:
                     base_types = []
                 else:

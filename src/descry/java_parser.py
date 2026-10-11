@@ -612,8 +612,9 @@ class JavaParser(BaseParser):
                 if bodies and bodies[-1][1] >= context_start:
                     parent_id = bodies[-1][0]
                 # A local is declared from the first line of the outermost
-                # body the line is in, or on the line itself.
-                since = inside[0][1] if inside else lineno
+                # body the line is in, or on the line itself. A class written
+                # in a method reads that method's locals too.
+                since = bodies[0][1] if bodies else lineno
                 written = code
                 code = _plain_instantiations(code)
                 self.begin_line(code, lineno, raw=raw_line)
@@ -712,6 +713,23 @@ class JavaParser(BaseParser):
                     last = self._find_block_end(lines, i)
                     anonymous[last] = created[0]
                     self._supers.append((last, subclassed[2].replace(".", "::")))
+                    # Its members are those of a class source cannot name.
+                    anonymous_id = f"{parent_id}::class@{lineno}"
+                    self.builder.add_node(
+                        anonymous_id,
+                        "Class",
+                        name=f"class@{lineno}",
+                        kind="class",
+                        lineno=lineno,
+                        end_lineno=last,
+                        token_count=(last - lineno + 1) * 10,
+                        docstring="",
+                    )
+                    self.builder.add_edge(parent_id, anonymous_id, "DEFINES")
+                    self.builder.add_edge(
+                        anonymous_id, f"REF:{subclassed[2]}", "INHERITS"
+                    )
+                    self.enter_context(anonymous_id, lineno + 1, last - 1)
 
             # A block opened outside every method is a body of the type's.
             opened = bodies and bodies[-1][1] == lineno
