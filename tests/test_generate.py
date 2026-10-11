@@ -5861,8 +5861,8 @@ class TestTypeScriptCallResolution:
             node["id"] for node in builder.nodes if "object@" in node["id"]
         ) == [
             "FILE:a.ts::accessors::object@14",
-            "FILE:a.ts::accessors::object@14::get_size",
-            "FILE:a.ts::accessors::object@14::set_size",
+            "FILE:a.ts::accessors::object@14::get size",
+            "FILE:a.ts::accessors::object@14::set size",
             "FILE:a.ts::noted::object@37",
             "FILE:a.ts::noted::object@37::error",
             "FILE:a.ts::pattern::object@30",
@@ -9544,6 +9544,69 @@ class TestOwnersSourceCannotName:
         ]
         assert _calls(builder, "FILE:a.js::wrap::object@4::sibling") == [
             "FILE:a.js::wrap::inner"
+        ]
+
+    def test_an_accessor_has_a_name_no_method_can_have(self, tmp_path):
+        """An accessor is filed as source writes it, `get size`, so a method
+        whose name spells that with an underscore is a definition of its
+        own."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Box {
+                    get size() {
+                        return 1;
+                    }
+                    set size(count) {}
+                    get_size() {
+                        return 2;
+                    }
+                }
+
+                export function make() {
+                    return {
+                        get size() {
+                            return 1;
+                        },
+                        get_size() {
+                            return 2;
+                        },
+                    };
+                }
+
+                export function use(box: Box) {
+                    box.get_size();
+                    make().get_size();
+                }
+                """,
+                "lib/a.dart": """
+                class Box {
+                  int get size => 1;
+                  set size(int count) {}
+                  int set_size() => 2;
+                }
+                """,
+            },
+        )
+        members = {
+            node["id"].partition("::")[2]
+            for node in builder.nodes
+            if node["type"] == "Method"
+        }
+        assert members == {
+            "Box::get size",
+            "Box::set size",
+            "Box::get_size",
+            "make::object@13::get size",
+            "make::object@13::get_size",
+            "Box::size",
+            "Box::set_size",
+        }
+        assert _calls(builder, "FILE:a.ts::use") == [
+            "FILE:a.ts::Box::get_size",
+            "FILE:a.ts::make",
+            "FILE:a.ts::make::object@13::get_size",
         ]
 
 

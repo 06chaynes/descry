@@ -89,6 +89,11 @@ Python SDK v2, and a full-tree review's findings are fixed.
   So is the object a JavaScript or TypeScript function returns, under
   `object@<line>`: a function written in it is a member of the object, not
   of the function, and two functions of one name are two nodes.
+- **An accessor is filed as source writes it.** A JavaScript or TypeScript
+  `get size()` is `Type::get size` and a Dart setter `Type::set size`,
+  where they were `get_size` and `set_size` and shared a node with a method
+  of that name. A Dart member renamed beside a constructor of its name is
+  `field name`, `get name` or `method name`.
 - **The object a JavaScript or TypeScript function returns is followed.**
   `make().load()`, `const h = make(); h.load()` and `const { load } =
   make(); load()` reach the function that `make` returns under that name,

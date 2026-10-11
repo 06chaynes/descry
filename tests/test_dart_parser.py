@@ -354,7 +354,7 @@ class Box {
             "counter": ("Constant", 2, None),
             "total": ("Constant", 2, None),
             "size": ("Function", 3, 3),
-            "set_size": ("Function", 4, 4),
+            "set size": ("Function", 4, 4),
             "Box": ("Class", 6, 16),
             "Box::limit": ("Constant", 7, None),
             "Box::_stream": ("Constant", 8, None),
@@ -362,7 +362,7 @@ class Box {
             "Box::width": ("Constant", 10, None),
             "Box::height": ("Constant", 10, None),
             "Box::area": ("Method", 12, 12),
-            "Box::set_area": ("Method", 13, 15),
+            "Box::set area": ("Method", 13, 15),
         }
         types = {
             n["id"].rpartition("::")[2]: n["metadata"]["value_type"]
@@ -467,7 +467,7 @@ class Response {
 }
 """.strip()
         _parse(builder, src)
-        assert {"Response::field_ok", "Response::get_from"} < set(_defined(builder))
+        assert {"Response::field ok", "Response::get from"} < set(_defined(builder))
         constructors = {
             n["id"].partition("::")[2]: n["metadata"]["return_type"]
             for n in builder.nodes

@@ -651,7 +651,7 @@ class DartParser(BaseParser):
                 )
                 for field in fields:
                     node_id = f"{parent_id}::{field}"
-                    renamed[node_id] = f"{parent_id}::field_{field}"
+                    renamed[node_id] = f"{parent_id}::field {field}"
                     if node_id in constructors:
                         # A constructor of the same name keeps `<type>::<name>`.
                         node_id = renamed[node_id]
@@ -693,13 +693,13 @@ class DartParser(BaseParser):
             else:
                 name = "".join(name.split())
                 metadata = {"return_type": declared_type}
-            node_id = f"{parent_id}::{'set_' if accessor == 'set' else ''}{name}"
+            node_id = f"{parent_id}::{'set ' if accessor == 'set' else ''}{name}"
             if "is_constructor" in metadata:
                 constructors.add(node_id)
                 if node_id in renamed:
                     self.rename_node(node_id, renamed[node_id])
             else:
-                renamed[node_id] = f"{parent_id}::{accessor or 'method'}_{name}"
+                renamed[node_id] = f"{parent_id}::{accessor or 'method'} {name}"
                 if node_id in constructors:
                     # A constructor of the same name keeps `<type>::<name>`.
                     node_id = renamed[node_id]

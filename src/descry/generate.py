@@ -9769,8 +9769,8 @@ class TSParser(BaseParser):
                 r"(?:async\s+|(get|set)\s+)?\*?\s*([\w$]+)\s*\0\s*\0", name
             )
             if method and not colon:
-                # An accessor is filed as `get_name` or `set_name`.
-                filed = "_".join(filter(None, method.groups()))
+                # An accessor is filed as `get name` or `set name`.
+                filed = " ".join(filter(None, method.groups()))
                 held[filed] = f"={filed}" if member else filed
             elif not re.fullmatch(r"[\w$]+", name):
                 continue
@@ -10348,8 +10348,9 @@ class TSParser(BaseParser):
                 declared_at = match.start(2)
                 docstring = self.get_leading_docstring(lines, i)
                 j, full_sig, end_lineno = consume_sig(i)
-                # Include accessor type in ID to distinguish get/set pairs
-                mid = f"{object_id or parent_id}::{accessor_type}_{name}"
+                # An accessor is filed as source writes it, `get name`, which
+                # tells a pair apart and is no name a method can have.
+                mid = f"{object_id or parent_id}::{accessor_type} {name}"
                 return_type, param_types, typed = self._extract_ts_types(full_sig)
                 # Build signature for getter/setter
                 if accessor_type == "get":
