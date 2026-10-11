@@ -494,6 +494,7 @@ class TestScipIndexResolveLineSemantics:
             ("rust-analyzer cargo other 1.0 util/path().", True),
             # A method of a trait the project implements, and of one it does not.
             ("rust-analyzer cargo core 1.0 fmt/Display#path().", False),
+            ("rust-analyzer cargo core 1.0 convert/From#path().", False),
             ("rust-analyzer cargo other 1.0 dsl/QueryDsl#path().", True),
             # No call, and a project symbol.
             ("rust-analyzer cargo std 1.0 fs/DirEntry#path.", False),
@@ -505,13 +506,35 @@ class TestScipIndexResolveLineSemantics:
     ):
         own = "rust-analyzer cargo app 0.1.0 alpha/impl#[Alpha]path()."
         shown = "rust-analyzer cargo app 0.1.0 alpha/impl#[Alpha][Display]fmt()."
+        made = "rust-analyzer cargo app 0.1.0 alpha/impl#[`Pair<[u8]>`][`From<Beta>`]from()."
         documents = {
-            "src/alpha.rs": [(0, own, True), (1, shown, True)],
+            "src/alpha.rs": [(0, own, True), (1, shown, True), (2, made, True)],
             "src/main.rs": [(4, called, False)],
         }
         index = ScipIndex([_write_scip(tmp_path / "app.scip", documents)])
         assert index.outside_at("entry.path", "app/src/main.rs", 5) is outside
         assert index.outside_at("entry.path", "app/src/main.rs", 6) is False
+
+    @pytest.mark.parametrize(
+        ("called", "outside"),
+        [
+            ("rust-analyzer cargo std 1.0 fs/impl#[DirEntry]path().", True),
+            ("rust-analyzer cargo lib-two 0.1.0 util/path().", False),
+        ],
+    )
+    def test_symbol_of_a_crate_without_an_index_does_not_leave(
+        self, tmp_path, called, outside
+    ):
+        (tmp_path / "Cargo.toml").write_text('[workspace]\nmembers = ["app", "two"]\n')
+        for crate, package in (("app", "app"), ("two", "lib-two")):
+            (tmp_path / crate / "src").mkdir(parents=True)
+            manifest = f'[package]\nname = "{package}"\n'
+            (tmp_path / crate / "Cargo.toml").write_text(manifest)
+        own = "rust-analyzer cargo app 0.1.0 alpha/impl#[Alpha]path()."
+        documents = {"src/main.rs": [(0, own, True), (4, called, False)]}
+        scip = _write_scip(tmp_path / "app.scip", documents)
+        index = ScipIndex([scip], {scip: "app"}, tmp_path)
+        assert index.outside_at("entry.path", "app/src/main.rs", 5) is outside
 
     def test_definition_at_does_not_fall_back_to_name(self, index):
         assert index.definition_at("run", "app/src/main.rs", 5) == (

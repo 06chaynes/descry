@@ -18,8 +18,11 @@ from descry.scip.adapter import (
 logger = logging.getLogger(__name__)
 
 
-# `impl#[Type][Trait]`: the trait an `impl` block is for
-_RUST_TRAIT_IMPL = re.compile(r"impl#\[[^\]]*\]\[([^\]]+)\]")
+# `impl#[Type][Trait]`: the trait an `impl` block is for, without its
+# arguments. A name that is no identifier is written between backticks.
+_RUST_TRAIT_IMPL = re.compile(r"impl#\[(?:`[^`]*`|[^\]`])*\]\[`?([^\]`<]+)")
+# A symbol's package and its descriptors
+_RUST_SYMBOL = re.compile(r"\S+ \S+ (\S+) \S+ (.+)", re.DOTALL)
 _RUST_DESCRIPTOR_PATTERN = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)(\([^)]*\)|[#./\[\]])?")
 
 
@@ -194,18 +197,35 @@ class RustAdapter:
         argv.extend(config.extra_args)
         return CommandSpec(argv=argv, cwd=project.root)
 
-    def leaving(self, defined):
-        """A test of whether a call of a symbol outside the project, given
-        by its descriptors, cannot reach the project: it names a function, a
-        method of a concrete type (`impl#[String]len().`), or a method of a
-        trait (`Display#fmt().`) that no `impl` among ``defined``, the
-        descriptors of the project's own symbols, is for."""
-        found = (_RUST_TRAIT_IMPL.search(descriptors) for descriptors in defined)
-        implemented = {impl[1].partition("<")[0] for impl in found if impl}
+    def _packages(self, root: Path | None) -> set[str]:
+        """Cargo package names of the crates ``discover()`` finds in ``root``."""
+        names = set()
+        for project in self.discover(root, set()) if root else ():
+            try:
+                with open(crate_dir(root, project.name) / "Cargo.toml", "rb") as f:
+                    names.add(tomllib.load(f)["package"]["name"])
+            except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError):
+                pass
+        return names
 
-        def leaves(descriptors: str) -> bool:
-            if not descriptors.endswith(")."):
+    def leaving(self, defined, root):
+        """A test of whether a call of a symbol no index defines cannot
+        reach the project: it names a function, a method of a concrete type
+        (`impl#[String]len().`), or a method of a trait (`Display#fmt().`)
+        that no `impl` among ``defined``, the symbols the indexes define, is
+        for. A symbol of a crate of ``root`` that has no index does not
+        leave; the `impl`s of such a crate are not seen."""
+        found = map(_RUST_SYMBOL.fullmatch, defined)
+        known = [match.groups() for match in found if match]
+        found = (_RUST_TRAIT_IMPL.search(descriptors) for _, descriptors in known)
+        implemented = {impl[1].rpartition("::")[2] for impl in found if impl}
+        unindexed = self._packages(root) - {package for package, _ in known}
+
+        def leaves(symbol: str) -> bool:
+            match = _RUST_SYMBOL.fullmatch(symbol)
+            if not match or match[1] in unindexed or not match[2].endswith(")."):
                 return False
+            descriptors = match[2]
             if "impl#[" in descriptors or "#" not in descriptors:
                 return True
             trait = descriptors.rpartition("#")[0].rpartition("/")[2]

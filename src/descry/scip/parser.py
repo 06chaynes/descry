@@ -324,18 +324,18 @@ class ScipIndex:
     def _leaves(self, symbol: str) -> bool:
         if symbol in self.definitions:
             return False
-        scheme, _, rest = symbol.partition(" ")
+        scheme = symbol.partition(" ")[0]
         if scheme not in self._leaving:
             adapter = adapter_for_scheme(scheme)
-            defined = (
-                " ".join(known.split(" ")[4:])
-                for known in self.definitions
-                if known.startswith(f"{scheme} ")
-            )
+            defined = [
+                known for known in self.definitions if known.startswith(f"{scheme} ")
+            ]
             # An adapter that cannot tell says nothing leaves.
             build = getattr(adapter, "leaving", None)
-            self._leaving[scheme] = build(defined) if build else (lambda _: False)
-        return self._leaving[scheme](" ".join(rest.split(" ")[3:]))
+            self._leaving[scheme] = (
+                build(defined, self._root) if build else (lambda _: False)
+            )
+        return self._leaving[scheme](symbol)
 
     def _symbol_at(
         self, ref_name: str, source_file: str, line: int, column: int | None = None
