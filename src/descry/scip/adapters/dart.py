@@ -46,7 +46,12 @@ class DartAdapter:
     name = "dart"
     scheme = "scip-dart"
     binary = "scip-dart"
-    binary_alternatives = ("scip_dart",)
+    # `dart pub global` installs scip_dart into ~/.pub-cache/bin and
+    # warns that directory is not on PATH — probe it explicitly too.
+    binary_alternatives = (
+        "scip_dart",
+        str(Path.home() / ".pub-cache" / "bin" / "scip_dart"),
+    )
     extensions = (".dart",)
 
     def discover(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
