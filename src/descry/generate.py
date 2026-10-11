@@ -9541,6 +9541,7 @@ def _blank_js_strings(line: str, stack: list | None = None, keep=False) -> str:
     # or `/*` for a comment still open
     stack = [] if stack is None else stack
     carried = len(stack)
+    ended = None  # how much of `out` there was where a /.../ literal ended
     i = 0
     while i < len(line):
         ch = line[i]
@@ -9580,12 +9581,15 @@ def _blank_js_strings(line: str, stack: list | None = None, keep=False) -> str:
             elif (
                 ch == "/"
                 and (regex := _JS_REGEX_RE.match(line, i))
+                # Straight after a /.../ literal a `/` divides.
+                and (ended is None or "".join(out[ended:]).strip())
                 and _js_regex_position("".join(out))
             ):
                 if keep:
                     out.append(regex.group())
                 else:
                     out.append(f"/{' ' * (len(regex.group()) - 1)}")
+                ended = len(out)
                 i = regex.end()
                 continue
             elif ch == "/" and line[i + 1 : i + 2] == "/":

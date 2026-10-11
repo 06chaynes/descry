@@ -5852,7 +5852,8 @@ class TestTypeScriptCallResolution:
         """The shapes that beat a line-at-a-time reading: a `//` inside a
         regular expression is no comment, and a template literal opened
         with `${` on one line and closed on a later one keeps the lines
-        between out of the block count."""
+        between out of the block count. A `/` straight after a regular
+        expression divides, so the comment after it is one."""
         builder = _index(
             tmp_path,
             {
@@ -5871,6 +5872,11 @@ class TestTypeScriptCallResolution:
                     return emit(body);
                 }
 
+                function ratio(s: string) {
+                    const r = /a/ / /b/; // }
+                    return parse(s);
+                }
+
                 function parse(s: string) {}
                 function emit(s: string) {}
                 """,
@@ -5886,6 +5892,7 @@ class TestTypeScriptCallResolution:
         }
         assert span["parseUrl"] == (2, 7)
         assert span["describe"] == (9, 14)
+        assert span["ratio"] == (16, 19)
         assert _calls(builder, "FILE:g.ts::parseUrl") == ["FILE:g.ts::parse"]
         assert _calls(builder, "FILE:g.ts::describe") == ["FILE:g.ts::emit"]
 
