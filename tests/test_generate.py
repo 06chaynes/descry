@@ -3345,6 +3345,41 @@ class TestRustCallResolution:
             "FILE:src/tools.rs::sharpen",
         ]
 
+    def test_name_the_standard_library_has_does_not_pin_an_unknown_receiver(
+        self, tmp_path
+    ):
+        builder = _index(
+            tmp_path,
+            {
+                "a.rs": """
+                pub struct Key;
+                impl Key {
+                    pub fn and(self, other: Key) -> Key {
+                        self
+                    }
+                    pub fn only_here(self) -> Key {
+                        self
+                    }
+                }
+                pub fn go() {
+                    let made = build!();
+                    made.and(1);
+                    made.only_here();
+                }
+                """,
+            },
+        )
+        calls = {
+            edge["target"]: edge["metadata"].get("candidates")
+            for edge in builder.edges
+            if edge["source"] == "FILE:a.rs::go"
+            and edge["relation"].startswith("CALLS")
+        }
+        assert calls == {
+            "REF:made.and": ["FILE:a.rs::Key::and"],
+            "FILE:a.rs::Key::only_here": None,
+        }
+
     def test_impl_whose_brace_follows_a_where_clause(self, tmp_path):
         builder = _index(
             tmp_path,

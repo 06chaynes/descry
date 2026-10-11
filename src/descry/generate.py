@@ -12225,11 +12225,13 @@ class CallResolver:
         if lang in _DATA_NAMED_LANGS:
             standard, listed = name in _stdlib.members(lang), False
         else:
-            # Python's standard names are those of its data too, and a
-            # special method is a protocol any class may implement.
+            # Python's and Rust's standard names are those of their data
+            # too, and a special method is a protocol any class may
+            # implement.
             special = name.startswith("__") and name.endswith("__")
             named = special or name in _stdlib.members(lang)
-            standard, listed = lang == "python" and named, is_non_project_call(callee)
+            standard = lang in ("python", "rust") and named
+            listed = is_non_project_call(callee)
         held = not top_level and (lang, name) in self.builder.function_properties
         untyped = lang in _UNTYPED_RECEIVER_LANGS
         if namespace or not pool or standard or held or listed or untyped:
