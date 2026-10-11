@@ -23,7 +23,7 @@ just test tests/test_handlers.py::test_index     # one test
 just test -k "cross_lang and not slow"           # by expression
 ```
 
-Python 3.11+ required (enforced by `pyproject.toml`). Pre-commit gate: `just lint && just fmt && just test` all pass (2138 tests currently — a drop is a regression signal).
+Python 3.11+ required (enforced by `pyproject.toml`). Pre-commit gate: `just lint && just fmt && just test` all pass (2140 tests currently — a drop is a regression signal).
 
 Invoke the tool while developing:
 
@@ -50,7 +50,7 @@ Packaging: `pyproject.toml` defines four console scripts — `descry`, `descry-m
 
 **Standard-library knowledge is generated.** `src/descry/stdlib/<lang>.json` (format in `src/descry/_stdlib.py`, loaded lazily per language) is written by `tools/stdlib/gen_<lang>.py` from the language's own machine-readable description and never edited by hand. `class StandardLibrary` in `generate.py` is the one lookup every language plugs into, by supplying how it writes a type and how a name in source maps to the data. Do not add lists of library types, functions or members to a parser or the resolver — extend the generator. `tests/test_stdlib.py` regenerates each file when its source is present (`$DESCRY_STDLIB_SOURCES`, `$JAVA_HOME`).
 
-**Owners are named as source names them.** A parser files members under the type that source names. A block for no type source can name (an anonymous class, a Rust `impl` for a tuple or a type parameter, an unnamed extension) gets an owner whose name no source can write (`class@12`, `<Trait for (A, B)>`, `extension on String`), never the name of a trait, a base or the enclosing type, so no lookup of a type lands on it. `TestOwnersSourceCannotName` in `tests/test_generate.py` holds a fixture per language; a new parser adds one.
+**Owners are named as source names them.** A parser files members under the type that source names. A block for no type source can name (an anonymous class, a Rust `impl` for a tuple or a type parameter, an unnamed extension) gets an owner whose name no source can write (`class@12`, `object@12`, `<Trait for (A, B)>`, `extension on String`), never the name of a trait, a base or the enclosing type, so no lookup of a type lands on it. `TestOwnersSourceCannotName` in `tests/test_generate.py` holds a fixture per language; a new parser adds one.
 
 **Resolution changes need numbers.** Measure a resolver or parser change on public repositories before and after (`DESCRY_NO_SCIP=1 DESCRY_NO_EMBEDDINGS=1`, cache outside the repository), compare the graphs edge by edge, and read a random sample of the moved edges against the source. A wrong edge is worse than an unresolved one; a rule must be the language's, never tuned to one repository.
 

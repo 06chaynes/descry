@@ -274,18 +274,7 @@ class JavaParser(BaseParser):
         """Open the body, lines ``lineno`` to ``last``, of a class source
         cannot name: a subclass of ``base``, a node or a `REF:` to a name,
         made in ``parent_id``. Its members are its own."""
-        anonymous_id = f"{parent_id}::class@{lineno}"
-        self.builder.add_node(
-            anonymous_id,
-            "Class",
-            name=f"class@{lineno}",
-            kind="class",
-            lineno=lineno,
-            end_lineno=last,
-            token_count=(last - lineno + 1) * 10,
-            docstring="",
-        )
-        self.builder.add_edge(parent_id, anonymous_id, "DEFINES")
+        anonymous_id = self._nameless_owner(parent_id, f"class@{lineno}", lineno, last)
         self.builder.add_edge(anonymous_id, base, "INHERITS")
         self.enter_context(anonymous_id, lineno + 1, last - 1)
 

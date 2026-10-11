@@ -86,6 +86,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   the trait's name, the parameter's or the enclosing class. A blanket
   `impl` gives its methods to a type only where the type can meet its
   bounds, and a Rust trait written with a path is looked up by that path.
+  So is the object a JavaScript or TypeScript function returns, under
+  `object@<line>`: a function written in it is a member of the object, not
+  of the function, and two functions of one name are two nodes.
 - **The object a JavaScript or TypeScript function returns is followed.**
   `make().load()`, `const h = make(); h.load()` and `const { load } =
   make(); load()` reach the function that `make` returns under that name,
@@ -96,8 +99,12 @@ Python SDK v2, and a full-tree review's findings are fixed.
   for the members the object names none of. A helper that hands back a
   call's result returns that object as well. A property of the object
   holds what the value written for it holds: a name a local was bound to a
-  call's result, or the call itself. A function written there is a member
-  of the function returning it, named as a method of the object is.
+  call's result, or the call itself. A function written there, whether a
+  method, an arrow or a function expression, is a member of the object,
+  which no source can name. A name written in one of them is read in the
+  returning function's scope; the object's other members are reached
+  through `this`. A function the factory declares and one the object
+  writes under the same name are two nodes.
 - **A Rust method name the standard library has does not pin a call.** On
   a receiver of unknown type such a call is left unresolved with the
   project's method as its candidate; it was resolved to that method.

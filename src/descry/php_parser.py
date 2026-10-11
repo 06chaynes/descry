@@ -605,18 +605,9 @@ class PhpParser(BaseParser):
             if brace_line_idx is not None:
                 column = m_anonymous.start() if brace_line_idx == i else 0
                 end_lineno = self._find_block_end(codes, brace_line_idx, column)
-                anonymous_id = f"{context_id}::class@{lineno}"
-                self.builder.add_node(
-                    anonymous_id,
-                    "Class",
-                    name=f"class@{lineno}",
-                    kind="class",
-                    lineno=lineno,
-                    end_lineno=end_lineno,
-                    token_count=(end_lineno - lineno + 1) * 10,
-                    docstring="",
+                anonymous_id = self._nameless_owner(
+                    context_id, f"class@{lineno}", lineno, end_lineno
                 )
-                self.builder.add_edge(context_id, anonymous_id, "DEFINES")
                 header = [code[m_anonymous.end() :], *codes[i + 1 : brace_line_idx + 1]]
                 bases[anonymous_id] = self._bases(" ".join(header).partition("{")[0])
                 types[anonymous_id] = None

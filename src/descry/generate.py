@@ -6657,6 +6657,24 @@ class BaseParser:
         every definition of the file."""
         return False
 
+    def _nameless_owner(self, parent_id, name, lineno, last, kind="class"):
+        """Make the definition ``name`` that source cannot write, held by
+        ``parent_id`` and spanning lines ``lineno`` to ``last``: the members
+        of a block for no type source can name are its own. Returns its ID."""
+        owner_id = f"{parent_id}::{name}"
+        self.builder.add_node(
+            owner_id,
+            "Class",
+            name=name,
+            kind=kind,
+            lineno=lineno,
+            end_lineno=last,
+            token_count=(last - lineno + 1) * 10,
+            docstring="",
+        )
+        self.builder.add_edge(parent_id, owner_id, "DEFINES")
+        return owner_id
+
     def _binds_name(self, name):
         """Whether a line declaring ``name`` gives it a value of this file's
         own."""
@@ -9728,6 +9746,11 @@ class TSParser(BaseParser):
             if not depth:
                 break
         body = text[1:end]
+        # A function written in the object is a member of it, filed under
+        # the object's own ID — where the object is written over lines. One
+        # written on a single line shares it with the `return`, so its
+        # properties get no node of their own.
+        holds_members = last > index
         # The text around a nested part keeps the column it is written at.
         while (reduced := _JS_NESTED_RE.sub(_nested_part, body)) != body:
             body = reduced
@@ -9743,7 +9766,7 @@ class TSParser(BaseParser):
             name, value = head.strip(), tail.strip()
             method = re.fullmatch(r"(?:async\s+)?\*?\s*([\w$]+)\s*\0\s*\0", name)
             if method and not colon:
-                held[method[1]] = method[1]
+                held[method[1]] = f"={method[1]}" if holds_members else method[1]
             elif not re.fullmatch(r"[\w$]+", name):
                 continue
             elif not colon or re.fullmatch(r"[\w$]+(?:\.[\w$]+)*", value):
@@ -9752,23 +9775,23 @@ class TSParser(BaseParser):
                 made = "=>" in value or re.match(r"(?:async\s+)?function\b", value)
                 value_at = start + len(head) + 1 + len(tail) - len(tail.lstrip())
                 held[name] = (
-                    name
-                    if made
+                    f"={name}"
+                    if made and holds_members
                     else self._call_held(
                         index, column, value_at, at - 1, len(written[0]), since, owner
                     )
                 )
         return held
 
-    def _in_returned_object(self, returned_object, parent_id, lineno):
-        """Whether the line being read is one of the object that the
-        definition ``parent_id`` returns, which ``returned_object`` names
-        with the lines it spans."""
-        return bool(
-            returned_object
-            and returned_object[0] == parent_id
-            and returned_object[1] <= lineno <= returned_object[2]
-        )
+    def _returned_object_at(self, returned_objects, parent_id, lineno):
+        """The object that the definition ``parent_id`` returns at the line
+        being read, where the line is one of its lines: the innermost of
+        those it returns that reaches it, as its ID and the line the names
+        written in it are read from — the definition that returns it."""
+        for parent, first, last, owner_id, scope in reversed(returned_objects):
+            if parent == parent_id and first <= lineno <= last:
+                return owner_id, scope
+        return None, None
 
     def _name_held(self, value, lineno, since):
         """What a property of the object being read holds where the value it
@@ -9884,7 +9907,7 @@ class TSParser(BaseParser):
         # either with type parameters before the `(`
         re_method = re.compile(
             rf"^\s*{_TS_MEMBER_MODIFIERS}"
-            r"([a-zA-Z0-9_$]+)\s*(=\s*(?:async\s+)?)?(?:[(]|<(?![\s=]))"
+            r"(?:\*\s*)?([a-zA-Z0-9_$]+)\s*(=\s*(?:async\s+)?)?(?:[(]|<(?![\s=]))"
         )
         # Getter/setter methods: get name() or set name(value)
         re_getter_setter = re.compile(
@@ -9966,10 +9989,10 @@ class TSParser(BaseParser):
         # function's, not the definition's.
         returning = None
         nameless = {}
-        # The definition whose returned object is being read, and the lines
-        # that object spans: a property of it that holds a function is a
-        # member of that definition.
-        returned_object = None
+        # Each object a definition returns: the definition, the lines the
+        # object spans and the object's own ID. A function written on one of
+        # those lines is a member of the object, not of the definition.
+        returned_objects = []
         self._signatures = {}  # node ID -> the signatures it is declared with
         class_ids = set()  # class/interface/enum nodes declared in this file
         object_ids = set()  # constants of the file that hold an object literal
@@ -10004,8 +10027,16 @@ class TSParser(BaseParser):
             # the regex call fallback must not read as a call.
             declared_at = None
             valued = None  # the signature of the arrow function the line is
+            arrow_id = None  # the node of the arrow function the line declares
 
             parent_id = self.context_at(lineno)[0]
+            # The object the definition returns, where the line being read is
+            # one of its lines: a function written there is a member of that
+            # object, which no source can name, and reads the names the
+            # definition that returns it does.
+            object_id, object_scope = self._returned_object_at(
+                returned_objects, parent_id, lineno
+            )
 
             def claim(node_id):
                 """Take ``node_id`` for a function or variable; an interface
@@ -10091,6 +10122,7 @@ class TSParser(BaseParser):
                 claim(cid)
                 if val and (held := _arrow_function(line)):
                     valued = self._arrow_typed(held[1], line)
+                    arrow_id = cid
                 self.builder.add_node(
                     cid,
                     "Constant",
@@ -10204,14 +10236,12 @@ class TSParser(BaseParser):
                 enter(fid, lineno, end_lineno, full_sig)
                 i = j
             elif (
-                _TS_VARIABLE_RE.match(line)
-                or parent_id in object_ids
-                or self._in_returned_object(returned_object, parent_id, lineno)
+                _TS_VARIABLE_RE.match(line) or parent_id in object_ids or object_id
             ) and (arrow := (statement := read_arrow(i))[1]):
                 name, parameters = arrow
                 j = statement[0]
                 docstring = self.get_leading_docstring(lines, i)
-                fid = f"{parent_id}::{name}"
+                fid = f"{object_id or parent_id}::{name}"
                 # A block is left open where the statement stops; an
                 # expression body ends there.
                 last = _NON_CODE_RE.sub("", lines[j])
@@ -10241,8 +10271,9 @@ class TSParser(BaseParser):
                     docstring=docstring,
                     signatures=self._overloads(fid, typed),
                 )
-                self.builder.add_edge(parent_id, fid, "DEFINES")
-                enter(fid, lineno, end_lineno, parameters)
+                self.builder.add_edge(object_id or parent_id, fid, "DEFINES")
+                enter(fid, object_scope or lineno, end_lineno, parameters)
+                arrow_id = fid
                 i = j
             elif (
                 parent_id in object_ids
@@ -10277,7 +10308,7 @@ class TSParser(BaseParser):
                 ):
                     declared_at = match.start(1)
                     docstring = self.get_leading_docstring(lines, i)
-                    mid = f"{parent_id}::{name}"
+                    mid = f"{object_id or parent_id}::{name}"
                     return_type, param_types, typed = self._extract_ts_types(full_sig)
                     # Build signature like: function name(p1: T1, p2: T2): ReturnType
                     signature = self._build_ts_signature(name, param_types, return_type)
@@ -10295,15 +10326,16 @@ class TSParser(BaseParser):
                         param_types=param_types,
                         signatures=self._overloads(mid, typed),
                     )
-                    self.builder.add_edge(parent_id, mid, "DEFINES")
-                    enter(mid, lineno, end_lineno, full_sig)
+                    self.builder.add_edge(object_id or parent_id, mid, "DEFINES")
+                    enter(mid, object_scope or lineno, end_lineno, full_sig)
                     i = j
             # Handle getter/setter methods: get name() or set name(value)
-            # Only match when parent is a Class (not inside a function/method)
+            # Only match when the parent is a Class, or an object a function
+            # returns (not inside a function/method of its own)
             elif (
                 "::" in parent_id
                 and parent_id != file_id
-                and self._is_class_context(parent_id)
+                and (object_id or self._is_class_context(parent_id))
                 and (match := re_getter_setter.search(line))
             ):
                 accessor_type = match.group(1)  # "get" or "set"
@@ -10312,7 +10344,7 @@ class TSParser(BaseParser):
                 docstring = self.get_leading_docstring(lines, i)
                 j, full_sig, end_lineno = consume_sig(i)
                 # Include accessor type in ID to distinguish get/set pairs
-                mid = f"{parent_id}::{accessor_type}_{name}"
+                mid = f"{object_id or parent_id}::{accessor_type}_{name}"
                 return_type, param_types, typed = self._extract_ts_types(full_sig)
                 # Build signature for getter/setter
                 if accessor_type == "get":
@@ -10335,7 +10367,7 @@ class TSParser(BaseParser):
                     accessor=accessor_type,
                     signatures=self._overloads(mid, typed),
                 )
-                self.builder.add_edge(parent_id, mid, "DEFINES")
+                self.builder.add_edge(object_id or parent_id, mid, "DEFINES")
                 # Don't push getters/setters to context - they're leaf methods
                 # that shouldn't contain nested definitions
                 i = j
@@ -10573,9 +10605,16 @@ class TSParser(BaseParser):
                     re.findall(r"\breturn\b", code)
                 )
                 found = None
+                # Whether the value the line gives is an expression: an
+                # arrow's `{` opens a block unless its body is parenthesised,
+                # which an object expression must be.
+                expression = returns == 1
                 if valued and code.count("=>") == 1:
                     returned = valued["returned"]
                     found = re.search(r"=>\s*(?P<new>new\s+)?", code)
+                    expression = bool(found) and code[
+                        found.end() :
+                    ].lstrip().startswith("(")
                 elif returns == 1:
                     found = _JS_RETURN_RE.match(code)
                 if returned is not None and (found or returns):
@@ -10604,23 +10643,33 @@ class TSParser(BaseParser):
                         )
                         if held and "#" not in held:
                             record = "", held[:-2]
-                    elif value.lstrip("(").startswith("{"):
+                    elif value.lstrip("(").startswith("{") and expression:
                         # An object: its properties are read where the
-                        # function is written.
+                        # function is written, and the functions among them
+                        # are members of the object itself.
                         opened = code.index("{", found.end())
+                        object_end = self._find_block_end(lines, i, opened)
                         key = f"[{len(self.builder.literals)}]"
+                        # An arrow's own node holds the object its body is,
+                        # which the arrow may declare on this line.
+                        holder = arrow_id or parent_id
                         held = self._object_held(lines, i, opened, since, owner)
                         self.builder.literals[key] = [held]
-                        self.builder.literal_scopes[key] = parent_id
+                        self.builder.literal_scopes[key] = holder
                         record = "", key
-                        object_end = self._find_block_end(lines, i, opened)
-                        # The members of the object are the returning
-                        # function's; a `return` on one of its lines is one
-                        # of a function written in it.
-                        returned_object = parent_id, lineno, object_end
-                        nameless[parent_id] = max(
-                            nameless.get(parent_id, 0), object_end
-                        )
+                        # An object that holds a function written in it owns
+                        # that function; one that holds none is no owner.
+                        if any(str(value).startswith("=") for value in held.values()):
+                            object_id = self._nameless_owner(
+                                holder, f"object@{lineno}", lineno, object_end, "object"
+                            )
+                            self.builder.literal_scopes[key] = object_id
+                            returned_objects.append(
+                                (holder, lineno, object_end, object_id, since)
+                            )
+                        # A `return` on a line of the object is one of a
+                        # function written in it.
+                        nameless[holder] = max(nameless.get(holder, 0), object_end)
                     returned.append(record)
                 if (
                     lineno > nameless.get(parent_id, 0)
@@ -14625,11 +14674,15 @@ class CallResolver:
 
     def _lexical(self, name, scope_id, skip_classes):
         """Definition of ``name`` in the innermost scope enclosing ``scope_id``.
-        What a constant holds is no scope: it is reached through the constant."""
+        What a constant holds, and what an object literal holds, are no
+        scopes: each is reached through the name it is written for."""
         for scope in self._scopes(scope_id):
             if skip_classes and self._is_class(scope):
                 continue
-            if scope in self.nodes and self.nodes[scope]["type"] == "Constant":
+            node = self.nodes.get(scope)
+            if node and (
+                node["type"] == "Constant" or node["metadata"].get("kind") == "object"
+            ):
                 continue
             hit = self.members.get(scope, {}).get(name)
             if hit:

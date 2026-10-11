@@ -4824,7 +4824,9 @@ class TestTypeScriptCallResolution:
         )
         ids = {n["id"] for n in builder.nodes}
         assert "FILE:a.ts::check::report" not in ids
-        assert "FILE:a.ts::check::has" in ids
+        # `has` is a method of the object `check` returns, whose owner no
+        # source can name.
+        assert "FILE:a.ts::check::object@8::has" in ids
         assert _calls(builder, "FILE:a.ts::check") == ["FILE:a.ts::report"]
 
     def test_class_after_a_closed_class_is_not_nested_in_it(self, tmp_path):
@@ -5931,8 +5933,8 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:use.ts::hidden") == ["REF:shared.load"]
         assert _calls(builder, "FILE:use.ts::declared") == [
             "FILE:make.ts::typed",
-            "FILE:make.ts::typed::clear",
             "FILE:make.ts::typed::load",
+            "FILE:make.ts::typed::object@15::clear",
         ]
         assert _calls(builder, "FILE:use.ts::oddly") == [
             "FILE:make.ts::odd",
@@ -6026,17 +6028,57 @@ class TestTypeScriptCallResolution:
             "FILE:make.ts::Store::clear",
             "FILE:make.ts::Store::load",
             "FILE:make.ts::Thing::show",
-            "FILE:make.ts::createStore::clear",
             "FILE:make.ts::createStore::load",
             "FILE:make.ts::createStore::load",
+            "FILE:make.ts::createStore::object@13::clear",
             "FILE:make.ts::openStore::load",
         ]
         assert _calls(builder, "FILE:use.ts::local") == [
             "FILE:make.ts::createStore",
-            "FILE:make.ts::createStore::clear",
             "FILE:make.ts::createStore::load",
+            "FILE:make.ts::createStore::object@13::clear",
         ]
         assert _calls(builder, "FILE:use.ts::hidden") == ["FILE:make.ts::Store::load"]
+
+    def test_a_function_of_the_object_is_not_the_factorys_inner_one(self, tmp_path):
+        """Two functions of one name — one the factory declares, one written
+        in the object it returns — are two nodes. A name written in the
+        object's function is read in the factory's scope."""
+        builder = _index(
+            tmp_path,
+            {
+                "make.ts": """
+                export function wrap(name: string) {
+                    function load(times: number) {
+                        inner();
+                    }
+                    return {
+                        load: () => {
+                            outer();
+                            load(1);
+                        },
+                    };
+                }
+                function inner() {}
+                function outer() {}
+                """,
+                "use.ts": """
+                import { wrap } from './make';
+                export function run() {
+                    wrap('a').load();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:make.ts::wrap::load") == ["FILE:make.ts::inner"]
+        assert _calls(builder, "FILE:make.ts::wrap::object@6::load") == [
+            "FILE:make.ts::outer",
+            "FILE:make.ts::wrap::load",
+        ]
+        assert _calls(builder, "FILE:use.ts::run") == [
+            "FILE:make.ts::wrap",
+            "FILE:make.ts::wrap::object@6::load",
+        ]
 
     def test_a_helper_returns_what_its_body_reaches(self, tmp_path):
         """A helper whose body hands back the result of a call that returns
@@ -6206,8 +6248,8 @@ class TestTypeScriptCallResolution:
 
     def test_a_function_written_in_the_object_a_function_returns(self, tmp_path):
         """A property of that object which holds a function written there is
-        a member of the function returning it, named as a method of the
-        object is, and is what a call of the property reaches."""
+        a member of the object, which no source names, and is what a call of
+        the property reaches."""
         builder = _index(
             tmp_path,
             {
@@ -6232,9 +6274,9 @@ class TestTypeScriptCallResolution:
             "FILE:a.ts::createOps",
             "FILE:a.ts::createOps",
             "FILE:a.ts::createOps",
-            "FILE:a.ts::createOps::clear",
-            "FILE:a.ts::createOps::create",
-            "FILE:a.ts::createOps::plain",
+            "FILE:a.ts::createOps::object@3::clear",
+            "FILE:a.ts::createOps::object@3::create",
+            "FILE:a.ts::createOps::object@3::plain",
         ]
 
     def test_member_call_is_not_pinned_to_a_function_of_another_module(self, tmp_path):
@@ -9380,6 +9422,44 @@ class TestOwnersSourceCannotName:
         assert {
             owner.rpartition("::")[2]: sorted(names) for owner, names in written.items()
         } == named
+
+    def test_a_returned_object_owns_the_functions_written_in_it(self, tmp_path):
+        """A factory's own members are the functions it declares; a function
+        written in the object it returns is a member of that object, which
+        no source can name. A name written in such a function is read in the
+        factory's scope — its own members are reached through `this`."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                function wrap(name) {
+                    function inner() {}
+                    return {
+                        member() {
+                            inner();
+                            this.sibling();
+                            sibling();
+                        },
+                        sibling() {
+                            inner();
+                        },
+                    };
+                }
+                """,
+            },
+        )
+        assert {
+            node["id"].rpartition("::")[2]
+            for node in builder.nodes
+            if node["id"].rpartition("::")[0] == "FILE:a.js::wrap"
+        } == {"inner", "object@4"}
+        assert _calls(builder, "FILE:a.js::wrap::object@4::member") == [
+            "FILE:a.js::wrap::inner",
+            "FILE:a.js::wrap::object@4::sibling",
+        ]
+        assert _calls(builder, "FILE:a.js::wrap::object@4::sibling") == [
+            "FILE:a.js::wrap::inner"
+        ]
 
 
 class TestJavaCallResolution:
