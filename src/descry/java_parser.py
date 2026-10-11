@@ -108,9 +108,11 @@ _RE_PACKAGE_FIELD = re.compile(
     rf"(?P<type>[\w.]+(?:{_TYPE_ARGUMENTS})?(?:\[\])*)\s+"
     r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*(?:=(?!=)|;)"
 )
-# An enum constant, alone on its line: `NAME,`, `NAME(args),`, `NAME {`
+# An enum constant, alone on its line behind its annotations: `NAME,`,
+# `NAME(args),`, `@Deprecated NAME {`
 _RE_ENUM_CONSTANT = re.compile(
-    r"^\s*([A-Z][A-Z0-9_]*)\s*(?:\(.*\))?\s*(?:\{.*\}\s*)?[,;{]?\s*$"
+    r"^\s*(?:@[\w.]+(?:\([^)]*\))?\s+)*"
+    r"([A-Z][A-Z0-9_]*)\s*(?:\(.*\))?\s*(?:\{.*\}\s*)?[,;{]?\s*$"
 )
 # The word before a name: `Type name(` declares `name` where it is no
 # statement's.
@@ -621,9 +623,13 @@ class JavaParser(BaseParser):
                         value_type=context_id.rpartition("::")[2],
                     )
                     self.builder.add_edge(context_id, constant_id, "DEFINES")
-                    if code.rstrip().endswith("{"):
-                        # The constant's body is a subclass of the enum.
-                        last = self._find_block_end(lines, i)
+                    # A `{` that ends the line, or starts the next where
+                    # nothing ends the constant, opens its body: a subclass
+                    # of the enum.
+                    opened = code.rstrip()[-1:]
+                    below = lines[i + 1].lstrip() if i + 1 < n else ""
+                    if opened == "{" or opened not in ",;}" and below.startswith("{"):
+                        last = self._find_block_end(lines, i + (opened != "{"))
                         self._anonymous(constant_id, context_id, lineno, last)
 
             # 4. Calls. ast-grep has no Java backend today, so we always

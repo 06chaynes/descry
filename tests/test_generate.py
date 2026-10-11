@@ -3281,6 +3281,17 @@ class TestRustCallResolution:
                     fn index(&self) {}
                 }
                 """,
+                "src/aliased.rs": """
+                use crate::traits as t;
+                use std::fmt as f;
+                pub struct Other;
+                impl t::Mark for Other {
+                    fn mark(&self) {}
+                }
+                impl f::Display for Other {
+                    fn fmt(&self) {}
+                }
+                """,
             },
         )
         bases = {
@@ -3288,7 +3299,10 @@ class TestRustCallResolution:
             for edge in builder.edges
             if edge["relation"] == "INHERITS"
         }
-        assert bases == {"FILE:src/lib.rs::Own": "FILE:src/traits.rs::Mark"}
+        assert bases == {
+            "FILE:src/lib.rs::Own": "FILE:src/traits.rs::Mark",
+            "FILE:src/aliased.rs::Other": "FILE:src/traits.rs::Mark",
+        }
 
     def test_impl_whose_brace_follows_a_where_clause(self, tmp_path):
         builder = _index(
@@ -8779,7 +8793,13 @@ class TestOwnersSourceCannotName:
                         void apply() {}
                         void more() {}
                     },
-                    OFF;
+                    @Deprecated HALF(1) {
+                        void half() {}
+                    },
+                    OFF
+                    {
+                        void off() {}
+                    };
                     void apply() {}
                 }
                 """,

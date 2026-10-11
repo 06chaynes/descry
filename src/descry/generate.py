@@ -11744,8 +11744,10 @@ class CallResolver:
     def _use_crate(self, path, file_id):
         """Where a Rust path written in ``file_id`` leads: ``(crate
         directory,)``, ``()`` for a crate outside the project, None when
-        the path starts at a module or type in scope."""
+        the path starts at a module or type in scope. A name that a `use`
+        of the file binds leads where that `use` does."""
         root = path.split("::")[0]
+        root = self.builder.imports.get(file_id, {}).get(root, root).split("::")[0]
         if root in ("crate", "self", "super"):
             return (self._unit(file_id, "rust"),)
         if root in self.builder.rust_crates:
