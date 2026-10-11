@@ -9732,13 +9732,14 @@ class TSParser(BaseParser):
         result that a local it names was bound to; its own name where it is
         a method or a function written there, None where it is anything
         else. A property under a name that is no plain one, a spread among
-        them, is left out."""
-        last = self._find_block_end(lines, index, column)
-        written, commented = [], False
-        for line in (lines[index][column:], *lines[index + 1 : last]):
-            line, commented = strip_block_comments(line, commented)
-            line = strip_line_comment(line, backticks=True)
+        them, is left out. With it, the number of the line that closes the
+        object. ``lines`` are the file's without their comments."""
+        written, depth = [], 0
+        for line in (lines[index][column:], *lines[index + 1 :]):
             written.append(_blank_js_strings(line))
+            depth += written[-1].count("{") - written[-1].count("}")
+            if depth <= 0:
+                break
         text = "\n".join(written)
         depth = 0
         for end, char in enumerate(text):
@@ -9746,11 +9747,6 @@ class TSParser(BaseParser):
             if not depth:
                 break
         body = text[1:end]
-        # A function written in the object is a member of it, filed under
-        # the object's own ID — where the object is written over lines. One
-        # written on a single line shares it with the `return`, so its
-        # properties get no node of their own.
-        holds_members = last > index + 1
         # The text around a nested part keeps the column it is written at.
         while (reduced := _JS_NESTED_RE.sub(_nested_part, body)) != body:
             body = reduced
@@ -9764,13 +9760,18 @@ class TSParser(BaseParser):
                 continue
             head, colon, tail = part.partition(":")
             name, value = head.strip(), tail.strip()
+            # A function written in the object is a member of it, filed
+            # under the object's own ID, where it is written below the line
+            # of the `return`. That line is read as the `return` alone, so a
+            # function on it gets no node.
+            member = start > len(written[0])
             method = re.fullmatch(
                 r"(?:async\s+|(get|set)\s+)?\*?\s*([\w$]+)\s*\0\s*\0", name
             )
             if method and not colon:
                 # An accessor is filed as `get_name` or `set_name`.
-                member = "_".join(filter(None, method.groups()))
-                held[member] = f"={member}" if holds_members else member
+                filed = "_".join(filter(None, method.groups()))
+                held[filed] = f"={filed}" if member else filed
             elif not re.fullmatch(r"[\w$]+", name):
                 continue
             elif not colon or re.fullmatch(r"[\w$]+(?:\.[\w$]+)*", value):
@@ -9779,13 +9780,13 @@ class TSParser(BaseParser):
                 made = "=>" in value or re.match(r"(?:async\s+)?function\b", value)
                 value_at = start + len(head) + 1 + len(tail) - len(tail.lstrip())
                 held[name] = (
-                    (f"={name}" if holds_members else name)
+                    (f"={name}" if member else name)
                     if made
                     else self._call_held(
                         index, column, value_at, at - 1, len(written[0]), since, owner
                     )
                 )
-        return held
+        return held, index + 1 + text.count("\n", 0, end)
 
     def _returned_object_at(self, returned_objects, parent_id, lineno):
         """The object that the definition ``parent_id`` returns at the line
@@ -10652,12 +10653,13 @@ class TSParser(BaseParser):
                         # function is written, and the functions among them
                         # are members of the object itself.
                         opened = code.index("{", found.end())
-                        object_end = self._find_block_end(lines, i, opened)
                         key = f"[{len(self.builder.literals)}]"
                         # An arrow's own node holds the object its body is,
                         # which the arrow may declare on this line.
                         holder = arrow_id or parent_id
-                        held = self._object_held(lines, i, opened, since, owner)
+                        held, object_end = self._object_held(
+                            code_lines, i, opened, since, owner
+                        )
                         self.builder.literals[key] = [held]
                         self.builder.literal_scopes[key] = holder
                         record = "", key

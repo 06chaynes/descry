@@ -5789,9 +5789,10 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:b.ts::run") == ["FILE:c.ts::helper"]
 
     def test_object_is_an_owner_where_it_holds_a_member_node(self, tmp_path):
-        """An accessor is a member; an object that holds no function, or is
-        written on one line with its `return`, gets no `object@` node, and a
-        call of a function written on that line is no other definition's."""
+        """An accessor is a member, and so is a function written after a
+        brace in a property's value or in a comment. An object that holds no
+        function below the line of its `return` gets no `object@` node, and
+        a call of a function written on that line is no other definition's."""
         builder = _index(
             tmp_path,
             {
@@ -5818,9 +5819,29 @@ class TestTypeScriptCallResolution:
                     };
                 }
 
+                export function firstLine(text: string) {
+                    return { error: () => text,
+                    };
+                }
+
+                export function pattern(text: string) {
+                    return {
+                        close: /}/,
+                        error: () => text,
+                    };
+                }
+
+                export function noted(text: string) {
+                    return /* { */ {
+                        error: () => text,
+                    };
+                }
+
                 export function use() {
                     const { error } = oneLine("x");
                     error();
+                    firstLine("x").error();
+                    pattern("x").error();
                 }
                 """,
                 "b.ts": """
@@ -5830,13 +5851,22 @@ class TestTypeScriptCallResolution:
                 """,
             },
         )
-        assert _calls(builder, "FILE:a.ts::use") == ["FILE:a.ts::oneLine"]
+        assert _calls(builder, "FILE:a.ts::use") == [
+            "FILE:a.ts::firstLine",
+            "FILE:a.ts::oneLine",
+            "FILE:a.ts::pattern",
+            "FILE:a.ts::pattern::object@30::error",
+        ]
         assert sorted(
             node["id"] for node in builder.nodes if "object@" in node["id"]
         ) == [
             "FILE:a.ts::accessors::object@14",
             "FILE:a.ts::accessors::object@14::get_size",
             "FILE:a.ts::accessors::object@14::set_size",
+            "FILE:a.ts::noted::object@37",
+            "FILE:a.ts::noted::object@37::error",
+            "FILE:a.ts::pattern::object@30",
+            "FILE:a.ts::pattern::object@30::error",
         ]
 
     def test_constant_bound_to_a_library_value_is_the_library_s(self, tmp_path):
