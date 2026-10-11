@@ -46,6 +46,7 @@ class DartAdapter:
     name = "dart"
     scheme = "scip-dart"
     binary = "scip-dart"
+    binary_alternatives = ("scip_dart",)
     extensions = (".dart",)
 
     def discover(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
@@ -55,8 +56,9 @@ class DartAdapter:
         Discovery precedence:
         1. Root-level ``pubspec.yaml`` → single project (standard Dart
            and Flutter app layout).
-        2. Per-subdir packages (monorepo / melos workspace layout with
-           ``packages/*/pubspec.yaml``).
+        2. Per-subdir packages (``<dir>/pubspec.yaml``), then per-
+           collection packages (``<collection>/<dir>/pubspec.yaml`` —
+           melos ``packages/``, shelf's ``pkgs/``, ``apps/``…).
         """
         if (root / "pubspec.yaml").exists() and _has_dart_sources(root):
             return [
@@ -89,9 +91,11 @@ class DartAdapter:
                 )
             )
 
-        # Melos / workspace layout: packages/<name>/pubspec.yaml.
+        # Workspace layouts keep a package one level deeper than the
+        # collection directory: melos `packages/<name>/`, shelf's
+        # `pkgs/<name>/`, `apps/<name>/`, `examples/<name>/`.
         if not projects:
-            for marker in root.glob("packages/*/pubspec.yaml"):
+            for marker in root.glob("*/*/pubspec.yaml"):
                 pkg_dir = marker.parent
                 if pkg_dir.name.startswith("."):
                     continue

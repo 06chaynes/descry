@@ -132,6 +132,16 @@ class ScipIndex:
             logger.warning(f"SCIP: Failed to parse {scip_file}: {e}")
             return
 
+        if not index.documents or not any(d.occurrences for d in index.documents):
+            # An indexer that ran but found nothing usually means its own
+            # environment was missing (a `pip`/`java` on PATH, a `dart pub
+            # get`), not that the project holds no symbols — the regex
+            # rates that follow look correct while SCIP contributes 0%.
+            logger.warning(
+                f"SCIP: {scip_file} carries no symbols — "
+                f"check the indexer's output and its own requirements"
+            )
+
         project_dir = self._project_dirs.get(scip_file)
         if project_dir is None:
             project_dir = self._stated_project_dir(index.metadata.project_root)

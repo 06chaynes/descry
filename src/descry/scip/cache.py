@@ -39,6 +39,7 @@ from descry.scip.adapter import (
     DiscoveredProject,
     LanguageAdapter,
     project_dir,
+    resolved_binary,
 )
 from descry.scip.adapters.rust import crate_dir as rust_crate_dir
 
@@ -319,9 +320,18 @@ class ScipCacheManager:
         output_before = self._file_signature(output_path)
         default_before = self._file_signature(default_output)
 
+        # Where argv[0] is the indexer itself, run the probed binary: an
+        # indexer installed under another name (scip_dart for scip-dart)
+        # still runs. argv[0] is allowed to be a wrapper (`sh -c`), which
+        # this leaves alone.
+        argv0 = (
+            resolved_binary(adapter)
+            if spec.argv and spec.argv[0] == adapter.binary
+            else spec.argv[0]
+        )
         try:
             result = subprocess.run(
-                spec.argv,
+                [argv0, *spec.argv[1:]],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

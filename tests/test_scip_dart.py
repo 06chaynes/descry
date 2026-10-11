@@ -30,6 +30,36 @@ class TestDartAdapterDiscovery:
         projects = DartAdapter().discover(tmp_path, set())
         assert sorted(p.name for p in projects) == ["alpha", "beta"]
 
+    def test_pkgs_workspace(self, tmp_path):
+        """shelf's layout keeps packages under `pkgs/` — a collection
+        directory any name, one level above each package."""
+        for name in ("shelf", "shelf_web_socket"):
+            pkg = tmp_path / "pkgs" / name
+            pkg.mkdir(parents=True)
+            (pkg / "pubspec.yaml").write_text(f"name: {name}\n")
+            (pkg / "lib").mkdir()
+            (pkg / "lib" / "main.dart").write_text("void main() {}\n")
+
+        projects = DartAdapter().discover(tmp_path, set())
+        assert sorted(p.name for p in projects) == ["shelf", "shelf_web_socket"]
+
+    def test_binary_alternative_probes_scip_dart(self, tmp_path, monkeypatch):
+        """`dart pub global activate scip_dart` installs `scip_dart`;
+        the adapter probes both spellings."""
+        import shutil
+
+        fake = tmp_path / "scip_dart"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+        monkeypatch.setattr(
+            shutil, "which", lambda name: str(fake) if name == "scip_dart" else None
+        )
+        from descry.scip import adapter as adapter_mod
+
+        adapter_mod.reset_registry_state()
+        assert adapter_mod.resolved_binary(DartAdapter()) == str(fake)
+        adapter_mod.reset_registry_state()
+
     def test_subdir_packages(self, tmp_path):
         for name in ("alpha", "beta"):
             pkg = tmp_path / name

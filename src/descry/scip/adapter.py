@@ -81,7 +81,8 @@ class LanguageAdapter(Protocol):
     ``"scip-typescript"``, ``"scip-python"``, ``"scip-java"``, ``"scip-go"``)."""
 
     binary: str
-    """Command name probed via ``shutil.which()``."""
+    """Command name probed via ``shutil.which()``. An indexer installed
+    under another name lists it in ``binary_alternatives``."""
 
     extensions: tuple[str, ...]
     """Source file extensions this adapter owns (e.g. ``(".java", ".kt", ".scala")``)."""
@@ -146,7 +147,8 @@ def _probe_binary(adapter: LanguageAdapter) -> dict:
     import subprocess
 
     result = {"available": False, "path": None, "version": None}
-    path = shutil.which(adapter.binary)
+    names = [adapter.binary, *getattr(adapter, "binary_alternatives", ())]
+    path = next((p for n in names if (p := shutil.which(n))), None)
     if path:
         try:
             proc = subprocess.run(
@@ -182,6 +184,15 @@ def indexer_status(lang_name: str) -> dict:
     if adapter is None:
         return {"available": False, "path": None, "version": None}
     return _probe_binary(adapter)
+
+
+def resolved_binary(adapter: LanguageAdapter) -> str:
+    """The path the probe found, else `adapter.binary`.
+
+    `build_command` uses this for ``argv[0]`` where an indexer is
+    installed under a name other than ``adapter.binary``.
+    """
+    return _probe_binary(adapter).get("path") or adapter.binary
 
 
 def indexer_available(lang_name: str) -> bool:
