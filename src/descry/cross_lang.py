@@ -31,13 +31,15 @@ logger = logging.getLogger(__name__)
 _RE_STRING = re.compile(r"""["']([^"'\n]*)["']""")
 
 
-# What a line of an attribute, a decorator or a comment starts with
-_HEADS = ("#", "@", "[", "//", "/*", "*")
+# What a line of a comment starts with
+_COMMENTS = ("#", "//", "/*", "*")
 
 
 def _head(lines: list[str]) -> str:
-    """What heads the definition below ``lines``: its attributes, decorators
-    and comments, a blank line between them and it left out."""
+    """What heads the definition below ``lines``: its attributes and
+    decorators, those written in a comment (`* @Route(...)`) too. Other
+    comment lines, and a blank line between the head and the definition, are
+    passed over."""
     head, depth = [], 0
     for line in reversed(lines):
         text = line.strip()
@@ -47,8 +49,11 @@ def _head(lines: list[str]) -> str:
             continue
         # Read upwards, a `)` or `]` opens what a `(` or `[` closes.
         opened = depth + sum(map(text.count, ")]")) - sum(map(text.count, "(["))
-        if depth <= 0 and opened <= 0 and not text.startswith(_HEADS):
-            break
+        if depth <= 0 and not text.lstrip("/*# ").startswith(("@", "[")):
+            if text.startswith(_COMMENTS):
+                continue
+            if opened <= 0:
+                break
         head.append(text)
         depth = max(opened, 0)
     return "\n".join(head)
@@ -71,6 +76,7 @@ class CrossLangTracer:
         api_prefixes: list[str] | None = None,
         is_test=None,
         project_root=None,
+        max_file_bytes=0,
     ):
         """Initialize the tracer with OpenAPI spec.
 
@@ -84,9 +90,11 @@ class CrossLangTracer:
             is_test: Tells whether a node ID is test code.
             project_root: Where the graph's files are, to read what heads a
                 function that shares its name with another.
+            max_file_bytes: A larger file is not read, when not 0.
         """
         self.is_test = is_test
         self.project_root = project_root
+        self.max_file_bytes = max_file_bytes
         self.openapi_path = Path(openapi_path)
         self.graph_path = Path(graph_path) if graph_path else None
         self.backend_handler_patterns = backend_handler_patterns or []
@@ -231,7 +239,9 @@ class CrossLangTracer:
         rel_path = node["id"][5:].split("::")[0]
         lineno = node.get("metadata", {}).get("lineno")
         if rel_path not in sources:
-            located = self.project_root and source_path(self.project_root, rel_path)
+            located = self.project_root and source_path(
+                self.project_root, rel_path, self.max_file_bytes
+            )
             text = Path(located).read_text("utf-8", "ignore") if located else ""
             sources[rel_path] = text.split("\n")
         if not isinstance(lineno, int):

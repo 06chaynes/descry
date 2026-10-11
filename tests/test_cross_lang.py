@@ -265,19 +265,23 @@ class TestGraphLinking:
             "FILE:backend/src/routes/actions.rs::list_actions"
         )
 
-    @pytest.mark.parametrize("route", ["/api/v1/actions", "/actions"])
+    @pytest.mark.parametrize(
+        "head",
+        [
+            '#[utoipa::path(\n    get,\n    path = "/api/v1/actions",\n)]\n\n',
+            '#[get("/actions")]\n/// Lists them.\n',
+            '/**\n * @Route("/actions")\n */\n',
+        ],
+    )
     def test_function_that_declares_the_path_is_the_handler(
-        self, spec_path, tmp_path, route
+        self, spec_path, tmp_path, head
     ):
         sources = {
             "client/api.rs": (
                 'fn url() -> String {\n    api("/actions")\n}\n\n'
-                "/// Lists them.\nasync fn list_actions() {}\n"
+                '/// Lists what "/actions" answers.\nasync fn list_actions() {}\n'
             ),
-            "server/routes.rs": (
-                f'#[utoipa::path(\n    get,\n    path = "{route}",\n)]\n\n'
-                "async fn list_actions() {}\n"
-            ),
+            "server/routes.rs": f"{head}async fn list_actions() {{}}\n",
         }
         nodes = []
         for rel_path, text in sources.items():
@@ -296,6 +300,10 @@ class TestGraphLinking:
         assert tracer.operation_to_handler["list_actions"] == (
             "FILE:server/routes.rs::list_actions"
         )
+        unread = CrossLangTracer(
+            str(spec_path), str(graph), project_root=tmp_path, max_file_bytes=8
+        )
+        assert "list_actions" not in unread.operation_to_handler
 
     def test_non_callable_nodes_are_not_handlers(self, spec_path, graph_path):
         tracer = CrossLangTracer(str(spec_path), str(graph_path))
