@@ -3304,6 +3304,47 @@ class TestRustCallResolution:
             "FILE:src/aliased.rs::Other": "FILE:src/traits.rs::Mark",
         }
 
+    def test_call_through_a_name_a_use_binds_a_module_under(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "x"\n',
+                "src/lib.rs": """
+                pub mod shapes;
+                pub mod tools;
+                pub mod user;
+                """,
+                "src/shapes.rs": """
+                pub struct Square;
+                impl Square {
+                    pub fn of() -> Square {
+                        Square
+                    }
+                }
+                pub fn make() {}
+                """,
+                "src/tools.rs": """
+                pub fn sharpen() {}
+                """,
+                "src/user.rs": """
+                use crate::shapes as s;
+                use crate::shapes as tools;
+                use std::fs as f;
+                pub fn go() {
+                    s::make();
+                    s::Square::of();
+                    f::read("x");
+                    crate::tools::sharpen();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:src/user.rs::go") == [
+            "FILE:src/shapes.rs::Square::of",
+            "FILE:src/shapes.rs::make",
+            "FILE:src/tools.rs::sharpen",
+        ]
+
     def test_impl_whose_brace_follows_a_where_clause(self, tmp_path):
         builder = _index(
             tmp_path,

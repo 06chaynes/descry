@@ -11610,9 +11610,17 @@ class CallResolver:
             owners = self._types(lang, receiver)
             if lang == "clang":
                 owners = [o for o in owners if self._in_reach(o, source_id)] or owners
-            if lang != "rust" or callee.endswith(f"::{name}"):
-                # A Rust module is named in a path, never before a `.`.
+            if lang != "rust":
                 owners += self.containers.get((lang, receiver), [])
+            elif callee.endswith(f"::{name}"):
+                # A Rust module is named in a path, never before a `.`. The
+                # first segment of a path may be the name a `use` of the
+                # file binds the module under.
+                uses = self.builder.imports.get(source_id.split("::")[0], {})
+                bound = (
+                    uses.get(receiver, receiver) if len(qualifier) == 1 else receiver
+                )
+                owners += self.containers.get((lang, bound.rpartition("::")[2]), [])
             source = "regex"
             root = qualifier[0]
             # A path of two or more segments, not a chain of fields, that
