@@ -9705,6 +9705,39 @@ class TestJavaCallResolution:
         assert _calls(builder, f"{body}::draw") == ["FILE:app/Shapes.java::Shape::draw"]
         assert _calls(builder, "FILE:app/Shapes.java::Use::draw") == []
 
+    def test_body_of_an_enum_constant_is_a_subclass_of_its_enum(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "A.java": """
+                class A {
+                    enum State {
+                        ON {
+                            boolean live() { return shared(); }
+                        },
+                        OFF;
+                        boolean live() { return false; }
+                        boolean shared() { return true; }
+                    }
+                }
+                """,
+                "B.java": """
+                class B {
+                    enum State { UP, DOWN }
+                }
+                """,
+            },
+        )
+        body = "FILE:A.java::A::State::ON::class@4"
+        bases = [
+            edge["target"]
+            for edge in builder.edges
+            if edge["source"] == body and edge["relation"] == "INHERITS"
+        ]
+        assert bases == ["FILE:A.java::A::State"]
+        assert _calls(builder, f"{body}::live") == ["FILE:A.java::A::State::shared"]
+        assert _calls(builder, "FILE:A.java::A::State::live") == []
+
     def test_type_name_is_read_in_its_package(self, tmp_path):
         """A simple type name is the type of the file's own package, not a
         class nested in an unrelated one that sits nearer in the tree."""

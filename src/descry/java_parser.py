@@ -270,8 +270,8 @@ class JavaParser(BaseParser):
 
     def _anonymous(self, parent_id, base, lineno, last):
         """Open the body, lines ``lineno`` to ``last``, of a class source
-        cannot name: a subclass of ``base`` made in ``parent_id``, whose
-        members are its own."""
+        cannot name: a subclass of ``base``, a node or a `REF:` to a name,
+        made in ``parent_id``. Its members are its own."""
         anonymous_id = f"{parent_id}::class@{lineno}"
         self.builder.add_node(
             anonymous_id,
@@ -284,7 +284,7 @@ class JavaParser(BaseParser):
             docstring="",
         )
         self.builder.add_edge(parent_id, anonymous_id, "DEFINES")
-        self.builder.add_edge(anonymous_id, f"REF:{base}", "INHERITS")
+        self.builder.add_edge(anonymous_id, base, "INHERITS")
         self.enter_context(anonymous_id, lineno + 1, last - 1)
 
     def call_origin(self, callee, lineno, since, owner=None):
@@ -624,8 +624,7 @@ class JavaParser(BaseParser):
                     if code.rstrip().endswith("{"):
                         # The constant's body is a subclass of the enum.
                         last = self._find_block_end(lines, i)
-                        enum = context_id.rpartition("::")[2]
-                        self._anonymous(constant_id, enum, lineno, last)
+                        self._anonymous(constant_id, context_id, lineno, last)
 
             # 4. Calls. ast-grep has no Java backend today, so we always
             #    run the regex extractor (rather than gating on
@@ -737,7 +736,8 @@ class JavaParser(BaseParser):
                     last = self._find_block_end(lines, i)
                     anonymous[last] = created[0]
                     self._supers.append((last, subclassed[2].replace(".", "::")))
-                    self._anonymous(parent_id, subclassed[2], lineno, last)
+                    base = f"REF:{subclassed[2]}"
+                    self._anonymous(parent_id, base, lineno, last)
 
             # A block opened outside every method is a body of the type's.
             opened = bodies and bodies[-1][1] == lineno

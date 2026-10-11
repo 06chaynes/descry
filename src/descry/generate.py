@@ -11040,8 +11040,9 @@ class CallResolver:
             if edge["relation"] == "IMPORTS" and self.lang(edge["source"]) == "ruby":
                 path = edge["target"].removeprefix("MODULE:")
                 self.requires.setdefault(edge["source"], []).append(path)
-            if edge["relation"] == "INHERITS" and edge["target"].startswith("REF:"):
-                base = edge["target"][4:]
+            if edge["relation"] == "INHERITS":
+                # A base the parser gave as a node is known by its name too.
+                base = edge["target"].removeprefix("REF:")
                 # A PHP base is written by its full name, which names one
                 # type; a Ruby constant is looked up by its whole path.
                 lang = self.lang(edge["source"])
