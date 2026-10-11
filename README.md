@@ -320,7 +320,7 @@ Share of project calls resolved without SCIP, measured on public repositories at
 
 | Language | Repository | Resolved |
 |---|---|---|
-| Rust | ripgrep `3fce3b5` | 87% (93% with rust-analyzer) |
+| Rust | ripgrep `3fce3b5` | 87% (96% with rust-analyzer) |
 | TypeScript | zod `0b216ef` | 93% |
 | Go | cobra `adbc881` | 100% |
 | Java | gson `845664b`, commons-lang `682a8ff` | 100%, 99% |
