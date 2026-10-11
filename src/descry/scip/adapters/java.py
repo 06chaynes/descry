@@ -55,6 +55,15 @@ _JAVA_BUILD_MARKERS = (
     "build.sbt",
 )
 
+# What scip-java's GradleBuildTool treats as a Gradle build. A `pom.xml`
+# wins over every one of them: scip-java orders Maven before Gradle.
+_GRADLE_MARKERS = (
+    "settings.gradle",
+    "gradlew",
+    "build.gradle",
+    "build.gradle.kts",
+)
+
 
 _COMPAT_INIT_SCRIPT_PATH = Path(__file__).parent / "_java_compat.init.gradle"
 
@@ -259,6 +268,17 @@ class JavaAdapter:
         scipCompileAll``) because ``--`` replaces scip-java's default
         task list.
         """
+        # The init-script and the default task list are Gradle arguments:
+        # scip-java forwards everything after `--` to the build tool it
+        # detects, and on a Maven (or sbt) project those flags reach `mvn`
+        # (or `sbt`), which rejects them and writes no index. scip-java
+        # checks Maven before Gradle, so a `pom.xml` decides it even beside
+        # Gradle files.
+        gradle = (
+            any((project.root / m).exists() for m in _GRADLE_MARKERS)
+            and not (project.root / "pom.xml").exists()
+        )
+
         # Pre-flight: scip-java's SemanticdbGradlePlugin applies to
         # allprojects (incl. :buildSrc and includeBuild participants).
         # On Kotlin DSL projects with precompiled-script-plugins, that
@@ -266,7 +286,10 @@ class JavaAdapter:
         # and there is no flag (incl. -x / --exclude-task) that defers
         # it past task creation. Skip with a clear log so the user
         # sees what's happening instead of an opaque scip-java stderr.
-        kotlin_dsl_marker = _detect_kotlin_dsl_buildSrc(project.root)
+        # The plugin runs inside Gradle, so only a Gradle build is skipped.
+        kotlin_dsl_marker = (
+            _detect_kotlin_dsl_buildSrc(project.root) if gradle else None
+        )
         if kotlin_dsl_marker is not None:
             logger.warning(
                 f"SCIP: skipping scip-java for {project.name}: "
@@ -283,19 +306,6 @@ class JavaAdapter:
 
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
 
-        # The init-script and the default task list are Gradle arguments:
-        # scip-java forwards everything after `--` to the build tool it
-        # detects, and on a Maven (or sbt) project those flags reach `mvn`
-        # (or `sbt`), which rejects them and writes no index. scip-java
-        # checks Maven before Gradle, so a `pom.xml` decides it even beside
-        # Gradle files.
-        gradle = (
-            any(
-                (project.root / m).exists()
-                for m in ("build.gradle", "build.gradle.kts")
-            )
-            and not (project.root / "pom.xml").exists()
-        )
         init_script = _compat_init_script() if gradle else None
         pass_through: list[str] = []
         if init_script is not None:

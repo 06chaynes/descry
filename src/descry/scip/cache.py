@@ -320,14 +320,18 @@ class ScipCacheManager:
         output_before = self._file_signature(output_path)
         default_before = self._file_signature(default_output)
 
+        if not spec.argv:
+            logger.warning(
+                f"SCIP: {adapter.name} built an empty command for {project.name}"
+            )
+            return False
+
         # Where argv[0] is the indexer itself, run the probed binary: an
         # indexer installed under another name (scip_dart for scip-dart)
         # still runs. argv[0] is allowed to be a wrapper (`sh -c`), which
         # this leaves alone.
         argv0 = (
-            resolved_binary(adapter)
-            if spec.argv and spec.argv[0] == adapter.binary
-            else spec.argv[0]
+            resolved_binary(adapter) if spec.argv[0] == adapter.binary else spec.argv[0]
         )
         try:
             result = subprocess.run(

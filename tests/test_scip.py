@@ -414,6 +414,34 @@ def _write_scip(path, documents, project_root="", position_encoding=0):
     return path
 
 
+class TestGenerateScipEmptyCommand:
+    """A command with no argv is refused rather than indexed."""
+
+    def test_empty_argv_is_refused(self, tmp_path):
+        from descry.scip.adapter import CommandSpec, DiscoveredProject
+
+        class _EmptyAdapter:
+            name = "emptylang"
+            scheme = "scip-empty"
+            binary = "scip-empty"
+            extensions = (".empty",)
+
+            def discover(self, _root, _excluded_dirs):
+                return []
+
+            def build_command(self, project, _out_path, _config):
+                return CommandSpec(argv=[], cwd=project.root)
+
+            def parse_descriptors(self, _raw):
+                return []
+
+        mgr = ScipCacheManager(tmp_path)
+        mgr.cache_dir.mkdir(parents=True, exist_ok=True)
+        project = DiscoveredProject(name="p", root=tmp_path, language="emptylang")
+
+        assert mgr._generate_scip(_EmptyAdapter(), project) is False
+
+
 class TestScipIndexResolveLineSemantics:
     """resolve() takes 1-based descry linenos against 0-based SCIP ranges.
 

@@ -23,6 +23,7 @@ cache atomically.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from descry.scip.adapter import (
@@ -46,13 +47,15 @@ class DartAdapter:
     name = "dart"
     scheme = "scip-dart"
     binary = "scip-dart"
-    # `dart pub global` installs scip_dart into ~/.pub-cache/bin and
-    # warns that directory is not on PATH — probe it explicitly too.
-    binary_alternatives = (
-        "scip_dart",
-        str(Path.home() / ".pub-cache" / "bin" / "scip_dart"),
-    )
     extensions = (".dart",)
+
+    @property
+    def binary_alternatives(self) -> tuple[str, ...]:
+        """`dart pub global` installs `scip_dart` into `$PUB_CACHE/bin`, or
+        `~/.pub-cache/bin` when that variable is unset, and warns that the
+        directory is not on PATH — probe it explicitly too."""
+        cache = os.environ.get("PUB_CACHE") or str(Path.home() / ".pub-cache")
+        return ("scip_dart", str(Path(cache) / "bin" / "scip_dart"))
 
     def discover(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
         """Return one DiscoveredProject per Dart package.
@@ -102,9 +105,10 @@ class DartAdapter:
         if not projects:
             for marker in root.glob("*/*/pubspec.yaml"):
                 pkg_dir = marker.parent
-                if pkg_dir.name.startswith("."):
+                collection = pkg_dir.parent
+                if pkg_dir.name.startswith(".") or collection.name.startswith("."):
                     continue
-                if pkg_dir.name in excluded_dirs:
+                if pkg_dir.name in excluded_dirs or collection.name in excluded_dirs:
                     continue
                 if pkg_dir.name in seen:
                     continue

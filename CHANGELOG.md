@@ -225,13 +225,17 @@ Python SDK v2, and a full-tree review's findings are fixed.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root
   when given `--project-root` alone, and refuses a path outside it.
   scip-java no longer passes the Gradle init-script on Maven or sbt
-  projects, where `mvn`/`sbt` rejected it and no index was written.
-  scip-dart is found under either spelling — `scip-dart` or the
-  `scip_dart` `dart pub global` installs — and its package discovery
-  reaches `<collection>/<name>/pubspec.yaml` (`pkgs/`, `apps/`, …), not
-  only `packages/`. An index file that parses but carries no symbols is
-  logged, since that usually means the indexer's own environment was
-  missing rather than a project with no symbols.
+  projects, where `mvn`/`sbt` rejected it and no index was written; its
+  Kotlin-DSL pre-flight likewise runs only for a Gradle build, which is
+  now recognised by every marker scip-java's own detector accepts
+  (`settings.gradle` and `gradlew` beside the two build files). scip-dart is found under either spelling — `scip-dart` or
+  the `scip_dart` `dart pub global` installs, read from `$PUB_CACHE` when
+  it is set — and its package discovery reaches
+  `<collection>/<name>/pubspec.yaml` (`pkgs/`, `apps/`, …), not only
+  `packages/`, while a package under an excluded or dot-directory is left
+  alone. An index file that parses but carries no symbols is logged, since
+  that usually means the indexer's own environment was missing rather than
+  a project with no symbols.
 - **Service and query.** Source is read relative to the project root
   whatever the working directory. A missing, stale or corrupt graph no
   longer stops the MCP server from starting, and is reported by `health`

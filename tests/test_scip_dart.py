@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from descry.scip.adapter import AdapterConfig, DiscoveredProject
 from descry.scip.adapters.dart import DartAdapter
 from descry.scip.parser import ScipIndex
@@ -59,6 +61,39 @@ class TestDartAdapterDiscovery:
         adapter_mod.reset_registry_state()
         assert adapter_mod.resolved_binary(DartAdapter()) == str(fake)
         adapter_mod.reset_registry_state()
+
+    def test_collection_directory_is_excluded(self, tmp_path):
+        """The exclusion applies to the collection too: `build/` can hold a
+        stale copy of a package."""
+        pkg = tmp_path / "build" / "pkg"
+        pkg.mkdir(parents=True)
+        (pkg / "pubspec.yaml").write_text("name: pkg\n")
+        (pkg / "main.dart").write_text("void main() {}\n")
+
+        assert DartAdapter().discover(tmp_path, {"build"}) == []
+
+    def test_dot_collection_is_skipped(self, tmp_path):
+        pkg = tmp_path / ".hidden" / "pkg"
+        pkg.mkdir(parents=True)
+        (pkg / "pubspec.yaml").write_text("name: pkg\n")
+        (pkg / "main.dart").write_text("void main() {}\n")
+
+        assert DartAdapter().discover(tmp_path, set()) == []
+
+    def test_pub_cache_is_honoured(self, tmp_path, monkeypatch):
+        """`dart pub global` installs into `$PUB_CACHE/bin` when that
+        variable is set, and the adapter probes it there."""
+        monkeypatch.setenv("PUB_CACHE", str(tmp_path))
+
+        assert str(tmp_path / "bin" / "scip_dart") in DartAdapter().binary_alternatives
+
+    def test_pub_cache_default_is_the_home_directory(self, monkeypatch):
+        monkeypatch.delenv("PUB_CACHE", raising=False)
+
+        assert (
+            str(Path.home() / ".pub-cache" / "bin" / "scip_dart")
+            in DartAdapter().binary_alternatives
+        )
 
     def test_subdir_packages(self, tmp_path):
         for name in ("alpha", "beta"):

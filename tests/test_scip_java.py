@@ -162,6 +162,38 @@ class TestJavaAdapterBuildCommand:
 
         assert "--" not in spec.argv
 
+    def test_gradle_args_for_every_marker_scip_java_detects(self, tmp_path):
+        """scip-java's GradleBuildTool accepts `settings.gradle`,
+        `gradlew`, `build.gradle` and `build.gradle.kts`; the init-script
+        is passed for each of them, not for the two build files alone."""
+        for marker in (
+            "settings.gradle",
+            "gradlew",
+            "build.gradle",
+            "build.gradle.kts",
+        ):
+            root = tmp_path / marker
+            root.mkdir()
+            (root / marker).write_text("// marker\n")
+            project = DiscoveredProject(name="myapp", root=root, language="java")
+            spec = JavaAdapter().build_command(
+                project, root / "out.scip", AdapterConfig()
+            )
+
+            assert "--" in spec.argv, marker
+
+    def test_pom_wins_over_a_settings_marker(self, tmp_path):
+        """Maven decides before Gradle, so a `pom.xml` beside a
+        `settings.gradle` still gets no Gradle arguments."""
+        (tmp_path / "pom.xml").write_text("<project/>")
+        (tmp_path / "settings.gradle").write_text("rootProject.name = 'x'\n")
+        project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
+        spec = JavaAdapter().build_command(
+            project, tmp_path / "out.scip", AdapterConfig()
+        )
+
+        assert "--" not in spec.argv
+
 
 class TestJavaAdapterKotlinDslPreflight:
     """scip-java's SemanticdbGradlePlugin can't index Kotlin DSL builds
@@ -172,6 +204,7 @@ class TestJavaAdapterKotlinDslPreflight:
 
     def test_kotlin_dsl_in_buildSrc_kts_raises(self, tmp_path):
         # buildSrc/build.gradle.kts with `kotlin-dsl` (kotlinx.coroutines pattern)
+        (tmp_path / "build.gradle.kts").write_text("// root build\n")
         (tmp_path / "buildSrc").mkdir()
         (tmp_path / "buildSrc" / "build.gradle.kts").write_text(
             "plugins {\n    `kotlin-dsl`\n}\n"
@@ -186,6 +219,7 @@ class TestJavaAdapterKotlinDslPreflight:
     def test_kotlin_dsl_via_includeBuild_raises(self, tmp_path):
         # ktor pattern: includeBuild('build-settings-logic') in settings.gradle.kts
         # and that included build applies kotlin-dsl
+        (tmp_path / "gradlew").write_text("#!/bin/sh\n")
         (tmp_path / "settings.gradle.kts").write_text(
             'rootProject.name = "ktor"\nincludeBuild("build-settings-logic")\n'
         )
@@ -202,6 +236,7 @@ class TestJavaAdapterKotlinDslPreflight:
 
     def test_kotlin_dsl_groovy_dsl_buildSrc_raises(self, tmp_path):
         # The Groovy-DSL `apply plugin: 'kotlin-dsl'` variant
+        (tmp_path / "build.gradle").write_text("// root build\n")
         (tmp_path / "buildSrc").mkdir()
         (tmp_path / "buildSrc" / "build.gradle").write_text(
             "apply plugin: 'kotlin-dsl'\n"
@@ -224,6 +259,22 @@ class TestJavaAdapterKotlinDslPreflight:
             project, tmp_path / "out.scip", AdapterConfig()
         )
         assert spec.argv[0] == "scip-java"
+
+    def test_kotlin_dsl_buildSrc_on_a_maven_project_is_not_skipped(self, tmp_path):
+        # The plugin runs inside Gradle and a Maven project gets no
+        # init-script, so a Gradle build script beside `pom.xml` is no
+        # reason to lose SCIP for it.
+        (tmp_path / "pom.xml").write_text("<project/>")
+        (tmp_path / "buildSrc").mkdir()
+        (tmp_path / "buildSrc" / "build.gradle.kts").write_text(
+            "plugins {\n    `kotlin-dsl`\n}\n"
+        )
+        project = DiscoveredProject(name="maven", root=tmp_path, language="java")
+        spec = JavaAdapter().build_command(
+            project, tmp_path / "out.scip", AdapterConfig()
+        )
+
+        assert "--" not in spec.argv
 
     def test_no_buildSrc_does_not_raise(self, tmp_path):
         # Plain Maven project — no buildSrc at all
