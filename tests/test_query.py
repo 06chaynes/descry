@@ -1224,6 +1224,30 @@ class TestUnresolvedCallsInPathsAndFlows:
             ("FILE:b.py::helper", "FILE:b.py::leaf")
         ]
 
+    @pytest.mark.parametrize("asked", ["Store::get", "Store.get"])
+    def test_dotted_name_is_the_qualified_one(self, tmp_path, asked):
+        nodes = [
+            _fn("FILE:a.py::Store::get"),
+            _fn("FILE:a.py::Cache::get"),
+            _fn("FILE:a.py::one"),
+            _fn("FILE:a.py::two"),
+            _fn("FILE:a.py::three"),
+        ]
+        edges = [
+            _calls("FILE:a.py::one", "FILE:a.py::Store::get"),
+            _calls("FILE:a.py::two", "FILE:a.py::Cache::get"),
+            {
+                "source": "FILE:a.py::three",
+                "target": "REF:Store.get",
+                "relation": "CALLS",
+                "metadata": {"lineno": 3},
+            },
+        ]
+        querier = _querier(tmp_path, nodes, edges)
+        assert querier.get_callers(asked) == ["FILE:a.py::one", "FILE:a.py::three"]
+        found = querier.find_nodes_by_name(asked)
+        assert [node["id"] for node in found] == ["FILE:a.py::Store::get"]
+
     def test_qualified_name_is_no_part_of_a_longer_one(self, tmp_path):
         names = ("Foo::m", "Foo::mid", "BigFoo::m", "one", "two", "three")
         nodes = [_fn(f"FILE:a.py::{name}") for name in names]

@@ -2022,7 +2022,8 @@ class GraphQuerier:
         Supports:
         - Exact name match: "start" matches any node with name="start"
         - Naming convention variants: "getClient" matches "get_client" (camelCase/snake_case)
-        - Qualified name: "Server::start" matches node IDs ending with that pattern
+        - Qualified name: "Server::start", also written "Server.start", matches node IDs
+          ending with that pattern
         - File path suffix: "server.rs" matches files ending with that path
         - Partial qualified (when fuzzy=True): "Server::sta" matches IDs containing that pattern
         - Fuzzy/prefix matching (when fuzzy=True): "validate_token" matches "validate_token_format"
@@ -2090,11 +2091,11 @@ class GraphQuerier:
                     continue
 
         # Return exact matches first, then variant matches, then fuzzy if no others
-        if exact_matches:
-            return exact_matches
-        if variant_matches:
-            return variant_matches
-        return fuzzy_matches
+        found = exact_matches or variant_matches or fuzzy_matches
+        if not found and "." in name:
+            # `Type.name` that matches nothing as written is `Type::name`.
+            return self.find_nodes_by_name(name.replace(".", "::"), fuzzy)
+        return found
 
     def find_trait_impls(self, method_name: str, trait_name: str | None = None) -> list:
         """Find all implementations of a trait method across the codebase.
@@ -2217,9 +2218,9 @@ class GraphQuerier:
         Returns node IDs and REF: IDs that match the given name.
         """
         target_ids = set()
-        base_name = func_name.split("::")[-1].split(".")[-1]
-        # `Type::name` asks for that one; a bare name for every `name`.
-        names = (func_name,) if "::" in func_name else (func_name, base_name)
+        # `Type::name`, also written `Type.name`, asks for that one; a bare
+        # name for every `name`.
+        names = {func_name, func_name.replace(".", "::"), func_name.replace("::", ".")}
 
         # Direct matches - these are the most common
         target_ids.add(func_name)
