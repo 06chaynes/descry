@@ -1,6 +1,7 @@
 """Tests for descry.scip — SCIP parsing, import resolution, and cache performance."""
 
 import json
+import logging
 import multiprocessing
 import os
 from pathlib import Path
@@ -440,6 +441,67 @@ class TestGenerateScipEmptyCommand:
         project = DiscoveredProject(name="p", root=tmp_path, language="emptylang")
 
         assert mgr._generate_scip(_EmptyAdapter(), project) is False
+
+
+class TestGenerateScipRunsTheProbedBinary:
+    """An indexer installed under another name is run by the path the
+    probe found, where the command names the adapter's binary."""
+
+    def test_alternative_runs_in_place_of_the_binary(self, tmp_path):
+        from descry.scip import adapter as adapter_mod
+        from descry.scip.adapter import CommandSpec, DiscoveredProject
+
+        installed = tmp_path / "bin" / "scip_alt"
+        installed.parent.mkdir()
+        installed.write_text('#!/bin/sh\n[ "$1" = --version ] || printf ran > "$2"\n')
+        installed.chmod(0o755)
+
+        class _AltAdapter:
+            name = "altlang"
+            scheme = "scip-alt"
+            binary = "scip-alt-not-installed"
+            binary_alternatives = (str(installed),)
+            extensions = (".alt",)
+
+            def discover(self, _root, _excluded_dirs):
+                return []
+
+            def build_command(self, project, out_path, _config):
+                return CommandSpec(
+                    argv=[self.binary, "index", str(out_path)], cwd=project.root
+                )
+
+            def parse_descriptors(self, _raw):
+                return []
+
+        adapter_mod.reset_registry_state()
+        mgr = ScipCacheManager(tmp_path)
+        mgr.cache_dir.mkdir(parents=True, exist_ok=True)
+        project = DiscoveredProject(name="p", root=tmp_path, language="altlang")
+
+        assert mgr._generate_scip(_AltAdapter(), project) is True
+        assert mgr._index_path("altlang", "p").read_text() == "ran"
+        adapter_mod.reset_registry_state()
+
+
+class TestScipIndexWithoutSymbols:
+    """An index that parses but holds no occurrence is reported: the
+    indexer most likely lacked its own environment."""
+
+    def test_index_without_occurrences_warns(self, tmp_path, caplog):
+        empty = _write_scip(tmp_path / "empty.scip", {"a.py": []})
+        with caplog.at_level(logging.WARNING, logger="descry.scip.parser"):
+            ScipIndex([empty])
+        assert "carries no symbols" in caplog.text
+
+    def test_index_with_occurrences_is_quiet(self, tmp_path, caplog):
+        full = _write_scip(
+            tmp_path / "full.scip",
+            {"a.py": [(0, "scip-python python p 1 a/f().", True)]},
+        )
+        with caplog.at_level(logging.WARNING, logger="descry.scip.parser"):
+            ScipIndex([full])
+        assert "carries no symbols" not in caplog.text
 
 
 class TestScipIndexResolveLineSemantics:

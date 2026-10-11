@@ -62,6 +62,30 @@ class TestJavaAdapterDiscovery:
 
         assert [p.name for p in projects] == ["kotlin-svc"]
 
+    def test_multi_project_root_without_a_build_file(self, tmp_path):
+        """A root holding `settings.gradle(.kts)` and `gradlew` but no build
+        file of its own is one Gradle build, not a project per subproject."""
+        for settings in ("settings.gradle", "settings.gradle.kts"):
+            root = tmp_path / settings
+            app = root / "app"
+            app.mkdir(parents=True)
+            (root / settings).write_text("include 'app'\n")
+            (root / "gradlew").write_text("#!/bin/sh\n")
+            (app / "build.gradle").write_text("// app build\n")
+            (app / "Main.java").write_text("class Main {}")
+
+            projects = JavaAdapter().discover(root, set())
+
+            assert [p.root for p in projects] == [root], settings
+
+    def test_wrapper_alone_marks_the_root(self, tmp_path):
+        (tmp_path / "gradlew").write_text("#!/bin/sh\n")
+        (tmp_path / "Main.java").write_text("class Main {}")
+
+        projects = JavaAdapter().discover(tmp_path, set())
+
+        assert [p.root for p in projects] == [tmp_path]
+
     def test_excluded_directory_ignored(self, tmp_path):
         pkg = tmp_path / "target"
         pkg.mkdir()

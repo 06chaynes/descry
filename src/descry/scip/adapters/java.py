@@ -52,6 +52,7 @@ _JAVA_BUILD_MARKERS = (
     "build.gradle.kts",
     "settings.gradle",
     "settings.gradle.kts",
+    "gradlew",
     "build.sbt",
 )
 
@@ -197,10 +198,10 @@ class JavaAdapter:
 
         # Gradle multi-project short-circuit — scip-java handles the
         # subproject tree natively; iterating ourselves picks up
-        # buildSrc/ alone which fails to build standalone.
-        root_has_gradle = (root / "build.gradle").exists() or (
-            root / "build.gradle.kts"
-        ).exists()
+        # buildSrc/ alone which fails to build standalone. The root is a
+        # Gradle build by any marker scip-java takes for one, a root
+        # build file or not.
+        root_has_gradle = any((root / m).exists() for m in _GRADLE_MARKERS)
         root_has_settings = (root / "settings.gradle").exists() or (
             root / "settings.gradle.kts"
         ).exists()

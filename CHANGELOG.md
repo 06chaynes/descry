@@ -228,8 +228,11 @@ Python SDK v2, and a full-tree review's findings are fixed.
   projects, where `mvn`/`sbt` rejected it and no index was written; its
   Kotlin-DSL pre-flight likewise runs only for a Gradle build, which is
   now recognised by every marker scip-java's own detector accepts
-  (`settings.gradle` and `gradlew` beside the two build files). scip-dart is found under either spelling — `scip-dart` or
-  the `scip_dart` `dart pub global` installs, read from `$PUB_CACHE` when
+  (`settings.gradle` and `gradlew` beside the two build files). A Gradle
+  multi-project root is indexed as one build without a build file of its
+  own: by `settings.gradle`, or by `settings.gradle.kts` beside `gradlew`.
+  scip-dart is found under either spelling — `scip-dart` or the
+  `scip_dart` `dart pub global` installs, read from `$PUB_CACHE` when
   it is set — and its package discovery reaches
   `<collection>/<name>/pubspec.yaml` (`pkgs/`, `apps/`, …), not only
   `packages/`, while a package under an excluded or dot-directory is left
