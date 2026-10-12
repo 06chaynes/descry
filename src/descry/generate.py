@@ -9344,8 +9344,16 @@ def _arrow_function(statement: str) -> tuple[str, str] | None:
             break
     else:
         return None
+    value = _function_value(statement[column + 1 :])
+    return (match.group(1), value) if value else None
+
+
+def _function_value(text: str) -> str | None:
+    """The function ``text``, the value given a name, is written as, from
+    its parameters on, where it is an arrow function or a `function`
+    expression; else None."""
     # `((params) => ...) as Type` holds the function in parentheses.
-    value = re.sub(r"^\s*(?:\((?=\())?(?:async\b\s*)?", "", statement[column + 1 :])
+    value = re.sub(r"^\s*(?:\((?=\())?(?:async\b\s*)?", "", text)
     if value.startswith("<"):
         # Type parameters before the parameters: `<T,>(x: T) => ...`; the
         # `>` of a `=>` in one of their defaults closes nothing.
@@ -9359,7 +9367,7 @@ def _arrow_function(statement: str) -> tuple[str, str] | None:
                     value = value[column + 1 :].lstrip()
                     break
     if re.match(r"function\b|[A-Za-z_$][\w$]*\s*=>", value):
-        return match.group(1), value
+        return value
     if not value.startswith("("):
         return None
     depth = 0
@@ -9369,7 +9377,7 @@ def _arrow_function(statement: str) -> tuple[str, str] | None:
             # `=>` follows the parameters, after any return type.
             rest = value[column + 1 :].lstrip()
             is_arrow = rest.startswith("=>") or (rest.startswith(":") and "=>" in rest)
-            return (match.group(1), value) if is_arrow else None
+            return value if is_arrow else None
     return None
 
 
@@ -9525,7 +9533,7 @@ def _members_on_line(code: str, start: int) -> list[tuple[str, int, str]]:
             members.append((filed, found.end(2), code[column:end].strip()))
         elif (
             named := _TS_LINE_PROPERTY_RE.match(code, column, end)
-        ) and _arrow_function(f"const {named[1]} = {code[named.end() : end]}"):
+        ) and _function_value(code[named.end() : end]):
             members.append((named[1], named.end(1), code[named.end() : end].strip()))
         column = end
     return members
@@ -10881,8 +10889,8 @@ class TSParser(BaseParser):
                 for later, name_end, value_at in later_declarators.pop(i, ()):
                     lid = f"{parent_id}::{later}"
                     claim(lid)
-                    held = _arrow_function(f"const {later} = {line[value_at:]}")
-                    held_typed = held and self._arrow_typed(held[1], line)
+                    held = _function_value(line[value_at:])
+                    held_typed = held and self._arrow_typed(held, line)
                     self.builder.add_node(
                         lid,
                         "Constant",

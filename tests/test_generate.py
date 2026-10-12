@@ -16623,6 +16623,7 @@ class TestOneLineDefinitionCalls:
                 export function helper(): any { return 1; }
                 export class Earlier { x = () => helper(); y = 2; }
                 export class Last { z = async (n: number) => helper() }
+                export class Hidden { #p = () => helper(); }
                 """
             },
         )
@@ -16630,6 +16631,7 @@ class TestOneLineDefinitionCalls:
         assert "FILE:p.ts::Earlier::y" not in ids
         assert _calls(builder, "FILE:p.ts::Earlier::x") == ["FILE:p.ts::helper"]
         assert _calls(builder, "FILE:p.ts::Last::z") == ["FILE:p.ts::helper"]
+        assert _calls(builder, "FILE:p.ts::Hidden::#p") == ["FILE:p.ts::helper"]
 
     def test_a_statements_declarators_on_any_of_its_lines(self, tmp_path):
         """Every declarator of a `const` statement is a constant: after a
