@@ -201,8 +201,11 @@ class RustAdapter:
         """Cargo package names of the crates ``discover()`` finds in ``root``."""
         names = set()
         for project in self.discover(root, set()) if root else ():
+            manifest = crate_dir(root, project.name) / "Cargo.toml"
+            if not manifest.is_file():
+                continue
             try:
-                with open(crate_dir(root, project.name) / "Cargo.toml", "rb") as f:
+                with open(manifest, "rb") as f:
                     names.add(tomllib.load(f)["package"]["name"])
             except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError):
                 pass

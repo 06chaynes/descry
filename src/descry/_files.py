@@ -1,5 +1,6 @@
 """Writing files into a directory the indexed repository may have shipped."""
 
+import fnmatch
 import glob
 import os
 import re
@@ -22,22 +23,24 @@ def create_sibling(path: Path) -> tuple[int, Path]:
     Temporaries for `path` that are orphaned are removed first.
     Returns the open descriptor and the file's path.
     """
-    _remove_orphans(path)
+    remove_orphans(path.parent, glob.escape(path.name))
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     return os.open(tmp, flags, 0o666), tmp
 
 
-def _remove_orphans(path: Path) -> None:
-    """Remove the temporaries `create_sibling` made for `path` that nothing
-    has written to for `_ORPHANED_AFTER` seconds."""
-    named = re.compile(rf"\.{re.escape(path.name)}\.[0-9a-f]{{16}}\.tmp")
+def remove_orphans(directory: Path, names: str) -> None:
+    """Remove the temporaries `create_sibling` made in `directory` for targets
+    whose names match the glob `names`, that nothing has written to for
+    `_ORPHANED_AFTER` seconds."""
     cutoff = time.time() - _ORPHANED_AFTER
-    for tmp in path.parent.glob(f".{glob.escape(path.name)}.*.tmp"):
+    for tmp in directory.glob(f".{names}.*.tmp"):
+        target, _, token = tmp.name[1:-4].rpartition(".")
         try:
             st = tmp.lstat()
             if (
-                named.fullmatch(tmp.name)
+                re.fullmatch(r"[0-9a-f]{16}", token)
+                and fnmatch.fnmatchcase(target, names)
                 and not stat.S_ISDIR(st.st_mode)
                 and st.st_mtime < cutoff
             ):

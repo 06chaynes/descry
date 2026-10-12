@@ -48,10 +48,10 @@ _RE_CONSTANT = re.compile(r"\s*([A-Z]\w*)\s*(?:\|\|)?=(?![=~>])(?P<value>.*)")
 # attr_reader :foo, :bar / attr_writer :x / attr_accessor :y
 _RE_ATTR = re.compile(r"(?<![\w.])attr(?:_(reader|writer|accessor))?\b\s*\(?\s*(?=:)")
 # alias new old / alias_method :new, :old
-_RE_ALIAS = re.compile(rf"(?<![\w.])alias(?:_method)?\b\s*\(?\s*:?({_METHOD_NAME})")
+_RE_ALIAS = re.compile(rf"(?<![\w.])alias(?:_method)?\b\s*+\(?\s*+:?({_METHOD_NAME})")
 # include Foo, Bar / extend Foo / prepend Foo
 _RE_MIXIN = re.compile(
-    rf"\s*(?:include|extend|prepend)\b\s*\(?\s*({_CONST}(?:\s*,\s*{_CONST})*)\s*\)?\s*$"
+    rf"\s*+(?:include|extend|prepend)\b\s*+\(?\s*+({_CONST}(?:\s*,\s*{_CONST})*)\s*+\)?\s*$"
 )
 # `Class.new(Base)`, `Module.new`, `Struct.new(:a, :b)`, `Data.define(:a)`:
 # an expression that makes a type, whose block is the body of that type
@@ -139,7 +139,7 @@ _EVALUATORS = frozenset(
 # The last statement of a method written on one line, behind its parameters
 _RE_INLINE_BODY = re.compile(
     r"\s*(?:\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))?\s*(?:=(?![=~>])|[^;]*;)?"
-    r"(?:[^;]*;)*?\s*(?!end\s*$)(?P<body>[^;]+?)\s*(?:;\s*)?(?:\bend)?\s*$"
+    r"(?:[^;]*;)*?\s*(?!end\s*$)(?P<body>[^;]+?)\s*+(?:;\s*+)?(?:\bend)?\s*$"
 )
 # `return value` in a method body
 _RE_RETURN = re.compile(r"(?<![\w.@$:])return\b(?P<value>[^;]*)")

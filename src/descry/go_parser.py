@@ -107,10 +107,10 @@ _DECLARATIONS = (
     # `name Type` / `name *Type`, alone on its line: a struct field, or with
     # a `,` a parameter or result of a list written one to a line
     re.compile(
-        r"^\s+(?!(?:return|go|defer|goto|case|package|import|type|var|const)\b)"
-        r"(?P<name>[A-Za-z_]\w*)\s+\*?"
+        r"^\s++(?!(?:return|go|defer|goto|case|package|import|type|var|const)\b)"
+        r"(?P<name>[A-Za-z_]\w*)\s++\*?"
         + _DECLARED_TYPE
-        + r"\s*,?\s*(?:`[^`]*`\s*)?(?://.*)?$"
+        + r"\s*+,?\s*+(?:`[^`]*`\s*)?(?://.*)?$"
     ),
     # `name := new(Type)`
     re.compile(r"\b(?P<name>\w+)\s*:?=\s*new\(\s*(?P<type>[A-Za-z_][\w.]*)\s*\)"),

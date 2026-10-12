@@ -81,6 +81,18 @@ def test_rust_discovery_leaves_a_fifo_member_manifest(tmp_path):
     assert adapter._packages(tmp_path) == set()
 
 
+def test_root_crate_is_named_from_its_own_manifest(tmp_path):
+    """A subdirectory named like the root, holding a FIFO manifest, is not
+    taken for the root crate."""
+    root = tmp_path / "proj"
+    (root / "src").mkdir(parents=True)
+    (root / "Cargo.toml").write_text('[package]\nname = "root"\n')
+    (root / "proj" / "src").mkdir(parents=True)
+    _fifo(root / "proj" / "Cargo.toml")
+
+    assert RustAdapter()._packages(root) == {"root"}
+
+
 def test_java_leaves_a_fifo_build_properties(tmp_path):
     (tmp_path / "settings.gradle").write_text("")
     _fifo(tmp_path / "project" / "build.properties")

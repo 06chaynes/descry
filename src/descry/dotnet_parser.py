@@ -66,9 +66,9 @@ _RE_DELEGATE = re.compile(
 # an event. A constructor has no type; `IFoo.Name` implements a member of
 # IFoo explicitly.
 _RE_MEMBER = re.compile(
-    rf"^\s*(?P<modifiers>(?:{_METHOD_MODIFIERS}\s+)*)"
-    rf"(?:(?P<type>{_TYPE})\s+)?(?:{_TYPE}\s*\.\s*)?"
-    rf"(?P<name>~?{_NAME})\s*(?P<generic>{_GENERIC})?\s*(?P<next>[(\[{{;=,]|$)"
+    rf"^\s*+(?P<modifiers>(?:{_METHOD_MODIFIERS}\s++)*)"
+    rf"(?:(?P<type>{_TYPE})\s++)?(?:{_TYPE}\s*\.\s*)?"
+    rf"(?P<name>~?{_NAME})\s*+(?P<generic>{_GENERIC})?\s*+(?P<next>[(\[{{;=,]|$)"
 )
 # public static Money operator +(Money a, Money b)  /  implicit operator Money(int n)
 _RE_OPERATOR = re.compile(
@@ -82,8 +82,8 @@ _RE_LOCAL_FUNCTION = re.compile(
 )
 # One parameter of a parameter list, behind its attributes
 _RE_PARAMETER = re.compile(
-    r"\s*(?:\[[^\]]*\]\s*)*"
-    r"(?P<modifiers>(?:(?:this|ref|out|in|params|scoped|readonly)\s+)*)"
+    r"\s*+(?:\[[^\]]*\]\s*+)*"
+    r"(?P<modifiers>(?:(?:this|ref|out|in|params|scoped|readonly)\s++)*)"
     rf"(?P<type>{_TYPE})\s+(?P<name>{_NAME})\s*(?:=[^,]*)?(?:,|$)"
 )
 # A member of an enum, behind its attributes: `Name`, `Name = value`

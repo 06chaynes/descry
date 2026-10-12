@@ -116,11 +116,15 @@ _binary_cache: dict[str, dict] = {}
 def project_dir(root: Path, name: str, *markers: str) -> Path:
     """Directory of the project that ``discover()`` named ``name``.
 
-    ``root / name`` if it holds every marker; otherwise ``root`` itself,
-    for a single project at the root, which is named after the root directory.
+    ``root / name`` if it holds every marker, each a regular file or a
+    directory; otherwise ``root`` itself, for a single project at the root,
+    which is named after the root directory.
     """
     candidate = root / name
-    if all((candidate / marker).exists() for marker in markers):
+    if all(
+        (candidate / marker).is_file() or (candidate / marker).is_dir()
+        for marker in markers
+    ):
         return candidate
     return root
 

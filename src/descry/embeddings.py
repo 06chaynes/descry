@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from descry._files import create_sibling
+from descry._files import create_sibling, remove_orphans
 from descry.query import _read_file_cached, source_path
 
 try:
@@ -583,6 +583,7 @@ class SemanticSearcher:
             for old_file in old_files:
                 logger.info(f"Removing stale embedding cache: {old_file.name}")
                 old_file.unlink()
+            remove_orphans(self.cache_dir, "embeddings_*")
             if old_files:
                 logger.info(f"Cleaned up {len(old_files)} old embedding file(s)")
         except OSError as e:

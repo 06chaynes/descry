@@ -55,8 +55,8 @@ _TYPE_ARGUMENTS = rf"<{_PLAIN}(?:<{_PLAIN}(?:<{_PLAIN}>{_PLAIN})*>{_PLAIN})*>"
 _ANNOTATIONS = r"(?:@[\w.]+(?:\([^()]*\))?\s+)*"
 _RE_METHOD = re.compile(
     rf"^\s*{_ANNOTATIONS}(?:(?:{_METHOD_MODIFIERS})\s++)+"
-    rf"(?:{_TYPE_ARGUMENTS}\s+)?"  # optional generic type params
-    r"(?:@[\w.]+\s+)*"  # annotations of the return type
+    rf"(?:{_TYPE_ARGUMENTS}\s++)?"  # optional generic type params
+    r"(?:@[\w.]+\s++)*"  # annotations of the return type
     r"(?P<returns>(?!<)[\w<>\[\],?\s.]+?)\s+"  # return type (lazy)
     r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*\("  # name + open paren
 )
@@ -112,7 +112,7 @@ _RE_PACKAGE_FIELD = re.compile(
 # `NAME(args),`, `@Deprecated NAME {`
 _RE_ENUM_CONSTANT = re.compile(
     r"^\s*(?:@[\w.]+(?:\([^)]*\))?\s+)*"
-    r"([A-Z][A-Z0-9_]*)\s*(?:\(.*\))?\s*(?:\{.*\}\s*)?[,;{]?\s*$"
+    r"([A-Z][A-Z0-9_]*)\s*+(?:\(.*\))?\s*+(?:\{.*\}\s*+)?[,;{]?\s*$"
 )
 # The word before a name: `Type name(` declares `name` where it is no
 # statement's.

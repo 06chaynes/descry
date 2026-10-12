@@ -7752,8 +7752,8 @@ class PythonParser(BaseParser):
 # with a pattern rather than one name, and a match arm.
 _RUST_BINDER_RES = (
     re.compile(r"\|([^|]*)\|"),
-    re.compile(r"\bfor\s+(.+?)\s+in\b"),
-    re.compile(r"\b(?:if|while)\s+let\s+(.+?)=(?!=)"),
+    re.compile(r"\bfor\s++(.+?)\s+in\b"),
+    re.compile(r"\b(?:if|while)\s++let\s++(.+?)=(?!=)"),
     re.compile(r"\blet\s+(?:mut\s+)?([({\[A-Z].*?)=(?!=)"),
     re.compile(r"^\s*(.+?)=>"),
 )
@@ -7778,15 +7778,15 @@ _RUST_INDEX_LET_RE = re.compile(
 _RUST_DERIVE_RE = re.compile(r"#\[derive\(([^)]*)\)\]")
 # Where a pattern is matched against a value: `for` and `if let` or `while
 # let` with the block they open, `let` with a pattern, and `match`
-_RUST_FOR_RE = re.compile(r"\bfor\s+(?P<pattern>.+?)\s+in\s+(?P<value>.+?)\s*\{\s*$")
+_RUST_FOR_RE = re.compile(r"\bfor\s++(?P<pattern>.+?)\s+in\s+(?P<value>.+?)\s*\{\s*$")
 _RUST_IF_LET_RE = re.compile(
-    r"\b(?:if|while)\s+let\s+(?P<pattern>.+?)\s*=(?!=)\s*(?P<value>.+?)\s*\{\s*$"
+    r"\b(?:if|while)\s++let\s++(?P<pattern>.+?)\s*=(?!=)\s*(?P<value>.+?)\s*\{\s*$"
 )
 _RUST_LET_RE = re.compile(
     r"\blet\s+(?P<pattern>[^=]*[(\[{][^=]*?)\s*=(?!=)\s*(?P<value>.+?)"
     r"(?:;|\s+else\s*\{)\s*$"
 )
-_RUST_MATCH_RE = re.compile(r"\bmatch\s+(?P<value>.+?)\s*\{\s*$")
+_RUST_MATCH_RE = re.compile(r"\bmatch\s++(?P<value>.+?)\s*\{\s*$")
 _RUST_ARM_RE = re.compile(r"^\s*+(?P<pattern>.+?)(?:\s+if\s.+?)?\s*=>")
 # The parameters of a closure passed to a call
 _RUST_CLOSURE_RE = re.compile(r"(?:(?<=[(,])|^)\s*(?:move\s+)?\|(?P<params>[^|]*)\|")

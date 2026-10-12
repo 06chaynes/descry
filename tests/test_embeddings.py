@@ -1166,3 +1166,20 @@ def test_fifo_sidecars_are_left(fake_model, graph_writer):
 
     assert s._load_cached() is False
     assert get_embeddings_status(str(g))["cached"] is False
+
+
+def test_orphaned_embedding_temporaries_are_removed(fake_model, graph_writer):
+    """A save killed mid-write leaves temporaries for a key the next index no
+    longer uses; the cleanup removes them once nothing writes to them."""
+    from descry import _files
+
+    g = graph_writer()
+    s = SemanticSearcher(str(g))
+    orphan = s.cache_dir / ".embeddings_oldkey.npz.0123456789abcdef.tmp"
+    orphan.write_bytes(b"x")
+    stale = time.time() - 2 * _files._ORPHANED_AFTER
+    os.utime(orphan, (stale, stale))
+
+    s._cleanup_old_embeddings(keep=set(s._cache_paths()))
+
+    assert not orphan.exists()

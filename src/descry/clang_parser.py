@@ -114,7 +114,7 @@ _RE_LINKAGE = re.compile(r"\s*extern\s*")
 # the name stand attributes: `alignas(...)`, `__attribute__((...))`, and
 # export macros, which are names in capitals that another name follows.
 _RE_TYPE = re.compile(
-    r"\s*(?P<typedef>typedef\b)?"
+    r"\s*+(?P<typedef>typedef\b)?"
     r"(?:\s*(?:static|const|extern|[A-Z_][A-Z0-9_]*)\b(?:\s*\(\s*\))?)*\s*"
     r"(?P<kind>class|struct|union|enum)\b(?:\s+(?:class|struct)\b)?"
     r"(?:\s*(?:(?:alignas|__\w+)\s*\(\s*\)"
