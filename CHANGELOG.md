@@ -52,6 +52,11 @@ Python SDK v2, and a full-tree review's findings are fixed.
   manifest, index or checksum file, an embedding sidecar, the OpenAPI
   spec — is left alone rather than read, which would wait or never end;
   a graph that is not a regular file is reported as malformed.
+- **Backtracking.** A long run of whitespace on a Dart line, or before a
+  Rust match arm, made a parser's pattern take time cubic in its length
+  (3,200 spaces took a minute on a Dart line and 13 s before an arm), which
+  no `max_parse_seconds` limit can interrupt inside one match. The
+  whitespace is now taken once.
 - **Writes into the cache.** The cache directory sits in the indexed
   repository by default, which can ship it. The graph and the embedding
   cache are written through new, randomly named temporaries, so a symlink

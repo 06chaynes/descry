@@ -7787,7 +7787,7 @@ _RUST_LET_RE = re.compile(
     r"(?:;|\s+else\s*\{)\s*$"
 )
 _RUST_MATCH_RE = re.compile(r"\bmatch\s+(?P<value>.+?)\s*\{\s*$")
-_RUST_ARM_RE = re.compile(r"^\s*(?P<pattern>.+?)(?:\s+if\s.+?)?\s*=>")
+_RUST_ARM_RE = re.compile(r"^\s*+(?P<pattern>.+?)(?:\s+if\s.+?)?\s*=>")
 # The parameters of a closure passed to a call
 _RUST_CLOSURE_RE = re.compile(r"(?:(?<=[(,])|^)\s*(?:move\s+)?\|(?P<params>[^|]*)\|")
 # How a type is borrowed or abstracted over, before its name

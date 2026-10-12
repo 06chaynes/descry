@@ -16401,3 +16401,15 @@ class TestRaisedThresholds:
         }
         assert "REF:escapeChars.Union" not in edges
         assert "FILE:LinqBridge.cs::Enumerable::Shout" in edges
+
+
+def test_rust_arm_pattern_takes_leading_whitespace_once():
+    """A long run of spaces before no `=>` is not split again for each start
+    of the pattern, which made the search cubic in its length."""
+    start = time.perf_counter()
+
+    assert generate._RUST_ARM_RE.search(" " * 3000 + "!") is None
+    found = generate._RUST_ARM_RE.search("        Some(x) if x > 1 => x,")
+    assert found["pattern"] == "Some(x)"
+
+    assert time.perf_counter() - start < 1

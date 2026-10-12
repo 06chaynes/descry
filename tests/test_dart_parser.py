@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
 
-from descry.dart_parser import DartParser
+from descry.dart_parser import _RE_LOCAL_FUNCTION, DartParser
 from descry.generate import CodeGraphBuilder
 
 
@@ -611,3 +612,14 @@ void run(Theme theme, AsyncValue value) {
         _parse(builder, src)
         calls = [e["target"] for e in builder.edges if e["relation"] == "CALLS"]
         assert calls == ["REF:Theme.of", "REF:value.when", "REF:this.start"]
+
+
+def test_local_function_pattern_takes_a_whitespace_run_once():
+    """A long run of spaces is not split between the parts that can take it,
+    which made the match cubic in its length."""
+    start = time.perf_counter()
+
+    assert _RE_LOCAL_FUNCTION.match(" " * 3000 + "!") is None
+    assert _RE_LOCAL_FUNCTION.match("  Future<int> load(")
+
+    assert time.perf_counter() - start < 1

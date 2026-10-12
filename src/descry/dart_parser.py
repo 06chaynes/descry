@@ -80,7 +80,7 @@ _RE_MEMBER = re.compile(
 
 # What a line that may declare a local function starts with: `Type name(`
 # or `name(`.
-_RE_LOCAL_FUNCTION = re.compile(r"\s*(?:[\w$.<>?, ]+\s+)?[\w$]+\s*(?:<[^()=]*>)?\(")
+_RE_LOCAL_FUNCTION = re.compile(r"\s*+(?:[\w$.<>?, ]+\s++)?[\w$]+\s*(?:<[^()=]*>)?\(")
 
 # `=` where it is part of an operator's name: `operator ==`, `operator []=`
 _RE_OPERATOR_NAME = re.compile(r"\boperator\s*[^\s\w$(]*$")
