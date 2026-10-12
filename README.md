@@ -303,9 +303,9 @@ Configuration precedence: defaults < `.descry.toml` < environment variables.
 | TypeScript | Regex (+ ast-grep when `sg` on PATH) | Yes | `scip-typescript` via npm |
 | JavaScript | Regex (+ ast-grep when `sg` on PATH) | Yes (via `scip-typescript`) | `scip-typescript` via npm |
 | Svelte | Regex | Yes (via `scip-typescript`) | `scip-typescript` via npm |
-| Python | Regex + Python `ast` module | Yes | `scip-python` via npm |
-| Java / Kotlin / Scala | Regex (Java only — `.kt` / `.scala` produce no nodes when scip-java doesn't run) | Yes | `scip-java` (`coursier install scip-java`); see [CHANGELOG](CHANGELOG.md#020--2026-04-20) for the Kotlin-DSL Gradle limitation |
-| Go | Regex | Yes | `scip-go` (`go install github.com/sourcegraph/scip-go/cmd/scip-go@latest`) |
+| Python | Regex + Python `ast` module | Yes | `scip-python` via npm; writes no index without a `pip` in the project's environment (a `uv venv` has none) |
+| Java / Kotlin / Scala | Regex (Java only — `.kt` / `.scala` produce no nodes when scip-java doesn't run) | Yes | `scip-java` 0.12.3 (`coursier bootstrap --standalone -o scip-java com.sourcegraph:scip-java_2.13:0.12.3 --main com.sourcegraph.scip_java.ScipJava`), with a JDK and Maven or Gradle on `PATH`; see [CHANGELOG](CHANGELOG.md#020--2026-04-20) for the Kotlin-DSL Gradle limitation |
+| Go | Regex | Yes | `scip-go` (`go install github.com/scip-code/scip-go/cmd/scip-go@latest`) |
 | Ruby | Regex | Yes | `scip-ruby` gem or direct binary |
 | PHP | Regex | Yes | `scip-php` via `composer require --dev davidrjenni/scip-php` (third-party indexer) |
 | C# / VB.NET | Regex (C# only) | Yes | `scip-dotnet` via `dotnet tool install --global scip-dotnet` |
