@@ -57,7 +57,8 @@ _RE_METHOD = re.compile(
     rf"^\s*{_ANNOTATIONS}(?:(?:{_METHOD_MODIFIERS})\s++)+"
     rf"(?:{_TYPE_ARGUMENTS}\s++)?"  # optional generic type params
     r"(?:@[\w.]+\s++)*"  # annotations of the return type
-    r"(?P<returns>(?!<)[\w<>\[\],?\s.]+?)\s+"  # return type (lazy)
+    # The return type, from a non-space to a non-space, shortest first
+    r"(?P<returns>(?!<)[\w<>\[\],?.](?:[\w<>\[\],?\s.]*?[\w<>\[\],?.])??)\s+"
     r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*\("  # name + open paren
 )
 
@@ -99,7 +100,7 @@ _RE_PACKAGE_CONSTRUCTOR = re.compile(
 # Field declaration: modifiers + type + name + (= value)? ;
 _RE_FIELD = re.compile(
     rf"^\s*{_ANNOTATIONS}(?:(?:{_METHOD_MODIFIERS}|volatile|transient)\s++)+"
-    rf"(?!{_METHOD_MODIFIERS}\b)(?P<type>[\w<>\[\],?\s.]+?)\s+"
+    rf"(?!{_METHOD_MODIFIERS}\b)(?P<type>[\w<>\[\],?.](?:[\w<>\[\],?\s.]*?[\w<>\[\],?.])??)\s+"
     r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*(?:=|;|$)"
 )
 # Field declared without a modifier: `Type name;` or `Type name = value`.

@@ -41,6 +41,8 @@ _LONG_RUN = " " * 20000
         (ruby_parser._RE_ALIAS.search, "alias" + _LONG_RUN + ")"),
         (ruby_parser._RE_MIXIN.match, "  prepend" + _LONG_RUN + "="),
         (_RE_TYPE.fullmatch, _LONG_RUN + ")"),
+        (java_parser._RE_METHOD.match, "private final a" + _LONG_RUN + "b"),
+        (java_parser._RE_FIELD.match, "public static a" + _LONG_RUN + "b("),
     ],
     ids=[
         "dart-local-function",
@@ -63,6 +65,8 @@ _LONG_RUN = " " * 20000
         "ruby-alias",
         "ruby-mixin",
         "clang-type",
+        "java-return-type",
+        "java-field-type",
     ],
 )
 def test_a_whitespace_run_is_taken_once(find, text):
