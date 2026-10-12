@@ -16430,7 +16430,7 @@ class TestRaisedThresholds:
 class TestOneLineDefinitionCalls:
     """A call on a TypeScript/JavaScript definition's own line is the
     definition's: its parameters and the first line of its body run when
-    it is called (ECMA-262 10.2.11 FunctionDeclarationInstantiation)."""
+    it is called (ECMA-262 2026 10.2.11 FunctionDeclarationInstantiation)."""
 
     def test_every_row_of_the_fixture(self, tmp_path):
         """The one-line shapes: a function, a method, a named arrow, the
@@ -16503,7 +16503,7 @@ class TestOneLineDefinitionCalls:
 
     def test_a_parameter_default_is_the_functions(self, tmp_path):
         """`x = g()` runs at each call of the function, not where it is
-        written (ECMA-262 10.2.11)."""
+        written (ECMA-262 2026 10.2.11)."""
         builder = _index(
             tmp_path,
             {
@@ -16539,7 +16539,8 @@ class TestOneLineDefinitionCalls:
 
     def test_an_extends_clause_runs_where_the_class_is_defined(self, tmp_path):
         """The heritage expression is evaluated at class definition
-        (ECMA-262 15.7.14 ClassDefinitionEvaluation), outside the class."""
+        (ECMA-262 2026 15.7.14 ClassDefinitionEvaluation), outside the
+        class."""
         builder = _index(
             tmp_path,
             {
@@ -16553,7 +16554,8 @@ class TestOneLineDefinitionCalls:
 
     def test_a_computed_key_runs_where_the_definition_is_evaluated(self, tmp_path):
         """A computed key is evaluated where the class or object is defined
-        (ECMA-262 15.7.14; 13.2.5.6 PropertyDefinitionEvaluation), not in the member."""
+        (ECMA-262 2026 15.7.14; 13.2.5.6 PropertyDefinitionEvaluation), not
+        in the member."""
         builder = _index(
             tmp_path,
             {
@@ -16575,7 +16577,7 @@ class TestOneLineDefinitionCalls:
 
     def test_a_field_initialiser_is_the_classs(self, tmp_path):
         """A field initialiser runs when an instance is constructed
-        (ECMA-262 7.3.33 InitializeInstanceElements); with no field
+        (ECMA-262 2026 7.3.33 InitializeInstanceElements); with no field
         node, the class owns it."""
         builder = _index(
             tmp_path,

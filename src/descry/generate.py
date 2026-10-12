@@ -9365,8 +9365,8 @@ def _own_line_span(code: str, name_end: int) -> tuple[int, int] | None:
     """The columns of ``code`` holding the parameters and the first line of
     the body of a definition whose name ends at ``name_end``: code that
     runs when the definition is called, its parameter defaults with it
-    (ECMA-262 10.2.11 FunctionDeclarationInstantiation), so a call on its
-    own line is its, not its enclosing scope's.
+    (ECMA-262 2026 10.2.11 FunctionDeclarationInstantiation), so a call on
+    its own line is its, not its enclosing scope's.
     """
     paren = code.find("(", name_end)
     arrow = code.find("=>", name_end)
@@ -9417,9 +9417,10 @@ def _own_line_span(code: str, name_end: int) -> tuple[int, int] | None:
 def _definition_time_region(code: str) -> tuple[int, int] | None:
     """The columns of the decorators and computed keys that lead ``code``,
     each evaluated where the class or object is defined, not in the member
-    they lead: a computed key by ECMA-262 15.7.14 ClassDefinitionEvaluation
-    and 13.2.5.6 PropertyDefinitionEvaluation, a decorator, which ECMA-262
-    does not define, by TypeScript's decorator evaluation.
+    they lead: a computed key by ECMA-262 2026 15.7.14
+    ClassDefinitionEvaluation and 13.2.5.6 PropertyDefinitionEvaluation, a
+    decorator, which ECMA-262 does not define, by TypeScript's decorator
+    evaluation.
     """
     start = len(code) - len(code.lstrip())
     end = start
