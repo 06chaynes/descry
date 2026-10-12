@@ -72,7 +72,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   lock is opened without following a symlink and never truncated; a
   symlink at a SCIP index path is removed rather than written through, and
   an indexer that writes `index.scip` in the project does not run through
-  one there.
+  one there. Indexing refuses a default cache directory, or a `scip`
+  subdirectory, that resolves outside the project, where descry would
+  replace another directory's files; `DESCRY_CACHE_DIR` names any other.
 - **Git.** Hooks, fsmonitor, signature display, external diff, textconv
   and filter drivers are disabled; partial clones are never lazily
   fetched; diffs are forced to the plain `a/` `b/` format; log output is

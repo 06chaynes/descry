@@ -2,6 +2,7 @@
 repository. A symlink it ships where descry writes a file is never written
 through: the file it points at is left as it was."""
 
+import asyncio
 import json
 import os
 import stat
@@ -14,6 +15,7 @@ from descry._files import create_sibling
 from descry._graph import CURRENT_SCHEMA
 from descry.embeddings import _file_lock
 from descry.generate import CodeGraphBuilder
+from descry.handlers import DescryConfig, DescryService, ServiceError
 from descry.scip.adapter import CommandSpec, DiscoveredProject
 from descry.scip.cache import ScipCacheManager
 
@@ -170,3 +172,49 @@ def test_rename_mode_does_not_run_through_a_linked_index(tmp_path, victim):
 
     assert victim.read_text() == "precious\n"
     assert (root / "index.scip").is_symlink()
+
+
+def test_default_cache_dir_resolving_outside_the_project_is_refused(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    (root / ".descry_cache").symlink_to("../elsewhere")
+
+    error = DescryConfig(project_root=root).cache_dir_error()
+
+    assert error and "DESCRY_CACHE_DIR" in error
+
+
+def test_scip_cache_dir_resolving_outside_the_project_is_refused(tmp_path):
+    root = tmp_path / "repo"
+    (root / ".descry_cache").mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    (root / ".descry_cache" / "scip").symlink_to("../../elsewhere")
+
+    assert DescryConfig(project_root=root).cache_dir_error()
+
+
+def test_cache_dir_inside_the_project_or_the_users_own_is_allowed(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "repo"
+    (root / "cache").mkdir(parents=True)
+    (root / ".descry_cache").symlink_to("cache")
+    (tmp_path / "elsewhere").mkdir()
+
+    assert DescryConfig(project_root=root).cache_dir_error() is None
+    monkeypatch.setenv("DESCRY_CACHE_DIR", str(tmp_path / "elsewhere"))
+    assert DescryConfig.from_env(root).cache_dir_error() is None
+
+
+def test_index_refuses_an_escaping_cache_dir_before_running(tmp_path, victim):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".descry_cache").symlink_to("..")
+    service = DescryService(DescryConfig(project_root=root))
+    service._indexer_child = lambda _path: pytest.fail("the indexer ran")
+
+    result = asyncio.run(service.index())
+
+    assert isinstance(result, ServiceError) and "DESCRY_CACHE_DIR" in result
+    assert victim.read_text() == "precious\n"

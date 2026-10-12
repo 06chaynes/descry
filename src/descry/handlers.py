@@ -398,10 +398,33 @@ class DescryConfig:
 
     def __post_init__(self):
         self.project_root = Path(self.project_root)
+        # The default cache directory is inside the project; one given here
+        # or by DESCRY_CACHE_DIR is the user's.
+        self.cache_dir_given = self.cache_dir is not None
         if self.cache_dir is None:
             self.cache_dir = self.project_root / ".descry_cache"
         else:
             self.cache_dir = Path(self.cache_dir)
+
+    def cache_dir_error(self) -> str | None:
+        """Why descry may not write to the cache directory, or None if it may.
+
+        A repository can ship the default directory, or its `scip`
+        subdirectory, as a symlink to a directory outside it, where descry
+        would replace files and remove stale indexes. The default must stay
+        inside the project; DESCRY_CACHE_DIR names any other.
+        """
+        if self.cache_dir_given:
+            return None
+        root = self.project_root.resolve()
+        for path in (self.cache_dir, self.cache_dir / "scip"):
+            resolved = path.resolve()
+            if not resolved.is_relative_to(root):
+                return (
+                    f"The cache directory {path} resolves to {resolved}, outside "
+                    "the project. Set DESCRY_CACHE_DIR to keep the cache there."
+                )
+        return None
 
     @property
     def graph_path(self) -> Path:
@@ -690,6 +713,7 @@ class DescryConfig:
         cache_dir_str = _env("DESCRY_CACHE_DIR")
         if cache_dir_str:
             self.cache_dir = Path(cache_dir_str)
+            self.cache_dir_given = True
         if env_flag("DESCRY_NO_SCIP"):
             self.enable_scip = False
         if env_flag("DESCRY_NO_EMBEDDINGS"):
@@ -1195,6 +1219,8 @@ class DescryService:
 
     def _new_searcher(self):
         """A SemanticSearcher over this service's graph, cache and model."""
+        if error := self.config.cache_dir_error():
+            raise RuntimeError(error)
         return self._SemanticSearcher(
             str(self.config.graph_path),
             cache_dir=str(self.config.cache_dir),
@@ -1588,6 +1614,8 @@ class DescryService:
                 index_path = str(resolved)
             except (OSError, ValueError) as e:
                 return ServiceError(f"Invalid index path {path!r}: {e}")
+        if error := self.config.cache_dir_error():
+            return ServiceError(error)
 
         if not self._index_lock.acquire(blocking=False):
             return ServiceError(_INDEX_BUSY, reason="busy")
@@ -2508,6 +2536,9 @@ class DescryService:
         def remaining() -> float | None:
             return None if deadline is None else max(deadline - loop.time(), 0)
 
+        if error := self.config.cache_dir_error():
+            yield {"type": "done", "success": False, "message": error}
+            return
         argv, env = self._indexer_child(str(self.config.project_root))
         if not self._index_lock.acquire(blocking=False):
             yield {"type": "done", "success": False, "message": _INDEX_BUSY}

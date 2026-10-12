@@ -23,7 +23,7 @@ just test tests/test_handlers.py::test_index     # one test
 just test -k "cross_lang and not slow"           # by expression
 ```
 
-Python 3.11+ required (enforced by `pyproject.toml`). Pre-commit gate: `just lint && just fmt && just test` all pass (2220 tests currently — a drop is a regression signal).
+Python 3.11+ required (enforced by `pyproject.toml`). Pre-commit gate: `just lint && just fmt && just test` all pass (2224 tests currently — a drop is a regression signal).
 
 Invoke the tool while developing:
 
@@ -67,6 +67,7 @@ These are load-bearing — see the `### Security` sections of `CHANGELOG.md`. Do
 - **The indexer child is isolated from the repository it indexes.** It is spawned with `python -P`, so a `descry/` package inside the repository cannot shadow the installed one.
 - **Git runs with the repository's config neutralised.** `_run_git` in `git_history.py` disables hooks, fsmonitor, signature display, external diff, textconv and filter drivers, never lazily fetches (`GIT_NO_LAZY_FETCH`), forces the plain uncoloured `a/` `b/` diff format, and frames log output with NUL bytes. Arguments from callers go through the `_validate_git_*` helpers. New git calls go through `_run_git`.
 - **Source is only read from inside the project root.** Graph node paths are untrusted (a graph file can be hand-edited or shipped by a repository); every read goes through `source_path()` in `query.py`, which refuses anything that resolves outside the root or is not a regular file.
+- **The default cache directory stays inside the project.** A repository can ship `.descry_cache`, or its `scip` subdirectory, as a symlink to another directory; `DescryConfig.cache_dir_error()` refuses indexing and embedding there, and only `DESCRY_CACHE_DIR` names a cache outside the project.
 - **TOML-sourced subprocess args are validated.** `_validate_toolchain`, `_validate_scip_extra_arg`, `_validate_embedding_model` in `handlers.py` reject short flags, shell metacharacters, and out-of-root local paths. New TOML → subprocess plumbing must validate.
 - **Web UI is local-only by design.** `descry-web` binds `127.0.0.1`, has no auth, and deliberately omits `CORSMiddleware` so browsers enforce same-origin — a tab on `evil.com` cannot read `/api/source`. State-changing requests are refused unless same-origin (`Origin` / `Sec-Fetch-Site`), so it cannot trigger `/api/index` either. The host middleware rejects non-loopback `Host` headers to defeat DNS-rebinding that would otherwise bypass the 127.0.0.1 bind. `/api/source` enforces project-root containment, rejects non-regular files / non-text content / >10 MiB, and opens every path component with `O_NOFOLLOW`. `/api/index` (and `/api/index/stream`) take no path parameter (always indexes the configured root). `DescryService` runs one index at a time for every interface and stops the indexer's whole process tree when a run ends early. The page's remote scripts carry SRI hashes and every response carries the Content-Security-Policy that `web/server.py` builds from the page's own tags, allowing exactly those asset URLs; a new remote script needs an SRI hash. Don't add a `--host 0.0.0.0` flag, don't add `CORSMiddleware`, and don't expose network listeners.
 - **MCP `index(path=...)`** is restricted to the configured project root; a path below it narrows the walk but still writes the root's graph.

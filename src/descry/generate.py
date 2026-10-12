@@ -16060,6 +16060,8 @@ def main():
         parser.error(f"{target!r} is outside the project root {project_root}")
     # The root comes from the arguments, not from the working directory.
     config = DescryConfig.from_env(project_root)
+    if error := config.cache_dir_error():
+        parser.error(error)
 
     # Passed always, so non-TOML projects still get the full default
     # exclusion set.
