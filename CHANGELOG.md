@@ -52,6 +52,14 @@ Python SDK v2, and a full-tree review's findings are fixed.
   manifest, index or checksum file, an embedding sidecar, the OpenAPI
   spec — is left alone rather than read, which would wait or never end;
   a graph that is not a regular file is reported as malformed.
+- **Writes into the cache.** The cache directory sits in the indexed
+  repository by default, which can ship it. The graph and the embedding
+  cache are written through new, randomly named temporaries, so a symlink
+  at a guessable name no longer has its target overwritten; the embedding
+  lock is opened without following a symlink and never truncated; a
+  symlink at a SCIP index path is removed rather than written through, and
+  an indexer that writes `index.scip` in the project does not run through
+  one there.
 - **Git.** Hooks, fsmonitor, signature display, external diff, textconv
   and filter drivers are disabled; partial clones are never lazily
   fetched; diffs are forced to the plain `a/` `b/` format; log output is

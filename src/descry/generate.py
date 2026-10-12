@@ -16,6 +16,7 @@ from pathlib import Path
 
 from descry import _stdlib
 from descry._comments import strip_block_comments
+from descry._files import create_sibling
 
 # Configure logging for consistent error reporting
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -15986,9 +15987,9 @@ class CodeGraphBuilder:
         output_path = (
             Path(output_path) if not isinstance(output_path, Path) else output_path
         )
-        tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+        fd, tmp_path = create_sibling(output_path)
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(
                     {
                         "schema_version": CURRENT_SCHEMA,

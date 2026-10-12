@@ -1,9 +1,8 @@
 """A repository can put a FIFO where descry expects a file. Each reader below
-leaves it alone instead of waiting on it; an alarm fails a test that waits."""
+leaves it alone instead of waiting on it."""
 
 import asyncio
 import os
-import signal
 import sys
 
 import pytest
@@ -19,23 +18,10 @@ from descry.scip.adapters.typescript import TypeScriptAdapter
 from descry.scip.cache import ScipCacheManager
 from descry.scip.parser import ScipIndex
 
-pytestmark = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs")
-
-
-class _Waited(BaseException):
-    """Raised by the alarm; no reader's own `except` catches it."""
-
-
-@pytest.fixture(autouse=True)
-def _alarm():
-    def waited(_signum, _frame):
-        raise _Waited
-
-    previous = signal.signal(signal.SIGALRM, waited)
-    signal.alarm(10)
-    yield
-    signal.alarm(0)
-    signal.signal(signal.SIGALRM, previous)
+pytestmark = [
+    pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs"),
+    pytest.mark.usefixtures("no_wait"),
+]
 
 
 def _fifo(path):

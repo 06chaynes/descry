@@ -115,3 +115,21 @@ def indexer_tree(tmp_path):
     tree = IndexerTree(tmp_path)
     yield tree
     tree.kill()
+
+
+class _Waited(BaseException):
+    """Raised by `no_wait`'s alarm; no reader's own `except` catches it."""
+
+
+@pytest.fixture
+def no_wait():
+    """Fail, rather than hang, a test whose code waits on a FIFO."""
+
+    def waited(_signum, _frame):
+        raise _Waited
+
+    previous = signal.signal(signal.SIGALRM, waited)
+    signal.alarm(10)
+    yield
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, previous)

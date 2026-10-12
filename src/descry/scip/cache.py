@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -44,6 +45,16 @@ from descry.scip.adapter import (
 from descry.scip.adapters.rust import crate_dir as rust_crate_dir
 
 logger = logging.getLogger(__name__)
+
+
+def _writes_through(path: Path) -> bool:
+    """Whether a write to `path` would land elsewhere or wait: a symlink, a
+    FIFO or a device sits there."""
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return False
+    return not (stat.S_ISREG(mode) or stat.S_ISDIR(mode))
 
 
 class ScipCacheManager:
@@ -314,9 +325,22 @@ class ScipCacheManager:
 
         env = {**os.environ, **spec.env_extras}
 
+        # The indexer writes the output path, and in rename mode `index.scip`
+        # in its working directory. Either would be written through a link
+        # or FIFO there: one in the cache directory is removed, and the run
+        # stops on one in the project rather than delete it.
+        default_output = spec.cwd / "index.scip"
+        if _writes_through(output_path):
+            output_path.unlink()
+        if spec.output_mode == "rename" and _writes_through(default_output):
+            logger.warning(
+                f"SCIP: {default_output} is not a regular file; "
+                f"not running {adapter.name} for {project.name}"
+            )
+            return False
+
         # Only a file the indexer writes during this run counts as its
         # output, not an index that was already there.
-        default_output = spec.cwd / "index.scip"
         output_before = self._file_signature(output_path)
         default_before = self._file_signature(default_output)
 

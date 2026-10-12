@@ -331,7 +331,7 @@ class TestCacheRoundTrip:
     def test_no_temp_files_left_behind(self, fake_model, graph_writer):
         g = graph_writer()
         SemanticSearcher(str(g))
-        leftovers = [p.name for p in g.parent.iterdir() if ".tmp." in p.name]
+        leftovers = [p.name for p in g.parent.iterdir() if ".tmp" in p.name]
         assert leftovers == []
 
     def test_force_rebuild_reencodes(self, fake_model, graph_writer):
