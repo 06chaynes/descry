@@ -56,14 +56,47 @@ _JAVA_BUILD_MARKERS = (
     "build.sbt",
 )
 
-# What scip-java's GradleBuildTool treats as a Gradle build. A `pom.xml`
-# wins over every one of them: scip-java orders Maven before Gradle.
+# What scip-java's GradleBuildTool treats as a Gradle build.
 _GRADLE_MARKERS = (
     "settings.gradle",
     "gradlew",
     "build.gradle",
     "build.gradle.kts",
 )
+
+
+# What scip-java detects as another build tool: a SCIP config, Maven, sbt,
+# Mill and Bazel. sbt is also detected by `project/build.properties` holding
+# the key `sbt.version`; `_SBT_VERSION_KEY` finds it where a line starts with
+# it, which is every form but an escaped key or a continued line.
+_OTHER_BUILD_MARKERS = (
+    "scip-java.json",
+    "lsif-java.json",
+    "pom.xml",
+    "build.sbt",
+    "build.sc",
+    "WORKSPACE",
+)
+_SBT_VERSION_KEY = re.compile(r"^[ \t\f]*sbt\.version(?:[ \t\f=:\r]|$)", re.MULTILINE)
+
+
+def _runs_gradle(directory: Path) -> bool:
+    """Whether scip-java run in `directory` builds it with Gradle.
+
+    Given no ``--build-tool``, it refuses a directory where it detects
+    another build tool as well ("Multiple build tools detected").
+    """
+    if not any((directory / m).exists() for m in _GRADLE_MARKERS):
+        return False
+    if any((directory / m).exists() for m in _OTHER_BUILD_MARKERS):
+        return False
+    try:
+        properties = (directory / "project" / "build.properties").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return True
+    return not _SBT_VERSION_KEY.search(properties)
 
 
 _COMPAT_INIT_SCRIPT_PATH = Path(__file__).parent / "_java_compat.init.gradle"
@@ -186,24 +219,24 @@ class JavaAdapter:
         detected as a single project when it carries a build marker with
         no subdirectory competing for the name.
 
-        Gradle multi-project builds (a root settings file beside a Gradle
-        marker scip-java recognises) are treated as a single unit — scip-java handles their submodules natively, and
-        trying to index a ``buildSrc/`` directory in isolation fails
-        because it depends on the parent project's configuration
-        (observed on spring-framework).
+        Gradle multi-project builds (a root ``settings.gradle``, or a
+        ``settings.gradle.kts`` beside a Gradle marker, where
+        scip-java runs Gradle) are treated as a single unit — scip-java
+        handles their submodules natively, and trying to index a
+        ``buildSrc/`` directory in isolation fails because it depends on
+        the parent project's configuration (observed on spring-framework).
         """
         seen: set[str] = set()
         projects: list[DiscoveredProject] = []
 
         # Gradle multi-project short-circuit — scip-java handles the
         # subproject tree natively; iterating ourselves picks up
-        # buildSrc/ alone which fails to build standalone. The root is a
-        # Gradle build by any marker scip-java takes for one.
-        root_has_gradle = any((root / m).exists() for m in _GRADLE_MARKERS)
+        # buildSrc/ alone which fails to build standalone.
+        root_runs_gradle = _runs_gradle(root)
         root_has_settings = (root / "settings.gradle").exists() or (
             root / "settings.gradle.kts"
         ).exists()
-        if root_has_gradle and root_has_settings and _has_jvm_sources(root):
+        if root_runs_gradle and root_has_settings and _has_jvm_sources(root):
             projects.append(
                 DiscoveredProject(
                     name=root.name,
@@ -271,10 +304,7 @@ class JavaAdapter:
         # scip-java forwards everything after `--` to the build tool it
         # detects, and on a Maven (or sbt) project those flags reach `mvn`
         # (or `sbt`), which rejects them and writes no index.
-        gradle = (
-            any((project.root / m).exists() for m in _GRADLE_MARKERS)
-            and not (project.root / "pom.xml").exists()
-        )
+        gradle = _runs_gradle(project.root)
 
         # Pre-flight: scip-java's SemanticdbGradlePlugin applies to
         # allprojects (incl. :buildSrc and includeBuild participants).

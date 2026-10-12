@@ -231,6 +231,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   (`settings.gradle` and `gradlew` beside the two build files). A Gradle
   multi-project root is indexed as one build without a build file of its
   own: by `settings.gradle`, or by `settings.gradle.kts` beside `gradlew`.
+  Where scip-java also detects another build tool at such a root (Maven,
+  sbt, Mill, Bazel or a SCIP config), with or without a build file of its
+  own, it refuses the root, and the root's subprojects are indexed instead.
   scip-dart is found under either spelling — `scip-dart` or the
   `scip_dart` `dart pub global` installs, read from `$PUB_CACHE` when
   it is set — and its package discovery reaches

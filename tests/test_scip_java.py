@@ -78,6 +78,49 @@ class TestJavaAdapterDiscovery:
 
             assert [p.root for p in projects] == [root], settings
 
+    def test_root_with_another_build_tool_yields_its_subprojects(self, tmp_path):
+        """scip-java refuses a directory where it detects another build tool
+        beside Gradle, so such a root is not taken as one Gradle build."""
+        others = {
+            "scip-java.json": "{}",
+            "lsif-java.json": "{}",
+            "pom.xml": "<project/>",
+            "build.sbt": "",
+            "build.sc": "",
+            "WORKSPACE": "",
+            "project/build.properties": "sbt.version=1.9.9\n",
+        }
+        for other, text in others.items():
+            for extra in ((), ("gradlew",), ("build.gradle",)):
+                root = tmp_path / other.replace("/", "_") / "-".join(("root", *extra))
+                app = root / "app"
+                app.mkdir(parents=True)
+                for name in ("settings.gradle", *extra):
+                    (root / name).write_text("// marker\n")
+                (root / other).parent.mkdir(exist_ok=True)
+                (root / other).write_text(text)
+                (app / "build.gradle").write_text("// app build\n")
+                (app / "Main.java").write_text("class Main {}")
+
+                projects = JavaAdapter().discover(root, set())
+
+                assert [p.root for p in projects] == [app], (other, extra)
+
+    def test_build_properties_without_sbt_version_is_no_sbt_build(self, tmp_path):
+        app = tmp_path / "app"
+        app.mkdir()
+        (tmp_path / "settings.gradle").write_text("include 'app'\n")
+        (tmp_path / "project").mkdir()
+        (tmp_path / "project" / "build.properties").write_text(
+            "# sbt.version=1.9.9\nsbt.versions=1\n"
+        )
+        (app / "build.gradle").write_text("// app build\n")
+        (app / "Main.java").write_text("class Main {}")
+
+        projects = JavaAdapter().discover(tmp_path, set())
+
+        assert [p.root for p in projects] == [tmp_path]
+
     def test_wrapper_alone_marks_the_root(self, tmp_path):
         (tmp_path / "gradlew").write_text("#!/bin/sh\n")
         (tmp_path / "Main.java").write_text("class Main {}")
@@ -154,9 +197,7 @@ class TestJavaAdapterBuildCommand:
         assert "scipCompileAll" in spec.argv
 
     def test_no_gradle_args_on_a_maven_project(self, tmp_path):
-        """The init-script and task list are Gradle arguments: scip-java
-        forwards everything after `--` to the build tool it detects, and
-        Maven rejects them with no index written."""
+        """A Maven project gets no Gradle arguments."""
         (tmp_path / "pom.xml").write_text("<project/>")
         project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
         spec = JavaAdapter().build_command(
@@ -175,10 +216,9 @@ class TestJavaAdapterBuildCommand:
         assert "--" not in spec.argv
 
     def test_gradle_args_follow_scip_java_detection(self, tmp_path):
-        """scip-java's GradleBuildTool accepts `settings.gradle`, `gradlew`,
-        `build.gradle` and `build.gradle.kts`, and checks Maven first: the
-        init-script is passed for each marker unless a `pom.xml` sits beside
-        it."""
+        """The init-script is passed for each marker scip-java's
+        GradleBuildTool accepts, and not where a `pom.xml` beside it makes
+        scip-java refuse the directory."""
         for marker in (
             "settings.gradle",
             "gradlew",

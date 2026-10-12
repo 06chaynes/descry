@@ -166,11 +166,11 @@ def _probe_binary(adapter: LanguageAdapter) -> dict:
                 result["version"] = proc.stdout.strip() or proc.stderr.strip()
                 logger.debug(f"SCIP: {adapter.binary} available at {path}")
             else:
-                logger.debug(f"SCIP: {adapter.binary} found but failed to run")
+                logger.debug(f"SCIP: {path} found but failed to run")
         except subprocess.TimeoutExpired:
-            logger.debug(f"SCIP: {adapter.binary} version check timed out")
+            logger.debug(f"SCIP: {path} version check timed out")
         except (OSError, FileNotFoundError) as e:
-            logger.debug(f"SCIP: {adapter.binary} check failed: {e}")
+            logger.debug(f"SCIP: version check failed: {e}")
     else:
         logger.debug(f"SCIP: none of {names} found")
 
