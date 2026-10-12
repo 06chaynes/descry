@@ -5957,6 +5957,26 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:b.ts::run") == ["FILE:c.ts::helper"]
 
+    def test_a_member_closing_the_object_on_its_line_ends_there(self, tmp_path):
+        """A member written on one line, with the object's closing brace
+        after it, ends on that line: what follows the object is no member."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                function make() {
+                    return {
+                        load() { return 1; },
+                        save() { return 2; } };
+                }
+                function after() { return 3; }
+                """,
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert "FILE:a.js::make::object@3::save" in ids
+        assert "FILE:a.js::after" in ids
+
     def test_object_is_an_owner_where_it_holds_a_member_node(self, tmp_path):
         """An accessor is a member, and so is a function written after a
         brace in a property's value or in a comment. An object that holds no

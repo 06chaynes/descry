@@ -6996,7 +6996,9 @@ class BaseParser:
                     # signature (`f(opts: { a: T }) {`); only its end counts.
                     if found_open and brace_depth == 0 and i > start_idx:
                         return i + 1  # 1-indexed line number
-            if found_open and brace_depth == 0:
+            # A block opened and closed on its first line ends there, also
+            # where the line goes on to close what encloses it (`f() {} };`).
+            if found_open and brace_depth <= 0:
                 return i + 1
 
         # If no closing brace found, estimate based on file end

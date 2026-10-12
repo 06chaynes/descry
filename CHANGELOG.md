@@ -249,7 +249,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   a `{` or `}` in a JavaScript or TypeScript regular expression, template
   literal or block comment ending or opening a block the definitions
   after it are filed under, and a `//` inside a regular expression cut
-  as a comment, taking the calls after it on the line with it.
+  as a comment, taking the calls after it on the line with it. A block
+  written on one line whose line goes on to close what encloses it
+  (`save() { ... } };`) ends on that line, rather than taking in the
+  definitions after it.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer
   aborts the whole index. `index` no longer encodes every symbol twice.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root
