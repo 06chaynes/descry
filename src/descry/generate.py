@@ -9369,6 +9369,16 @@ def _own_line_span(code: str, name_end: int) -> tuple[int, int] | None:
     own line is its, not its enclosing scope's.
     """
     paren = code.find("(", name_end)
+    arrow = code.find("=>", name_end)
+    if arrow >= 0 and (paren < 0 or arrow < paren):
+        # One parameter, unparenthesised (`x => g(x)`): the body is the
+        # expression after the arrow, to the `,` or `;` that ends it.
+        depth = 0
+        for body in range(arrow + 2, len(code)):
+            depth += (code[body] in "([{") - (code[body] in ")]}")
+            if depth == 0 and code[body] in ",;":
+                return (arrow, body)
+        return (arrow, len(code))
     if paren < 0:
         return None
     depth = 0
@@ -9406,9 +9416,10 @@ def _own_line_span(code: str, name_end: int) -> tuple[int, int] | None:
 
 def _definition_time_region(code: str) -> tuple[int, int] | None:
     """The columns of the decorators and computed keys that lead ``code``,
-    each evaluated where the class or object is defined (ECMA-262 15.5.5
-    ClassDefinitionEvaluation; 13.2.5 PropertyDefinition), not in the
-    member they lead.
+    each evaluated where the class or object is defined, not in the member
+    they lead: a computed key by ECMA-262 15.7.14 ClassDefinitionEvaluation
+    and 13.2.5.6 PropertyDefinitionEvaluation, a decorator, which ECMA-262
+    does not define, by TypeScript's decorator evaluation.
     """
     start = len(code) - len(code.lstrip())
     end = start
@@ -9790,7 +9801,7 @@ class TSParser(BaseParser):
                     head,
                 )
                 assigned = re.search(r"(?<![\w$.])([\w$]+)\s*=(?![=>])\s*$", head)
-                if declared and declared[2] is not None:
+                if declared and (declared[2] or "").lstrip().startswith(("(", "<")):
                     # The annotation is the closure's own function type:
                     # read its parameters where they are written, not
                     # through the variable — a definition the value
@@ -10203,6 +10214,7 @@ class TSParser(BaseParser):
             valued = None  # the signature of the arrow function the line is
             arrow_id = None  # the node of the arrow function the line declares
             own_defs = []  # (node ID, end of its name) declared on the line
+            nodes_before = len(self.builder.nodes)
 
             parent_id = self.context_at(lineno)[0]
             # The object the definition returns, where the line being read is
@@ -10689,13 +10701,15 @@ class TSParser(BaseParser):
                 calls = []  # (edge index, column of its `(`) of each on the line
                 # A definition on this line takes the calls its parameters
                 # and the first line of its body enclose, which run when it
-                # is called. A decorator or computed key leading the line
-                # runs where the class or object is defined, not in the
-                # member it leads.
+                # is called, where the node is its own: one that an earlier
+                # definition of the name already holds is not. A decorator
+                # or computed key leading the line runs where the class or
+                # object is defined, not in the member it leads.
+                added = {node["id"] for node in self.builder.nodes[nodes_before:]}
                 spans = [
                     (*span, node_id)
                     for node_id, name_end in own_defs
-                    if (span := _own_line_span(code, name_end))
+                    if node_id in added and (span := _own_line_span(code, name_end))
                 ]
                 if (parent_id in class_ids or parent_id in object_ids) and (
                     region := _definition_time_region(code)

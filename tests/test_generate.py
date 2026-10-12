@@ -16479,6 +16479,28 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, f"{file}::makeLine") == [f"{file}::helper"]
         assert _calls(builder, f"{file}::makeLine::save") == [f"{file}::helper"]
 
+    def test_an_arrow_with_one_unparenthesised_parameter(self, tmp_path):
+        """`x => g(x)`: the call is the arrow's, not the call's `(` taken
+        for its parameters."""
+        builder = _index(
+            tmp_path,
+            {
+                "u.ts": """
+                export function helper(x: any): any { return x; }
+                export const single = x => helper(x);
+                export function make() {
+                  return {
+                    run: x => helper(x),
+                  };
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:u.ts::single") == ["FILE:u.ts::helper"]
+        assert _calls(builder, "FILE:u.ts::make::object@5::run") == [
+            "FILE:u.ts::helper"
+        ]
+
     def test_a_parameter_default_is_the_functions(self, tmp_path):
         """`x = g()` runs at each call of the function, not where it is
         written (ECMA-262 10.2.11)."""
@@ -16517,7 +16539,7 @@ class TestOneLineDefinitionCalls:
 
     def test_an_extends_clause_runs_where_the_class_is_defined(self, tmp_path):
         """The heritage expression is evaluated at class definition
-        (ECMA-262 15.5.5 ClassDefinitionEvaluation), outside the class."""
+        (ECMA-262 15.7.14 ClassDefinitionEvaluation), outside the class."""
         builder = _index(
             tmp_path,
             {
@@ -16531,7 +16553,7 @@ class TestOneLineDefinitionCalls:
 
     def test_a_computed_key_runs_where_the_definition_is_evaluated(self, tmp_path):
         """A computed key is evaluated where the class or object is defined
-        (ECMA-262 15.5.5; 13.2.5 PropertyDefinition), not in the member."""
+        (ECMA-262 15.7.14; 13.2.5.6 PropertyDefinitionEvaluation), not in the member."""
         builder = _index(
             tmp_path,
             {
@@ -16553,7 +16575,7 @@ class TestOneLineDefinitionCalls:
 
     def test_a_field_initialiser_is_the_classs(self, tmp_path):
         """A field initialiser runs when an instance is constructed
-        (ECMA-262 15.5.19 InitializeInstanceElements); with no field
+        (ECMA-262 7.3.33 InitializeInstanceElements); with no field
         node, the class owns it."""
         builder = _index(
             tmp_path,
@@ -16568,7 +16590,9 @@ class TestOneLineDefinitionCalls:
         )
         assert _calls(builder, "FILE:i.ts::Fields") == ["FILE:i.ts::helper"]
 
-    def test_each_of_several_definitions_on_one_line_takes_its_own(self, tmp_path):
+    def test_the_first_of_several_declarators_takes_its_call(self, tmp_path):
+        """`const a = () => f(), b = 2;`: the arrow takes the call written in
+        it; a later declarator of the line gets no node of its own."""
         builder = _index(
             tmp_path,
             {
