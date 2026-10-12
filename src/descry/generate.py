@@ -9346,6 +9346,18 @@ def _arrow_function(statement: str) -> tuple[str, str] | None:
         return None
     # `((params) => ...) as Type` holds the function in parentheses.
     value = re.sub(r"^\s*(?:\((?=\())?(?:async\b\s*)?", "", statement[column + 1 :])
+    if value.startswith("<"):
+        # Type parameters before the parameters: `<T,>(x: T) => ...`; the
+        # `>` of a `=>` in one of their defaults closes nothing.
+        depth = 0
+        for column, char in enumerate(value):
+            if char == "<":
+                depth += 1
+            elif char == ">" and value[column - 1] != "=":
+                depth -= 1
+                if depth == 0:
+                    value = value[column + 1 :].lstrip()
+                    break
     if re.match(r"function\b|[A-Za-z_$][\w$]*\s*=>", value):
         return match.group(1), value
     if not value.startswith("("):
@@ -9396,12 +9408,8 @@ def _own_line_span(code: str, name_end: int) -> tuple[int, int] | None:
         if char == "{":
             # A block: where its braces balance on this line, else the
             # first line of a block that spans lines.
-            depth = 0
-            for body in range(close + 1 + offset, len(code)):
-                depth += (code[body] == "{") - (code[body] == "}")
-                if depth == 0:
-                    return (paren, body + 1)
-            return (paren, len(code))
+            body = _block_close(code, close + 1 + offset)
+            return (paren, len(code) if body is None else body + 1)
         if char == "=" and code[close + 2 + offset : close + 3 + offset] == ">":
             # An expression: to the `,` or `;` that ends it, at bracket depth.
             depth = 0
@@ -9411,6 +9419,90 @@ def _own_line_span(code: str, name_end: int) -> tuple[int, int] | None:
                 if depth == 0 and char in ",;":
                     return (paren, body)
             return (paren, len(code))
+    return None
+
+
+def _later_declarators(code: str, start: int) -> list[tuple[str, int, int]]:
+    """Each declarator after the first of the statement whose value starts
+    at column ``start`` of ``code``: `b` in `const a = f, b = () => g();`, as
+    its name, the column its name ends at and the column its value starts
+    at. ``code`` is a line with the text of its literals blanked."""
+    declarators = []
+    depth = 0
+    for column in range(start, len(code)):
+        char = code[column]
+        depth += (char in "([{") - (char in ")]}")
+        if depth < 0 or (depth == 0 and char == ";"):
+            break
+        if depth == 0 and char == ",":
+            rest = code[column + 1 :]
+            named = re.match(r"\s*([A-Za-z_$][\w$]*)\s*(?::[^=,;]*)?=(?!=)\s*", rest)
+            if named:
+                declarators.append(
+                    (named[1], column + 1 + named.end(1), column + 1 + named.end())
+                )
+    return declarators
+
+
+def _class_body_open(code: str, start: int) -> int | None:
+    """The column of the `{` that opens the body of the class whose name
+    ends at column ``start`` of ``code``, where it is on that line: the
+    first outside the brackets and type arguments of its heritage."""
+    depth = 0
+    for column in range(start, len(code)):
+        char = code[column]
+        if char == "{" and depth == 0:
+            return column
+        depth += (char in "([<") - (char in ")]>")
+    return None
+
+
+def _members_on_line(code: str, start: int) -> list[tuple[str, int, str]]:
+    """The methods and accessors written on the line of a class, in the body
+    whose `{` is at column ``start`` of ``code``: each as the name it is
+    filed under (`get size` for an accessor), the column its name ends at,
+    and its text. A field is passed over. ``code`` is a line with the text
+    of its literals blanked."""
+    members = []
+    column = start + 1
+    while column < len(code):
+        found = _TS_LINE_MEMBER_RE.match(code, column)
+        end = None
+        depth = 0
+        for at in range(found.end() - 1 if found else column, len(code)):
+            depth += (code[at] in "([{") - (code[at] in ")]}")
+            if depth < 0:
+                return members  # the class's own `}`
+            if found and depth == 0 and code[at] == ")":
+                # The parameters closed; the member ends with its body.
+                body = code.find("{", at)
+                if body < 0:
+                    return members
+                close = _block_close(code, body)
+                if close is None:
+                    return members
+                end = close + 1
+                break
+            if not found and depth == 0 and code[at] in ";}":
+                end = at + 1
+                break
+        if end is None:
+            return members
+        if found:
+            filed = " ".join(filter(None, (found.group(1), found.group(2))))
+            members.append((filed, found.end(2), code[column:end].strip()))
+        column = end
+    return members
+
+
+def _block_close(code: str, opened: int) -> int | None:
+    """The column of the `}` that closes the `{` at column ``opened`` of
+    ``code``, where it is on that line."""
+    depth = 0
+    for column in range(opened, len(code)):
+        depth += (code[column] == "{") - (code[column] == "}")
+        if depth == 0:
+            return column
     return None
 
 
@@ -9479,6 +9571,11 @@ def _ts_params(signature: str) -> set[str]:
 _TS_METHOD_MODIFIERS = ("", "async", "static", "get", "set", "*", "async *")
 # Modifiers a class member is declared behind, in any order
 _TS_MEMBER_MODIFIERS = r"(?:(?:private|public|protected|static|abstract|override|declare|readonly|async)\s+)*"
+# A method or accessor a class declares: `name(`, `get name(`, `async *name<T>(`
+_TS_LINE_MEMBER_RE = re.compile(
+    rf"\s*{_TS_MEMBER_MODIFIERS}(?:(get|set)\s+)?(?:\*\s*)?"
+    r"([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\("
+)
 # `const name = require("m")`, `const { a, b: c } = await import("m")`
 _TS_REQUIRE_RE = re.compile(
     r"""\b(?:const|let|var)\s+([\w$]+|\{[^}]*\})\s*=\s*(?:await\s+)?"""
@@ -10206,6 +10303,7 @@ class TSParser(BaseParser):
         text_lines = [_blank_js_strings(line, literals, keep=True) for line in lines]
 
         i = 0
+        signature_until = 0  # the last line of a definition's signature
         while i < len(lines):
             line = text_lines[i]
             lineno = i + 1
@@ -10298,7 +10396,11 @@ class TSParser(BaseParser):
                         return j, sig.strip(), idx + 1
                 return idx, code_lines[idx].strip(), idx + 1
 
-            if (match := re_const.search(line)) and (
+            if lineno <= signature_until:
+                # A line of the signature of the definition above, whose
+                # calls are its; it declares nothing of its own.
+                pass
+            elif (match := re_const.search(line)) and (
                 match.group(3) is not None or not read_arrow(i)[1]
             ):
                 name, value_type, val = match.groups()
@@ -10323,6 +10425,27 @@ class TSParser(BaseParser):
                     signatures=valued and self._overloads(cid, valued),
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
+                # A later declarator of the statement declares its own name.
+                for later, name_end, value_at in (
+                    _later_declarators(code_lines[i], match.start(3)) if val else ()
+                ):
+                    lid = f"{parent_id}::{later}"
+                    claim(lid)
+                    held = _arrow_function(f"const {later} = {line[value_at:]}")
+                    typed = held and self._arrow_typed(held[1], line)
+                    self.builder.add_node(
+                        lid,
+                        "Constant",
+                        name=later,
+                        value=line[value_at:].split(",")[0].strip(" ;"),
+                        value_type=None,
+                        lineno=lineno,
+                        docstring=None,
+                        signatures=typed and self._overloads(lid, typed),
+                    )
+                    self.builder.add_edge(parent_id, lid, "DEFINES")
+                    if held:
+                        own_defs.append((lid, name_end))
                 if parent_id == file_id and re.search(r"=\s*\{\s*$", line):
                     # The functions it holds are its members.
                     object_ids.add(cid)
@@ -10355,6 +10478,28 @@ class TSParser(BaseParser):
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
                 class_ids.add(cid)
+                # The methods and accessors written on the class's own line.
+                if (body := _class_body_open(code_lines[i], match.end())) is not None:
+                    for member, name_end, text in _members_on_line(code_lines[i], body):
+                        mid = f"{cid}::{member}"
+                        return_type, param_types, typed = self._extract_ts_types(text)
+                        self.builder.add_node(
+                            mid,
+                            "Method",
+                            name=member,
+                            signature=self._build_ts_signature(
+                                member, param_types, return_type
+                            ),
+                            lineno=lineno,
+                            end_lineno=lineno,
+                            token_count=10,
+                            docstring=None,
+                            return_type=return_type,
+                            param_types=param_types,
+                            signatures=self._overloads(mid, typed),
+                        )
+                        self.builder.add_edge(cid, mid, "DEFINES")
+                        own_defs.append((mid, name_end))
                 # Generic arguments go first: `class A<T extends B> extends C<T>`
                 # inherits from C.
                 heritage = _strip_generics(full_sig)
@@ -10424,7 +10569,7 @@ class TSParser(BaseParser):
                 self.builder.add_edge(parent_id, fid, "DEFINES")
                 own_defs.append((fid, match.end(1)))
                 enter(fid, lineno, end_lineno, full_sig)
-                i = j
+                signature_until = j
             elif (
                 _TS_VARIABLE_RE.match(line) or parent_id in object_ids or object_id
             ) and (arrow := (statement := read_arrow(i))[1]):
@@ -10467,7 +10612,7 @@ class TSParser(BaseParser):
                     own_defs.append((fid, named.end(1)))
                 enter(fid, object_scope or lineno, end_lineno, parameters)
                 arrow_id = fid
-                i = j
+                signature_until = j
             elif (
                 parent_id in object_ids
                 and (match := re_held.match(line))
@@ -10522,7 +10667,7 @@ class TSParser(BaseParser):
                     self.builder.add_edge(object_id or parent_id, mid, "DEFINES")
                     own_defs.append((mid, match.end(1)))
                     enter(mid, object_scope or lineno, end_lineno, full_sig)
-                    i = j
+                    signature_until = j
             # Handle getter/setter methods: get name() or set name(value)
             # Only match when the parent is a Class, or an object a function
             # returns (not inside a function/method of its own)
@@ -10566,7 +10711,7 @@ class TSParser(BaseParser):
                 own_defs.append((mid, match.end(2)))
                 # Don't push getters/setters to context - they're leaf methods
                 # that shouldn't contain nested definitions
-                i = j
+                signature_until = j
             elif match := re_import.search(line):
                 self.builder.add_edge(file_id, f"MODULE:{match.group(2)}", "IMPORTS")
 

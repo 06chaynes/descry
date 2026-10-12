@@ -259,7 +259,12 @@ Python SDK v2, and a full-tree review's findings are fixed.
   enclosing file or class; a decorator or computed key on the line runs
   where the class or object is defined, and an arrow constant written
   with a function-type annotation resolves its body calls through the
-  annotation.
+  annotation. A generic arrow (`<T>(x: T) => ...`) is read as a function,
+  each declarator of `const a = ..., b = ...` as a constant of its own,
+  and a method, accessor or constructor written on its class's line as a
+  member; a call on a later line of a signature, a parameter default or a
+  multi-line arrow's expression body, is the function's, where it was
+  not read at all.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer
   aborts the whole index. `index` no longer encodes every symbol twice.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root

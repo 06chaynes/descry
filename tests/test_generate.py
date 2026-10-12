@@ -16501,6 +16501,93 @@ class TestOneLineDefinitionCalls:
             "FILE:u.ts::helper"
         ]
 
+    def test_a_generic_arrow_takes_its_call(self, tmp_path):
+        """Type parameters before the parameters, one with a function type as
+        its default, make the arrow no less a function."""
+        builder = _index(
+            tmp_path,
+            {
+                "g.ts": """
+                export function helper(x?: any): any { return x; }
+                export const generic = <T,>(x: T) => helper(x);
+                export const defaulted = <T = () => void>(x: T) => helper(x);
+                """
+            },
+        )
+        assert _calls(builder, "FILE:g.ts::generic") == ["FILE:g.ts::helper"]
+        assert _calls(builder, "FILE:g.ts::defaulted") == ["FILE:g.ts::helper"]
+
+    def test_each_declarator_of_a_statement_is_a_node(self, tmp_path):
+        """`const a = ..., b = ...;` declares `b` as well, and an arrow it
+        holds takes its own call."""
+        builder = _index(
+            tmp_path,
+            {
+                "d.ts": """
+                export function helper(): any { return 1; }
+                export function other(): any { return 2; }
+                export const a = () => helper(), b = () => other(), c = 3;
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert {"FILE:d.ts::a", "FILE:d.ts::b", "FILE:d.ts::c"} <= ids
+        assert _calls(builder, "FILE:d.ts::a") == ["FILE:d.ts::helper"]
+        assert _calls(builder, "FILE:d.ts::b") == ["FILE:d.ts::other"]
+
+    def test_members_written_on_their_classs_line(self, tmp_path):
+        """A method, an accessor, a static method and the constructor written
+        on the class's line are its members and take their calls; a field
+        is none, and the `extends` call stays outside the class."""
+        builder = _index(
+            tmp_path,
+            {
+                "c.ts": """
+                export function helper(): any { return 1; }
+                export function other(): any { return 2; }
+                export class C extends Base(helper()) { m() { return other(); } get size() { return helper(); } n = 1; static s() { return other(); } }
+                export class D { constructor() { helper(); } p() { other(); }
+                  q() {
+                    return helper();
+                  }
+                }
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert {"FILE:c.ts::C::m", "FILE:c.ts::C::get size", "FILE:c.ts::C::s"} <= ids
+        assert "FILE:c.ts::C::n" not in ids
+        assert _calls(builder, "FILE:c.ts::C::m") == ["FILE:c.ts::other"]
+        assert _calls(builder, "FILE:c.ts::C::get size") == ["FILE:c.ts::helper"]
+        assert _calls(builder, "FILE:c.ts::C::s") == ["FILE:c.ts::other"]
+        assert _calls(builder, "FILE:c.ts::D::constructor") == ["FILE:c.ts::helper"]
+        assert _calls(builder, "FILE:c.ts::D::p") == ["FILE:c.ts::other"]
+        assert _calls(builder, "FILE:c.ts::D::q") == ["FILE:c.ts::helper"]
+        assert _calls(builder, "FILE:c.ts") == ["FILE:c.ts::helper"]
+
+    def test_a_call_on_a_later_line_of_a_signature_is_the_functions(self, tmp_path):
+        """A parameter default or an arrow's expression body written on the
+        lines a signature spans runs when the function is called."""
+        builder = _index(
+            tmp_path,
+            {
+                "s.ts": """
+                export function helper(x?: any): any { return x; }
+                export function other(): any { return 2; }
+                export const plain = (
+                  cls: any,
+                ) => helper(cls);
+                export function spread(
+                  x = other(),
+                ): any {
+                  return x;
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:s.ts::plain") == ["FILE:s.ts::helper"]
+        assert _calls(builder, "FILE:s.ts::spread") == ["FILE:s.ts::other"]
+
     def test_a_parameter_default_is_the_functions(self, tmp_path):
         """`x = g()` runs at each call of the function, not where it is
         written (ECMA-262 2026 10.2.11)."""
@@ -16594,7 +16681,7 @@ class TestOneLineDefinitionCalls:
 
     def test_the_first_of_several_declarators_takes_its_call(self, tmp_path):
         """`const a = () => f(), b = 2;`: the arrow takes the call written in
-        it; a later declarator of the line gets no node of its own."""
+        it, not the plain value declared after it."""
         builder = _index(
             tmp_path,
             {
