@@ -16588,6 +16588,49 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, "FILE:s.ts::plain") == ["FILE:s.ts::helper"]
         assert _calls(builder, "FILE:s.ts::spread") == ["FILE:s.ts::other"]
 
+    def test_a_multi_line_signature_keeps_the_object_its_body_returns(self, tmp_path):
+        """The last line of a signature, `) => {`, opens the function's own
+        body: its `return` of an object still gives the object its members."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.ts": """
+                export const make = (
+                  factory?: () => number,
+                ) => {
+                  const calls: number[] = [];
+                  return {
+                    getCalls: () => calls,
+                  };
+                };
+                export function caller() {
+                  make().getCalls();
+                }
+                """
+            },
+        )
+        assert "FILE:m.ts::make::object@6::getCalls" in _calls(
+            builder, "FILE:m.ts::caller"
+        )
+
+    def test_an_arrow_property_on_its_classs_line_is_a_member(self, tmp_path):
+        """`x = () => f()` on the class's line is a member, as on a later
+        line; a property holding any other value is none."""
+        builder = _index(
+            tmp_path,
+            {
+                "p.ts": """
+                export function helper(): any { return 1; }
+                export class Earlier { x = () => helper(); y = 2; }
+                export class Last { z = async (n: number) => helper() }
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert "FILE:p.ts::Earlier::y" not in ids
+        assert _calls(builder, "FILE:p.ts::Earlier::x") == ["FILE:p.ts::helper"]
+        assert _calls(builder, "FILE:p.ts::Last::z") == ["FILE:p.ts::helper"]
+
     def test_a_parameter_default_is_the_functions(self, tmp_path):
         """`x = g()` runs at each call of the function, not where it is
         written (ECMA-262 2026 10.2.11)."""

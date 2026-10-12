@@ -261,8 +261,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
   with a function-type annotation resolves its body calls through the
   annotation. A generic arrow (`<T>(x: T) => ...`) is read as a function,
   each declarator of `const a = ..., b = ...` as a constant of its own,
-  and a method, accessor or constructor written on its class's line as a
-  member; a call on a later line of a signature, a parameter default or a
+  and a method, accessor, constructor or arrow-valued property written on
+  its class's line as a member; a call on a later line of a signature, a parameter default or a
   multi-line arrow's expression body, is the function's, where it was
   not read at all.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer

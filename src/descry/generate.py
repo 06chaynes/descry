@@ -9459,9 +9459,10 @@ def _class_body_open(code: str, start: int) -> int | None:
 
 def _members_on_line(code: str, start: int) -> list[tuple[str, int, str]]:
     """The methods and accessors written on the line of a class, in the body
-    whose `{` is at column ``start`` of ``code``: each as the name it is
-    filed under (`get size` for an accessor), the column its name ends at,
-    and its text. A field is passed over. ``code`` is a line with the text
+    whose `{` is at column ``start`` of ``code``, and the properties holding
+    an arrow function, as on a later line: each as the name it is filed
+    under (`get size` for an accessor), the column its name ends at, and its
+    text. Any other field is passed over. ``code`` is a line with the text
     of its literals blanked."""
     members = []
     column = start + 1
@@ -9472,7 +9473,10 @@ def _members_on_line(code: str, start: int) -> list[tuple[str, int, str]]:
         for at in range(found.end() - 1 if found else column, len(code)):
             depth += (code[at] in "([{") - (code[at] in ")]}")
             if depth < 0:
-                return members  # the class's own `}`
+                if found:
+                    return members
+                end = at  # a field runs to the class's own `}`
+                break
             if found and depth == 0 and code[at] == ")":
                 # The parameters closed; the member ends with its body.
                 body = code.find("{", at)
@@ -9486,11 +9490,15 @@ def _members_on_line(code: str, start: int) -> list[tuple[str, int, str]]:
             if not found and depth == 0 and code[at] in ";}":
                 end = at + 1
                 break
-        if end is None:
+        if end is None or end <= column:
             return members
         if found:
             filed = " ".join(filter(None, (found.group(1), found.group(2))))
             members.append((filed, found.end(2), code[column:end].strip()))
+        elif (
+            named := _TS_LINE_PROPERTY_RE.match(code, column, end)
+        ) and _arrow_function(f"const {named[1]} = {code[named.end() : end]}"):
+            members.append((named[1], named.end(1), code[named.end() : end].strip()))
         column = end
     return members
 
@@ -9572,6 +9580,10 @@ _TS_METHOD_MODIFIERS = ("", "async", "static", "get", "set", "*", "async *")
 # Modifiers a class member is declared behind, in any order
 _TS_MEMBER_MODIFIERS = r"(?:(?:private|public|protected|static|abstract|override|declare|readonly|async)\s+)*"
 # A method or accessor a class declares: `name(`, `get name(`, `async *name<T>(`
+# A property a class declares with a value: `name = `, `name?: T = `
+_TS_LINE_PROPERTY_RE = re.compile(
+    rf"\s*{_TS_MEMBER_MODIFIERS}([A-Za-z_$][\w$]*)\s*[?!]?\s*(?::[^=;]*)?=(?![=>])\s*"
+)
 _TS_LINE_MEMBER_RE = re.compile(
     rf"\s*{_TS_MEMBER_MODIFIERS}(?:(get|set)\s+)?(?:\*\s*)?"
     r"([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\("
@@ -10569,7 +10581,7 @@ class TSParser(BaseParser):
                 self.builder.add_edge(parent_id, fid, "DEFINES")
                 own_defs.append((fid, match.end(1)))
                 enter(fid, lineno, end_lineno, full_sig)
-                signature_until = j
+                signature_until = j + 1  # its last line, as a line number
             elif (
                 _TS_VARIABLE_RE.match(line) or parent_id in object_ids or object_id
             ) and (arrow := (statement := read_arrow(i))[1]):
@@ -10612,7 +10624,7 @@ class TSParser(BaseParser):
                     own_defs.append((fid, named.end(1)))
                 enter(fid, object_scope or lineno, end_lineno, parameters)
                 arrow_id = fid
-                signature_until = j
+                signature_until = j + 1  # its last line, as a line number
             elif (
                 parent_id in object_ids
                 and (match := re_held.match(line))
@@ -10667,7 +10679,7 @@ class TSParser(BaseParser):
                     self.builder.add_edge(object_id or parent_id, mid, "DEFINES")
                     own_defs.append((mid, match.end(1)))
                     enter(mid, object_scope or lineno, end_lineno, full_sig)
-                    signature_until = j
+                    signature_until = j + 1  # its last line, as a line number
             # Handle getter/setter methods: get name() or set name(value)
             # Only match when the parent is a Class, or an object a function
             # returns (not inside a function/method of its own)
@@ -10711,7 +10723,7 @@ class TSParser(BaseParser):
                 own_defs.append((mid, match.end(2)))
                 # Don't push getters/setters to context - they're leaf methods
                 # that shouldn't contain nested definitions
-                signature_until = j
+                signature_until = j + 1  # its last line, as a line number
             elif match := re_import.search(line):
                 self.builder.add_edge(file_id, f"MODULE:{match.group(2)}", "IMPORTS")
 
@@ -10962,9 +10974,11 @@ class TSParser(BaseParser):
                 # the value of each `return` of its body, or of an arrow
                 # function the expression it is.
                 returned = (self._signatures.get(parent_id) or [{}])[-1].get("returned")
-                returns = lineno > nameless.get(parent_id, 0) and len(
-                    re.findall(r"\breturn\b", code)
-                )
+                # A `return` on a line of a signature is one of a callback in
+                # a parameter default, not the definition's.
+                returns = lineno > max(
+                    nameless.get(parent_id, 0), signature_until
+                ) and len(re.findall(r"\breturn\b", code))
                 found = None
                 # Whether the value the line gives is an expression: an
                 # arrow's `{` opens a block unless its body is parenthesised,
@@ -11034,7 +11048,7 @@ class TSParser(BaseParser):
                         nameless[holder] = max(nameless.get(holder, 0), object_end)
                     returned.append(record)
                 if (
-                    lineno > nameless.get(parent_id, 0)
+                    lineno > max(nameless.get(parent_id, 0), signature_until)
                     and _JS_BLOCK_FUNCTION_RE.search(code)
                     and self.context_at(lineno + 1)[0] == parent_id
                 ):
