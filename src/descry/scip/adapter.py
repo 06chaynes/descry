@@ -170,7 +170,7 @@ def _probe_binary(adapter: LanguageAdapter) -> dict:
         except subprocess.TimeoutExpired:
             logger.debug(f"SCIP: {path} version check timed out")
         except (OSError, FileNotFoundError) as e:
-            logger.debug(f"SCIP: version check failed: {e}")
+            logger.debug(f"SCIP: {path} check failed: {e.strerror or e}")
     else:
         logger.debug(f"SCIP: none of {names} found")
 

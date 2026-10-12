@@ -3,6 +3,10 @@ SCIP symbol resolution through the shared ScipIndex dispatch path."""
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
 from descry.scip.adapter import AdapterConfig, DiscoveredProject
 from descry.scip.adapters.java import JavaAdapter
 from descry.scip.parser import ScipIndex
@@ -88,7 +92,7 @@ class TestJavaAdapterDiscovery:
             "build.sbt": "",
             "build.sc": "",
             "WORKSPACE": "",
-            "project/build.properties": "sbt.version=1.9.9\n",
+            "project/build.properties": "# sbt\nsbt.version=1.9.9\n",
         }
         for other, text in others.items():
             for extra in ((), ("gradlew",), ("build.gradle",)):
@@ -111,8 +115,8 @@ class TestJavaAdapterDiscovery:
         app.mkdir()
         (tmp_path / "settings.gradle").write_text("include 'app'\n")
         (tmp_path / "project").mkdir()
-        (tmp_path / "project" / "build.properties").write_text(
-            "# sbt.version=1.9.9\nsbt.versions=1\n"
+        (tmp_path / "project" / "build.properties").write_bytes(
+            b"# sbt.version=1.9.9 caf\xe9\nsbt.versions=1\n"
         )
         (app / "build.gradle").write_text("// app build\n")
         (app / "Main.java").write_text("class Main {}")
@@ -120,6 +124,27 @@ class TestJavaAdapterDiscovery:
         projects = JavaAdapter().discover(tmp_path, set())
 
         assert [p.root for p in projects] == [tmp_path]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+    def test_unreadable_build_properties_yields_the_subprojects(self, tmp_path):
+        """scip-java aborts on a `project/build.properties` it cannot read, so
+        the root is not taken as one Gradle build."""
+        app = tmp_path / "app"
+        app.mkdir()
+        (tmp_path / "settings.gradle").write_text("include 'app'\n")
+        (tmp_path / "project").mkdir()
+        properties = tmp_path / "project" / "build.properties"
+        properties.write_text("# no key\n")
+        properties.chmod(0)
+        (app / "build.gradle").write_text("// app build\n")
+        (app / "Main.java").write_text("class Main {}")
+
+        try:
+            projects = JavaAdapter().discover(tmp_path, set())
+        finally:
+            properties.chmod(0o644)
+
+        assert [p.root for p in projects] == [app]
 
     def test_wrapper_alone_marks_the_root(self, tmp_path):
         (tmp_path / "gradlew").write_text("#!/bin/sh\n")
@@ -255,8 +280,6 @@ class TestJavaAdapterKotlinDslPreflight:
         )
         project = DiscoveredProject(name="kx", root=tmp_path, language="java")
 
-        import pytest
-
         with pytest.raises(RuntimeError, match="kotlin-dsl"):
             JavaAdapter().build_command(project, tmp_path / "out.scip", AdapterConfig())
 
@@ -273,8 +296,6 @@ class TestJavaAdapterKotlinDslPreflight:
         )
         project = DiscoveredProject(name="ktor", root=tmp_path, language="java")
 
-        import pytest
-
         with pytest.raises(RuntimeError, match="kotlin-dsl"):
             JavaAdapter().build_command(project, tmp_path / "out.scip", AdapterConfig())
 
@@ -286,8 +307,6 @@ class TestJavaAdapterKotlinDslPreflight:
             "apply plugin: 'kotlin-dsl'\n"
         )
         project = DiscoveredProject(name="weird", root=tmp_path, language="java")
-
-        import pytest
 
         with pytest.raises(RuntimeError, match="kotlin-dsl"):
             JavaAdapter().build_command(project, tmp_path / "out.scip", AdapterConfig())

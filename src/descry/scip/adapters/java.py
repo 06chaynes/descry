@@ -66,9 +66,11 @@ _GRADLE_MARKERS = (
 
 
 # What scip-java detects as another build tool: a SCIP config, Maven, sbt,
-# Mill and Bazel. sbt is also detected by `project/build.properties` holding
-# the key `sbt.version`; `_SBT_VERSION_KEY` finds it where a line starts with
-# it, which is every form but an escaped key or a continued line.
+# Mill and Bazel. sbt is also detected by a regular `project/build.properties`
+# holding the key `sbt.version`; `_SBT_VERSION_KEY` finds it where a line
+# starts with it, which is every form but an escaped key, a continued line or
+# a malformed `\u` escape (on which scip-java aborts). Text mode turns CR and
+# CRLF into LF, the other line ends the properties format accepts.
 _OTHER_BUILD_MARKERS = (
     "scip-java.json",
     "lsif-java.json",
@@ -77,7 +79,7 @@ _OTHER_BUILD_MARKERS = (
     "build.sc",
     "WORKSPACE",
 )
-_SBT_VERSION_KEY = re.compile(r"^[ \t\f]*sbt\.version(?:[ \t\f=:\r]|$)", re.MULTILINE)
+_SBT_VERSION_KEY = re.compile(r"^[ \t\f]*sbt\.version(?:[ \t\f=:]|$)", re.MULTILINE)
 
 
 def _runs_gradle(directory: Path) -> bool:
@@ -90,13 +92,14 @@ def _runs_gradle(directory: Path) -> bool:
         return False
     if any((directory / m).exists() for m in _OTHER_BUILD_MARKERS):
         return False
-    try:
-        properties = (directory / "project" / "build.properties").read_text(
-            encoding="utf-8", errors="replace"
-        )
-    except OSError:
+    properties = directory / "project" / "build.properties"
+    if not properties.is_file():
         return True
-    return not _SBT_VERSION_KEY.search(properties)
+    try:
+        text = properties.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return not _SBT_VERSION_KEY.search(text)
 
 
 _COMPAT_INIT_SCRIPT_PATH = Path(__file__).parent / "_java_compat.init.gradle"
