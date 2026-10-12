@@ -108,7 +108,7 @@ class RustAdapter:
            single-crate project (small libraries).
         """
         root_cargo = root / "Cargo.toml"
-        if not root_cargo.exists():
+        if not root_cargo.is_file():
             return []
 
         projects: list[DiscoveredProject] = []

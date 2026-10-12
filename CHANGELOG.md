@@ -44,7 +44,14 @@ Python SDK v2, and a full-tree review's findings are fixed.
   asks. The indexer and everything it started are stopped on timeout,
   cancellation, client disconnect, and `SIGINT`/`SIGTERM`/`SIGHUP`.
 - **Indexer child process.** Spawned with `python -P`, so a `descry/`
-  package inside the indexed repository cannot shadow the installed one.
+  package inside the indexed repository cannot shadow the installed one,
+  and with its stdin on `/dev/null`, so it reads nothing from the MCP
+  protocol stream.
+- **Non-regular files.** A FIFO or a link to a device where descry
+  expects a file — a source file, `.descry.toml`, the graph, a SCIP
+  manifest, index or checksum file, an embedding sidecar, the OpenAPI
+  spec — is left alone rather than read, which would wait or never end;
+  a graph that is not a regular file is reported as malformed.
 - **Git.** Hooks, fsmonitor, signature display, external diff, textconv
   and filter drivers are disabled; partial clones are never lazily
   fetched; diffs are forced to the plain `a/` `b/` format; log output is

@@ -74,7 +74,7 @@ def _parse_ts_workspace_packages(root: Path) -> list[Path]:
                 continue
 
     pnpm_yaml = root / "pnpm-workspace.yaml"
-    if pnpm_yaml.exists():
+    if pnpm_yaml.is_file():
         try:
             text = pnpm_yaml.read_text(encoding="utf-8", errors="ignore")
         except OSError:
@@ -98,7 +98,7 @@ def _parse_ts_workspace_packages(root: Path) -> list[Path]:
         _expand(parsed_entries)
 
     root_pkg_json = root / "package.json"
-    if root_pkg_json.exists():
+    if root_pkg_json.is_file():
         try:
             import json as _json
 

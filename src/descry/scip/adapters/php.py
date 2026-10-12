@@ -140,7 +140,7 @@ def _scip_php_incompatibility_reason(pkg_dir: Path) -> str | None:
     PHP parse, so we leave that to surface as a runtime error.)
     """
     composer_json = pkg_dir / "composer.json"
-    if not composer_json.exists():
+    if not composer_json.is_file():
         return None
     try:
         import json as _json

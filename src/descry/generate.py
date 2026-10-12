@@ -8,6 +8,7 @@ import os
 import posixpath
 import re
 import signal
+import stat
 import threading
 from collections import deque
 from functools import cache
@@ -15487,11 +15488,15 @@ class CodeGraphBuilder:
                     continue
                 rel_path = self.get_rel_path(file_path)
                 # Each file is read whole, so one over the limit is skipped
-                # before it is opened.
+                # before it is opened, as is anything but a regular file: a
+                # FIFO would hold the read open and a device never end it.
                 try:
-                    size = file_path.stat().st_size
+                    st = file_path.stat()
                 except OSError:
                     continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                size = st.st_size
                 if self.max_file_bytes and size > self.max_file_bytes:
                     logger.warning(
                         "Skipping %s — %.1f MiB exceeds [code_files] max_file_mb",
@@ -15500,10 +15505,15 @@ class CodeGraphBuilder:
                     )
                     continue
                 # O_NOFOLLOW on the final open so a post-check symlink swap
-                # can't redirect us outside the project root. Mirrors the
-                # api_source hardening in web/server.py.
+                # can't redirect us outside the project root, and O_NONBLOCK
+                # so one to a FIFO doesn't wait. Mirrors the api_source
+                # hardening in web/server.py.
                 try:
-                    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                    flags = (
+                        os.O_RDONLY
+                        | getattr(os, "O_NOFOLLOW", 0)
+                        | getattr(os, "O_NONBLOCK", 0)
+                    )
                     fd = os.open(str(file_path), flags)
                     with os.fdopen(fd, "r", encoding="utf-8", errors="ignore") as f:
                         content = f.read()

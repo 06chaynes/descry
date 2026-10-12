@@ -658,8 +658,8 @@ class SemanticSearcher:
         for self.model_name in candidates:
             npz_path, json_path = self._cache_paths()
             if (
-                npz_path.exists()
-                and json_path.exists()
+                npz_path.is_file()
+                and json_path.is_file()
                 and self._try_load_cache(npz_path, json_path)
             ):
                 return True
@@ -892,7 +892,7 @@ def get_embeddings_status(
         except OSError:
             return status
 
-        if expected_npz.exists() and expected_json.exists():
+        if expected_npz.is_file() and expected_json.is_file():
             status["cached"] = True
             status["model"] = probe._resolved_repo_id()
             status["cache_path"] = str(expected_npz)

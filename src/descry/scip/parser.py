@@ -96,7 +96,7 @@ class ScipIndex:
         }
 
         for scip_file in scip_files:
-            if scip_file.exists():
+            if scip_file.is_file():
                 self._load_scip(scip_file)
 
         logger.info(

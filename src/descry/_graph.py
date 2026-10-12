@@ -92,6 +92,9 @@ def load_graph_with_schema(path: Path | str) -> dict:
         FileNotFoundError: if path does not exist.
         json.JSONDecodeError: if path is not valid JSON.
     """
+    path = Path(path)
+    if path.exists() and not path.is_file():
+        raise _malformed("not a regular file")
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):

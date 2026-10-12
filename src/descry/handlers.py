@@ -449,7 +449,7 @@ class DescryConfig:
         import tomllib
 
         toml_path = Path(project_root) / ".descry.toml"
-        if not toml_path.exists():
+        if not toml_path.is_file():
             return {}
         try:
             if toml_path.stat().st_size > 1 * 1024 * 1024:
@@ -958,9 +958,12 @@ async def _process_tree(argv: list[str], **kwargs):
     the child has exited. The session keeps the terminal's Ctrl-C and hangup,
     and a signal sent to this process's group, from reaching the tree, so
     while the block runs each of those kills it first and is then handled as
-    it would have been.
+    it would have been. The child reads nothing from this process's stdin,
+    which under MCP is the protocol stream.
     """
-    proc = await asyncio.create_subprocess_exec(*argv, start_new_session=True, **kwargs)
+    proc = await asyncio.create_subprocess_exec(
+        *argv, start_new_session=True, stdin=asyncio.subprocess.DEVNULL, **kwargs
+    )
 
     def stop(signum, frame):
         _kill_process_tree(proc)

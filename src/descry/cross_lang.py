@@ -117,7 +117,7 @@ class CrossLangTracer:
 
     def _parse_openapi(self):
         """Parse OpenAPI spec to extract endpoint -> operationId mappings."""
-        if not self.openapi_path.exists():
+        if not self.openapi_path.is_file():
             logger.warning(f"OpenAPI spec not found: {self.openapi_path}")
             return
 

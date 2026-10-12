@@ -77,7 +77,7 @@ def _global_json_satisfiable(project_root: Path, dotnet_root: str | None) -> str
     project fails to restore and the scip index is useless.
     """
     gj = project_root / "global.json"
-    if not gj.exists():
+    if not gj.is_file():
         return None
     try:
         import json as _json

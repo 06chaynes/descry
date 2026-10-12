@@ -580,6 +580,8 @@ class ScipCacheManager:
         source_files.sort()
 
         for src_file in source_files:
+            if not src_file.is_file():
+                continue
             rel_parts = src_file.relative_to(pkg_path).parts
             skip = False
             for part in rel_parts[:-1]:
@@ -615,19 +617,19 @@ class ScipCacheManager:
 
         # Hash Cargo.toml
         cargo_toml = crate_path / "Cargo.toml"
-        if cargo_toml.exists():
+        if cargo_toml.is_file():
             hasher.update(cargo_toml.read_bytes())
 
         # Hash workspace Cargo.lock (resolved dependency versions affect types).
         cargo_lock = self.project_root / "Cargo.lock"
-        if cargo_lock.exists():
+        if cargo_lock.is_file():
             hasher.update(cargo_lock.read_bytes())
 
         # Hash all .rs files (sorted for determinism)
         rs_files = sorted(crate_path.rglob("*.rs"))
         for rs_file in rs_files:
             # Skip target directory
-            if "target" in rs_file.parts:
+            if "target" in rs_file.parts or not rs_file.is_file():
                 continue
             try:
                 # Include relative path in hash so renames are detected
@@ -658,12 +660,12 @@ class ScipCacheManager:
 
         # Hash package.json
         package_json = pkg_path / "package.json"
-        if package_json.exists():
+        if package_json.is_file():
             hasher.update(package_json.read_bytes())
 
         # Hash tsconfig.json if present
         tsconfig = pkg_path / "tsconfig.json"
-        if tsconfig.exists():
+        if tsconfig.is_file():
             hasher.update(tsconfig.read_bytes())
 
         # Hash all source files (sorted for determinism)
@@ -676,6 +678,8 @@ class ScipCacheManager:
         for src_file in source_files:
             # Skip node_modules and dist directories
             if "node_modules" in src_file.parts or "dist" in src_file.parts:
+                continue
+            if not src_file.is_file():
                 continue
             try:
                 # Include relative path in hash so renames are detected
@@ -726,7 +730,7 @@ class ScipCacheManager:
             "Pipfile.lock",
         ):
             marker = pkg_path / name
-            if marker.exists():
+            if marker.is_file():
                 hasher.update(f"{name}:".encode())
                 hasher.update(marker.read_bytes())
 
@@ -740,7 +744,7 @@ class ScipCacheManager:
                 if part.startswith(".") or part in self.excluded_dirs:
                     skip = True
                     break
-            if not skip:
+            if not skip and candidate_path.is_file():
                 py_files.append(candidate_path)
         py_files.sort()
         for py_file in py_files:
@@ -786,7 +790,7 @@ class ScipCacheManager:
 
     def _load_checksums(self) -> dict[str, str]:
         """Load cached checksums from disk."""
-        if self.checksums_file.exists():
+        if self.checksums_file.is_file():
             try:
                 with open(self.checksums_file, encoding="utf-8") as f:
                     data = json.load(f)
