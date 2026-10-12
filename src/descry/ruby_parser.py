@@ -38,7 +38,7 @@ _RE_METHOD = re.compile(
     rf"def\s+(?:(?P<owner>[A-Za-z_]\w*)\s*\.\s*)?(?P<name>{_METHOD_NAME})"
 )
 # `= value` after the name or the parameters of an endless method
-_RE_ENDLESS = re.compile(r"\s*(?:\((?:[^()]|\([^()]*\))*\))?\s*=(?![=~>])")
+_RE_ENDLESS = re.compile(r"\s*+(?:\((?:[^()]|\([^()]*\))*\))?\s*=(?![=~>])")
 # require 'x', require "x", require_relative 'x'
 _RE_REQUIRE = re.compile(
     r"^\s*(?:require|require_relative|load|autoload)\s+[\"']([^\"']+)[\"']"
@@ -139,7 +139,7 @@ _EVALUATORS = frozenset(
 # The last statement of a method written on one line, behind its parameters
 _RE_INLINE_BODY = re.compile(
     r"\s*(?:\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))?\s*(?:=(?![=~>])|[^;]*;)?"
-    r"(?:[^;]*;)*?\s*(?!end\s*$)(?P<body>[^;]+?)\s*+(?:;\s*+)?(?:\bend)?\s*$"
+    r"(?:[^;]*;)*?\s*(?!end\s*$)(?P<body>[^;\s](?:[^;]*?[^;\s])??|\s+)\s*+(?:;\s*+)?(?:\bend)?\s*$"
 )
 # `return value` in a method body
 _RE_RETURN = re.compile(r"(?<![\w.@$:])return\b(?P<value>[^;]*)")

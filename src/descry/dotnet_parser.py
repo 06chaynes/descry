@@ -50,7 +50,7 @@ _RE_CLASS = re.compile(
 )
 # The type parameters and the opening `(` of a primary constructor, after
 # the name of a type
-_RE_PRIMARY_CONSTRUCTOR = re.compile(rf"\s*(?:{_GENERIC})?\s*\(")
+_RE_PRIMARY_CONSTRUCTOR = re.compile(rf"\s*+(?:{_GENERIC})?\s*\(")
 
 _METHOD_MODIFIERS = (
     r"(?:public|internal|private|protected|static|virtual|abstract|"
@@ -81,8 +81,10 @@ _RE_LOCAL_FUNCTION = re.compile(
     rf"(?P<name>{_NAME})\s*(?P<generic>{_GENERIC})?\s*\("
 )
 # One parameter of a parameter list, behind its attributes
+# A match never starts inside a run of whitespace, which the one starting
+# where the run starts holds.
 _RE_PARAMETER = re.compile(
-    r"\s*+(?:\[[^\]]*\]\s*+)*"
+    r"(?<!\s)\s*+(?:\[[^\]]*\]\s*+)*"
     r"(?P<modifiers>(?:(?:this|ref|out|in|params|scoped|readonly)\s++)*)"
     rf"(?P<type>{_TYPE})\s+(?P<name>{_NAME})\s*(?:=[^,]*)?(?:,|$)"
 )

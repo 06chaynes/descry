@@ -43,6 +43,10 @@ _LONG_RUN = " " * 20000
         (_RE_TYPE.fullmatch, _LONG_RUN + ")"),
         (java_parser._RE_METHOD.match, "private final a" + _LONG_RUN + "b"),
         (java_parser._RE_FIELD.match, "public static a" + _LONG_RUN + "b("),
+        (ruby_parser._RE_ENDLESS.match, _LONG_RUN * 3 + "x"),
+        (ruby_parser._RE_INLINE_BODY.match, "end" + "\n" * 60000 + "x"),
+        (dotnet_parser._RE_PRIMARY_CONSTRUCTOR.match, _LONG_RUN * 3 + "x"),
+        (dotnet_parser._RE_PARAMETER.findall, "readonly" + "\t\n " * 20000 + ")"),
     ],
     ids=[
         "dart-local-function",
@@ -67,6 +71,10 @@ _LONG_RUN = " " * 20000
         "clang-type",
         "java-return-type",
         "java-field-type",
+        "ruby-endless",
+        "ruby-inline-body-newlines",
+        "dotnet-primary-constructor",
+        "dotnet-parameter-mixed-run",
     ],
 )
 def test_a_whitespace_run_is_taken_once(find, text):
