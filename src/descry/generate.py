@@ -9435,15 +9435,16 @@ def _member_written(
 _JS_CONTINUES_EXPRESSION = tuple(".?:+-*/%&|^=<>")
 
 
-def _statement_end(lines: list[str], index: int) -> int:
-    """The index of the last line of the statement that starts on line
-    ``index``: the first line at which its brackets are closed and that
+def _statement_end(lines: list[str], index: int, column: int = 0) -> int:
+    """The index of the last line of the statement that starts at column
+    ``column`` of line ``index``: the first line at which its brackets are
+    closed and that
     neither ends with an operator or an arrow's `=>`, nor is followed by a
     line going on with it; a `,` there ends the property or declarator.
     ``lines`` are code lines with the text of their literals blanked."""
     depth = 0
     for row in range(index, len(lines)):
-        code = lines[row].strip()
+        code = lines[row][column if row == index else 0 :].strip()
         for char in code:
             depth += (char in "([{") - (char in ")]}")
             if depth < 0:
@@ -9598,14 +9599,19 @@ def _class_body_open(code: str, start: int) -> int | None:
     return None
 
 
-def _members_on_line(code: str, start: int) -> list[tuple[str, int, str]]:
+def _members_on_line(
+    code: str, start: int
+) -> tuple[list[tuple[str, int, str]], list[tuple[int, int]], int | None]:
     """The methods and accessors written on the line of a class, in the body
     whose `{` is at column ``start`` of ``code``, and the properties holding
     an arrow function, as on a later line: each as the name it is filed
     under (`get size` for an accessor), the column its name ends at, and its
-    text. Any other field is passed over. ``code`` is a line with the text
-    of its literals blanked."""
+    text. Also the columns of the value of each other field, and the column
+    at which a member or field starts that the line leaves open, None where
+    there is none. ``code`` is a line with the text of its literals
+    blanked."""
     members = []
+    fields = []
     column = start + 1
     while column < len(code):
         found = _TS_LINE_MEMBER_RE.match(code, column)
@@ -9615,33 +9621,34 @@ def _members_on_line(code: str, start: int) -> list[tuple[str, int, str]]:
             depth += (code[at] in "([{") - (code[at] in ")]}")
             if depth < 0:
                 if found:
-                    return members
+                    return members, fields, None
                 end = at  # a field runs to the class's own `}`
                 break
             if found and depth == 0 and code[at] == ")":
                 # The parameters closed; the member ends with its body.
                 body = code.find("{", at)
-                if body < 0:
-                    return members
-                close = _block_close(code, body)
+                close = _block_close(code, body) if body >= 0 else None
                 if close is None:
-                    return members
+                    break
                 end = close + 1
                 break
             if not found and depth == 0 and code[at] in ";}":
                 end = at + 1
                 break
-        if end is None or end <= column:
-            return members
+        if end is None:
+            return members, fields, column if code[column:].strip() else None
+        if end <= column:
+            return members, fields, None
         if found:
             filed = " ".join(filter(None, (found.group(1), found.group(2))))
             members.append((filed, found.end(2), code[column:end].strip()))
-        elif (prop := _class_property(code[:end], column)) and _function_value(
-            code[prop[2] : end]
-        ):
-            members.append((prop[0], prop[1], code[prop[2] : end].strip()))
+        elif prop := _class_property(code[:end], column):
+            if _function_value(code[prop[2] : end]):
+                members.append((prop[0], prop[1], code[prop[2] : end].strip()))
+            else:
+                fields.append((prop[2], end))
         column = end
-    return members
+    return members, fields, None
 
 
 def _block_close(code: str, opened: int) -> int | None:
@@ -10477,6 +10484,7 @@ class TSParser(BaseParser):
             valued = None  # the signature of the arrow function the line is
             arrow_id = None  # the node of the arrow function the line declares
             own_defs = []  # (node ID, end of its name) declared on the line
+            field_spans = []  # (start, end, class ID) of a field's value on it
             nodes_before = len(self.builder.nodes)
 
             parent_id = self.context_at(lineno)[0]
@@ -10636,28 +10644,54 @@ class TSParser(BaseParser):
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
                 class_ids.add(cid)
-                # The methods and accessors written on the class's own line.
+                # The methods and accessors written on the class's own line,
+                # and the member or field the line leaves open, which ends
+                # with its statement.
+                # A field's value is evaluated with the class's instance or,
+                # static, with the class: the class's.
+                written, fields, open_at = [], [], None
                 if (body := _class_body_open(code_lines[i], match.end())) is not None:
-                    for member, name_end, text in _members_on_line(code_lines[i], body):
-                        mid = f"{cid}::{member}"
-                        return_type, param_types, typed = self._extract_ts_types(text)
-                        self.builder.add_node(
-                            mid,
-                            "Method",
-                            name=member,
-                            signature=self._build_ts_signature(
-                                member, param_types, return_type
-                            ),
-                            lineno=lineno,
-                            end_lineno=lineno,
-                            token_count=10,
-                            docstring=None,
-                            return_type=return_type,
-                            param_types=param_types,
-                            signatures=self._overloads(mid, typed),
-                        )
-                        self.builder.add_edge(cid, mid, "DEFINES")
-                        own_defs.append((mid, name_end))
+                    written, fields, open_at = _members_on_line(code_lines[i], body)
+                field_spans = [(*field, cid) for field in fields]
+                written = [(*member, lineno) for member in written]
+                if open_at is not None:
+                    member_end = _statement_end(code_lines, i, open_at) + 1
+                    found = _TS_LINE_MEMBER_RE.match(code_lines[i], open_at)
+                    prop = _class_property(code_lines[i], open_at)
+                    if found:
+                        filed = " ".join(filter(None, (found.group(1), found.group(2))))
+                        text = code_lines[i][open_at:]
+                        written.append((filed, found.end(2), text, member_end))
+                    elif prop and _function_value(line[prop[2] :]):
+                        text = line[prop[2] :]
+                        written.append((prop[0], prop[1], text, member_end))
+                    else:
+                        signature_until = member_end
+                        if prop:
+                            field_spans.append((prop[2], len(code_lines[i]), cid))
+                open_member = None
+                for member, name_end, text, member_end in written:
+                    mid = f"{cid}::{member}"
+                    return_type, param_types, typed = self._extract_ts_types(text)
+                    self.builder.add_node(
+                        mid,
+                        "Method",
+                        name=member,
+                        signature=self._build_ts_signature(
+                            member, param_types, return_type
+                        ),
+                        lineno=lineno,
+                        end_lineno=member_end,
+                        token_count=(member_end - lineno + 1) * 10,
+                        docstring=None,
+                        return_type=return_type,
+                        param_types=param_types,
+                        signatures=self._overloads(mid, typed),
+                    )
+                    self.builder.add_edge(cid, mid, "DEFINES")
+                    own_defs.append((mid, name_end))
+                    if member_end > lineno:
+                        open_member = (mid, lineno, member_end, text)
                 # Generic arguments go first: `class A<T extends B> extends C<T>`
                 # inherits from C.
                 heritage = _strip_generics(full_sig)
@@ -10668,6 +10702,8 @@ class TSParser(BaseParser):
                     except (IndexError, ValueError):
                         pass
                 enter(cid, lineno, end_lineno)
+                if open_member:
+                    enter(*open_member)
                 i = j
             elif match := re_interface.search(line):
                 name = match.group(1)
@@ -10783,6 +10819,24 @@ class TSParser(BaseParser):
                 if not spread:
                     held = (key or name, modules[name], "*")
                 self.builder.reexports.setdefault(parent_id, []).append(held)
+            elif (
+                parent_id in class_ids
+                and not re_method.search(line)
+                and (field := _class_property(code_lines[i]))
+                and not _function_value(
+                    " ".join(
+                        [line[field[2] :]]
+                        + [
+                            text.strip()
+                            for text in text_lines[
+                                i + 1 : min(_statement_end(code_lines, i), i + 40) + 1
+                            ]
+                        ]
+                    )
+                )
+            ):
+                # A field's value: the lines it goes on over declare nothing.
+                signature_until = _statement_end(code_lines, i) + 1
             elif (
                 "::" in parent_id
                 and parent_id != file_id
@@ -11043,7 +11097,7 @@ class TSParser(BaseParser):
                 # or computed key leading the line runs where the class or
                 # object is defined, not in the member it leads.
                 added = {node["id"] for node in self.builder.nodes[nodes_before:]}
-                spans = [
+                spans = field_spans + [
                     (*span, node_id)
                     for node_id, name_end in own_defs
                     if node_id in added and (span := _own_line_span(code, name_end))

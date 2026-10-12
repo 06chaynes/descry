@@ -269,7 +269,11 @@ Python SDK v2, and a full-tree review's findings are fixed.
   later line of a signature or a parameter default, an optional call
   (`f?.()`, `o.m?.()`), and a call in an arrow's expression body on the
   lines after its `=>`, are the function's, where they were not read or
-  were filed under the enclosing scope.
+  were filed under the enclosing scope. A member that starts on its
+  class's line and goes on over the next ones is a member to the end of
+  its statement, and the lines a field's value goes on over declare
+  nothing, where a call on one was taken for a method of the class; a
+  field's value on the class's line is the class's, as on a later line.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer
   aborts the whole index. `index` no longer encodes every symbol twice.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root

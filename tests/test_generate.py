@@ -16761,6 +16761,59 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, "FILE:n.ts::spread") == ["FILE:n.ts::helper"]
         assert _calls(builder, "FILE:n.ts::after") == ["FILE:n.ts::helper"]
 
+    def test_a_member_its_classs_line_leaves_open(self, tmp_path):
+        """A method, accessor or arrow property that starts on its class's
+        line and goes on over the next ones is a member to the end of its
+        statement; a line of its body is no member of the class."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.ts": """
+                export function helper(x?: any): any { return x; }
+                export class InField { cf = () =>
+                  helper(); }
+                export class M { m() {
+                    helper();
+                  }
+                }
+                export class G { get g() {
+                    return helper();
+                  }
+                }
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert not {
+            i for i in ids if i.endswith("::helper") and i != "FILE:m.ts::helper"
+        }
+        for member in ("InField::cf", "M::m", "G::get g"):
+            assert _calls(builder, f"FILE:m.ts::{member}") == ["FILE:m.ts::helper"]
+
+    def test_a_fields_value_belongs_to_its_class(self, tmp_path):
+        """A field's value, on the class's line or over the lines after its
+        own, declares nothing and its calls are the class's; a computed key
+        on the class's line runs where the class is defined."""
+        builder = _index(
+            tmp_path,
+            {
+                "f.ts": """
+                export function helper(x?: any): any { return x; }
+                export function key(): any { return "k"; }
+                export class Q {
+                  p = helper(
+                    helper());
+                }
+                export class P { [key()]() { return 1; } p = helper(); }
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert "FILE:f.ts::Q::helper" not in ids
+        assert _calls(builder, "FILE:f.ts::Q") == ["FILE:f.ts::helper"] * 2
+        assert _calls(builder, "FILE:f.ts::P") == ["FILE:f.ts::helper"]
+        assert _calls(builder, "FILE:f.ts") == ["FILE:f.ts::key"]
+
     def test_let_and_var_declarators_holding_functions(self, tmp_path):
         """A later declarator of a `let` or `var` is a function where it holds
         one, as its first is; a `const` declarator's value is its own."""
