@@ -280,7 +280,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
   detected" or "Multiple build tools detected". A Rust root package beside
   its workspace members, or beside nested crates, is indexed too:
   `rust-analyzer scip` indexes only the crate at the path it is given, so
-  the root package had no index. scip-dart is run on `.`; given `./` it
+  the root package had no index; it is named `.` where a member holds the
+  root directory's name. scip-dart is run on `.`; given `./` it
   took the package for a nested one, skipped it and wrote an empty index.
   scip-dart is found under either spelling — `scip-dart` or the
   `scip_dart` `dart pub global` installs, read from `$PUB_CACHE` when

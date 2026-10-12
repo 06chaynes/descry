@@ -231,9 +231,9 @@ class JavaAdapter:
         # subproject tree natively; iterating ourselves picks up
         # buildSrc/ alone which fails to build standalone.
         root_runs_gradle = _runs_gradle(root)
-        root_has_settings = (root / "settings.gradle").exists() or (
+        root_has_settings = (root / "settings.gradle").is_file() or (
             root / "settings.gradle.kts"
-        ).exists()
+        ).is_file()
         if root_runs_gradle and root_has_settings and _has_jvm_sources(root):
             projects.append(
                 DiscoveredProject(

@@ -109,8 +109,9 @@ class RustAdapter:
            workspaces that don't declare ``[workspace] members`` (e.g.,
            tokio — each subdir is an independent crate).
         3. The root is a crate of its own, named after the root directory,
-           where its ``Cargo.toml`` declares a ``[package]`` and it has
-           ``src/``, or where nothing else was found and it has ``src/``.
+           or ``.`` where a member is named so, where its ``Cargo.toml``
+           declares a ``[package]`` and it has ``src/``, or where nothing
+           else was found and it has ``src/``.
            ``rust-analyzer scip`` indexes only the crate at the path it is
            given, so a root package beside its members needs its own run.
         """
@@ -165,14 +166,13 @@ class RustAdapter:
                 )
 
         root_package = "package" in _load_manifest(root_cargo)
-        if (
-            (root_package or not projects)
-            and (root / "src").exists()
-            and all(p.name != root.name for p in projects)
-        ):
+        if (root_package or not projects) and (root / "src").exists():
+            # Named after the root directory, or `.` where a member already
+            # holds that name; `crate_dir` resolves either to the root.
+            taken = any(p.name == root.name for p in projects)
             projects.append(
                 DiscoveredProject(
-                    name=root.name,
+                    name="." if taken else root.name,
                     root=root,
                     language=self.name,
                 )

@@ -191,6 +191,20 @@ class TestJavaAdapterDiscovery:
 
         assert "--" in spec.argv
 
+    def test_a_directory_named_settings_gradle_is_no_settings_file(self, tmp_path):
+        """scip-java and Gradle read a settings file, so a directory of that
+        name does not make the root one multi-project build."""
+        app = tmp_path / "app"
+        app.mkdir()
+        (tmp_path / "settings.gradle").mkdir()
+        (tmp_path / "gradlew").write_text("#!/bin/sh\n")
+        (app / "build.gradle").write_text("// app build\n")
+        (app / "Main.java").write_text("class Main {}")
+
+        projects = JavaAdapter().discover(tmp_path, set())
+
+        assert [p.root for p in projects] == [app]
+
     def test_wrapper_alone_marks_the_root(self, tmp_path):
         (tmp_path / "gradlew").write_text("#!/bin/sh\n")
         (tmp_path / "Main.java").write_text("class Main {}")

@@ -11,7 +11,7 @@ import pytest
 
 from descry.scip import adapter as adapter_mod
 from descry.scip.adapter import ADAPTERS, CommandSpec, DiscoveredProject
-from descry.scip.adapters.rust import RustAdapter
+from descry.scip.adapters.rust import RustAdapter, crate_dir
 from descry.scip.cache import ScipCacheManager
 
 
@@ -216,6 +216,23 @@ class TestRustSingleCrateAtRoot:
         names = [p.name for p in RustAdapter().discover(tmp_path, set())]
 
         assert names == ["crates/core"]
+
+    def test_root_package_and_a_member_of_its_name_are_both_crates(self, tmp_path):
+        """The root package is `.` where a member already holds the root
+        directory's name, and its index runs on the root."""
+        root = tmp_path / "dup"
+        (root / "src").mkdir(parents=True)
+        (root / "dup" / "src").mkdir(parents=True)
+        (root / "Cargo.toml").write_text(
+            '[package]\nname = "rootpkg"\n[workspace]\nmembers = ["dup"]\n'
+        )
+        (root / "dup" / "Cargo.toml").write_text('[package]\nname = "dupm"\n')
+
+        projects = RustAdapter().discover(root, set())
+
+        assert sorted(p.name for p in projects) == [".", "dup"]
+        assert crate_dir(root, ".") == root
+        assert crate_dir(root, "dup") == root / "dup"
 
     def test_member_crate_named_like_the_root_targets_the_member(self, tmp_path):
         root = tmp_path / "mylib"
