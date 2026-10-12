@@ -6380,6 +6380,14 @@ class BaseParser:
             self._contexts.pop()
         return self._contexts[-1][:2]
 
+    def enclosing_scope(self, node_id):
+        """The innermost context around ``node_id``: where a class or an
+        object it defines is evaluated."""
+        for context in reversed(self._contexts):
+            if context[0] != node_id:
+                return context[0]
+        return node_id
+
     @staticmethod
     def leave_contexts(contexts, levels, level):
         """Pop the innermost context, never the first, for as long as its
@@ -9353,6 +9361,86 @@ def _arrow_function(statement: str) -> tuple[str, str] | None:
     return None
 
 
+def _own_line_span(code: str, name_end: int) -> tuple[int, int] | None:
+    """The columns of ``code`` holding the parameters and the first line of
+    the body of a definition whose name ends at ``name_end``: code that
+    runs when the definition is called, its parameter defaults with it
+    (ECMA-262 10.2.11 FunctionDeclarationInstantiation), so a call on its
+    own line is its, not its enclosing scope's.
+    """
+    paren = code.find("(", name_end)
+    if paren < 0:
+        return None
+    depth = 0
+    close = -1
+    for col in range(paren, len(code)):
+        depth += (code[col] == "(") - (code[col] == ")")
+        if depth == 0:
+            close = col
+            break
+    if close < 0:
+        # The parameters span lines; the rest of this line is theirs.
+        return (paren, len(code))
+    # The body follows, past any return-type annotation.
+    for offset, char in enumerate(code[close + 1 :]):
+        if char == "{":
+            # A block: where its braces balance on this line, else the
+            # first line of a block that spans lines.
+            depth = 0
+            for body in range(close + 1 + offset, len(code)):
+                depth += (code[body] == "{") - (code[body] == "}")
+                if depth == 0:
+                    return (paren, body + 1)
+            return (paren, len(code))
+        if char == "=" and code[close + 2 + offset : close + 3 + offset] == ">":
+            # An expression: to the `,` or `;` that ends it, at bracket depth.
+            depth = 0
+            for body in range(close + 3 + offset, len(code)):
+                char = code[body]
+                depth += (char in "([{") - (char in ")]}")
+                if depth == 0 and char in ",;":
+                    return (paren, body)
+            return (paren, len(code))
+    return None
+
+
+def _definition_time_region(code: str) -> tuple[int, int] | None:
+    """The columns of the decorators and computed keys that lead ``code``,
+    each evaluated where the class or object is defined (ECMA-262 15.5.5
+    ClassDefinitionEvaluation; 13.2.5 PropertyDefinition), not in the
+    member they lead.
+    """
+    start = len(code) - len(code.lstrip())
+    end = start
+    while code[end : end + 1] in ("@", "["):
+        opened = code[end]
+        if opened == "@":
+            named = re.match(r"@\s*[\w$.]+", code[end:])
+            if named is None:
+                break
+            end += named.end()
+            if code[end : end + 1] == "(":
+                depth = 0
+                for col in range(end, len(code)):
+                    depth += (code[col] == "(") - (code[col] == ")")
+                    if depth == 0:
+                        end = col + 1
+                        break
+                else:
+                    break
+        else:
+            depth = 0
+            for col in range(end, len(code)):
+                depth += (code[col] == "[") - (code[col] == "]")
+                if depth == 0:
+                    end = col + 1
+                    break
+            else:
+                break
+        end += len(code[end:]) - len(code[end:].lstrip())
+    return (start, end) if end > start else None
+
+
 def _ts_params(signature: str) -> set[str]:
     """Names of the parameters in the first parameter list of ``signature``."""
     names = set()
@@ -9698,12 +9786,26 @@ class TSParser(BaseParser):
                     origin = f">{escaped}"
             else:
                 declared = re.search(
-                    r"\b(?:const|let|var)\s+([\w$]+)(?:\s*:[^;]*)?=\s*$", head
+                    r"\b(?:const|let|var)\s+([\w$]+)(?:\s*:\s*([^;]*?))?\s*=\s*$",
+                    head,
                 )
                 assigned = re.search(r"(?<![\w$.])([\w$]+)\s*=(?![=>])\s*$", head)
-                given = declared or assigned
-                if given:
-                    origin = f"={given[1]}"
+                if declared and declared[2] is not None:
+                    # The annotation is the closure's own function type:
+                    # read its parameters where they are written, not
+                    # through the variable — a definition the value
+                    # becomes does not hold it as a member.
+                    escaped = (
+                        declared[2]
+                        .strip()
+                        .replace("(", "<")
+                        .replace(")", ">")
+                        .replace(".", "::")
+                    )
+                    origin = f">{escaped}"
+                else:
+                    given = declared or assigned
+                    origin = f"={given[1]}" if given else None
             if origin is None:
                 break
             self._closures.pop(0)
@@ -10100,6 +10202,7 @@ class TSParser(BaseParser):
             declared_at = None
             valued = None  # the signature of the arrow function the line is
             arrow_id = None  # the node of the arrow function the line declares
+            own_defs = []  # (node ID, end of its name) declared on the line
 
             parent_id = self.context_at(lineno)[0]
             # The object the definition returns, where the line being read is
@@ -10195,6 +10298,7 @@ class TSParser(BaseParser):
                 if val and (held := _arrow_function(line)):
                     valued = self._arrow_typed(held[1], line)
                     arrow_id = cid
+                    own_defs.append((cid, match.end(1)))
                 self.builder.add_node(
                     cid,
                     "Constant",
@@ -10305,6 +10409,7 @@ class TSParser(BaseParser):
                     signatures=self._overloads(fid, typed),
                 )
                 self.builder.add_edge(parent_id, fid, "DEFINES")
+                own_defs.append((fid, match.end(1)))
                 enter(fid, lineno, end_lineno, full_sig)
                 i = j
             elif (
@@ -10344,6 +10449,9 @@ class TSParser(BaseParser):
                     signatures=self._overloads(fid, typed),
                 )
                 self.builder.add_edge(object_id or parent_id, fid, "DEFINES")
+                named = _TS_VARIABLE_RE.match(line) or _TS_PROPERTY_RE.match(line)
+                if named and named.group(1) == name:
+                    own_defs.append((fid, named.end(1)))
                 enter(fid, object_scope or lineno, end_lineno, parameters)
                 arrow_id = fid
                 i = j
@@ -10399,6 +10507,7 @@ class TSParser(BaseParser):
                         signatures=self._overloads(mid, typed),
                     )
                     self.builder.add_edge(object_id or parent_id, mid, "DEFINES")
+                    own_defs.append((mid, match.end(1)))
                     enter(mid, object_scope or lineno, end_lineno, full_sig)
                     i = j
             # Handle getter/setter methods: get name() or set name(value)
@@ -10441,6 +10550,7 @@ class TSParser(BaseParser):
                     signatures=self._overloads(mid, typed),
                 )
                 self.builder.add_edge(object_id or parent_id, mid, "DEFINES")
+                own_defs.append((mid, match.end(2)))
                 # Don't push getters/setters to context - they're leaf methods
                 # that shouldn't contain nested definitions
                 i = j
@@ -10577,6 +10687,20 @@ class TSParser(BaseParser):
                 self._bodies = []
                 typed = _TS_TYPED_VALUE_RE.search(code)
                 calls = []  # (edge index, column of its `(`) of each on the line
+                # A definition on this line takes the calls its parameters
+                # and the first line of its body enclose, which run when it
+                # is called. A decorator or computed key leading the line
+                # runs where the class or object is defined, not in the
+                # member it leads.
+                spans = [
+                    (*span, node_id)
+                    for node_id, name_end in own_defs
+                    if (span := _own_line_span(code, name_end))
+                ]
+                if (parent_id in class_ids or parent_id in object_ids) and (
+                    region := _definition_time_region(code)
+                ):
+                    spans.append((*region, self.enclosing_scope(parent_id)))
                 for match in re_call_candidate.finditer(code):
                     if match.start(1) == declared_at:
                         continue
@@ -10638,8 +10762,12 @@ class TSParser(BaseParser):
                             held = self._this_in_object(code, match.start(1))
                             if held:
                                 origin = f"{held}.{called}"
+                        source = parent_id
+                        for span_start, span_end, node_id in spans:
+                            if span_start <= match.start(1) < span_end:
+                                source = node_id
                         self.add_call(
-                            parent_id,
+                            source,
                             callee,
                             lineno,
                             since,

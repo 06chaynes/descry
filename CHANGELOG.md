@@ -252,7 +252,14 @@ Python SDK v2, and a full-tree review's findings are fixed.
   as a comment, taking the calls after it on the line with it. A block
   written on one line whose line goes on to close what encloses it
   (`save() { ... } };`) ends on that line, rather than taking in the
-  definitions after it.
+  definitions after it. A call on a TypeScript or JavaScript definition's
+  own line is now the definition's — its parameter defaults and the
+  first line of its body run when it is called — so a one-line
+  function's, method's or arrow's call is no longer filed under the
+  enclosing file or class; a decorator or computed key on the line runs
+  where the class or object is defined, and an arrow constant written
+  with a function-type annotation resolves its body calls through the
+  annotation.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer
   aborts the whole index. `index` no longer encodes every symbol twice.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root

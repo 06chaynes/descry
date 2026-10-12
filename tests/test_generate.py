@@ -4749,7 +4749,8 @@ class TestTypeScriptCallResolution:
         assert "FILE:a.ts::Dog::fetch" in _calls(builder, "FILE:a.ts::makeMaker")
 
     def test_arrow_assigned_a_function_type_reads_its_params(self, tmp_path):
-        """`const f: (x: Dog) => Dog = (y) => y.fetch()` types `y`."""
+        """`const f: (x: Dog) => Dog = (y) => y.fetch()` types `y`; the call
+        is the arrow's, on its own line."""
         builder = _index(
             tmp_path,
             {
@@ -4762,7 +4763,7 @@ class TestTypeScriptCallResolution:
                 """
             },
         )
-        assert "FILE:a.ts::Dog::fetch" in _calls(builder, "FILE:a.ts")
+        assert _calls(builder, "FILE:a.ts::typed") == ["FILE:a.ts::Dog::fetch"]
 
     def test_union_member_calls_stay_alternatives(self, tmp_path):
         """`a.fetch()` on `Dog | Cat`, which both define, is genuinely
@@ -6439,10 +6440,13 @@ class TestTypeScriptCallResolution:
             "FILE:thing.test.ts::make",
             "FILE:thing.test.ts::open",
             "FILE:thing.test.ts::passed",
-            "FILE:thing.ts::useThing",
             "FILE:thing.ts::useThing::show",
             "FILE:thing.ts::useThing::show",
             "FILE:thing.ts::useThing::show",
+        ]
+        # The arrow `open` calls `useThing` on its own first line.
+        assert _calls(builder, "FILE:thing.test.ts::open") == [
+            "FILE:thing.ts::useThing"
         ]
         assert _calls(builder, "FILE:deep.ts::run") == [
             "FILE:deep.ts::second",
@@ -16421,3 +16425,194 @@ class TestRaisedThresholds:
         }
         assert "REF:escapeChars.Union" not in edges
         assert "FILE:LinqBridge.cs::Enumerable::Shout" in edges
+
+
+class TestOneLineDefinitionCalls:
+    """A call on a TypeScript/JavaScript definition's own line is the
+    definition's: its parameters and the first line of its body run when
+    it is called (ECMA-262 10.2.11 FunctionDeclarationInstantiation)."""
+
+    def test_every_row_of_the_fixture(self, tmp_path):
+        """The one-line shapes: a function, a method, a named arrow, the
+        members of a returned object; the return-line member keeps the
+        owner's decision and a later line's member takes its own."""
+        builder = _index(
+            tmp_path,
+            {
+                "s.ts": """
+                export function helper(): number { return 1; }
+                export function oneLine(): number { return helper(); }
+                export class K {
+                  m(): number { return helper(); }
+                  n(): number {
+                    return helper();
+                  }
+                }
+                export const arrow = (): number => helper();
+                export function make() {
+                  return {
+                    load() { return helper(); },
+                    save() {
+                      return helper();
+                    },
+                    run: () => helper(),
+                  };
+                }
+                export function makeLine() {
+                  return { load() { return helper(); },
+                    save() { return helper(); },
+                  };
+                }
+                """
+            },
+        )
+        file = "FILE:s.ts"
+        assert _calls(builder, f"{file}::oneLine") == [f"{file}::helper"]
+        assert _calls(builder, f"{file}::K::m") == [f"{file}::helper"]
+        assert _calls(builder, f"{file}::K::n") == [f"{file}::helper"]
+        assert _calls(builder, f"{file}::arrow") == [f"{file}::helper"]
+        assert _calls(builder, f"{file}::make::object@12::load") == [f"{file}::helper"]
+        assert _calls(builder, f"{file}::make::object@12::save") == [f"{file}::helper"]
+        assert _calls(builder, f"{file}::make::object@12::run") == [f"{file}::helper"]
+        # The member on the return line has no node: the owner's decision
+        # keeps its call with the function that returns the object.
+        assert _calls(builder, f"{file}::makeLine") == [f"{file}::helper"]
+        assert _calls(builder, f"{file}::makeLine::save") == [f"{file}::helper"]
+
+    def test_a_parameter_default_is_the_functions(self, tmp_path):
+        """`x = g()` runs at each call of the function, not where it is
+        written (ECMA-262 10.2.11)."""
+        builder = _index(
+            tmp_path,
+            {
+                "p.ts": """
+                export function helper(): number { return 1; }
+                export function f(x = helper()): number { return x; }
+                export function multi(
+                  x = helper(),
+                ): number { return x; }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:p.ts::f") == ["FILE:p.ts::helper"]
+
+    def test_a_decorator_runs_where_the_class_is_defined(self, tmp_path):
+        """`@dec()` on a member is evaluated while the class is being
+        defined, in the scope the class is declared in."""
+        builder = _index(
+            tmp_path,
+            {
+                "d.ts": """
+                export function dec(): any { return null; }
+                export function helper(): number { return 1; }
+                export class Host {
+                  @dec() m(): number { return helper(); }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:d.ts") == ["FILE:d.ts::dec"]
+        # The decorated method yields no node; its call stays with the class.
+        assert _calls(builder, "FILE:d.ts::Host") == ["FILE:d.ts::helper"]
+
+    def test_an_extends_clause_runs_where_the_class_is_defined(self, tmp_path):
+        """The heritage expression is evaluated at class definition
+        (ECMA-262 15.5.5 ClassDefinitionEvaluation), outside the class."""
+        builder = _index(
+            tmp_path,
+            {
+                "e.ts": """
+                export function base(): any { return null; }
+                export class Ext extends base() { m(): number { return 1; } }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:e.ts") == ["FILE:e.ts::base"]
+
+    def test_a_computed_key_runs_where_the_definition_is_evaluated(self, tmp_path):
+        """A computed key is evaluated where the class or object is defined
+        (ECMA-262 15.5.5; 13.2.5 PropertyDefinition), not in the member."""
+        builder = _index(
+            tmp_path,
+            {
+                "k.ts": """
+                export function helper(): any { return null; }
+                export class Computed {
+                  [helper() as string](): number { return 1; }
+                }
+                export const objLit = {
+                  [helper() as string]: 1,
+                };
+                """
+            },
+        )
+        assert _calls(builder, "FILE:k.ts") == [
+            "FILE:k.ts::helper",
+            "FILE:k.ts::helper",
+        ]
+
+    def test_a_field_initialiser_is_the_classs(self, tmp_path):
+        """A field initialiser runs when an instance is constructed
+        (ECMA-262 15.5.19 InitializeInstanceElements); with no field
+        node, the class owns it."""
+        builder = _index(
+            tmp_path,
+            {
+                "i.ts": """
+                export function helper(): number { return 1; }
+                export class Fields {
+                  field = helper();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:i.ts::Fields") == ["FILE:i.ts::helper"]
+
+    def test_each_of_several_definitions_on_one_line_takes_its_own(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "v.ts": """
+                export function helper(): number { return 1; }
+                export const a = () => helper(), second = 2;
+                """
+            },
+        )
+        assert _calls(builder, "FILE:v.ts::a") == ["FILE:v.ts::helper"]
+
+    def test_a_call_after_the_definition_closes_is_not_its(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "c.ts": """
+                export function helper(): number { return 1; }
+                export function ab() { helper(); } helper();
+                export function go(fn: () => number) { return fn(); }
+                export function wrapped() { go(() => helper()); helper(); }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:c.ts::ab") == ["FILE:c.ts::helper"]
+        assert _calls(builder, "FILE:c.ts") == ["FILE:c.ts::helper"]
+        # A closure passed inline stays with the function that passes it.
+        assert _calls(builder, "FILE:c.ts::wrapped") == [
+            "FILE:c.ts::go",
+            "FILE:c.ts::helper",
+            "FILE:c.ts::helper",
+        ]
+
+    def test_a_named_arrow_inside_a_function_takes_its_own_call(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "n.ts": """
+                export function helper(): number { return 1; }
+                export function outer(): number {
+                  const inner = () => helper();
+                  return inner();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:n.ts::outer::inner") == ["FILE:n.ts::helper"]
+        assert _calls(builder, "FILE:n.ts::outer") == ["FILE:n.ts::outer::inner"]
