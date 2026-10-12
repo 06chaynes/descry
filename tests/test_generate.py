@@ -16698,6 +16698,97 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, "FILE:p.ts::P::both") == ["FILE:p.ts::P::#make"]
         assert _calls(builder, "FILE:p.ts::P::#make") == ["FILE:p.ts::P"]
 
+    def test_typed_class_properties_holding_functions_are_members(self, tmp_path):
+        """A property is a member where it holds a function whatever its
+        annotation, one holding a function type of its own included."""
+        builder = _index(
+            tmp_path,
+            {
+                "k.ts": """
+                export function helper(x?: any): any { return x; }
+                export class K {
+                  v: any = () => helper();
+                  q?: () => any = () => helper();
+                  t: (a: number) => void = (a) => helper(a);
+                  n: number = helper();
+                }
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert "FILE:k.ts::K::n" not in ids
+        for member in ("v", "q", "t"):
+            assert _calls(builder, f"FILE:k.ts::K::{member}") == ["FILE:k.ts::helper"]
+
+    def test_an_optional_call_is_a_call(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "o.ts": """
+                export function helper(x?: any): any { return x; }
+                export class K {
+                  run(o?: K) {
+                    return o?.run?.();
+                  }
+                  opt() {
+                    return helper?.(1);
+                  }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:o.ts::K::run") == ["FILE:o.ts::K::run"]
+        assert _calls(builder, "FILE:o.ts::K::opt") == ["FILE:o.ts::helper"]
+
+    def test_an_arrow_body_on_the_lines_after_its_arrow(self, tmp_path):
+        """An expression body ends with the statement: on the next line, or
+        over lines its brackets hold open."""
+        builder = _index(
+            tmp_path,
+            {
+                "n.ts": """
+                export function helper(x?: any): any { return x; }
+                export const next = (x: number) =>
+                  helper(x);
+                export const spread = (x: number) => helper(
+                  x,
+                );
+                export const after = () => helper();
+                """
+            },
+        )
+        assert _calls(builder, "FILE:n.ts::next") == ["FILE:n.ts::helper"]
+        assert _calls(builder, "FILE:n.ts::spread") == ["FILE:n.ts::helper"]
+        assert _calls(builder, "FILE:n.ts::after") == ["FILE:n.ts::helper"]
+
+    def test_let_and_var_declarators_holding_functions(self, tmp_path):
+        """A later declarator of a `let` or `var` is a function where it holds
+        one, as its first is; a `const` declarator's value is its own."""
+        builder = _index(
+            tmp_path,
+            {
+                "l.ts": """
+                export function helper(x?: any): any { return x; }
+                let la = () => helper(), lb = () => helper();
+                var va = 1, vb = () => helper();
+                const cv = helper(1, 2), cw = helper(3, 4);
+                const cm = new Map<string, number>(), cn: number = helper(5, 6);
+                const ct: { fn: () => void }[] = [];
+                """
+            },
+        )
+        nodes = {n["id"]: n for n in builder.nodes}
+        assert "FILE:l.ts::va" not in nodes
+        assert _calls(builder, "FILE:l.ts::lb") == ["FILE:l.ts::helper"]
+        assert _calls(builder, "FILE:l.ts::vb") == ["FILE:l.ts::helper"]
+        assert nodes["FILE:l.ts::cv"]["metadata"]["value"] == "helper(1, 2)"
+        assert nodes["FILE:l.ts::cw"]["metadata"]["value"] == "helper(3, 4)"
+        assert (
+            nodes["FILE:l.ts::cm"]["metadata"]["value"] == "new Map<string, number>()"
+        )
+        assert nodes["FILE:l.ts::cn"]["metadata"]["value"] == "helper(5, 6)"
+        assert nodes["FILE:l.ts::ct"]["metadata"]["value"] == "[]"
+
     def test_a_parameter_default_is_the_functions(self, tmp_path):
         """`x = g()` runs at each call of the function, not where it is
         written (ECMA-262 2026 10.2.11)."""

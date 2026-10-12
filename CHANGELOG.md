@@ -260,13 +260,16 @@ Python SDK v2, and a full-tree review's findings are fixed.
   where the class or object is defined, and an arrow constant written
   with a function-type annotation resolves its body calls through the
   annotation. A generic arrow (`<T>(x: T) => ...`) is read as a function,
-  each declarator of `const a = ..., b = ...` as a constant of its own,
-  after a destructured first one and on the lines the statement goes on
-  to, a method, accessor, constructor or arrow-valued property written on
-  its class's line as a member, and a private member (`#m`) as a member
-  that `this.#m()` reaches; a call on a later line of a signature, a parameter default or a
-  multi-line arrow's expression body, is the function's, where it was
-  not read at all.
+  each declarator of `const a = ..., b = ...` as a constant of its own
+  with its own value, and each of `let` or `var` holding a function as
+  that function, after a destructured first one and on the lines the
+  statement goes on to; a method, accessor, constructor or arrow-valued
+  property, typed or not, as a member, on its class's line too, and a
+  private member (`#m`) as a member that `this.#m()` reaches. A call on a
+  later line of a signature or a parameter default, an optional call
+  (`f?.()`, `o.m?.()`), and a call in an arrow's expression body on the
+  lines after its `=>`, are the function's, where they were not read or
+  were filed under the enclosing scope.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer
   aborts the whole index. `index` no longer encodes every symbol twice.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root

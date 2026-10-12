@@ -9381,6 +9381,84 @@ def _function_value(text: str) -> str | None:
     return None
 
 
+def _class_property(code: str, start: int = 0) -> tuple[str, int, int] | None:
+    """A property declared at column ``start`` of ``code`` with a value:
+    its name, the column its name ends at, and the column its value starts
+    at, past an annotation of any shape (`t: (a: A) => B = ...`)."""
+    named = _TS_CLASS_PROPERTY_RE.match(code, start)
+    if not named:
+        return None
+    depth = 0
+    for column in range(named.end(), len(code)):
+        char = code[column]
+        if char in "([{<":
+            depth += 1
+        elif char in ")]}>" and code[column - 1] != "=":
+            depth -= 1
+        elif char == ";" and depth == 0:
+            return None
+        elif (
+            char == "="
+            and depth == 0
+            and code[column + 1 : column + 2] not in ("=", ">")
+            and code[column - 1] not in "!<>="
+        ):
+            value = (
+                column + 1 + len(code[column + 1 :]) - len(code[column + 1 :].lstrip())
+            )
+            return named[1], named.end(1), value
+        if depth < 0:
+            return None
+    return None
+
+
+def _member_written(
+    line: str, in_class: bool, method_re
+) -> tuple[str, int, int, bool] | None:
+    """The member ``line`` opens: its name, the columns its name starts and
+    ends at, and whether a value is assigned to it. `name(` and `name = (`
+    as ``method_re`` reads them, and in a class a property holding a
+    function whatever its annotation."""
+    if match := method_re.search(line):
+        return match.group(1), match.start(1), match.end(1), bool(match.group(2))
+    if (
+        in_class
+        and (prop := _class_property(line))
+        and _function_value(line[prop[2] :])
+    ):
+        return prop[0], prop[1] - len(prop[0]), prop[1], True
+    return None
+
+
+# What a line ends with, or the line after it starts with, where the
+# expression goes on from the one to the other
+_JS_CONTINUES_EXPRESSION = tuple(".?:+-*/%&|^=<>")
+
+
+def _statement_end(lines: list[str], index: int) -> int:
+    """The index of the last line of the statement that starts on line
+    ``index``: the first line at which its brackets are closed and that
+    neither ends with an operator or an arrow's `=>`, nor is followed by a
+    line going on with it; a `,` there ends the property or declarator.
+    ``lines`` are code lines with the text of their literals blanked."""
+    depth = 0
+    for row in range(index, len(lines)):
+        code = lines[row].strip()
+        for char in code:
+            depth += (char in "([{") - (char in ")]}")
+            if depth < 0:
+                return row  # the line closes what holds the statement
+        if depth > 0 or not code:
+            continue
+        following = lines[row + 1].lstrip() if row + 1 < len(lines) else ""
+        if not (
+            code.endswith(_JS_CONTINUES_EXPRESSION + ("=>",))
+            or following.startswith(_JS_CONTINUES_EXPRESSION)
+        ):
+            return row
+    return len(lines) - 1
+
+
 def _own_line_span(code: str, name_end: int) -> tuple[int, int] | None:
     """The columns of ``code`` holding the parameters and the first line of
     the body of a definition whose name ends at ``name_end``: code that
@@ -9430,15 +9508,44 @@ def _own_line_span(code: str, name_end: int) -> tuple[int, int] | None:
     return None
 
 
+# The name, annotation and `=` of a declarator after a `,`
+_TS_DECLARATOR_RE = re.compile(r"\s*([A-Za-z_$][\w$]*)\s*(?::[^=,;]*)?=(?![=>])\s*")
+
+
+def _value_end(code: str, start: int) -> int:
+    """The column at which the declarator's value starting at column
+    ``start`` of ``code`` ends: outside brackets, the `;` after it or the `,`
+    before another declarator, else the end of the line."""
+    depth = 0
+    for column in range(start, len(code)):
+        depth += (code[column] in "([{") - (code[column] in ")]}")
+        if depth < 0 or (
+            depth == 0
+            and (
+                code[column] == ";"
+                or (
+                    code[column] == ","
+                    and (
+                        not code[column + 1 :].strip()
+                        or _TS_DECLARATOR_RE.match(code, column + 1)
+                    )
+                )
+            )
+        ):
+            return column
+    return len(code)
+
+
 def _declarators(
     lines: list[str], index: int, after: int
 ) -> list[tuple[int, str, int, int]]:
-    """Each declarator after the first of the `const` statement whose first
-    binding, a name or a destructuring pattern, ends at column ``after`` of
-    line ``index``: `b` in `const a = f, b = () => g();` or on a line the
-    statement goes on to, as the index of its line, its name, the column its
-    name ends at and the column its value starts at. ``lines`` are the
-    file's lines with the text of their literals blanked."""
+    """Each declarator after the first of the `const`, `let` or `var`
+    statement whose first binding, a name or a destructuring pattern, ends
+    at column ``after`` of line ``index``: `b` in `const a = f, b = () =>
+    g();` or on a line the statement goes on to, as the index of its line,
+    its name, the column its name ends at and the column its value starts
+    at. ``lines`` are the file's lines with the text of their literals
+    blanked."""
     declarators = []
     depth = 0
     in_value = False  # past the first declarator's `=`
@@ -9464,9 +9571,7 @@ def _declarators(
                     rest, at, offset = code[column + 1 :], row, column + 1
                     if not rest.strip() and row + 1 < len(lines):
                         rest, at, offset = lines[row + 1], row + 1, 0
-                    named = re.match(
-                        r"\s*([A-Za-z_$][\w$]*)\s*(?::[^=,;]*)?=(?![=>])\s*", rest
-                    )
+                    named = _TS_DECLARATOR_RE.match(rest)
                     if named:
                         declarators.append(
                             (at, named[1], offset + named.end(1), offset + named.end())
@@ -9531,10 +9636,10 @@ def _members_on_line(code: str, start: int) -> list[tuple[str, int, str]]:
         if found:
             filed = " ".join(filter(None, (found.group(1), found.group(2))))
             members.append((filed, found.end(2), code[column:end].strip()))
-        elif (
-            named := _TS_LINE_PROPERTY_RE.match(code, column, end)
-        ) and _function_value(code[named.end() : end]):
-            members.append((named[1], named.end(1), code[named.end() : end].strip()))
+        elif (prop := _class_property(code[:end], column)) and _function_value(
+            code[prop[2] : end]
+        ):
+            members.append((prop[0], prop[1], code[prop[2] : end].strip()))
         column = end
     return members
 
@@ -9618,14 +9723,16 @@ _TS_MEMBER_MODIFIERS = r"(?:(?:private|public|protected|static|abstract|override
 # The name of a class member, `#` before a private one
 _TS_MEMBER_NAME = r"#?[A-Za-z0-9_$]+"
 # A method or accessor a class declares: `name(`, `get name(`, `async *name<T>(`
-# `const` and the first binding of its statement: a name, or a destructuring
-# pattern without nested brackets
-_TS_CONST_HEAD_RE = re.compile(
-    r"^\s*(?:export\s+)?const\s+(?:[A-Za-z_$][\w$]*|\{[^{}]*\}|\[[^\[\]]*\])"
+# `const`, `let` or `var` and the first binding of its statement: a name, or
+# a destructuring pattern without nested brackets
+_TS_DECLARATION_HEAD_RE = re.compile(
+    r"^\s*(?:export\s+)?(const|let|var)\s+"
+    r"(?:[A-Za-z_$][\w$]*|\{[^{}]*\}|\[[^\[\]]*\])"
 )
-# A property a class declares with a value: `name = `, `name?: T = `
-_TS_LINE_PROPERTY_RE = re.compile(
-    rf"\s*{_TS_MEMBER_MODIFIERS}({_TS_MEMBER_NAME})\s*[?!]?\s*(?::[^=;]*)?=(?![=>])\s*"
+# A property a class declares, up to its annotation or value: `name`,
+# `name?`, `name!`
+_TS_CLASS_PROPERTY_RE = re.compile(
+    rf"\s*{_TS_MEMBER_MODIFIERS}({_TS_MEMBER_NAME})\s*[?!]?\s*(?=[:=])"
 )
 _TS_LINE_MEMBER_RE = re.compile(
     rf"\s*{_TS_MEMBER_MODIFIERS}(?:(get|set)\s+)?(?:\*\s*)?"
@@ -9732,7 +9839,8 @@ def _nested_part(match):
 # A function without a name of its own whose body is a block that the line
 # leaves open
 _JS_BLOCK_FUNCTION_RE = re.compile(
-    r"(?:=>|\bfunction\b[^{}]*\)|\b[gs]et\s+[\w$]+\s*\([^()]*\))\s*(?::[^{}=]+)?\{\s*$"
+    rf"(?:=>|\bfunction\b[^{{}}]*\)|\b[gs]et\s+{_TS_MEMBER_NAME}\s*\([^()]*\))"
+    r"\s*(?::[^{}=]+)?\{\s*$"
 )
 # The `new` a constructed type is named after
 _JS_NEW_RE = re.compile(r"\bnew\s+$")
@@ -10262,11 +10370,11 @@ class TSParser(BaseParser):
         re_const = re.compile(
             r"^\s*(?:export\s+)?const\s+([a-zA-Z0-9_$]+)"
             r"(?:\s*:\s*(\([^()]*\)\s*=>\s*[\w$.]+|[\w$.]+(?:<[^|&]*>)?)(?=\s*=(?!>)))?"
-            r"(?:\s*(?::\s*.*?)?\s*=\s*(.*?);)?"
+            r"(?:\s*(?::\s*.*?)?\s*=(?![=>])\s*(.*?);)?"
         )
         re_import = re.compile(r'import\s+.*?from\s+([\'"])(.*?)\1')
         re_call_candidate = re.compile(
-            rf"({_TS_MEMBER_NAME}(?:\.{_TS_MEMBER_NAME})*)\s*(?=[<(])"
+            rf"({_TS_MEMBER_NAME}(?:\??\.{_TS_MEMBER_NAME})*)\s*(?:\?\.)?(?=[<(])"
         )
         # In an object literal: `...name`, `key: name` or `name` alone
         re_held = re.compile(r"^\s*(\.\.\.)?(?:([\w$]+)\s*:\s*)?([\w$]+)\s*,?\s*$")
@@ -10408,7 +10516,17 @@ class TSParser(BaseParser):
                 """Read the declaration that starts on line ``idx`` up to the
                 `{` that opens its body, or to the end of one that has none.
                 Returns the index of that line, the declaration's text and
-                the line its body ends on, its first line when it has none."""
+                the line its body ends on: its first line when it has none,
+                and where it ends with an arrow's `=>`, the last line of the
+                expression after it."""
+                j, sig, end = read_sig(idx)
+                if sig.rstrip().endswith("=>"):
+                    end = _statement_end(code_lines, idx) + 1
+                return j, sig, end
+
+            def read_sig(idx):
+                """What ``consume_sig`` returns, but for an arrow's
+                expression body."""
                 sig = ""
                 stack = []  # brackets left open
                 closed = False  # a parameter list has been read
@@ -10452,9 +10570,11 @@ class TSParser(BaseParser):
                         return j, sig.strip(), idx + 1
                 return idx, code_lines[idx].strip(), idx + 1
 
-            if lineno <= signature_until:
-                # A line of the signature of the definition above, whose
-                # calls are its; it declares nothing of its own.
+            # A line of the signature of a definition above, whose calls are
+            # its: it declares nothing of its own, opens no nameless function
+            # and holds none of the definition's `return`s.
+            continuing = lineno <= signature_until
+            if continuing:
                 pass
             elif (match := re_const.search(line)) and (
                 match.group(3) is not None or not read_arrow(i)[1]
@@ -10474,7 +10594,10 @@ class TSParser(BaseParser):
                     cid,
                     "Constant",
                     name=name,
-                    value=val,
+                    value=val
+                    and line[
+                        match.start(3) : _value_end(code_lines[i], match.start(3))
+                    ],
                     value_type=value_type,
                     lineno=lineno,
                     docstring=doc,
@@ -10613,12 +10736,12 @@ class TSParser(BaseParser):
                 docstring = self.get_leading_docstring(lines, i)
                 fid = f"{object_id or parent_id}::{name}"
                 # A block is left open where the statement stops; an
-                # expression body ends there.
+                # expression body ends with the statement.
                 last = _NON_CODE_RE.sub("", code_lines[j])
                 end_lineno = (
                     self._find_block_end(code_lines, j)
                     if last.count("{") > last.count("}")
-                    else j + 1
+                    else _statement_end(code_lines, i) + 1
                 )
                 # Arrow functions don't have easily extractable signatures
                 signature = f"const {name} = (...) => ..."
@@ -10663,9 +10786,9 @@ class TSParser(BaseParser):
             elif (
                 "::" in parent_id
                 and parent_id != file_id
-                and (match := re_method.search(line))
+                and (member := _member_written(line, parent_id in class_ids, re_method))
             ):
-                name = match.group(1)
+                name, name_start, name_end, assigned = member
                 j, full_sig, end_lineno = consume_sig(i)
                 # `name(` declares a method directly in a class body, or where
                 # a block follows its parameter list; otherwise it is a call.
@@ -10675,11 +10798,11 @@ class TSParser(BaseParser):
                 )
                 if name not in ["if", "for", "while", "switch"] and (
                     arrow
-                    if match.group(2)
+                    if assigned
                     else parent_id in class_ids
                     or (name != "catch" and _opens_body(full_sig))
                 ):
-                    declared_at = match.start(1)
+                    declared_at = name_start
                     docstring = self.get_leading_docstring(lines, i)
                     mid = f"{object_id or parent_id}::{name}"
                     return_type, param_types, typed = self._extract_ts_types(full_sig)
@@ -10700,7 +10823,7 @@ class TSParser(BaseParser):
                         signatures=self._overloads(mid, typed),
                     )
                     self.builder.add_edge(object_id or parent_id, mid, "DEFINES")
-                    own_defs.append((mid, match.end(1)))
+                    own_defs.append((mid, name_end))
                     enter(mid, object_scope or lineno, end_lineno, full_sig)
                     signature_until = j + 1  # its last line, as a line number
             # Handle getter/setter methods: get name() or set name(value)
@@ -10878,24 +11001,31 @@ class TSParser(BaseParser):
                     for found in _JS_CLOSURE_RE.finditer(code)
                 ]
                 self._bodies = []
-                # The declarators of a `const` statement after its first, on
-                # this line or one the statement goes on to, are constants of
-                # their own; one holding an arrow takes its calls.
-                if lineno > signature_until and (
-                    head := _TS_CONST_HEAD_RE.match(code_lines[i])
+                # The declarators of a statement after its first, on this line
+                # or one the statement goes on to, are definitions of their
+                # own, as its first is: a `const` a constant, a `let` or `var`
+                # one holding a function that function. One holding a
+                # function takes its calls.
+                if not continuing and (
+                    head := _TS_DECLARATION_HEAD_RE.match(code_lines[i])
                 ):
                     for at, *declarator in _declarators(code_lines, i, head.end()):
-                        later_declarators.setdefault(at, []).append(declarator)
-                for later, name_end, value_at in later_declarators.pop(i, ()):
+                        later_declarators.setdefault(at, []).append(
+                            (head[1] == "const", *declarator)
+                        )
+                for constant, later, name_end, value_at in later_declarators.pop(i, ()):
+                    held = _function_value(line[value_at:])
+                    if not (constant or held):
+                        continue
                     lid = f"{parent_id}::{later}"
                     claim(lid)
-                    held = _function_value(line[value_at:])
                     held_typed = held and self._arrow_typed(held, line)
+                    value = line[value_at : _value_end(code_lines[i], value_at)]
                     self.builder.add_node(
                         lid,
-                        "Constant",
+                        "Constant" if constant else "Function",
                         name=later,
-                        value=line[value_at:].split(",")[0].strip(" ;"),
+                        value=value.strip(),
                         value_type=None,
                         lineno=lineno,
                         docstring=None,
@@ -10925,7 +11055,9 @@ class TSParser(BaseParser):
                 for match in re_call_candidate.finditer(code):
                     if match.start(1) == declared_at:
                         continue
-                    callee = match.group(1)
+                    # An optional call (`a?.b?.()`) is a call; only its
+                    # receiver may be nullish.
+                    callee = match.group(1).replace("?.", ".")
                     # `function name(` names the function it defines.
                     if re.search(r"\bfunction\s*\*?\s*$", code[: match.start(1)]):
                         continue
@@ -11023,11 +11155,11 @@ class TSParser(BaseParser):
                 # the value of each `return` of its body, or of an arrow
                 # function the expression it is.
                 returned = (self._signatures.get(parent_id) or [{}])[-1].get("returned")
-                # A `return` on a line of a signature is one of a callback in
-                # a parameter default, not the definition's.
-                returns = lineno > max(
-                    nameless.get(parent_id, 0), signature_until
-                ) and len(re.findall(r"\breturn\b", code))
+                returns = (
+                    not continuing
+                    and lineno > nameless.get(parent_id, 0)
+                    and len(re.findall(r"\breturn\b", code))
+                )
                 found = None
                 # Whether the value the line gives is an expression: an
                 # arrow's `{` opens a block unless its body is parenthesised,
@@ -11097,7 +11229,8 @@ class TSParser(BaseParser):
                         nameless[holder] = max(nameless.get(holder, 0), object_end)
                     returned.append(record)
                 if (
-                    lineno > max(nameless.get(parent_id, 0), signature_until)
+                    not continuing
+                    and lineno > nameless.get(parent_id, 0)
                     and _JS_BLOCK_FUNCTION_RE.search(code)
                     and self.context_at(lineno + 1)[0] == parent_id
                 ):
