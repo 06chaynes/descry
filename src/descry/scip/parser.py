@@ -132,7 +132,7 @@ class ScipIndex:
             logger.warning(f"SCIP: Failed to parse {scip_file}: {e}")
             return
 
-        if not index.documents or not any(d.occurrences for d in index.documents):
+        if not any(d.occurrences for d in index.documents):
             # An indexer that ran but found nothing usually means its own
             # environment was missing (a `pip`/`java` on PATH, a `dart pub
             # get`), not that the project holds no symbols — the regex

@@ -172,7 +172,7 @@ def _probe_binary(adapter: LanguageAdapter) -> dict:
         except (OSError, FileNotFoundError) as e:
             logger.debug(f"SCIP: {adapter.binary} check failed: {e}")
     else:
-        logger.debug(f"SCIP: {adapter.binary} not found in PATH")
+        logger.debug(f"SCIP: none of {names} found")
 
     _binary_cache[adapter.name] = result
     return result
@@ -187,11 +187,8 @@ def indexer_status(lang_name: str) -> dict:
 
 
 def resolved_binary(adapter: LanguageAdapter) -> str:
-    """The path the probe found, else `adapter.binary`.
-
-    `build_command` uses this for ``argv[0]`` where an indexer is
-    installed under a name other than ``adapter.binary``.
-    """
+    """The path the probe found for `adapter.binary` or one of its
+    `binary_alternatives`, else `adapter.binary`."""
     return _probe_binary(adapter).get("path") or adapter.binary
 
 

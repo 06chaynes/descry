@@ -165,18 +165,6 @@ class TestJavaAdapterBuildCommand:
 
         assert "--" not in spec.argv
 
-    def test_no_gradle_args_when_pom_sits_beside_gradle(self, tmp_path):
-        """scip-java checks Maven before Gradle, so a `pom.xml` decides it
-        even when Gradle files exist."""
-        (tmp_path / "pom.xml").write_text("<project/>")
-        (tmp_path / "build.gradle").write_text("// gradle")
-        project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
-        spec = JavaAdapter().build_command(
-            project, tmp_path / "out.scip", AdapterConfig()
-        )
-
-        assert "--" not in spec.argv
-
     def test_no_gradle_args_on_an_sbt_project(self, tmp_path):
         (tmp_path / "build.sbt").write_text('scalaVersion := "2.13.14"')
         project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
@@ -186,37 +174,29 @@ class TestJavaAdapterBuildCommand:
 
         assert "--" not in spec.argv
 
-    def test_gradle_args_for_every_marker_scip_java_detects(self, tmp_path):
-        """scip-java's GradleBuildTool accepts `settings.gradle`,
-        `gradlew`, `build.gradle` and `build.gradle.kts`; the init-script
-        is passed for each of them, not for the two build files alone."""
+    def test_gradle_args_follow_scip_java_detection(self, tmp_path):
+        """scip-java's GradleBuildTool accepts `settings.gradle`, `gradlew`,
+        `build.gradle` and `build.gradle.kts`, and checks Maven first: the
+        init-script is passed for each marker unless a `pom.xml` sits beside
+        it."""
         for marker in (
             "settings.gradle",
             "gradlew",
             "build.gradle",
             "build.gradle.kts",
         ):
-            root = tmp_path / marker
-            root.mkdir()
-            (root / marker).write_text("// marker\n")
-            project = DiscoveredProject(name="myapp", root=root, language="java")
-            spec = JavaAdapter().build_command(
-                project, root / "out.scip", AdapterConfig()
-            )
+            for pom in (False, True):
+                root = tmp_path / marker / str(pom)
+                root.mkdir(parents=True)
+                (root / marker).write_text("// marker\n")
+                if pom:
+                    (root / "pom.xml").write_text("<project/>")
+                project = DiscoveredProject(name="myapp", root=root, language="java")
+                spec = JavaAdapter().build_command(
+                    project, root / "out.scip", AdapterConfig()
+                )
 
-            assert "--" in spec.argv, marker
-
-    def test_pom_wins_over_a_settings_marker(self, tmp_path):
-        """Maven decides before Gradle, so a `pom.xml` beside a
-        `settings.gradle` still gets no Gradle arguments."""
-        (tmp_path / "pom.xml").write_text("<project/>")
-        (tmp_path / "settings.gradle").write_text("rootProject.name = 'x'\n")
-        project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
-        spec = JavaAdapter().build_command(
-            project, tmp_path / "out.scip", AdapterConfig()
-        )
-
-        assert "--" not in spec.argv
+                assert ("--" in spec.argv) is not pom, (marker, pom)
 
 
 class TestJavaAdapterKotlinDslPreflight:

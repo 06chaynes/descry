@@ -186,12 +186,11 @@ class JavaAdapter:
         detected as a single project when it carries a build marker with
         no subdirectory competing for the name.
 
-        Gradle multi-project builds (signalled by a root
-        ``settings.gradle`` / ``settings.gradle.kts``) are treated as a
-        single unit — scip-java handles their submodules natively, and
+        Gradle multi-project builds (a root settings file beside a Gradle
+        marker scip-java recognises) are treated as a single unit — scip-java handles their submodules natively, and
         trying to index a ``buildSrc/`` directory in isolation fails
         because it depends on the parent project's configuration
-        (observed on spring-framework, pre-fix).
+        (observed on spring-framework).
         """
         seen: set[str] = set()
         projects: list[DiscoveredProject] = []
@@ -199,8 +198,7 @@ class JavaAdapter:
         # Gradle multi-project short-circuit — scip-java handles the
         # subproject tree natively; iterating ourselves picks up
         # buildSrc/ alone which fails to build standalone. The root is a
-        # Gradle build by any marker scip-java takes for one, a root
-        # build file or not.
+        # Gradle build by any marker scip-java takes for one.
         root_has_gradle = any((root / m).exists() for m in _GRADLE_MARKERS)
         root_has_settings = (root / "settings.gradle").exists() or (
             root / "settings.gradle.kts"
@@ -272,9 +270,7 @@ class JavaAdapter:
         # The init-script and the default task list are Gradle arguments:
         # scip-java forwards everything after `--` to the build tool it
         # detects, and on a Maven (or sbt) project those flags reach `mvn`
-        # (or `sbt`), which rejects them and writes no index. scip-java
-        # checks Maven before Gradle, so a `pom.xml` decides it even beside
-        # Gradle files.
+        # (or `sbt`), which rejects them and writes no index.
         gradle = (
             any((project.root / m).exists() for m in _GRADLE_MARKERS)
             and not (project.root / "pom.xml").exists()

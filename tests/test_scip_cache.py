@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from descry.scip import adapter as adapter_mod
 from descry.scip.adapter import ADAPTERS, CommandSpec, DiscoveredProject
 from descry.scip.adapters.rust import RustAdapter
 from descry.scip.cache import ScipCacheManager
@@ -318,3 +319,37 @@ class TestTimeout:
         monkeypatch.setenv("DESCRY_SCIP_TIMEOUT", value)
         mgr = ScipCacheManager(tmp_path, scip_timeout_minutes=10)
         assert mgr._get_timeout() == seconds
+
+
+class TestCommand:
+    def test_empty_argv_is_refused(self, tmp_path):
+        class _EmptyCommand(_StubAdapter):
+            def build_command(self, project, _out_path, _config):
+                return CommandSpec(argv=[], cwd=project.root)
+
+        adapter = _EmptyCommand("")
+        mgr = ScipCacheManager(tmp_path)
+
+        assert mgr._generate_scip(adapter, _project(tmp_path, adapter)) is False
+
+    def test_probed_binary_runs_in_place_of_the_named_one(self, tmp_path, monkeypatch):
+        """An indexer installed under another name runs by the path the
+        probe found, where argv[0] names the adapter's binary."""
+        installed = tmp_path / "bin" / "scip_alt"
+        installed.parent.mkdir()
+        installed.write_text('#!/bin/sh\n[ "$1" = --version ] || printf ran > "$1"\n')
+        installed.chmod(0o755)
+
+        class _Installed(_StubAdapter):
+            binary = "scip-stub-not-installed"
+            binary_alternatives = (str(installed),)
+
+            def build_command(self, project, out_path, _config):
+                return CommandSpec(argv=[self.binary, str(out_path)], cwd=project.root)
+
+        monkeypatch.setattr(adapter_mod, "_binary_cache", {})
+        adapter = _Installed("")
+        mgr = ScipCacheManager(tmp_path)
+
+        assert mgr._generate_scip(adapter, _project(tmp_path, adapter)) is True
+        assert mgr._index_path(adapter.name, "proj").read_text() == "ran"

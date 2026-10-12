@@ -34,7 +34,7 @@ class TestDartAdapterDiscovery:
 
     def test_pkgs_workspace(self, tmp_path):
         """shelf's layout keeps packages under `pkgs/` — a collection
-        directory any name, one level above each package."""
+        directory of any name, one level above each package."""
         for name in ("shelf", "shelf_web_socket"):
             pkg = tmp_path / "pkgs" / name
             pkg.mkdir(parents=True)
@@ -58,9 +58,8 @@ class TestDartAdapterDiscovery:
         )
         from descry.scip import adapter as adapter_mod
 
-        adapter_mod.reset_registry_state()
+        monkeypatch.setattr(adapter_mod, "_binary_cache", {})
         assert adapter_mod.resolved_binary(DartAdapter()) == str(fake)
-        adapter_mod.reset_registry_state()
 
     def test_collection_directory_is_excluded(self, tmp_path):
         """The exclusion applies to the collection too: `build/` can hold a

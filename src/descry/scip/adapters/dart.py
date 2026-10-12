@@ -99,9 +99,7 @@ class DartAdapter:
                 )
             )
 
-        # Workspace layouts keep a package one level deeper than the
-        # collection directory: melos `packages/<name>/`, shelf's
-        # `pkgs/<name>/`, `apps/<name>/`, `examples/<name>/`.
+        # A package one level below a collection directory (step 2).
         if not projects:
             for marker in root.glob("*/*/pubspec.yaml"):
                 pkg_dir = marker.parent
