@@ -189,6 +189,34 @@ class TestRustSingleCrateAtRoot:
             Path("cli.scip"): "crates/cli",
         }
 
+    def test_root_package_beside_its_members_is_a_crate(self, tmp_path):
+        """`rust-analyzer scip` indexes only the crate at the path it is
+        given, so the root package is a project of its own."""
+        (tmp_path / "Cargo.toml").write_text(
+            '[package]\nname = "app"\n[workspace]\nmembers = ["crates/core"]\n'
+        )
+        (tmp_path / "src").mkdir()
+        (tmp_path / "crates" / "core" / "src").mkdir(parents=True)
+        (tmp_path / "crates" / "core" / "Cargo.toml").write_text(
+            '[package]\nname = "core"\n'
+        )
+
+        names = [p.name for p in RustAdapter().discover(tmp_path, set())]
+
+        assert names == ["crates/core", tmp_path.name]
+
+    def test_virtual_manifest_is_no_crate(self, tmp_path):
+        (tmp_path / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/core"]\n')
+        (tmp_path / "src").mkdir()
+        (tmp_path / "crates" / "core" / "src").mkdir(parents=True)
+        (tmp_path / "crates" / "core" / "Cargo.toml").write_text(
+            '[package]\nname = "core"\n'
+        )
+
+        names = [p.name for p in RustAdapter().discover(tmp_path, set())]
+
+        assert names == ["crates/core"]
+
     def test_member_crate_named_like_the_root_targets_the_member(self, tmp_path):
         root = tmp_path / "mylib"
         (root / "mylib" / "src").mkdir(parents=True)

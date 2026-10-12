@@ -262,6 +262,14 @@ Python SDK v2, and a full-tree review's findings are fixed.
   Where scip-java also detects another build tool at such a root (Maven,
   sbt, Mill, Bazel or a SCIP config), with or without a build file of its
   own, it refuses the root, and the root's subprojects are indexed instead.
+  Every JVM project is discovered on the same terms: a directory where
+  scip-java detects exactly one build tool, by the regular files its own
+  detectors read, so it is not run where it would answer "No build tool
+  detected" or "Multiple build tools detected". A Rust root package beside
+  its workspace members, or beside nested crates, is indexed too:
+  `rust-analyzer scip` indexes only the crate at the path it is given, so
+  the root package had no index. scip-dart is run on `.`; given `./` it
+  took the package for a nested one, skipped it and wrote an empty index.
   scip-dart is found under either spelling — `scip-dart` or the
   `scip_dart` `dart pub global` installs, read from `$PUB_CACHE` when
   it is set — and its package discovery reaches

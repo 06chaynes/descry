@@ -31,22 +31,26 @@ def crate_dir(workspace_root: Path, name: str) -> Path:
     return project_dir(workspace_root, name, "Cargo.toml", "src")
 
 
+def _load_manifest(cargo_toml: Path) -> dict:
+    """The parsed ``cargo_toml``, or an empty table where it cannot be read."""
+    try:
+        with open(cargo_toml, "rb") as f:
+            return tomllib.load(f)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        logger.debug(f"Cargo.toml parse failed at {cargo_toml}: {e}")
+        return {}
+
+
 def _parse_workspace_members(root_cargo: Path) -> list[Path]:
     """Parse ``[workspace] members = [...]`` entries from ``root_cargo``.
 
     Glob patterns like ``"crates/*"`` are expanded against the workspace
     root. Returns absolute paths; invalid/missing entries and entries
-    outside the root are silently dropped. Uses ``tomllib`` (3.11+); on
-    parse error returns an empty list so discovery falls through to the
+    outside the root are silently dropped. A manifest that cannot be
+    parsed gives an empty list, so discovery falls through to the
     single-level glob fallback.
     """
-    try:
-        with open(root_cargo, "rb") as f:
-            data = tomllib.load(f)
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
-        logger.debug(f"Cargo.toml parse failed at {root_cargo}: {e}")
-        return []
-
+    data = _load_manifest(root_cargo)
     workspace = data.get("workspace") or {}
     raw_members = workspace.get("members") or []
     if not isinstance(raw_members, list):
@@ -104,8 +108,11 @@ class RustAdapter:
         2. Falls back to top-level ``*/Cargo.toml`` globbing for simple
            workspaces that don't declare ``[workspace] members`` (e.g.,
            tokio — each subdir is an independent crate).
-        3. If neither matches but root has ``src/``, index root as a
-           single-crate project (small libraries).
+        3. The root is a crate of its own, named after the root directory,
+           where its ``Cargo.toml`` declares a ``[package]`` and it has
+           ``src/``, or where nothing else was found and it has ``src/``.
+           ``rust-analyzer scip`` indexes only the crate at the path it is
+           given, so a root package beside its members needs its own run.
         """
         root_cargo = root / "Cargo.toml"
         if not root_cargo.is_file():
@@ -157,7 +164,12 @@ class RustAdapter:
                     )
                 )
 
-        if not projects and (root / "src").exists():
+        root_package = "package" in _load_manifest(root_cargo)
+        if (
+            (root_package or not projects)
+            and (root / "src").exists()
+            and all(p.name != root.name for p in projects)
+        ):
             projects.append(
                 DiscoveredProject(
                     name=root.name,

@@ -46,60 +46,57 @@ _JAVA_DESCRIPTOR_PATTERN = re.compile(
     r"([a-zA-Z_$][a-zA-Z0-9_$]*)(\([^)]*\)|[#./\[\]])?"
 )
 
-_JAVA_BUILD_MARKERS = (
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-    "settings.gradle",
-    "settings.gradle.kts",
-    "gradlew",
-    "build.sbt",
-)
-
-# What scip-java's GradleBuildTool treats as a Gradle build.
-_GRADLE_MARKERS = (
-    "settings.gradle",
-    "gradlew",
-    "build.gradle",
-    "build.gradle.kts",
-)
-
-
-# What scip-java detects as another build tool: a SCIP config, Maven, sbt,
-# Mill and Bazel. sbt is also detected by a regular `project/build.properties`
-# holding the key `sbt.version`; `_SBT_VERSION_KEY` finds it where a line
-# starts with it, which is every form but an escaped key, a continued line or
-# a malformed `\u` escape (on which scip-java aborts). Text mode turns CR and
-# CRLF into LF, the other line ends the properties format accepts.
-_OTHER_BUILD_MARKERS = (
-    "scip-java.json",
-    "lsif-java.json",
-    "pom.xml",
-    "build.sbt",
-    "build.sc",
-    "WORKSPACE",
-)
+# The regular files by which scip-java 0.12.3 detects each build tool it
+# supports. sbt is also detected by a `project/build.properties` holding the
+# key `sbt.version`; `_SBT_VERSION_KEY` finds it where a line starts with it,
+# which is every form but an escaped key, a continued line or a malformed
+# `\u` escape (on which scip-java aborts). Text mode turns CR and CRLF into
+# LF, the other line ends the properties format accepts.
+_BUILD_TOOL_MARKERS = {
+    "SCIP": ("scip-java.json", "lsif-java.json"),
+    "Maven": ("pom.xml",),
+    "Gradle": ("settings.gradle", "gradlew", "build.gradle", "build.gradle.kts"),
+    "sbt": ("build.sbt",),
+    "mill": ("build.sc",),
+    "Bazel": ("WORKSPACE",),
+}
 _SBT_VERSION_KEY = re.compile(r"^[ \t\f]*sbt\.version(?:[ \t\f=:]|$)", re.MULTILINE)
 
 
-def _runs_gradle(directory: Path) -> bool:
-    """Whether scip-java run in `directory` builds it with Gradle.
+def _build_tools(directory: Path) -> set[str] | None:
+    """The build tools scip-java detects in `directory`, or None where it
+    aborts reading a `project/build.properties` it cannot read.
 
-    Given no ``--build-tool``, it refuses a directory where it detects
-    another build tool as well ("Multiple build tools detected").
+    Run there without ``--build-tool``, as descry runs it, scip-java builds
+    with the one it detects and refuses a directory where it detects none
+    ("No build tool detected") or more than one ("Multiple build tools
+    detected").
     """
-    if not any((directory / m).exists() for m in _GRADLE_MARKERS):
-        return False
-    if any((directory / m).exists() for m in _OTHER_BUILD_MARKERS):
-        return False
+    tools = {
+        tool
+        for tool, markers in _BUILD_TOOL_MARKERS.items()
+        if any((directory / m).is_file() for m in markers)
+    }
     properties = directory / "project" / "build.properties"
-    if not properties.is_file():
-        return True
-    try:
-        text = properties.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    return not _SBT_VERSION_KEY.search(text)
+    if properties.is_file():
+        try:
+            text = properties.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        if _SBT_VERSION_KEY.search(text):
+            tools.add("sbt")
+    return tools
+
+
+def _runs_gradle(directory: Path) -> bool:
+    """Whether scip-java run in `directory` builds it with Gradle."""
+    return _build_tools(directory) == {"Gradle"}
+
+
+def _scip_java_runs(directory: Path) -> bool:
+    """Whether scip-java run in `directory` builds it, with one tool."""
+    tools = _build_tools(directory)
+    return tools is not None and len(tools) == 1
 
 
 _COMPAT_INIT_SCRIPT_PATH = Path(__file__).parent / "_java_compat.init.gradle"
@@ -217,10 +214,9 @@ class JavaAdapter:
         """Return one DiscoveredProject per top-level JVM build directory.
 
         A JVM "project" in descry's sense is any top-level subdirectory
-        containing one of the recognized build markers (Maven, Gradle, or
-        sbt) plus at least one JVM source file. The root itself is
-        detected as a single project when it carries a build marker with
-        no subdirectory competing for the name.
+        where scip-java detects exactly one build tool, and so runs, holding
+        at least one JVM source file. The root itself is a single project
+        on the same terms when no subdirectory is one.
 
         Gradle multi-project builds (a root ``settings.gradle``, or a
         ``settings.gradle.kts`` beside a Gradle marker, where
@@ -229,7 +225,6 @@ class JavaAdapter:
         ``buildSrc/`` directory in isolation fails because it depends on
         the parent project's configuration (observed on spring-framework).
         """
-        seen: set[str] = set()
         projects: list[DiscoveredProject] = []
 
         # Gradle multi-project short-circuit — scip-java handles the
@@ -249,36 +244,29 @@ class JavaAdapter:
             )
             return projects
 
-        for marker_name in _JAVA_BUILD_MARKERS:
-            for marker in root.glob(f"*/{marker_name}"):
-                pkg_dir = marker.parent
-                if pkg_dir.name.startswith("."):
-                    continue
-                if pkg_dir.name in excluded_dirs:
-                    continue
-                if pkg_dir.name in seen:
-                    continue
-                if not _has_jvm_sources(pkg_dir):
-                    continue
-                seen.add(pkg_dir.name)
-                projects.append(
-                    DiscoveredProject(
-                        name=pkg_dir.name,
-                        root=pkg_dir,
-                        language=self.name,
-                    )
+        for pkg_dir in sorted(root.iterdir()):
+            if not pkg_dir.is_dir() or pkg_dir.name.startswith("."):
+                continue
+            if pkg_dir.name in excluded_dirs:
+                continue
+            if not _scip_java_runs(pkg_dir) or not _has_jvm_sources(pkg_dir):
+                continue
+            projects.append(
+                DiscoveredProject(
+                    name=pkg_dir.name,
+                    root=pkg_dir,
+                    language=self.name,
                 )
+            )
 
-        if not projects:
-            root_has_marker = any((root / m).exists() for m in _JAVA_BUILD_MARKERS)
-            if root_has_marker and _has_jvm_sources(root):
-                projects.append(
-                    DiscoveredProject(
-                        name=root.name,
-                        root=root,
-                        language=self.name,
-                    )
+        if not projects and _scip_java_runs(root) and _has_jvm_sources(root):
+            projects.append(
+                DiscoveredProject(
+                    name=root.name,
+                    root=root,
+                    language=self.name,
                 )
+            )
 
         projects.sort(key=lambda p: p.name)
         return projects

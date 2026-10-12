@@ -146,6 +146,51 @@ class TestJavaAdapterDiscovery:
 
         assert [p.root for p in projects] == [app]
 
+    def test_a_directory_is_a_project_where_scip_java_runs(self, tmp_path):
+        """scip-java, given no `--build-tool`, builds with the one tool it
+        detects and refuses none or more than one; discovery follows it."""
+        layouts = {
+            ("pom.xml",): True,
+            ("build.gradle",): True,
+            ("build.sbt",): True,
+            ("build.sc",): True,
+            ("WORKSPACE",): True,
+            ("scip-java.json",): True,
+            ("settings.gradle.kts",): False,
+            ("pom.xml", "build.gradle"): False,
+            ("build.sbt", "gradlew"): False,
+            ("WORKSPACE", "settings.gradle"): False,
+        }
+        for markers, runs in layouts.items():
+            for nested in (False, True):
+                root = tmp_path / "-".join(markers) / str(nested)
+                base = root / "app" if nested else root
+                base.mkdir(parents=True)
+                for marker in markers:
+                    (base / marker).write_text("x\n")
+                (base / "Main.java").write_text("class Main {}")
+
+                projects = JavaAdapter().discover(root, set())
+
+                assert [p.root for p in projects] == ([base] if runs else []), (
+                    markers,
+                    nested,
+                )
+
+    def test_a_directory_named_like_a_marker_is_no_marker(self, tmp_path):
+        """scip-java detects a build tool by a regular file, so beside a
+        directory named `pom.xml` it runs Gradle and takes Gradle arguments."""
+        (tmp_path / "pom.xml").mkdir()
+        (tmp_path / "build.gradle").write_text("// gradle\n")
+        (tmp_path / "Main.java").write_text("class Main {}")
+
+        (project,) = JavaAdapter().discover(tmp_path, set())
+        spec = JavaAdapter().build_command(
+            project, tmp_path / "out.scip", AdapterConfig()
+        )
+
+        assert "--" in spec.argv
+
     def test_wrapper_alone_marks_the_root(self, tmp_path):
         (tmp_path / "gradlew").write_text("#!/bin/sh\n")
         (tmp_path / "Main.java").write_text("class Main {}")

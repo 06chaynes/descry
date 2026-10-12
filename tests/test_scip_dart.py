@@ -121,7 +121,7 @@ class TestDartAdapterBuildCommand:
             project, tmp_path / "app.scip", AdapterConfig()
         )
         assert spec.argv[0] == "scip-dart"
-        assert "./" in spec.argv
+        assert spec.argv[1:] == ["."]
         assert spec.cwd == tmp_path
 
     def test_output_mode_rename(self, tmp_path):

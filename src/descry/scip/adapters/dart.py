@@ -133,12 +133,17 @@ class DartAdapter:
         """scip-dart takes the package root as a positional arg and
         writes ``index.scip`` to cwd.
 
+        The root is `.`: scip-dart skips every directory holding a
+        ``pubspec.yaml`` whose path, as text, is not the root's, and the
+        package's own directory is `.`, so `./` would skip the package and
+        index nothing.
+
         The shared runner (``output_mode="rename"``) moves that file
         into ``out_path`` after success. If ``dart pub get`` hasn't run
         scip-dart exits non-zero with a clear error; the runner reports
         the exit code and moves on to other adapters.
         """
-        argv: list[str] = [self.binary, "./"]
+        argv: list[str] = [self.binary, "."]
         return CommandSpec(argv=argv, cwd=project.root, output_mode="rename")
 
     def parse_descriptors(self, raw: str) -> list[str]:

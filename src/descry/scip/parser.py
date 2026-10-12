@@ -189,9 +189,9 @@ class ScipIndex:
                 # Build name-to-symbol index for fuzzy matching
                 name = self._extract_name(sym.symbol)
                 if name:
-                    if name not in self.name_to_symbols:
-                        self.name_to_symbols[name] = []
-                    self.name_to_symbols[name].append(sym.symbol)
+                    known = self.name_to_symbols.setdefault(name, [])
+                    if sym.symbol not in known:
+                        known.append(sym.symbol)
 
     def _extract_name(self, symbol_id: str) -> str | None:
         """Extract the simple name from a SCIP symbol ID.
