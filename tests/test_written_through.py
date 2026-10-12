@@ -5,9 +5,11 @@ through: the file it points at is left as it was."""
 import json
 import os
 import stat
+import time
 
 import pytest
 
+from descry import _files
 from descry._files import create_sibling
 from descry._graph import CURRENT_SCHEMA
 from descry.embeddings import _file_lock
@@ -53,6 +55,36 @@ def test_sibling_is_new_and_has_the_mode_open_gives(tmp_path):
     assert stat.S_IMODE(tmp.stat().st_mode) == stat.S_IMODE(
         (tmp_path / "reference").stat().st_mode
     )
+
+
+def test_sibling_is_not_created_through_a_symlink_at_its_name(
+    tmp_path, victim, monkeypatch
+):
+    monkeypatch.setattr(_files.secrets, "token_hex", lambda _n: "0" * 16)
+    (tmp_path / ".out.json.0000000000000000.tmp").symlink_to(victim)
+
+    with pytest.raises(FileExistsError):
+        create_sibling(tmp_path / "out.json")
+
+    assert victim.read_text() == "precious\n"
+
+
+def test_orphaned_siblings_are_removed(tmp_path):
+    target = tmp_path / "out.json"
+    orphan = tmp_path / ".out.json.0123456789abcdef.tmp"
+    live = tmp_path / ".out.json.fedcba9876543210.tmp"
+    other = tmp_path / ".out.json.notatemporary.tmp"
+    for path in (orphan, live, other):
+        path.write_text("x")
+    stale = time.time() - 2 * _files._ORPHANED_AFTER
+    os.utime(orphan, (stale, stale))
+    os.utime(other, (stale, stale))
+
+    fd, tmp = create_sibling(target)
+    os.close(fd)
+
+    assert not orphan.exists()
+    assert live.exists() and other.exists() and tmp.exists()
 
 
 def test_lock_is_not_written_through_a_symlink(tmp_path, victim):

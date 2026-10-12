@@ -320,7 +320,7 @@ class DartParser(BaseParser):
     """Regex-driven Dart source parser."""
 
     binding_re = re.compile(
-        r"\b(?:final|var|const)\s+(?:[\w$.<>?, ]+\s+)?(?P<name>[\w$]+)\s*"
+        r"\b(?:final|var|const)\s++(?:[\w$.<>?, ]+\s++)?(?P<name>[\w$]+)\s*"
         r"=(?![=>])\s*(?P<unwrap>await\b)?"
     )
 

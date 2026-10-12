@@ -1152,3 +1152,17 @@ class TestRecipeFingerprintInputs:
         SemanticSearcher(str(g), model_name="unknown/model")
         warm = SemanticSearcher(str(g), model_name="unknown/model")
         assert warm.search("alpha", min_score=-1.0)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs")
+@pytest.mark.usefixtures("no_wait")
+def test_fifo_sidecars_are_left(fake_model, graph_writer):
+    """A FIFO where the cache's files are is not read."""
+    g = graph_writer()
+    s = SemanticSearcher(str(g))
+    for path in s._cache_paths():
+        path.unlink()
+        os.mkfifo(path)
+
+    assert s._load_cached() is False
+    assert get_embeddings_status(str(g))["cached"] is False

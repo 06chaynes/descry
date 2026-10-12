@@ -87,8 +87,9 @@ def load_graph_with_schema(path: Path | str) -> dict:
     """Load a codebase graph JSON file and verify its schema_version and shape.
 
     Raises:
-        GraphSchemaError: if the file is not a JSON object, schema_version is
-            missing or mismatched, or a node or edge is malformed.
+        GraphSchemaError: if the path is not a regular file, the file is not
+            a JSON object, schema_version is missing or mismatched, or a node
+            or edge is malformed.
         FileNotFoundError: if path does not exist.
         json.JSONDecodeError: if path is not valid JSON.
     """

@@ -54,7 +54,7 @@ _TYPE_ARGUMENTS = rf"<{_PLAIN}(?:<{_PLAIN}(?:<{_PLAIN}>{_PLAIN})*>{_PLAIN})*>"
 # Annotations written on the line of the declaration they are on
 _ANNOTATIONS = r"(?:@[\w.]+(?:\([^()]*\))?\s+)*"
 _RE_METHOD = re.compile(
-    rf"^\s*{_ANNOTATIONS}(?:(?:{_METHOD_MODIFIERS})\s+)+"
+    rf"^\s*{_ANNOTATIONS}(?:(?:{_METHOD_MODIFIERS})\s++)+"
     rf"(?:{_TYPE_ARGUMENTS}\s+)?"  # optional generic type params
     r"(?:@[\w.]+\s+)*"  # annotations of the return type
     r"(?P<returns>(?!<)[\w<>\[\],?\s.]+?)\s+"  # return type (lazy)
@@ -98,7 +98,7 @@ _RE_PACKAGE_CONSTRUCTOR = re.compile(
 
 # Field declaration: modifiers + type + name + (= value)? ;
 _RE_FIELD = re.compile(
-    rf"^\s*{_ANNOTATIONS}(?:(?:{_METHOD_MODIFIERS}|volatile|transient)\s+)+"
+    rf"^\s*{_ANNOTATIONS}(?:(?:{_METHOD_MODIFIERS}|volatile|transient)\s++)+"
     rf"(?!{_METHOD_MODIFIERS}\b)(?P<type>[\w<>\[\],?\s.]+?)\s+"
     r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*(?:=|;|$)"
 )

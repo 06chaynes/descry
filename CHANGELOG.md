@@ -45,18 +45,23 @@ Python SDK v2, and a full-tree review's findings are fixed.
   cancellation, client disconnect, and `SIGINT`/`SIGTERM`/`SIGHUP`.
 - **Indexer child process.** Spawned with `python -P`, so a `descry/`
   package inside the indexed repository cannot shadow the installed one,
-  and with its stdin on `/dev/null`, so it reads nothing from the MCP
-  protocol stream.
+  and with its stdin on `/dev/null`, so neither it nor an indexer it starts
+  reads the terminal or the stream descry was started with.
 - **Non-regular files.** A FIFO or a link to a device where descry
   expects a file — a source file, `.descry.toml`, the graph, a SCIP
   manifest, index or checksum file, an embedding sidecar, the OpenAPI
   spec — is left alone rather than read, which would wait or never end;
   a graph that is not a regular file is reported as malformed.
-- **Backtracking.** A long run of whitespace on a Dart line, or before a
-  Rust match arm, made a parser's pattern take time cubic in its length
-  (3,200 spaces took a minute on a Dart line and 13 s before an arm), which
-  no `max_parse_seconds` limit can interrupt inside one match. The
-  whitespace is now taken once.
+- **Backtracking.** A long run of whitespace made six parser patterns take
+  time cubic in its length: on a Dart line, after a Dart `final`/`var`/
+  `const`, after a Java modifier in a method or field, after a TypeScript
+  `import`, and before a Rust match arm. 3,200 spaces took a minute on a
+  Dart line; `max_parse_seconds` (default 120 s) stopped such a file cut
+  short on the main thread of a platform with interval timers, and nothing
+  stopped it elsewhere. Each run is now taken once; what the patterns
+  match changes only where the old one read whitespace as a Java type, a
+  TypeScript import clause or a Rust arm's pattern, none of them valid
+  source.
 - **Writes into the cache.** The cache directory sits in the indexed
   repository by default, which can ship it. The graph and the embedding
   cache are written through new, randomly named temporaries, so a symlink

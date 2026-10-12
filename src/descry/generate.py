@@ -9393,7 +9393,7 @@ _TS_REEXPORT_RE = re.compile(
 )
 # `import <clause> from "<specifier>"`, the clause possibly over several lines
 _TS_IMPORT_RE = re.compile(
-    r"""^\s*import\s+(?:type\s+)?([^;'"]*?)\s+from\s+['"]([^'"]+)['"]""", re.MULTILINE
+    r"""^\s*import\s++(?:type\s++)?([^;'"]*?)\s+from\s+['"]([^'"]+)['"]""", re.MULTILINE
 )
 
 

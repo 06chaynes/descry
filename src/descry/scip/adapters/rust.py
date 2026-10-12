@@ -121,7 +121,7 @@ class RustAdapter:
                 part in excluded_dirs for part in member_dir.relative_to(root).parts
             ):
                 continue
-            if not (member_dir / "Cargo.toml").exists():
+            if not (member_dir / "Cargo.toml").is_file():
                 continue
             if not (member_dir / "src").exists():
                 continue
@@ -140,7 +140,7 @@ class RustAdapter:
         if not projects:
             for cargo_toml in root.glob("*/Cargo.toml"):
                 crate_dir = cargo_toml.parent
-                if crate_dir.name.startswith("."):
+                if crate_dir.name.startswith(".") or not cargo_toml.is_file():
                     continue
                 if crate_dir.name in excluded_dirs:
                     continue

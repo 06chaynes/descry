@@ -958,8 +958,9 @@ async def _process_tree(argv: list[str], **kwargs):
     the child has exited. The session keeps the terminal's Ctrl-C and hangup,
     and a signal sent to this process's group, from reaching the tree, so
     while the block runs each of those kills it first and is then handled as
-    it would have been. The child reads nothing from this process's stdin,
-    which under MCP is the protocol stream.
+    it would have been. The child's stdin is /dev/null, so neither it nor an
+    indexer it starts reads the terminal or the stream this process was
+    started with.
     """
     proc = await asyncio.create_subprocess_exec(
         *argv, start_new_session=True, stdin=asyncio.subprocess.DEVNULL, **kwargs

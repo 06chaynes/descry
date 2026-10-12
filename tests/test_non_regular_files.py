@@ -9,9 +9,11 @@ import pytest
 
 from descry import handlers
 from descry._graph import GraphSchemaError, load_graph_with_schema
+from descry.cross_lang import CrossLangTracer
 from descry.generate import CodeGraphBuilder
 from descry.handlers import DescryConfig
 from descry.scip.adapters.dotnet import _global_json_satisfiable
+from descry.scip.adapters.java import _runs_gradle
 from descry.scip.adapters.php import _scip_php_incompatibility_reason
 from descry.scip.adapters.rust import RustAdapter
 from descry.scip.adapters.typescript import TypeScriptAdapter
@@ -67,6 +69,29 @@ def test_discovery_leaves_a_fifo_manifest(tmp_path, adapter, manifest):
     _fifo(tmp_path / manifest)
 
     adapter.discover(tmp_path, set())
+
+
+def test_rust_discovery_leaves_a_fifo_member_manifest(tmp_path):
+    (tmp_path / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/a"]\n')
+    (tmp_path / "crates" / "a" / "src").mkdir(parents=True)
+    _fifo(tmp_path / "crates" / "a" / "Cargo.toml")
+    adapter = RustAdapter()
+
+    assert adapter.discover(tmp_path, set()) == []
+    assert adapter._packages(tmp_path) == set()
+
+
+def test_java_leaves_a_fifo_build_properties(tmp_path):
+    (tmp_path / "settings.gradle").write_text("")
+    _fifo(tmp_path / "project" / "build.properties")
+
+    assert _runs_gradle(tmp_path) is True
+
+
+def test_fifo_openapi_spec_is_left(tmp_path):
+    tracer = CrossLangTracer(str(_fifo(tmp_path / "openapi.json")))
+
+    assert tracer.operation_to_handler == {}
 
 
 def test_php_and_dotnet_leave_a_fifo_manifest(tmp_path):
