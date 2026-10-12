@@ -16631,6 +16631,71 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, "FILE:p.ts::Earlier::x") == ["FILE:p.ts::helper"]
         assert _calls(builder, "FILE:p.ts::Last::z") == ["FILE:p.ts::helper"]
 
+    def test_a_statements_declarators_on_any_of_its_lines(self, tmp_path):
+        """Every declarator of a `const` statement is a constant: after a
+        destructured first one, and on the lines the statement goes on to,
+        past the commas a value's brackets hold; a statement ended without
+        `;` declares nothing on the next line."""
+        builder = _index(
+            tmp_path,
+            {
+                "d.ts": """
+                export function helper(x?: any): any { return x; }
+                const { a } = helper(), b = () => helper();
+                const s1 = 1,
+                  s2 = () => helper();
+                const list = [
+                  helper(1),
+                  helper(2),
+                ], tail = () => helper();
+                const ended = 1
+                helper(3);
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert {"FILE:d.ts::b", "FILE:d.ts::s2", "FILE:d.ts::tail"} <= ids
+        assert _calls(builder, "FILE:d.ts::b") == ["FILE:d.ts::helper"]
+        assert _calls(builder, "FILE:d.ts::s2") == ["FILE:d.ts::helper"]
+        assert _calls(builder, "FILE:d.ts::tail") == ["FILE:d.ts::helper"]
+        constants = {
+            n["metadata"]["name"] for n in builder.nodes if n["type"] == "Constant"
+        }
+        assert constants == {"b", "s1", "s2", "list", "tail", "ended"}
+
+    def test_private_members_are_members(self, tmp_path):
+        """`#m`, `static #make` and `get #size` are filed as source writes
+        them, and `this.#m()` reaches the private method, not a public one
+        of the same name."""
+        builder = _index(
+            tmp_path,
+            {
+                "p.ts": """
+                export class P {
+                  #m() { return 1; }
+                  m() { return 2; }
+                  run() {
+                    return this.#m();
+                  }
+                  get #size() { return 3; }
+                  static #make() { return new P(); }
+                  both() {
+                    return P.#make();
+                  }
+                }
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert {
+            "FILE:p.ts::P::#m",
+            "FILE:p.ts::P::#make",
+            "FILE:p.ts::P::get #size",
+        } <= ids
+        assert _calls(builder, "FILE:p.ts::P::run") == ["FILE:p.ts::P::#m"]
+        assert _calls(builder, "FILE:p.ts::P::both") == ["FILE:p.ts::P::#make"]
+        assert _calls(builder, "FILE:p.ts::P::#make") == ["FILE:p.ts::P"]
+
     def test_a_parameter_default_is_the_functions(self, tmp_path):
         """`x = g()` runs at each call of the function, not where it is
         written (ECMA-262 2026 10.2.11)."""

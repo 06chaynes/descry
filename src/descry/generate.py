@@ -9422,25 +9422,53 @@ def _own_line_span(code: str, name_end: int) -> tuple[int, int] | None:
     return None
 
 
-def _later_declarators(code: str, start: int) -> list[tuple[str, int, int]]:
-    """Each declarator after the first of the statement whose value starts
-    at column ``start`` of ``code``: `b` in `const a = f, b = () => g();`, as
-    its name, the column its name ends at and the column its value starts
-    at. ``code`` is a line with the text of its literals blanked."""
+def _declarators(
+    lines: list[str], index: int, after: int
+) -> list[tuple[int, str, int, int]]:
+    """Each declarator after the first of the `const` statement whose first
+    binding, a name or a destructuring pattern, ends at column ``after`` of
+    line ``index``: `b` in `const a = f, b = () => g();` or on a line the
+    statement goes on to, as the index of its line, its name, the column its
+    name ends at and the column its value starts at. ``lines`` are the
+    file's lines with the text of their literals blanked."""
     declarators = []
     depth = 0
-    for column in range(start, len(code)):
-        char = code[column]
-        depth += (char in "([{") - (char in ")]}")
-        if depth < 0 or (depth == 0 and char == ";"):
-            break
-        if depth == 0 and char == ",":
-            rest = code[column + 1 :]
-            named = re.match(r"\s*([A-Za-z_$][\w$]*)\s*(?::[^=,;]*)?=(?!=)\s*", rest)
-            if named:
-                declarators.append(
-                    (named[1], column + 1 + named.end(1), column + 1 + named.end())
-                )
+    in_value = False  # past the first declarator's `=`
+    row, column = index, after
+    while row < len(lines):
+        code = lines[row]
+        while column < len(code):
+            char = code[column]
+            if not in_value:
+                # The annotation's `<>` hold commas of their own.
+                depth += (char in "([{<") - (char in ")]}>" and code[column - 1] != "=")
+                if (
+                    char == "="
+                    and depth == 0
+                    and code[column + 1 : column + 2] not in "=>"
+                ):
+                    in_value = True
+            else:
+                depth += (char in "([{") - (char in ")]}")
+                if depth < 0 or (depth == 0 and char == ";"):
+                    return declarators
+                if depth == 0 and char == ",":
+                    rest, at, offset = code[column + 1 :], row, column + 1
+                    if not rest.strip() and row + 1 < len(lines):
+                        rest, at, offset = lines[row + 1], row + 1, 0
+                    named = re.match(
+                        r"\s*([A-Za-z_$][\w$]*)\s*(?::[^=,;]*)?=(?![=>])\s*", rest
+                    )
+                    if named:
+                        declarators.append(
+                            (at, named[1], offset + named.end(1), offset + named.end())
+                        )
+            column += 1
+        # The statement goes on where a bracket is open or the line ends
+        # with the `,` before another declarator.
+        if not (depth > 0 or code.rstrip().endswith(",")):
+            return declarators
+        row, column = row + 1, 0
     return declarators
 
 
@@ -9579,14 +9607,21 @@ def _ts_params(signature: str) -> set[str]:
 _TS_METHOD_MODIFIERS = ("", "async", "static", "get", "set", "*", "async *")
 # Modifiers a class member is declared behind, in any order
 _TS_MEMBER_MODIFIERS = r"(?:(?:private|public|protected|static|abstract|override|declare|readonly|async)\s+)*"
+# The name of a class member, `#` before a private one
+_TS_MEMBER_NAME = r"#?[A-Za-z0-9_$]+"
 # A method or accessor a class declares: `name(`, `get name(`, `async *name<T>(`
+# `const` and the first binding of its statement: a name, or a destructuring
+# pattern without nested brackets
+_TS_CONST_HEAD_RE = re.compile(
+    r"^\s*(?:export\s+)?const\s+(?:[A-Za-z_$][\w$]*|\{[^{}]*\}|\[[^\[\]]*\])"
+)
 # A property a class declares with a value: `name = `, `name?: T = `
 _TS_LINE_PROPERTY_RE = re.compile(
-    rf"\s*{_TS_MEMBER_MODIFIERS}([A-Za-z_$][\w$]*)\s*[?!]?\s*(?::[^=;]*)?=(?![=>])\s*"
+    rf"\s*{_TS_MEMBER_MODIFIERS}({_TS_MEMBER_NAME})\s*[?!]?\s*(?::[^=;]*)?=(?![=>])\s*"
 )
 _TS_LINE_MEMBER_RE = re.compile(
     rf"\s*{_TS_MEMBER_MODIFIERS}(?:(get|set)\s+)?(?:\*\s*)?"
-    r"([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\("
+    rf"({_TS_MEMBER_NAME})\s*(?:<[^>]*>)?\s*\("
 )
 # `const name = require("m")`, `const { a, b: c } = await import("m")`
 _TS_REQUIRE_RE = re.compile(
@@ -10207,11 +10242,11 @@ class TSParser(BaseParser):
         # either with type parameters before the `(`
         re_method = re.compile(
             rf"^\s*{_TS_MEMBER_MODIFIERS}"
-            r"(?:\*\s*)?([a-zA-Z0-9_$]+)\s*(=\s*(?:async\s+)?)?(?:[(]|<(?![\s=]))"
+            rf"(?:\*\s*)?({_TS_MEMBER_NAME})\s*(=\s*(?:async\s+)?)?(?:[(]|<(?![\s=]))"
         )
         # Getter/setter methods: get name() or set name(value)
         re_getter_setter = re.compile(
-            rf"^\s*{_TS_MEMBER_MODIFIERS}(get|set)\s+([a-zA-Z0-9_$]+)\s*[(]"
+            rf"^\s*{_TS_MEMBER_MODIFIERS}(get|set)\s+({_TS_MEMBER_NAME})\s*[(]"
         )
         re_enum = re.compile(r"^\s*(?:export\s+)?enum\s+([a-zA-Z0-9_$]+)")
         # `const name: Type = value;`, the type kept where it is one named
@@ -10223,7 +10258,7 @@ class TSParser(BaseParser):
         )
         re_import = re.compile(r'import\s+.*?from\s+([\'"])(.*?)\1')
         re_call_candidate = re.compile(
-            r"([a-zA-Z0-9_$]+(?:\.[a-zA-Z0-9_$]+)*)\s*(?=[<(])"
+            rf"({_TS_MEMBER_NAME}(?:\.{_TS_MEMBER_NAME})*)\s*(?=[<(])"
         )
         # In an object literal: `...name`, `key: name` or `name` alone
         re_held = re.compile(r"^\s*(\.\.\.)?(?:([\w$]+)\s*:\s*)?([\w$]+)\s*,?\s*$")
@@ -10316,6 +10351,7 @@ class TSParser(BaseParser):
 
         i = 0
         signature_until = 0  # the last line of a definition's signature
+        later_declarators = {}  # line index -> declarators a statement gives it
         while i < len(lines):
             line = text_lines[i]
             lineno = i + 1
@@ -10437,27 +10473,6 @@ class TSParser(BaseParser):
                     signatures=valued and self._overloads(cid, valued),
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
-                # A later declarator of the statement declares its own name.
-                for later, name_end, value_at in (
-                    _later_declarators(code_lines[i], match.start(3)) if val else ()
-                ):
-                    lid = f"{parent_id}::{later}"
-                    claim(lid)
-                    held = _arrow_function(f"const {later} = {line[value_at:]}")
-                    typed = held and self._arrow_typed(held[1], line)
-                    self.builder.add_node(
-                        lid,
-                        "Constant",
-                        name=later,
-                        value=line[value_at:].split(",")[0].strip(" ;"),
-                        value_type=None,
-                        lineno=lineno,
-                        docstring=None,
-                        signatures=typed and self._overloads(lid, typed),
-                    )
-                    self.builder.add_edge(parent_id, lid, "DEFINES")
-                    if held:
-                        own_defs.append((lid, name_end))
                 if parent_id == file_id and re.search(r"=\s*\{\s*$", line):
                     # The functions it holds are its members.
                     object_ids.add(cid)
@@ -10855,6 +10870,32 @@ class TSParser(BaseParser):
                     for found in _JS_CLOSURE_RE.finditer(code)
                 ]
                 self._bodies = []
+                # The declarators of a `const` statement after its first, on
+                # this line or one the statement goes on to, are constants of
+                # their own; one holding an arrow takes its calls.
+                if lineno > signature_until and (
+                    head := _TS_CONST_HEAD_RE.match(code_lines[i])
+                ):
+                    for at, *declarator in _declarators(code_lines, i, head.end()):
+                        later_declarators.setdefault(at, []).append(declarator)
+                for later, name_end, value_at in later_declarators.pop(i, ()):
+                    lid = f"{parent_id}::{later}"
+                    claim(lid)
+                    held = _arrow_function(f"const {later} = {line[value_at:]}")
+                    held_typed = held and self._arrow_typed(held[1], line)
+                    self.builder.add_node(
+                        lid,
+                        "Constant",
+                        name=later,
+                        value=line[value_at:].split(",")[0].strip(" ;"),
+                        value_type=None,
+                        lineno=lineno,
+                        docstring=None,
+                        signatures=held_typed and self._overloads(lid, held_typed),
+                    )
+                    self.builder.add_edge(parent_id, lid, "DEFINES")
+                    if held:
+                        own_defs.append((lid, name_end))
                 typed = _TS_TYPED_VALUE_RE.search(code)
                 calls = []  # (edge index, column of its `(`) of each on the line
                 # A definition on this line takes the calls its parameters
