@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from descry import ast_grep, generate
+from descry._graph import load_graph_with_schema
 from descry.generate import (
     BaseParser,
     CallResolver,
@@ -731,6 +732,16 @@ def _calls(builder, source):
         for e in builder.edges
         if e["source"] == source and e["relation"].startswith("CALLS")
     )
+
+
+def _candidates(builder, source):
+    """The candidates of each call edge that leaves node ``source``, by its
+    target: None for one that has none."""
+    return {
+        e["target"]: e["metadata"].get("candidates")
+        for e in builder.edges
+        if e["source"] == source and e["relation"].startswith("CALLS")
+    }
 
 
 class TestCallAccounting:
@@ -3387,12 +3398,7 @@ class TestRustCallResolution:
                 """,
             },
         )
-        calls = {
-            edge["target"]: edge["metadata"].get("candidates")
-            for edge in builder.edges
-            if edge["source"] == "FILE:a.rs::go"
-            and edge["relation"].startswith("CALLS")
-        }
+        calls = _candidates(builder, "FILE:a.rs::go")
         assert calls == {
             "REF:made.and": ["FILE:a.rs::Key::and"],
             "REF:made.only_here": ["FILE:a.rs::Key::only_here"],
@@ -4362,12 +4368,7 @@ class TestRustCallResolution:
                 """
             },
         )
-        calls = {
-            edge["target"]: edge["metadata"].get("candidates")
-            for edge in builder.edges
-            if edge["source"] == "FILE:src/lib.rs::dump"
-            and edge["relation"].startswith("CALLS")
-        }
+        calls = _candidates(builder, "FILE:src/lib.rs::dump")
         assert calls == {
             "REF:out.tag": ["FILE:src/lib.rs::Tagged::tag"],
         }
@@ -7512,6 +7513,50 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:a.ts::make") == ["FILE:a.ts::make::Cache"]
         assert _calls(builder, "FILE:a.ts::take") == []
 
+    def test_a_class_written_inside_a_function_is_no_receiver_outside_it(
+        self, tmp_path
+    ):
+        """A member called on the name of a class that a function or a
+        callback declares is that class's only inside it. Elsewhere the
+        name is the language's global where it has one, and a receiver
+        nothing tells of where it has none."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export function make() {
+                  class Cache {
+                    static of(key) {}
+                  }
+                  return Cache.of('k');
+                }
+
+                export class Other {
+                  of(key) {}
+                  from(value) {}
+                }
+
+                export function take() {
+                  Cache.of('k');
+                  FormData.from(1);
+                }
+                """,
+                "a.test.ts": """
+                describe('x', () => {
+                  class FormData {
+                    static from(value) {}
+                  }
+                  FormData.from(1);
+                });
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::make") == ["FILE:a.ts::make::Cache::of"]
+        assert _calls(builder, "FILE:a.ts::take") == ["REF:Cache.of"]
+        assert _calls(builder, "FILE:a.test.ts::callback@2") == [
+            "FILE:a.test.ts::callback@2::FormData::from"
+        ]
+
     def test_global_is_the_librarys_unless_its_file_binds_the_name(self, tmp_path):
         """`document` and `globalThis.console` are the browser's and the
         language's; a parameter called `document` is not, and no method
@@ -8970,12 +9015,7 @@ class TestGoCallResolution:
                 """
             },
         )
-        calls = {
-            edge["target"]: edge["metadata"].get("candidates")
-            for edge in builder.edges
-            if edge["source"] == "FILE:app.go::describe"
-            and edge["relation"].startswith("CALLS")
-        }
+        calls = _candidates(builder, "FILE:app.go::describe")
         assert calls == {
             "REF:job.Enqueue": ["FILE:app.go::Job::Enqueue"],
             "REF:job.Name": ["FILE:app.go::Job::Name"],
@@ -10630,12 +10670,7 @@ class TestJavaCallResolution:
                 """,
             },
         )
-        calls = {
-            edge["target"]: edge["metadata"].get("candidates")
-            for edge in builder.edges
-            if edge["source"] == "FILE:Client.java::Client::run"
-            and edge["relation"].startswith("CALLS")
-        }
+        calls = _candidates(builder, "FILE:Client.java::Client::run")
         assert calls == {
             "REF:worker.isInterrupted": ["FILE:Monitor.java::Monitor::isInterrupted"],
             "REF:worker.report": ["FILE:Monitor.java::Monitor::report"],
@@ -17241,6 +17276,48 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, "FILE:k.ts::K::m") == ["FILE:k.ts::h"] * 5
         assert _calls(builder, "FILE:k.ts::K::run") == ["FILE:k.ts::h"]
 
+    def test_what_follows_the_close_of_a_block_in_a_member_is_no_member(self, tmp_path):
+        """A call or an assignment on the line of a `}` that closes a block
+        of a member's body, a method's or an accessor's, declares no
+        member, and a method's call there is the method's."""
+        builder = _index(
+            tmp_path,
+            {
+                "b.ts": """
+                export function compute(): any { return 1; }
+                export function teardown(x: any): any { return 1; }
+                export class K {
+                  m(a: any) {
+                    if (a) {
+                      a = 1;
+                    } teardown(a);
+                    let z;
+                    if (a) {
+                      a = 2;
+                    } z = compute()
+                  }
+                  get size() {
+                    if (this.a) {
+                      return 1;
+                    } teardown(this);
+                    return 2;
+                  }
+                  n() {}
+                }
+                """
+            },
+        )
+        members = {n["id"] for n in builder.nodes if n["type"] == "Method"}
+        assert members == {
+            "FILE:b.ts::K::m",
+            "FILE:b.ts::K::get size",
+            "FILE:b.ts::K::n",
+        }
+        assert _calls(builder, "FILE:b.ts::K::m") == [
+            "FILE:b.ts::compute",
+            "FILE:b.ts::teardown",
+        ]
+
     def test_a_method_written_with_a_quoted_name_is_a_member(self, tmp_path):
         """A string-literal name declares a member, filed as the name the
         source names, the literal's content — `"~validate"` is `~validate`,
@@ -17326,10 +17403,170 @@ class TestOneLineDefinitionCalls:
         assert classes == {"FILE:s.ts::C"}
         assert _calls(builder, "FILE:s.ts::C::make") == ["FILE:s.ts::h"]
         assert _calls(builder, "FILE:s.ts::run") == ["FILE:s.ts::h"]
-        assert {n["id"] for n in builder.nodes} & {
-            "FILE:a.ts::anon::X",
-            "FILE:a.ts::class",
-        } == set()
+
+    def test_a_class_expression_is_named_by_its_declarator_alone(self, tmp_path):
+        """`let` and `var` name the class they are given, as `const` does.
+        An expression's own name is visible only inside it: one given to a
+        member, to a field or to `module.exports`, or constructed where it
+        is written, is `class@<line>`, and a `new` of its own name in
+        another file does not reach it."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": """
+                export let Loose = class {
+                  a() {}
+                };
+                var Old = class Inner {
+                  b() {}
+                };
+                registry.entry = class Foo {
+                  c() {}
+                };
+                module.exports = class Bar {
+                  d() {}
+                };
+                new (class Baz {
+                  e() {}
+                })();
+                export class Outer {
+                  static Held = class Qux {
+                    f() {}
+                  };
+                }
+                """,
+                "u.js": """
+                new Inner();
+                new Foo();
+                new Bar();
+                new Baz();
+                new Qux();
+                """,
+            },
+        )
+        classes = {n["id"] for n in builder.nodes if n["type"] == "Class"}
+        assert classes == {
+            "FILE:m.js::Loose",
+            "FILE:m.js::Old",
+            "FILE:m.js::class@8",
+            "FILE:m.js::class@11",
+            "FILE:m.js::class@14",
+            "FILE:m.js::Outer",
+            "FILE:m.js::Outer::class@18",
+        }
+        assert _calls(builder, "FILE:u.js") == []
+
+    def test_a_class_expression_written_inside_brackets(self, tmp_path):
+        """A class a `new` constructs where it is written, or a call is
+        passed, is `class@<line>` of what its line declares: the line's
+        constant, function or member is declared too and holds it. It
+        ends with its own body, and an object passed after it is not its.
+        `class` naming a property or a method is no class."""
+        builder = _index(
+            tmp_path,
+            {
+                "e.ts": """
+                export function helper(): any { return 1; }
+                export class Base { inherited() {} }
+                const E = new (class {
+                  a() { helper(); }
+                })();
+                const typed: Ctor = class {
+                  b() { helper(); }
+                };
+                const make = (x: any) => wrap(x, class {
+                  c() { helper(); }
+                });
+                export class K {
+                  m() { return wrap(class extends Base {
+                      d() { this.inherited(); }
+                    });
+                  }
+                  static held = wrap(class {
+                    e() { helper(); }
+                  });
+                }
+                register("k", class {
+                  f() { helper(); }
+                }, {
+                  g() { helper(); },
+                });
+                h("div", { id, class: "x",
+                  onClick() { helper(); },
+                });
+                """
+            },
+        )
+        kinds = {n["id"]: n["type"] for n in builder.nodes}
+        assert kinds["FILE:e.ts::E"] == "Constant"
+        assert kinds["FILE:e.ts::make"] == "Function"
+        assert kinds["FILE:e.ts::K::m"] == "Method"
+        assert {i for i, kind in kinds.items() if kind == "Class"} == {
+            "FILE:e.ts::Base",
+            "FILE:e.ts::class@4",
+            "FILE:e.ts::typed",
+            "FILE:e.ts::make::class@10",
+            "FILE:e.ts::K",
+            "FILE:e.ts::K::m::class@14",
+            "FILE:e.ts::K::class@18",
+            "FILE:e.ts::class@22",
+            "FILE:e.ts::object@24",
+            "FILE:e.ts::object@27",
+        }
+        for member in ("class@4::a", "typed::b", "make::class@10::c"):
+            assert _calls(builder, f"FILE:e.ts::{member}") == ["FILE:e.ts::helper"]
+        assert _calls(builder, "FILE:e.ts::K::m::class@14::d") == [
+            "FILE:e.ts::Base::inherited"
+        ]
+        for member in ("K::class@18::e", "class@22::f", "object@24::g"):
+            assert _calls(builder, f"FILE:e.ts::{member}") == ["FILE:e.ts::helper"]
+        assert _calls(builder, "FILE:e.ts::object@27::onClick") == ["FILE:e.ts::helper"]
+
+    def test_members_written_with_a_quoted_name_on_the_classs_line(self, tmp_path):
+        """A quoted name on the class's own line is the literal's content,
+        each member its own, and an accessor written with one is filed as
+        `get name` or `set name`, on the class's line or its own."""
+        builder = _index(
+            tmp_path,
+            {
+                "q.ts": """
+                export function h(): any { return 1; }
+                export class A { "m"() { h(); } 'n'() {} get "size"() { return h(); } }
+                export class B {
+                  get "x"() { return h(); }
+                  set "y"(v) { h(); }
+                }
+                """
+            },
+        )
+        members = {n["id"] for n in builder.nodes if n["type"] == "Method"}
+        assert members == {
+            "FILE:q.ts::A::m",
+            "FILE:q.ts::A::n",
+            "FILE:q.ts::A::get size",
+            "FILE:q.ts::B::get x",
+            "FILE:q.ts::B::set y",
+        }
+        for member in sorted(members - {"FILE:q.ts::A::n"}):
+            assert _calls(builder, member) == ["FILE:q.ts::h"]
+
+    def test_a_graph_with_members_on_one_line_is_loaded(self, tmp_path):
+        """A member on its class's line and a declarator after the first of
+        its statement are written as the schema reads them."""
+        builder = _index(
+            tmp_path,
+            {
+                "g.ts": """
+                export class A { m() {} }
+                const first = 1, second = 2;
+                """
+            },
+        )
+        builder.export(tmp_path / "graph.json")
+        ids = {
+            n["id"] for n in load_graph_with_schema(tmp_path / "graph.json")["nodes"]
+        }
+        assert {"FILE:g.ts::A::m", "FILE:g.ts::second"} <= ids
 
     def test_a_bodyless_overload_on_its_classs_line_keeps_the_member_after_it(
         self, tmp_path
@@ -17452,6 +17689,35 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, f"{owner}::callback@7") == ["FILE:f.ts::a"]
         assert _calls(builder, f"{owner}::callback@15") == ["FILE:f.ts::b"]
 
+    def test_callbacks_that_open_on_one_line(self, tmp_path):
+        """A callback that opens after another on its line is written
+        inside it: it is held by the first, ends with its own block, and
+        the locals and calls of each are its own."""
+        builder = _index(
+            tmp_path,
+            {
+                "c.ts": """
+                export function a(): any { return 1; }
+                export function b(): any { return 1; }
+                outer(() => { inner(() => {
+                    const X = a();
+                  });
+                  const X = b();
+                });
+                """
+            },
+        )
+        first = "FILE:c.ts::callback@4"
+        second = f"{first}::callback@4"
+        spans = {
+            n["id"]: (n["metadata"]["lineno"], n["metadata"]["end_lineno"])
+            for n in builder.nodes
+            if n["id"] in (first, second)
+        }
+        assert spans == {first: (4, 8), second: (4, 6)}
+        assert _calls(builder, second) == ["FILE:c.ts::a"]
+        assert _calls(builder, first) == ["FILE:c.ts::b"]
+
     def test_objects_written_in_a_callback(self, tmp_path):
         """In a callback, as at the top of a file, a constant holding an
         object owns the functions written in it, and an object a call is
@@ -17523,6 +17789,75 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, "FILE:o.js::setup::object@8::request") == [
             "FILE:o.js::other"
         ]
+
+    def test_an_object_passed_after_other_arguments_owns_its_functions(self, tmp_path):
+        """The object is any argument of its call, not the first alone,
+        on the call's line or a later one; one that opens inside another on
+        that line is held by it, and each owns the functions written in it.
+        An element of an array a call is passed is no argument."""
+        builder = _index(
+            tmp_path,
+            {
+                "o.js": """
+                function helper() {}
+                function other() {}
+                export function setup() {
+                  register("first", {
+                    request() { helper(); },
+                  });
+                  register("second", options, {
+                    request() { other(); },
+                  });
+                  register("third", { wrapped: wrap({
+                      request() { helper(); },
+                    }),
+                    request() { other(); },
+                  });
+                  register(
+                    "fourth",
+                    {
+                      request() { helper(); },
+                    },
+                    {
+                      request() { other(); },
+                    },
+                  );
+                  register({
+                    request() { helper(); },
+                  }, {
+                    request() { other(); },
+                  });
+                  const run = () => wrap({
+                    request() { helper(); },
+                  });
+                  routes([
+                    {
+                      handler() { helper(); },
+                    },
+                  ]);
+                }
+                """,
+            },
+        )
+        setup = "FILE:o.js::setup"
+        owners = {
+            "object@5": "helper",
+            "object@8": "other",
+            "object@11::object@11": "helper",
+            "object@11": "other",
+            "object@18": "helper",
+            "object@21": "other",
+            "object@25": "helper",
+            "object@27": "other",
+            "run::object@30": "helper",
+        }
+        for owner, called in owners.items():
+            assert _calls(builder, f"{setup}::{owner}::request") == [
+                f"FILE:o.js::{called}"
+            ]
+        ids = {n["id"] for n in builder.nodes}
+        assert f"{setup}::request" not in ids
+        assert f"{setup}::handler" in ids
 
     def test_an_object_a_call_is_passed_at_the_files_margin(self, tmp_path):
         """An object a call is passed at the margin of a file owns the

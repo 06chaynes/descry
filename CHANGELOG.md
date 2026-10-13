@@ -288,31 +288,32 @@ Python SDK v2, and a full-tree review's findings are fixed.
   own, so a local of one callback is never filed under a local of the
   same name in a sibling, and `function (` names no member. A local that
   holds a function is the definition it holds when a function is passed
-  to it as well. An object a call is passed, whose lines go on past its
-  first and which holds a function, owns the functions written in it — a
-  method, an arrow or an accessor — under `object@<line>`, a name no
-  source can write, where they were the enclosing scope's; and a constant
-  of a function's body holding an object owns the functions written in
-  it, as at the top of a file and in a callback, and a member call on its
-  value reaches them, where the objects of one function were one member
-  of it. A method or property a string literal names is a member or
+  to it as well. An object a call is passed, as any of its arguments,
+  whose lines go on past its first and which holds a function, owns the
+  functions written in it — a method, an arrow or an accessor — under
+  `object@<line>`, a name no source can write, where they were the
+  enclosing scope's; and a constant of a function's body holding an
+  object owns the functions written in it, as at the top of a file and in
+  a callback, and a member call on its value reaches them, where the
+  objects of one function were one member of it. A method or property a string literal names is a member or
   property, filed as the name the source names — the literal's content,
   which no plain declaration can write for a `"~validate"` and which
   `{"m"}` and `{m}` share — where its body was read as the class's and
   made a phantom member the real method of that name shared a node with.
-  A class expression — a const's value, a member's value, or one a `new`
-  constructs — is a class of the scope it is written in: the const names
-  it, its own name is visible only inside it, and an anonymous one is
+  A class expression — a declarator's value, a member's value, or one a
+  `new` constructs or a call is passed — is a class of the scope it is
+  written in: the `const`, `let` or `var` that declares it names it, its
+  own name is visible only inside it, and one no declarator names is
   `class@<line>`, a name no source can write. Its members are its, where
   they were the enclosing scope's; an object a string-literal key gives a
   function to is the property the key names, so a class written in one is
   named by the function that holds it.
 - **A class declared inside a function or a callback is named only inside
-  it.** For TypeScript and JavaScript a type or a call of that name
-  written elsewhere — in a sibling function of the file or in another
-  file — is the language's global, and the class and its members are not
-  candidates a call there can reach. The class a test's callback in
-  another file declares no longer captures the name.
+  it.** For TypeScript and JavaScript a type, a call of that name or a
+  member call on it written elsewhere — in a sibling function of the file
+  or in another file — is the language's global, and the class and its
+  members are not candidates a call there can reach. The class a test's
+  callback in another file declares no longer captures the name.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer
   aborts the whole index. `index` no longer encodes every symbol twice.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root
