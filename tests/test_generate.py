@@ -656,8 +656,8 @@ export interface Schema {
         }
         assert nodes == {
             "FILE:hash.ts::hash": ("Format<`${Alg}_hex`>", 9),
-            "FILE:hash.ts::Schema::refine": ("Refined<this>", 12),
-            "FILE:hash.ts::Schema::shape": ("{ strict: boolean; }", 15),
+            "FILE:hash.ts::Schema::refine": ("Refined<this>", 14),
+            "FILE:hash.ts::Schema::shape": ("{ strict: boolean; }", 17),
             "FILE:hash.ts::Schema::catch": ("Caught<this>", 18),
             "FILE:hash.ts::Schema::parse": ("unknown", 19),
             "FILE:hash.ts::Schema::brand": ("this", 20),
@@ -2163,11 +2163,11 @@ class TestPythonCallResolution:
             "FILE:m.py::Job::run",
         ]
 
-    def test_standard_method_name_alone_does_not_pin_a_receiver(self, tmp_path):
-        """`locate` is a method of `importlib.metadata.PackagePath` and
-        `__html__` a protocol any class may implement: on a receiver of
-        unknown type the one project definition is not the only one that
-        fits."""
+    def test_an_unknown_receiver_is_never_pinned_by_name(self, tmp_path):
+        """`locate` a standard type also has as a method, `__html__` a
+        protocol any class may implement and `frobnicate` the project
+        alone defines: on a receiver of unknown type none of them pins
+        the call; the definitions that fit are its candidates."""
         builder = _index(
             tmp_path,
             {
@@ -2185,9 +2185,17 @@ class TestPythonCallResolution:
             },
         )
         assert _calls(builder, "FILE:m.py::run") == [
-            "FILE:m.py::Finder::frobnicate",
             "REF:thing.__html__",
+            "REF:thing.frobnicate",
             "REF:thing.locate",
+        ]
+        edges = {
+            e["target"]: e
+            for e in builder.edges
+            if e["source"] == "FILE:m.py::run" and e["relation"] == "CALLS"
+        }
+        assert edges["REF:thing.frobnicate"]["metadata"]["candidates"] == [
+            "FILE:m.py::Finder::frobnicate"
         ]
 
     def test_operator_and_variadic_parameters_are_standard_values(self, tmp_path):
@@ -3062,8 +3070,8 @@ class TestRustCallResolution:
 
     def test_path_through_a_type_parameter_goes_to_its_bound(self, tmp_path):
         """`S::begin` is a function of the bound of `S`. `S::Error` is an
-        associated type, not the project's `Error`: `error_io` is the
-        declaration every implementation of it shares."""
+        associated type, not the project's `Error`: the definitions of
+        `error_io` that fit are the call's candidates."""
         builder = _index(
             tmp_path,
             {
@@ -3096,6 +3104,15 @@ class TestRustCallResolution:
         )
         assert _calls(builder, "FILE:lib.rs::run") == [
             "FILE:lib.rs::Sink::begin",
+            "REF:S::Error::error_io",
+        ]
+        edges = {
+            e["target"]: e
+            for e in builder.edges
+            if e["source"] == "FILE:lib.rs::run" and e["relation"] == "CALLS"
+        }
+        assert edges["REF:S::Error::error_io"]["metadata"]["candidates"] == [
+            "FILE:lib.rs::Error::error_io",
             "FILE:lib.rs::SinkError::error_io",
         ]
 
@@ -3345,9 +3362,10 @@ class TestRustCallResolution:
             "FILE:src/tools.rs::sharpen",
         ]
 
-    def test_name_the_standard_library_has_does_not_pin_an_unknown_receiver(
-        self, tmp_path
-    ):
+    def test_a_name_the_project_alone_defines_does_not_pin(self, tmp_path):
+        """`and` a standard type also has as a method and `only_here` the
+        project alone defines are alike: neither pins a receiver of
+        unknown type, and the definitions that fit are candidates."""
         builder = _index(
             tmp_path,
             {
@@ -3377,7 +3395,7 @@ class TestRustCallResolution:
         }
         assert calls == {
             "REF:made.and": ["FILE:a.rs::Key::and"],
-            "FILE:a.rs::Key::only_here": None,
+            "REF:made.only_here": ["FILE:a.rs::Key::only_here"],
         }
 
     def test_impl_whose_brace_follows_a_where_clause(self, tmp_path):
@@ -3539,7 +3557,7 @@ class TestRustCallResolution:
         )
         assert _calls(builder, "FILE:src/lib.rs::run") == [
             "FILE:src/lib.rs::Rows::count",
-            "FILE:src/lib.rs::Summary::total",
+            "REF:stats.total",
         ]
 
     def test_declarations_and_comments_are_not_calls(self, tmp_path):
@@ -4321,9 +4339,11 @@ class TestRustCallResolution:
             "FILE:src/lib.rs::build",
         ]
 
-    def test_implementor_of_a_standard_trait_has_other_methods_too(self, tmp_path):
-        """What is only known to implement `Write` calls the trait's
-        `flush`; a method the trait has not may be the project's."""
+    def test_a_type_parameters_value_is_not_pinned_by_name(self, tmp_path):
+        """`out.tag()` on a value of a type parameter is not pinned to the
+        one project method of the name, whatever the bounds name; and
+        `out.flush()` a standard type also has is the library's. The
+        definitions that fit are candidates."""
         builder = _index(
             tmp_path,
             {
@@ -4342,9 +4362,15 @@ class TestRustCallResolution:
                 """
             },
         )
-        assert _calls(builder, "FILE:src/lib.rs::dump") == [
-            "FILE:src/lib.rs::Tagged::tag"
-        ]
+        calls = {
+            edge["target"]: edge["metadata"].get("candidates")
+            for edge in builder.edges
+            if edge["source"] == "FILE:src/lib.rs::dump"
+            and edge["relation"].startswith("CALLS")
+        }
+        assert calls == {
+            "REF:out.tag": ["FILE:src/lib.rs::Tagged::tag"],
+        }
 
     def test_derived_trait_gives_its_methods(self, tmp_path):
         """`#[derive(Clone, Default)]` makes `clone` and `default` the
@@ -6436,16 +6462,17 @@ class TestTypeScriptCallResolution:
                 """,
             },
         )
-        assert _calls(builder, "FILE:thing.test.ts") == [
-            "FILE:thing.test.ts::make",
-            "FILE:thing.test.ts::open",
-            "FILE:thing.test.ts::passed",
+        nested = "FILE:thing.test.ts::callback@4::callback@17"
+        assert _calls(builder, nested) == [
+            "FILE:thing.test.ts::callback@4::make",
+            "FILE:thing.test.ts::callback@4::open",
+            "FILE:thing.test.ts::callback@4::passed",
             "FILE:thing.ts::useThing::show",
             "FILE:thing.ts::useThing::show",
             "FILE:thing.ts::useThing::show",
         ]
         # The arrow `open` calls `useThing` on its own first line.
-        assert _calls(builder, "FILE:thing.test.ts::open") == [
+        assert _calls(builder, "FILE:thing.test.ts::callback@4::open") == [
             "FILE:thing.ts::useThing"
         ]
         assert _calls(builder, "FILE:deep.ts::run") == [
@@ -6908,8 +6935,9 @@ class TestTypeScriptCallResolution:
 
     def test_property_that_holds_a_function_is_not_the_one_method(self, tmp_path):
         """`effect.refinement()` on an unknown receiver may call the
-        function an Effect holds, so the one method of that name is not
-        pinned."""
+        function an Effect holds, and `schema.strict()` may call the one
+        project method of the name: neither is pinned, and the
+        definitions that fit are candidates."""
         builder = _index(
             tmp_path,
             {
@@ -6931,8 +6959,8 @@ class TestTypeScriptCallResolution:
             },
         )
         assert _calls(builder, "FILE:a.ts::run") == [
-            "FILE:a.ts::Schema::strict",
             "REF:effect.refinement",
+            "REF:schema.strict",
         ]
 
     def test_call_on_a_standard_value_is_external_and_typed(self, tmp_path):
@@ -7083,14 +7111,14 @@ class TestTypeScriptCallResolution:
         maker = "FILE:core.ts::maker"
         checked = "FILE:a.ts::Checked::check"
         assert _calls(builder, "FILE:a.ts") == [
-            checked,
-            checked,
             "FILE:core.ts::Maker::make",
             maker,
             maker,
             maker,
-            "REF:inst.check",
         ]
+        assert _calls(builder, "FILE:a.ts::callback@12") == [checked]
+        assert _calls(builder, "FILE:a.ts::callback@18") == [checked]
+        assert _calls(builder, "FILE:a.ts::callback@23") == ["REF:inst.check"]
         assert _calls(builder, "FILE:a.ts::written") == [
             "FILE:a.ts::Other::check",
             maker,
@@ -7421,9 +7449,73 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:a.ts::report") == ["REF:error.flatten"]
 
+    def test_a_class_written_inside_a_callback_is_named_only_inside_it(self, tmp_path):
+        """A class declaration is block-scoped: `new FormData()` in another
+        file is not the `FormData` a test's callback declares, and what
+        the value holds names the language's global. The callback's own
+        writing still names its class."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/use.js": """
+                export function send(data) {
+                  const form = new FormData();
+                  form.append('a', data);
+                }
+                """,
+                "tests/mock.test.js": """
+                describe('x', () => {
+                  class FormData {
+                    append(k, v) {}
+                  }
+                  it('y', () => {
+                    const f = new FormData();
+                    f.append('k', 1);
+                  });
+                });
+                """,
+            },
+        )
+        assert not [
+            e
+            for e in builder.edges
+            if e["source"].startswith("FILE:lib/use.js::send")
+            and e["target"].startswith("FILE:tests/mock.test.js::")
+        ]
+        assert _calls(builder, "FILE:tests/mock.test.js::callback@2::callback@6") == [
+            "FILE:tests/mock.test.js::callback@2::FormData",
+            "FILE:tests/mock.test.js::callback@2::FormData::append",
+        ]
+
+    def test_a_class_written_inside_a_function_is_named_only_inside_it(self, tmp_path):
+        """A class a function of the file declares is block-scoped: a
+        sibling function of the same file names the language's global, not
+        the class."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export function make() {
+                  class Cache {
+                    get(key) {}
+                  }
+                  return new Cache();
+                }
+
+                export function take() {
+                  const cache = new Cache();
+                  cache.get('k');
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::make") == ["FILE:a.ts::make::Cache"]
+        assert _calls(builder, "FILE:a.ts::take") == []
+
     def test_global_is_the_librarys_unless_its_file_binds_the_name(self, tmp_path):
         """`document` and `globalThis.console` are the browser's and the
-        language's; a parameter called `document` is not."""
+        language's; a parameter called `document` is not, and no method
+        it names is pinned to a project definition."""
         builder = _index(
             tmp_path,
             {
@@ -7452,8 +7544,16 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:a.ts::draw") == ["FILE:a.ts::setup"]
         assert _calls(builder, "FILE:b.ts::print") == [
-            "FILE:a.ts::Page::typeset",
             "REF:document.querySelector",
+            "REF:document.typeset",
+        ]
+        edges = {
+            e["target"]: e
+            for e in builder.edges
+            if e["source"] == "FILE:b.ts::print" and e["relation"] == "CALLS"
+        }
+        assert edges["REF:document.typeset"]["metadata"]["candidates"] == [
+            "FILE:a.ts::Page::typeset"
         ]
 
     def test_function_passed_to_a_standard_method_is_typed_by_it(self, tmp_path):
@@ -7496,7 +7596,10 @@ class TestTypeScriptCallResolution:
         )
         child = "FILE:a.ts::Schema::child"
         assert _calls(builder, "FILE:a.ts::each") == [child] * 5
-        assert _calls(builder, "FILE:a.ts::mapped") == ["FILE:a.ts::Child::run", child]
+        assert _calls(builder, "FILE:a.ts::mapped") == [child]
+        assert _calls(builder, "FILE:a.ts::mapped::callback@25") == [
+            "FILE:a.ts::Child::run"
+        ]
 
     def test_function_passed_to_a_project_function_is_typed_by_it(self, tmp_path):
         """The parameters of a function passed as an argument have the
@@ -7525,10 +7628,31 @@ class TestTypeScriptCallResolution:
                 """,
             },
         )
-        assert _calls(builder, "FILE:app.ts::emit") == [
-            "FILE:doc.ts::Doc::indented",
-            "FILE:doc.ts::Doc::write",
+        assert _calls(builder, "FILE:app.ts::emit") == ["FILE:doc.ts::Doc::indented"]
+        assert _calls(builder, "FILE:app.ts::emit::callback@5") == [
+            "FILE:doc.ts::Doc::write"
         ]
+
+    def test_a_local_called_with_a_function_reaches_its_definition(self, tmp_path):
+        """A local holding a function is the definition it holds when it is
+        called, whether or not a function is passed to it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export function g(): any { return 1; }
+                export function f() {
+                  const outcome = (fn: () => unknown) => {
+                    return fn();
+                  };
+                  outcome(() => g());
+                  outcome(g);
+                }
+                """
+            },
+        )
+        outcome = "FILE:a.ts::f::outcome"
+        assert _calls(builder, "FILE:a.ts::f") == [outcome, outcome, "FILE:a.ts::g"]
 
     def test_loop_variable_and_pattern_are_typed_by_their_value(self, tmp_path):
         """`for...of` gives the elements of what it iterates, `for...in`
@@ -7633,8 +7757,8 @@ class TestTypeScriptCallResolution:
                 """
             },
         )
-        assert _calls(builder, "FILE:a.ts") == [
-            "FILE:a.ts::Schema::run",
+        assert _calls(builder, "FILE:a.ts::callback@14") == ["FILE:a.ts::Schema::run"]
+        assert _calls(builder, "FILE:a.ts::callback@19") == [
             "REF:memo.run",
             "REF:schema.run",
         ]
@@ -8822,10 +8946,10 @@ class TestGoCallResolution:
             "FILE:app.go::Stack::Apply",
         ]
 
-    def test_standard_method_name_is_not_pinned_by_name_alone(self, tmp_path):
-        """On a receiver of unknown type a name that a type of the standard
-        library also has as a method is not the project's one definition
-        of it; any other name is."""
+    def test_an_unknown_receiver_is_never_pinned_by_name(self, tmp_path):
+        """`Name` a standard type also has as a method and `Enqueue` the
+        project alone defines are alike on a receiver of unknown type:
+        neither pins the call; the definitions that fit are candidates."""
         builder = _index(
             tmp_path,
             {
@@ -8846,10 +8970,16 @@ class TestGoCallResolution:
                 """
             },
         )
-        assert _calls(builder, "FILE:app.go::describe") == [
-            "FILE:app.go::Job::Enqueue",
-            "REF:job.Name",
-        ]
+        calls = {
+            edge["target"]: edge["metadata"].get("candidates")
+            for edge in builder.edges
+            if edge["source"] == "FILE:app.go::describe"
+            and edge["relation"].startswith("CALLS")
+        }
+        assert calls == {
+            "REF:job.Enqueue": ["FILE:app.go::Job::Enqueue"],
+            "REF:job.Name": ["FILE:app.go::Job::Name"],
+        }
 
     def test_fields_are_read_from_the_struct_in_any_file(self, tmp_path):
         """A chain of fields is followed through the structs that declare
@@ -9682,6 +9812,29 @@ class TestOwnersSourceCannotName:
                 """,
                 {},
             ),
+            (
+                "a.ts",
+                """
+                declare function test(n: string, f: () => void): void;
+                export function helper(): any { return 1; }
+                test("a", () => {
+                    const X = (): any => helper();
+                });
+                """,
+                {},
+            ),
+            (
+                "a.js",
+                """
+                export function helper(): any { return 1; }
+                export function make() {
+                    return new (class {
+                        run() { helper(); }
+                    })();
+                }
+                """,
+                {},
+            ),
         ],
     )
     def test_only_a_type_source_names_has_a_name_source_can_write(
@@ -10453,9 +10606,11 @@ class TestJavaCallResolution:
         assert _calls(builder, "FILE:Client.java::Client::made") == [fit, fit, fit]
         assert _calls(builder, "FILE:Client.java::Client::library") == []
 
-    def test_standard_method_name_on_an_unknown_receiver_is_not_pinned(self, tmp_path):
-        """`isInterrupted` is a method of `java.lang.Thread`, so the one
-        project method of that name is not the only one that fits."""
+    def test_an_unknown_receiver_is_never_pinned_by_name(self, tmp_path):
+        """`isInterrupted` a standard type also has as a method and
+        `report` the project alone defines are alike on a receiver of
+        unknown type: neither pins the call; the definitions that fit are
+        candidates."""
         builder = _index(
             tmp_path,
             {
@@ -10475,10 +10630,16 @@ class TestJavaCallResolution:
                 """,
             },
         )
-        assert _calls(builder, "FILE:Client.java::Client::run") == [
-            "FILE:Monitor.java::Monitor::report",
-            "REF:worker.isInterrupted",
-        ]
+        calls = {
+            edge["target"]: edge["metadata"].get("candidates")
+            for edge in builder.edges
+            if edge["source"] == "FILE:Client.java::Client::run"
+            and edge["relation"].startswith("CALLS")
+        }
+        assert calls == {
+            "REF:worker.isInterrupted": ["FILE:Monitor.java::Monitor::isInterrupted"],
+            "REF:worker.report": ["FILE:Monitor.java::Monitor::report"],
+        }
 
     def test_member_a_class_has_from_the_standard_library(self, tmp_path):
         """Every class has the methods of `Object`, an enum those of `Enum`,
@@ -16983,3 +17144,434 @@ class TestOneLineDefinitionCalls:
         )
         assert _calls(builder, "FILE:n.ts::outer::inner") == ["FILE:n.ts::helper"]
         assert _calls(builder, "FILE:n.ts::outer") == ["FILE:n.ts::outer::inner"]
+
+    def test_a_member_whose_type_parameters_run_over_lines_owns_its_call(
+        self, tmp_path
+    ):
+        """A member whose type parameters span lines ends with its
+        statement, not inside its type parameters, and owns the call its
+        expression body makes."""
+        builder = _index(
+            tmp_path,
+            {
+                "z.ts": """
+                export function helper(x?: any): any { return x; }
+                export class Z {
+                  static create = <Shape extends
+                    { a: number }
+                  >(x: Shape) => helper(x);
+                  after() { return 1; }
+                }
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert "FILE:z.ts::Z::helper" not in ids
+        assert _calls(builder, "FILE:z.ts::Z::create") == ["FILE:z.ts::helper"]
+        spans = {
+            node["id"]: (node["metadata"]["lineno"], node["metadata"]["end_lineno"])
+            for node in builder.nodes
+            if node["id"] == "FILE:z.ts::Z::create"
+        }
+        assert spans["FILE:z.ts::Z::create"] == (4, 6)
+
+    def test_a_member_on_the_line_that_closes_the_one_before_it(self, tmp_path):
+        """A member written on the line of the `}` that closes the member
+        before it is a member of the class, not a call, and owns the calls
+        of its body."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.ts": """
+                export function helper(): any { return 1; }
+                export class Mid {
+                  first() {
+                    return 1;
+                  } second() {
+                    helper();
+                  }
+                }
+                export class Mid2 {
+                  first() { return 1;
+                  } second() { helper(); }
+                }
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert "FILE:m.ts::Mid::helper" not in ids
+        assert _calls(builder, "FILE:m.ts::Mid::second") == ["FILE:m.ts::helper"]
+        assert _calls(builder, "FILE:m.ts::Mid2::second") == ["FILE:m.ts::helper"]
+
+    def test_a_keyword_on_the_line_that_closes_a_block_is_no_member(self, tmp_path):
+        """`} for (`, `} if (` and `} default:` in a method's body start a
+        statement, as `} else {` continues one: none names a member, and
+        the calls under them stay the method's. `} async run() {` is a
+        member."""
+        builder = _index(
+            tmp_path,
+            {
+                "k.ts": """
+                export function h(): any { return 1; }
+                export class K {
+                  m(a: any) {
+                    if (a) {
+                      h();
+                    } for (const z of a) {
+                      h();
+                    } if (a) {
+                      h();
+                    }
+                    switch (a) {
+                      case 1: {
+                        h();
+                      } default: {
+                        h();
+                      }
+                    }
+                  } async run() {
+                    h();
+                  }
+                }
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert not {i for i in ids if i.split("::")[-1] in ("for", "if", "default")}
+        assert _calls(builder, "FILE:k.ts::K::m") == ["FILE:k.ts::h"] * 5
+        assert _calls(builder, "FILE:k.ts::K::run") == ["FILE:k.ts::h"]
+
+    def test_a_method_written_with_a_quoted_name_is_a_member(self, tmp_path):
+        """A string-literal name declares a member, filed as the name the
+        source names, the literal's content — `"~validate"` is `~validate`,
+        a name no plain declaration can write. The call its body makes is
+        its, where it was read as the class body's and made a phantom
+        member the real method of that name shared a node with."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class ZodType {
+                  "~validate"(data: any): boolean {
+                    return this.isValid(data);
+                  }
+                  isValid(data: any): boolean { return true; }
+                }
+                """,
+            },
+        )
+        nodes = {n["id"]: n["metadata"].get("lineno") for n in builder.nodes}
+        quoted = "FILE:a.ts::ZodType::~validate"
+        assert nodes[quoted] == 3
+        assert nodes["FILE:a.ts::ZodType::isValid"] == 6
+        assert _calls(builder, quoted) == ["FILE:a.ts::ZodType::isValid"]
+
+    def test_a_class_expression_is_a_class_of_the_scope_it_is_written_in(
+        self, tmp_path
+    ):
+        """A class expression — a const's value, or one a `new`
+        constructs — is a class: the const names it, its own name is
+        visible only inside it, an anonymous one is no source's name, and
+        its members are its, where the line was the const's and the
+        members were the enclosing scope's."""
+        builder = _index(
+            tmp_path,
+            {
+                "b.ts": """
+                export class Base {
+                  helper() {}
+                }
+                """,
+                "a.ts": """
+                import { Base } from './b.js';
+                export const Named = class extends Base {
+                  run() { this.helper(); }
+                };
+                export function anon() {
+                  return new (class extends Base {
+                    build() { this.helper(); }
+                  })();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::Named::run") == ["FILE:b.ts::Base::helper"]
+        nameless = "FILE:a.ts::anon::class@7"
+        assert _calls(builder, f"{nameless}::build") == ["FILE:b.ts::Base::helper"]
+
+    def test_a_class_expression_inside_a_string_is_no_class(self, tmp_path):
+        """A string holding `x = class {}` or `const A = class B {}` — a
+        fixture of a tool that reads source — declares nothing, on a line
+        of its own or in a method."""
+        builder = _index(
+            tmp_path,
+            {
+                "s.ts": """
+                export function h(): any { return 1; }
+                test("x", () => expect(transform("x = class {}")).toBe("y"));
+                const src = "const A = class B {}";
+                export class C {
+                  make() {
+                    const s = "x = class Foo {";
+                    h();
+                  }
+                }
+                export function run() {
+                  h();
+                }
+                """
+            },
+        )
+        classes = {n["id"] for n in builder.nodes if n["type"] == "Class"}
+        assert classes == {"FILE:s.ts::C"}
+        assert _calls(builder, "FILE:s.ts::C::make") == ["FILE:s.ts::h"]
+        assert _calls(builder, "FILE:s.ts::run") == ["FILE:s.ts::h"]
+        assert {n["id"] for n in builder.nodes} & {
+            "FILE:a.ts::anon::X",
+            "FILE:a.ts::class",
+        } == set()
+
+    def test_a_bodyless_overload_on_its_classs_line_keeps_the_member_after_it(
+        self, tmp_path
+    ):
+        """A `;`-ended overload on the class's line does not swallow the
+        member written after it."""
+        builder = _index(
+            tmp_path,
+            {
+                "o.ts": """
+                export function helper(): any { return 1; }
+                export class O { m(x: number): void; n() { helper(); } }
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert "FILE:o.ts::O::m" in ids
+        assert _calls(builder, "FILE:o.ts::O::n") == ["FILE:o.ts::helper"]
+
+    def test_a_typed_field_whose_arrow_value_starts_on_the_next_line(self, tmp_path):
+        """A class property holding a function is a member whatever its
+        annotation, even where the value starts on the line after the `=`."""
+        builder = _index(
+            tmp_path,
+            {
+                "s.ts": """
+                export function helper(a: any): any { return a; }
+                export class S {
+                  s: (a: number) => any =
+                    (a) => helper(a);
+                }
+                export const c =
+                  () => helper();
+                """
+            },
+        )
+        assert _calls(builder, "FILE:s.ts::S::s") == ["FILE:s.ts::helper"]
+        assert _calls(builder, "FILE:s.ts::c") == ["FILE:s.ts::helper"]
+
+    def test_a_parenthesised_field_value_that_goes_on_over_lines(self, tmp_path):
+        """A field whose value is parenthesised and runs over lines is no
+        member; its calls are the class's, not a phantom method's."""
+        builder = _index(
+            tmp_path,
+            {
+                "p.ts": """
+                export function f(): any { return 1; }
+                export class P {
+                  p = (1 +
+                    f());
+                }
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert not {i for i in ids if i.endswith("::f") and i != "FILE:p.ts::f"}
+        assert _calls(builder, "FILE:p.ts::P") == ["FILE:p.ts::f"]
+
+    def test_locals_of_nameless_callbacks_are_their_own(self, tmp_path):
+        """A nameless function passed as an argument is a scope of its own:
+        a local of one callback is never filed under the same node as a
+        local of the same name in a sibling callback."""
+        builder = _index(
+            tmp_path,
+            {
+                "x.ts": """
+                declare function test(n: string, f: () => void): void;
+                export function helper(): any { return 1; }
+                export function other(): any { return 1; }
+                test("a", () => {
+                  const X: any = helper();
+                });
+                test("b", () => {
+                  const X = (): any => {
+                    return other();
+                  };
+                });
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert "FILE:x.ts::X" not in ids
+        assert _calls(builder, "FILE:x.ts::callback@5") == ["FILE:x.ts::helper"]
+        assert _calls(builder, "FILE:x.ts::callback@8::X") == ["FILE:x.ts::other"]
+
+    def test_a_function_passed_to_a_call_opened_inside_a_callback(self, tmp_path):
+        """A function expression passed to a call that a callback's body
+        leaves open on the line before is a scope of its own, as one passed
+        on the call's line is; `function (` names no member."""
+        builder = _index(
+            tmp_path,
+            {
+                "f.ts": """
+                export function a(): any { return 1; }
+                export function b(): any { return 1; }
+                make("Fn", (inst: any) => {
+                  inst.one = () => {
+                    return Object.defineProperty(
+                      function (x: any) {
+                        return a();
+                      },
+                      "k",
+                    );
+                  };
+                  inst.two = () => {
+                    return Object.defineProperty(
+                      async function (y: any) {
+                        return b();
+                      },
+                      "k",
+                    );
+                  };
+                });
+                """
+            },
+        )
+        ids = {node["id"] for node in builder.nodes}
+        assert not {i for i in ids if i.endswith("::function")}
+        owner = "FILE:f.ts::callback@4"
+        assert _calls(builder, f"{owner}::callback@7") == ["FILE:f.ts::a"]
+        assert _calls(builder, f"{owner}::callback@15") == ["FILE:f.ts::b"]
+
+    def test_objects_written_in_a_callback(self, tmp_path):
+        """In a callback, as at the top of a file, a constant holding an
+        object owns the functions written in it, and an object a call is
+        passed owns the functions written in it, a name no source can
+        write; neither's members are the callback's."""
+        builder = _index(
+            tmp_path,
+            {
+                "o.ts": """
+                export function a(): any { return 1; }
+                export function b(): any { return 1; }
+                test("t", () => {
+                  const clean = {
+                    request() {
+                      return a();
+                    },
+                  };
+                  const failing = {
+                    request() {
+                      return b();
+                    },
+                  };
+                  use({
+                    get size() {
+                      return a();
+                    },
+                    run() {
+                      return b();
+                    },
+                  });
+                });
+                """
+            },
+        )
+        owner = "FILE:o.ts::callback@4"
+        assert _calls(builder, f"{owner}::clean::request") == ["FILE:o.ts::a"]
+        assert _calls(builder, f"{owner}::failing::request") == ["FILE:o.ts::b"]
+        assert {n["id"] for n in builder.nodes} & {
+            f"{owner}::run",
+            f"{owner}::get size",
+        } == set()
+        assert _calls(builder, f"{owner}::object@15::run") == ["FILE:o.ts::b"]
+        assert _calls(builder, f"{owner}::object@15::get size") == ["FILE:o.ts::a"]
+
+    def test_an_object_a_call_is_passed_owns_its_functions(self, tmp_path):
+        """Two objects a call is passed in one function, holding members of
+        one name: each is a member of the object it is written in, a name
+        no source can write, where both were the function's one member."""
+        builder = _index(
+            tmp_path,
+            {
+                "o.js": """
+                function helper() {}
+                function other() {}
+                export function setup() {
+                  register({
+                    request() { helper(); },
+                  });
+                  register({
+                    request() { other(); },
+                  });
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:o.js::setup::object@5::request") == [
+            "FILE:o.js::helper"
+        ]
+        assert _calls(builder, "FILE:o.js::setup::object@8::request") == [
+            "FILE:o.js::other"
+        ]
+
+    def test_an_object_a_call_is_passed_at_the_files_margin(self, tmp_path):
+        """An object a call is passed at the margin of a file owns the
+        functions written in it, where its methods were read as the
+        file's."""
+        builder = _index(
+            tmp_path,
+            {
+                "o.js": """
+                function helper() {}
+                register({
+                  request() { helper(); },
+                });
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:o.js::object@3::request") == ["FILE:o.js::helper"]
+
+    def test_a_constant_of_a_function_holding_an_object(self, tmp_path):
+        """A constant a function declares, as one a file or a callback
+        declares, holding an object owns the functions written in it, and
+        a member call on its value reaches them, where the two of one
+        name were one member of the function."""
+        builder = _index(
+            tmp_path,
+            {
+                "o.js": """
+                function helper() {}
+                function other() {}
+                export function setup() {
+                  const first = {
+                    request() { helper(); },
+                  };
+                  const second = {
+                    request() { other(); },
+                  };
+                  first.request();
+                  second.request();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:o.js::setup::first::request") == [
+            "FILE:o.js::helper"
+        ]
+        assert _calls(builder, "FILE:o.js::setup::second::request") == [
+            "FILE:o.js::other"
+        ]
+        assert _calls(builder, "FILE:o.js::setup") == [
+            "FILE:o.js::setup::first::request",
+            "FILE:o.js::setup::second::request",
+        ]

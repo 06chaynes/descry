@@ -140,9 +140,13 @@ Python SDK v2, and a full-tree review's findings are fixed.
   returning function's scope; the object's other members are reached
   through `this`. A function the factory declares and one the object
   writes under the same name are two nodes.
-- **A Rust method name the standard library has does not pin a call.** On
-  a receiver of unknown type such a call is left unresolved with the
-  project's method as its candidate; it was resolved to that method.
+- **A receiver of unknown type is never resolved by name.** In every
+  language a member call whose receiver the source does not type is left
+  unresolved with the definitions that fit as its candidates; it was
+  resolved to the one definition of the member's name — and a name the
+  standard library also has was left unresolved while a name only the
+  project defined was resolved. C#, PHP and Ruby already behaved this
+  way. A test's mock of the same name no longer captures such a call.
 - **Unresolved calls name their candidates.** A `CALLS` edge that could
   reach several definitions carries them in `metadata.candidates`.
   `callers` and backward `flow` mark such a caller "one of N candidates"
@@ -164,8 +168,7 @@ Python SDK v2, and a full-tree review's findings are fixed.
   functions, out-of-class C++ members, Ruby singleton and generated
   methods); a call belongs to the member it is written in; receivers are
   typed from declarations. Ruby calls written without parentheses are
-  recorded. In C#, PHP and Ruby a call on a receiver of unknown type is
-  never matched by name.
+  recorded.
 - **Conditional compilation.** In C, C++ and C#, a definition under `#if`
   is chosen for a call only when the call sits under the same condition,
   or when nothing else, in the project or the standard library, could be
@@ -274,6 +277,42 @@ Python SDK v2, and a full-tree review's findings are fixed.
   its statement, and the lines a field's value goes on over declare
   nothing, where a call on one was taken for a method of the class; a
   field's value on the class's line is the class's, as on a later line.
+  A member whose type parameters run over lines ends with its statement,
+  not inside them, and owns the call its expression body makes; a member
+  written on the line of the `}` that closes the member before it is a
+  member of the class, not a call taken for one; a body-less overload on
+  the class's line no longer swallows the member after it; a typed class
+  property whose arrow value starts on the next line is a member; a field
+  whose parenthesised value runs over lines is no member, its calls the
+  class's; and each nameless callback a call is passed is a scope of its
+  own, so a local of one callback is never filed under a local of the
+  same name in a sibling, and `function (` names no member. A local that
+  holds a function is the definition it holds when a function is passed
+  to it as well. An object a call is passed, whose lines go on past its
+  first and which holds a function, owns the functions written in it — a
+  method, an arrow or an accessor — under `object@<line>`, a name no
+  source can write, where they were the enclosing scope's; and a constant
+  of a function's body holding an object owns the functions written in
+  it, as at the top of a file and in a callback, and a member call on its
+  value reaches them, where the objects of one function were one member
+  of it. A method or property a string literal names is a member or
+  property, filed as the name the source names — the literal's content,
+  which no plain declaration can write for a `"~validate"` and which
+  `{"m"}` and `{m}` share — where its body was read as the class's and
+  made a phantom member the real method of that name shared a node with.
+  A class expression — a const's value, a member's value, or one a `new`
+  constructs — is a class of the scope it is written in: the const names
+  it, its own name is visible only inside it, and an anonymous one is
+  `class@<line>`, a name no source can write. Its members are its, where
+  they were the enclosing scope's; an object a string-literal key gives a
+  function to is the property the key names, so a class written in one is
+  named by the function that holds it.
+- **A class declared inside a function or a callback is named only inside
+  it.** For TypeScript and JavaScript a type or a call of that name
+  written elsewhere — in a sibling function of the file or in another
+  file — is the language's global, and the class and its members are not
+  candidates a call there can reach. The class a test's callback in
+  another file declares no longer captures the name.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer
   aborts the whole index. `index` no longer encodes every symbol twice.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root

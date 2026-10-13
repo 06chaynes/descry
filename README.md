@@ -314,13 +314,13 @@ Configuration precedence: defaults < `.descry.toml` < environment variables.
 
 `ast-grep` is the `sg` Rust binary (install via Homebrew or `cargo install ast-grep`) — when present on `PATH`, descry uses it for higher-fidelity call extraction in Rust, TypeScript, and JavaScript files. It's auto-disabled on TS/JS corpora over `DESCRY_AST_GREP_MAX_FILES` (default 5,000) where per-file subprocess overhead would dominate. JavaScript and TypeScript cover `.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.mts` and `.cts`.
 
-Each call is resolved from evidence: imports (including `go.mod`, `Cargo.toml`, `package.json` and `tsconfig.json`), declared and returned types, lexical scope, the class hierarchy and the language's visibility rules. Names bound by loops, patterns, destructuring and closure parameters are typed from declarations, and each language's standard library is described by generated data (`src/descry/stdlib/`), so a chain through library types keeps its type. A call ends as *resolved* to one definition, *unresolved* when nothing in the source decides — the definitions that fit are kept on the edge as `candidates` — or *external* when it leaves the project; the index summary reports all three. Nothing is matched by name alone when more than one definition fits, and nothing by file path. SCIP adds type-aware resolution through traits and generics, and is verified for Rust workspaces; the other indexers' output is used only where it names a node in the graph.
+Each call is resolved from evidence: imports (including `go.mod`, `Cargo.toml`, `package.json` and `tsconfig.json`), declared and returned types, lexical scope, the class hierarchy and the language's visibility rules. Names bound by loops, patterns, destructuring and closure parameters are typed from declarations, and each language's standard library is described by generated data (`src/descry/stdlib/`), so a chain through library types keeps its type. A call ends as *resolved* to one definition, *unresolved* when nothing in the source decides — the definitions that fit are kept on the edge as `candidates` — or *external* when it leaves the project; the index summary reports all three. Nothing is matched by name alone when more than one definition fits, nothing by file path, and a receiver whose type is not known is never guessed. SCIP adds type-aware resolution through traits and generics, and is verified for Rust workspaces; the other indexers' output is used only where it names a node in the graph.
 
 Share of project calls resolved without SCIP, measured on public repositories at the commits named:
 
 | Language | Repository | Resolved |
 |---|---|---|
-| Rust | ripgrep `3fce3b5` | 87% (96% with rust-analyzer) |
+| Rust | ripgrep `3fce3b5` | 84% (95% with rust-analyzer) |
 | TypeScript | zod `0b216ef` | 93% |
 | Go | cobra `adbc881` | 100% |
 | Java | gson `845664b`, commons-lang `682a8ff` | 100%, 99% |
@@ -328,11 +328,11 @@ Share of project calls resolved without SCIP, measured on public repositories at
 | PHP | monolog `3bed304`, guzzle `9393947` | 95%, 93% |
 | C# | serilog `bebc771`, Newtonsoft.Json `52fa3ae` (`Src/Newtonsoft.Json`) | 94%, 91% |
 | C | jq `a19efdd`, libuv `954c1d1` | 99%, 79% |
-| C++ | leveldb `7ee830d`, fmt `c4927e6` | 98%, 86% |
-| Dart | shelf `b2cb503`, riverpod `1efba1c` (`packages/riverpod`) | 95%, 92% |
+| C++ | leveldb `7ee830d`, fmt `c4927e6` | 97%, 85% |
+| Dart | shelf `b2cb503`, riverpod `1efba1c` (`packages/riverpod`) | 93%, 91% |
 | Ruby | rack `a9833c8`, sinatra `cb22afd` | 70%, 39% |
 
-The remainder is unresolved, not wrong: of 450 resolved edges drawn at random from these repositories and read against the source, 448 reach the definition the call reaches. Ruby is low because the language declares no types and calls inside DSL blocks run with another `self`; libuv because most of its functions exist once for Unix and once for Windows, and the build files, not the source, choose between them.
+The remainder is unresolved, not wrong: of 450 resolved edges drawn at random from these repositories and read against the source, every one reaches the definition the call reaches. Ruby is low because the language declares no types and calls inside DSL blocks run with another `self`; libuv because most of its functions exist once for Unix and once for Windows, and the build files, not the source, choose between them.
 
 ## Installation
 

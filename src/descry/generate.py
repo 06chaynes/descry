@@ -9308,16 +9308,24 @@ def _ts_compound(text):
     return None
 
 
+# The name of a class member, `#` before a private one
+_TS_MEMBER_NAME = r"#?[A-Za-z0-9_$]+"
+# A member's name as the source writes it: a plain one, or a string literal
+# with its quotes, a name no plain method has. A call's name is always a
+# plain one: a quoted string is a value.
+_TS_WRITTEN_MEMBER_NAME = r"#?(?:[A-Za-z0-9_$]+|\"[^\"\n]*\"|'[^'\n]*')"
 _TS_VARIABLE_RE = re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_$]+)")
-# A property that holds a function, or is declared to: `name: (params) =>`,
-# `name?: (params) =>`, `name: param =>`, `name: function`
-_TS_FUNCTION_PROPERTY_RE = re.compile(
-    r"^\s*(?:readonly\s+)?([\w$]+)\??\s*:\s*(?:async\s+)?"
-    r"(?:function\b|(?:\([^()]*\)|[\w$]+)\s*(?::[^=,;]+)?=>)",
-    re.MULTILINE,
-)
-# The name of a property in an object literal: `name: value`
-_TS_PROPERTY_RE = re.compile(r"^\s*([A-Za-z0-9_$]+)(?=\s*:)")
+# The name of a property in an object literal: `name: value`, quoted or not
+_TS_PROPERTY_RE = re.compile(rf"^\s*({_TS_WRITTEN_MEMBER_NAME})(?=\s*:)")
+
+
+def _ts_unquote(name: str) -> str:
+    """A member's name as the source names it: a string-literal key's
+    content, its quotes syntax only — `"~validate"` and `~validate` are
+    one name, as `{"m": f}` and `{m: f}` are one property."""
+    if len(name) > 1 and name[0] == name[-1] and name[0] in "\"'":
+        return name[1:-1]
+    return name
 
 
 def _arrow_function(statement: str) -> tuple[str, str] | None:
@@ -9345,7 +9353,7 @@ def _arrow_function(statement: str) -> tuple[str, str] | None:
     else:
         return None
     value = _function_value(statement[column + 1 :])
-    return (match.group(1), value) if value else None
+    return (_ts_unquote(match.group(1)), value) if value else None
 
 
 def _function_value(text: str) -> str | None:
@@ -9406,25 +9414,31 @@ def _class_property(code: str, start: int = 0) -> tuple[str, int, int] | None:
             value = (
                 column + 1 + len(code[column + 1 :]) - len(code[column + 1 :].lstrip())
             )
-            return named[1], named.end(1), value
+            return _ts_unquote(named[1]), named.end(1), value
         if depth < 0:
             return None
     return None
 
 
 def _member_written(
-    line: str, in_class: bool, method_re
+    line: str, in_class: bool, method_re, value: str | None = None
 ) -> tuple[str, int, int, bool] | None:
     """The member ``line`` opens: its name, the columns its name starts and
     ends at, and whether a value is assigned to it. `name(` and `name = (`
     as ``method_re`` reads them, and in a class a property holding a
-    function whatever its annotation."""
+    function whatever its annotation, on its own line or over the lines of
+    its value, ``value`` being that value's text."""
     if match := method_re.search(line):
-        return match.group(1), match.start(1), match.end(1), bool(match.group(2))
+        return (
+            _ts_unquote(match.group(1)),
+            match.start(1),
+            match.end(1),
+            bool(match.group(2)),
+        )
     if (
         in_class
         and (prop := _class_property(line))
-        and _function_value(line[prop[2] :])
+        and _function_value(value if value is not None else line[prop[2] :])
     ):
         return prop[0], prop[1] - len(prop[0]), prop[1], True
     return None
@@ -9625,9 +9639,25 @@ def _members_on_line(
                 end = at  # a field runs to the class's own `}`
                 break
             if found and depth == 0 and code[at] == ")":
-                # The parameters closed; the member ends with its body.
-                body = code.find("{", at)
-                close = _block_close(code, body) if body >= 0 else None
+                # The parameters closed; the member ends with its body,
+                # unless a `;` ends a body-less overload first.
+                semi = brace = -1
+                inner = 0
+                for col in range(at + 1, len(code)):
+                    ch = code[col]
+                    if inner == 0 and ch == ";":
+                        semi = col
+                        break
+                    if inner == 0 and ch == "{":
+                        brace = col
+                        break
+                    inner += (ch in "([{") - (ch in ")]}")
+                    if inner < 0:
+                        break
+                if semi >= 0:
+                    end = semi + 1
+                    break
+                close = _block_close(code, brace) if brace >= 0 else None
                 if close is None:
                     break
                 end = close + 1
@@ -9649,6 +9679,29 @@ def _members_on_line(
                 fields.append((prop[2], end))
         column = end
     return members, fields, None
+
+
+def _member_close_column(code: str) -> int | None:
+    """The column of the `}` that closes the member whose next member is
+    written on the same line, where ``code`` has it: the line's first `}`
+    followed by a member declaration. None otherwise."""
+    stripped = code.lstrip()
+    if not stripped.startswith("}"):
+        return None
+    close = len(code) - len(stripped)
+    rest = code[close + 1 :].lstrip()
+    if not rest:
+        return None
+    at = close + 1 + len(code[close + 1 :]) - len(rest)
+    # A keyword — `else`, `catch`, `for (`, `default:` — continues or
+    # starts a statement; it names no member.
+    if found := _TS_LINE_MEMBER_RE.match(code, at):
+        name = found.group(2)
+    elif prop := _class_property(code, at):
+        name = prop[0]
+    else:
+        return None
+    return None if name in _JSTS_CONTROL_KEYWORDS else close
 
 
 def _block_close(code: str, opened: int) -> int | None:
@@ -9727,8 +9780,6 @@ def _ts_params(signature: str) -> set[str]:
 _TS_METHOD_MODIFIERS = ("", "async", "static", "get", "set", "*", "async *")
 # Modifiers a class member is declared behind, in any order
 _TS_MEMBER_MODIFIERS = r"(?:(?:private|public|protected|static|abstract|override|declare|readonly|async)\s+)*"
-# The name of a class member, `#` before a private one
-_TS_MEMBER_NAME = r"#?[A-Za-z0-9_$]+"
 # A method or accessor a class declares: `name(`, `get name(`, `async *name<T>(`
 # `const`, `let` or `var` and the first binding of its statement: a name, or
 # a destructuring pattern without nested brackets
@@ -9737,13 +9788,13 @@ _TS_DECLARATION_HEAD_RE = re.compile(
     r"(?:[A-Za-z_$][\w$]*|\{[^{}]*\}|\[[^\[\]]*\])"
 )
 # A property a class declares, up to its annotation or value: `name`,
-# `name?`, `name!`
+# `name?`, `name!`, plain- or quoted-keyed
 _TS_CLASS_PROPERTY_RE = re.compile(
-    rf"\s*{_TS_MEMBER_MODIFIERS}({_TS_MEMBER_NAME})\s*[?!]?\s*(?=[:=])"
+    rf"\s*{_TS_MEMBER_MODIFIERS}({_TS_WRITTEN_MEMBER_NAME})\s*[?!]?\s*(?=[:=])"
 )
 _TS_LINE_MEMBER_RE = re.compile(
     rf"\s*{_TS_MEMBER_MODIFIERS}(?:(get|set)\s+)?(?:\*\s*)?"
-    rf"({_TS_MEMBER_NAME})\s*(?:<[^>]*>)?\s*\("
+    rf"({_TS_WRITTEN_MEMBER_NAME})\s*(?:<[^>]*>)?\s*\("
 )
 # `const name = require("m")`, `const { a, b: c } = await import("m")`
 _TS_REQUIRE_RE = re.compile(
@@ -9991,6 +10042,8 @@ _TS_TYPE_EXPECTED_RE = re.compile(r"(?:[:|&?]|\b(?:extends|is|keyof|readonly))\s
 # What a line starts with where it carries on the type or opens the body of
 # the declaration before it
 _TS_TYPE_CONTINUES = ("|", "&", "?", ":", "{")
+# A bare `=` that ends a line: a value is assigned that starts on the next
+_JS_ASSIGNMENT_END_RE = re.compile(r"(?<![=<>!])=(?!=)\s*$")
 
 
 def _opens_body(signature: str) -> bool:
@@ -10221,6 +10274,7 @@ class TSParser(BaseParser):
             # of the `return`. That line is read as the `return` alone, so a
             # function on it gets no node.
             member = start > len(written[0])
+            name = _ts_unquote(name)
             method = re.fullmatch(
                 r"(?:async\s+|(get|set)\s+)?\*?\s*([\w$]+)\s*\0\s*\0", name
             )
@@ -10353,8 +10407,19 @@ class TSParser(BaseParser):
                     f"ast-grep TS import extraction failed for {file_path}: {e}"
                 )
 
+        # A class at a line's margin, or a class expression: `const C =
+        # class`, `member = class`, `new (class`. One whose body closes on
+        # its own line is the class's; a one-line expression is a const's
+        # value, read where the const is. Searched on the line with its
+        # literals blanked: an expression is written anywhere on a line,
+        # and a string may hold one.
         re_class = re.compile(
-            r"^\s*(?:export\s+)?(?:abstract\s+)?class\s+([a-zA-Z0-9_$]+)"
+            r"(?:(?P<const>const\s+(?P<declarator>[\w$]+))\s*=\s*"
+            r"|(?P<assign>[\w$][\w$.]*)\s*=\s*"
+            r"|(?P<new>new\s*\(\s*))class\b"
+            r"(?:\s+(?!extends\b|implements\b)(?P<own>[a-zA-Z0-9_$]+))?"
+            r"|^\s*(?:export\s+)?(?:abstract\s+)?class\b"
+            r"(?:\s+(?!extends\b|implements\b)(?P<plain>[a-zA-Z0-9_$]+))?"
         )
         re_interface = re.compile(r"^\s*(?:export\s+)?interface\s+([a-zA-Z0-9_$]+)")
         re_func = re.compile(
@@ -10365,7 +10430,7 @@ class TSParser(BaseParser):
         # either with type parameters before the `(`
         re_method = re.compile(
             rf"^\s*{_TS_MEMBER_MODIFIERS}"
-            rf"(?:\*\s*)?({_TS_MEMBER_NAME})\s*(=\s*(?:async\s+)?)?(?:[(]|<(?![\s=]))"
+            rf"(?:\*\s*)?({_TS_WRITTEN_MEMBER_NAME})\s*(=\s*(?:async\s+)?)?(?:[(]|<(?![\s=]))"
         )
         # Getter/setter methods: get name() or set name(value)
         re_getter_setter = re.compile(
@@ -10387,9 +10452,6 @@ class TSParser(BaseParser):
         re_held = re.compile(r"^\s*(\.\.\.)?(?:([\w$]+)\s*:\s*)?([\w$]+)\s*,?\s*$")
         self.scan_declarations(lines, _TS_DECLARATIONS)
         self.builder.type_aliases.update(_TYPE_ALIAS_RE.findall(content))
-        self.builder.function_properties.update(
-            ("typescript", name) for name in _TS_FUNCTION_PROPERTY_RE.findall(content)
-        )
         for star, namespace, clause, specifier in _TS_REEXPORT_RE.findall(content):
             # `export * as ns` exports the module itself, under a name.
             names = [(namespace or "*", "*" if namespace else "")] if star else []
@@ -10451,9 +10513,15 @@ class TSParser(BaseParser):
         # object spans and the object's own ID. A function written on one of
         # those lines is a member of the object, not of the definition.
         returned_objects = []
+        # Each callback given an owner, innermost last: its last line and how
+        # many calls are open around it. A call left open inside it, not one
+        # around it, makes a closure on a later line one of its arguments.
+        callbacks = []
+        callback_ids = set()  # the owners of those callbacks
         self._signatures = {}  # node ID -> the signatures it is declared with
         class_ids = set()  # class/interface/enum nodes declared in this file
-        object_ids = set()  # constants of the file that hold an object literal
+        # constants of the file or a callback that hold an object literal
+        object_ids = set()
         interface_ids = set()  # interfaces that have the ID `<scope>::<name>`
         value_ids = set()  # functions and variables, which always have it
 
@@ -10562,11 +10630,11 @@ class TSParser(BaseParser):
                             while stack[-1:] == ["<"]:
                                 stack.pop()
                             if not stack:
-                                return j, (sig + text[:column]).strip(), idx + 1
+                                return j, (sig + text[:column]).strip(), j + 1
                             stack.pop()
                             closed = closed or (char == ")" and not stack)
                         elif char == ";" and not stack:
-                            return j, sig + text[: column + 1].lstrip(), idx + 1
+                            return j, sig + text[: column + 1].lstrip(), j + 1
                     sig += f"{text.strip()} "
                     following = code_lines[j + 1].lstrip() if j + 1 < len(lines) else ""
                     if (
@@ -10574,9 +10642,76 @@ class TSParser(BaseParser):
                         and not stack
                         and not _TS_TYPE_EXPECTED_RE.search(sig)
                         and not following.startswith(_TS_TYPE_CONTINUES)
+                        and not _JS_ASSIGNMENT_END_RE.search(sig)
                     ):
-                        return j, sig.strip(), idx + 1
+                        return j, sig.strip(), j + 1
                 return idx, code_lines[idx].strip(), idx + 1
+
+            def members_on(class_id, idx, code, start, lineno):
+                """Read the members written on ``code``, line ``idx``, from
+                column ``start``, filed under ``class_id``, and make each a
+                node. Returns the member the line leaves open, the spans of
+                the values of the fields on it, the last line of a field
+                the line leaves open, 0 where there is none, and each member
+                as its ID and the column its name ends at."""
+                written, fields, open_at = _members_on_line(code, start)
+                spans = [(*field, class_id) for field in fields]
+                written = [(*member, lineno) for member in written]
+                sig_until = 0
+                if open_at is not None:
+                    member_end = _statement_end(code_lines, idx, open_at) + 1
+                    found = _TS_LINE_MEMBER_RE.match(code, open_at)
+                    prop = _class_property(code, open_at)
+                    if found:
+                        filed = " ".join(filter(None, (found.group(1), found.group(2))))
+                        text = code[open_at:]
+                        written.append((filed, found.end(2), text, member_end))
+                    elif prop and _function_value(text_lines[idx][prop[2] :]):
+                        text = text_lines[idx][prop[2] :]
+                        written.append((prop[0], prop[1], text, member_end))
+                    else:
+                        sig_until = member_end
+                        if prop:
+                            spans.append((prop[2], len(code), class_id))
+                open_member = None
+                made = []
+                for member, name_end, text, member_end in written:
+                    mid = f"{class_id}::{member}"
+                    return_type, param_types, typed = self._extract_ts_types(text)
+                    self.builder.add_node(
+                        mid,
+                        "Method",
+                        name=member,
+                        signature=self._build_ts_signature(
+                            member, param_types, return_type
+                        ),
+                        lineno=lineno,
+                        end_lineno=member_end,
+                        token_count=(member_end - lineno + 1) * 10,
+                        docstring=None,
+                        return_type=return_type,
+                        param_types=param_types,
+                        signatures=self._overloads(mid, typed),
+                    )
+                    self.builder.add_edge(class_id, mid, "DEFINES")
+                    made.append((mid, name_end))
+                    if member_end > lineno:
+                        open_member = (mid, lineno, member_end, text)
+                return open_member, spans, sig_until, made
+
+            def field_property(idx):
+                """The class property written on line ``idx`` and the text of
+                its value over the lines the statement spans, with the index
+                of its last line; None where the line writes no property."""
+                prop = _class_property(code_lines[idx])
+                if prop is None:
+                    return None
+                end = _statement_end(code_lines, idx)
+                value = " ".join(
+                    [text_lines[idx][prop[2] :]]
+                    + [t.strip() for t in text_lines[idx + 1 : min(end, idx + 40) + 1]]
+                )
+                return prop, value, end
 
             # A line of the signature of a definition above, whose calls are
             # its: it declares nothing of its own, opens no nameless function
@@ -10584,8 +10719,16 @@ class TSParser(BaseParser):
             continuing = lineno <= signature_until
             if continuing:
                 pass
-            elif (match := re_const.search(line)) and (
-                match.group(3) is not None or not read_arrow(i)[1]
+            elif (
+                (match := re_const.search(line))
+                and not (
+                    # A class expression whose body goes on over lines is the
+                    # class's line, not the const's.
+                    (cx := re_class.search(code_lines[i]))
+                    and (cx.group("const") or cx.group("assign") or cx.group("new"))
+                    and self._find_block_end(code_lines, i) > lineno
+                )
+                and (match.group(3) is not None or not read_arrow(i)[1])
             ):
                 name, value_type, val = match.groups()
                 if parent_id == file_id and line[:1].isspace():
@@ -10612,7 +10755,7 @@ class TSParser(BaseParser):
                     signatures=valued and self._overloads(cid, valued),
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
-                if parent_id == file_id and re.search(r"=\s*\{\s*$", line):
+                if parent_id not in class_ids and re.search(r"=\s*\{\s*$", line):
                     # The functions it holds are its members.
                     object_ids.add(cid)
                     enter(cid, lineno, self._find_block_end(code_lines, i))
@@ -10627,8 +10770,26 @@ class TSParser(BaseParser):
                 class_ids.add(cid)
                 if "{" in line:
                     enter(cid, lineno, self._find_block_end(code_lines, i))
-            elif match := re_class.search(line):
-                name = match.group(1)
+            elif (match := re_class.search(code_lines[i])) and (
+                # A one-line class expression is a const's value, read
+                # there, not a class of this scope.
+                not (
+                    match.group("const") or match.group("assign") or match.group("new")
+                )
+                or self._find_block_end(code_lines, i) > lineno
+            ):
+                if match.group("new"):
+                    # The expression constructs its own instance: its name
+                    # is the one it writes, or none that source can write.
+                    name = match.group("own") or f"class@{lineno}"
+                elif match.group("const"):
+                    # The const names the class it is given; the
+                    # expression's own name is visible only inside it.
+                    name = match.group("declarator")
+                else:
+                    name = (
+                        match.group("own") or match.group("plain") or f"class@{lineno}"
+                    )
                 docstring = self.get_leading_docstring(lines, i)
                 j, full_sig, end_lineno = consume_sig(i)
                 cid = f"{parent_id}::{name}"
@@ -10649,49 +10810,14 @@ class TSParser(BaseParser):
                 # with its statement.
                 # A field's value is evaluated with the class's instance or,
                 # static, with the class: the class's.
-                written, fields, open_at = [], [], None
-                if (body := _class_body_open(code_lines[i], match.end())) is not None:
-                    written, fields, open_at = _members_on_line(code_lines[i], body)
-                field_spans = [(*field, cid) for field in fields]
-                written = [(*member, lineno) for member in written]
-                if open_at is not None:
-                    member_end = _statement_end(code_lines, i, open_at) + 1
-                    found = _TS_LINE_MEMBER_RE.match(code_lines[i], open_at)
-                    prop = _class_property(code_lines[i], open_at)
-                    if found:
-                        filed = " ".join(filter(None, (found.group(1), found.group(2))))
-                        text = code_lines[i][open_at:]
-                        written.append((filed, found.end(2), text, member_end))
-                    elif prop and _function_value(line[prop[2] :]):
-                        text = line[prop[2] :]
-                        written.append((prop[0], prop[1], text, member_end))
-                    else:
-                        signature_until = member_end
-                        if prop:
-                            field_spans.append((prop[2], len(code_lines[i]), cid))
                 open_member = None
-                for member, name_end, text, member_end in written:
-                    mid = f"{cid}::{member}"
-                    return_type, param_types, typed = self._extract_ts_types(text)
-                    self.builder.add_node(
-                        mid,
-                        "Method",
-                        name=member,
-                        signature=self._build_ts_signature(
-                            member, param_types, return_type
-                        ),
-                        lineno=lineno,
-                        end_lineno=member_end,
-                        token_count=(member_end - lineno + 1) * 10,
-                        docstring=None,
-                        return_type=return_type,
-                        param_types=param_types,
-                        signatures=self._overloads(mid, typed),
+                if (body := _class_body_open(code_lines[i], match.end())) is not None:
+                    open_member, field_spans, sig_until, made = members_on(
+                        cid, i, code_lines[i], body, lineno
                     )
-                    self.builder.add_edge(cid, mid, "DEFINES")
-                    own_defs.append((mid, name_end))
-                    if member_end > lineno:
-                        open_member = (mid, lineno, member_end, text)
+                    own_defs.extend(made)
+                    if sig_until:
+                        signature_until = sig_until
                 # Generic arguments go first: `class A<T extends B> extends C<T>`
                 # inherits from C.
                 heritage = _strip_generics(full_sig)
@@ -10704,7 +10830,10 @@ class TSParser(BaseParser):
                 enter(cid, lineno, end_lineno)
                 if open_member:
                     enter(*open_member)
-                i = j
+                # A body that opens on this line has had what follows it
+                # read; one on a later line is read from that line.
+                if body is None:
+                    i = j
             elif match := re_interface.search(line):
                 name = match.group(1)
                 docstring = self.get_leading_docstring(lines, i)
@@ -10802,9 +10931,14 @@ class TSParser(BaseParser):
                 )
                 self.builder.add_edge(object_id or parent_id, fid, "DEFINES")
                 named = _TS_VARIABLE_RE.match(line) or _TS_PROPERTY_RE.match(line)
-                if named and named.group(1) == name:
+                if named and _ts_unquote(named.group(1)) == name:
                     own_defs.append((fid, named.end(1)))
-                enter(fid, object_scope or lineno, end_lineno, parameters)
+                enter(
+                    fid,
+                    object_scope if object_scope is not None else lineno,
+                    end_lineno,
+                    parameters,
+                )
                 arrow_id = fid
                 signature_until = j + 1  # its last line, as a line number
             elif (
@@ -10817,36 +10951,64 @@ class TSParser(BaseParser):
                 spread, key, name = match.groups()
                 held = ("*", modules[name], "")
                 if not spread:
-                    held = (key or name, modules[name], "*")
+                    held = (_ts_unquote(key or name), modules[name], "*")
                 self.builder.reexports.setdefault(parent_id, []).append(held)
             elif (
                 parent_id in class_ids
                 and not re_method.search(line)
-                and (field := _class_property(code_lines[i]))
-                and not _function_value(
-                    " ".join(
-                        [line[field[2] :]]
-                        + [
-                            text.strip()
-                            for text in text_lines[
-                                i + 1 : min(_statement_end(code_lines, i), i + 40) + 1
-                            ]
-                        ]
-                    )
-                )
+                and (fv := field_property(i)) is not None
+                and not _function_value(fv[1])
             ):
                 # A field's value: the lines it goes on over declare nothing.
-                signature_until = _statement_end(code_lines, i) + 1
+                signature_until = fv[2] + 1
             elif (
                 "::" in parent_id
                 and parent_id != file_id
-                and (member := _member_written(line, parent_id in class_ids, re_method))
+                and (
+                    enclosing := (
+                        parent_id
+                        if parent_id in class_ids
+                        else self.enclosing_scope(parent_id)
+                    )
+                )
+                in class_ids
+                and (close_col := _member_close_column(code_lines[i])) is not None
+            ):
+                # A member written on the line that closes the member before
+                # it is the class's, read as on its own line.
+                open_member, field_spans, sig_until, made = members_on(
+                    enclosing, i, code_lines[i], close_col, lineno
+                )
+                own_defs.extend(made)
+                if sig_until:
+                    signature_until = sig_until
+                if open_member:
+                    enter(*open_member)
+            # A callback's body, as the file's, holds no members of its own: a
+            # method written there is one of an object literal. Inside an
+            # object that owns what it holds, a member is one of its own.
+            elif (
+                object_id
+                or (
+                    "::" in parent_id
+                    and parent_id != file_id
+                    and parent_id not in callback_ids
+                )
+            ) and (
+                member := _member_written(
+                    line,
+                    parent_id in class_ids,
+                    re_method,
+                    (fv := field_property(i)) and fv[1],
+                )
             ):
                 name, name_start, name_end, assigned = member
                 j, full_sig, end_lineno = consume_sig(i)
                 # `name(` declares a method directly in a class body, or where
                 # a block follows its parameter list; otherwise it is a call.
-                # The block after `catch (` is that of a `try` statement.
+                # Outside a class a keyword names no member: the block after
+                # `catch (` is that of a `try` statement, and `function (`
+                # starts a function expression.
                 arrow = parent_id in class_ids and re.search(
                     r"\)\s*(?::[^=;]+)?=>", full_sig
                 )
@@ -10854,7 +11016,7 @@ class TSParser(BaseParser):
                     arrow
                     if assigned
                     else parent_id in class_ids
-                    or (name != "catch" and _opens_body(full_sig))
+                    or (name not in _JSTS_CONTROL_KEYWORDS and _opens_body(full_sig))
                 ):
                     declared_at = name_start
                     docstring = self.get_leading_docstring(lines, i)
@@ -10878,17 +11040,29 @@ class TSParser(BaseParser):
                     )
                     self.builder.add_edge(object_id or parent_id, mid, "DEFINES")
                     own_defs.append((mid, name_end))
-                    enter(mid, object_scope or lineno, end_lineno, full_sig)
+                    enter(
+                        mid,
+                        object_scope if object_scope is not None else lineno,
+                        end_lineno,
+                        full_sig,
+                    )
                     signature_until = j + 1  # its last line, as a line number
+                elif assigned and parent_id in class_ids:
+                    # A field whose parenthesised value is no function: its
+                    # lines declare nothing, its calls the class's.
+                    signature_until = _statement_end(code_lines, i) + 1
             # Handle getter/setter methods: get name() or set name(value)
-            # Only match when the parent is a Class, or an object a function
-            # returns (not inside a function/method of its own)
+            # Only match when the parent is a Class, or an object that owns
+            # what it holds — one returned, passed to a call, or a constant's
             elif (
-                "::" in parent_id
-                and parent_id != file_id
-                and (object_id or self._is_class_context(parent_id))
-                and (match := re_getter_setter.search(line))
-            ):
+                object_id
+                or (
+                    "::" in parent_id
+                    and parent_id != file_id
+                    and parent_id not in callback_ids
+                    and self._is_class_context(parent_id)
+                )
+            ) and (match := re_getter_setter.search(line)):
                 accessor_type = match.group(1)  # "get" or "set"
                 name = match.group(2)
                 declared_at = match.start(2)
@@ -10922,7 +11096,17 @@ class TSParser(BaseParser):
                 self.builder.add_edge(object_id or parent_id, mid, "DEFINES")
                 own_defs.append((mid, match.end(2)))
                 # Don't push getters/setters to context - they're leaf methods
-                # that shouldn't contain nested definitions
+                # that shouldn't contain nested definitions. In an object that
+                # owns what it holds, one returned, passed to a call, or held
+                # by a constant, a getter's body is one of its members, as a
+                # method's is.
+                if object_id:
+                    enter(
+                        mid,
+                        object_scope if object_scope is not None else lineno,
+                        end_lineno,
+                        full_sig,
+                    )
                 signature_until = j + 1  # its last line, as a line number
             elif match := re_import.search(line):
                 self.builder.add_edge(file_id, f"MODULE:{match.group(2)}", "IMPORTS")
@@ -11055,6 +11239,38 @@ class TSParser(BaseParser):
                     for found in _JS_CLOSURE_RE.finditer(code)
                 ]
                 self._bodies = []
+                # A nameless function passed as an argument, whose block body
+                # opens here and goes on over later lines, is a scope of its
+                # own: the locals it declares are its, not the enclosing
+                # definition's, and each such function its own.
+                for bar, _params, end in self._closures:
+                    text = code[bar:end].rstrip()
+                    if text.endswith("{"):
+                        opened = end - 1
+                    elif text.endswith("=>") and code[end:].lstrip().startswith("{"):
+                        opened = end + len(code[end:]) - len(code[end:].lstrip())
+                    else:
+                        continue  # an expression body, or one over later lines
+                    if _block_close(code, opened) is not None:
+                        continue  # the block closes on this line
+                    around = [o for o, c in self._pairs.items() if o < bar < c]
+                    around += [o for o in self._opens if o < bar]
+                    while callbacks and callbacks[-1][0] < lineno:
+                        callbacks.pop()
+                    outer = callbacks[-1][1] if callbacks else 0
+                    if not around and len(self._open_calls) <= outer:
+                        continue  # not an argument
+                    block_end = self._find_block_end(code_lines, i)
+                    if block_end <= lineno:
+                        continue
+                    callback_id = self._nameless_owner(
+                        parent_id, f"callback@{lineno}", lineno, block_end, "callback"
+                    )
+                    callbacks.append(
+                        (block_end - 1, len(self._open_calls) + len(self._opens))
+                    )
+                    callback_ids.add(callback_id)
+                    enter(callback_id, since, block_end - 1)
                 # The declarators of a statement after its first, on this line
                 # or one the statement goes on to, are definitions of their
                 # own, as its first is: a `const` a constant, a `let` or `var`
@@ -11192,6 +11408,41 @@ class TSParser(BaseParser):
                         calls.append((len(self.builder.edges) - 1, paren, start))
                         if typed and start == typed.end():
                             initialises = (calls[-1][0], typed["type"])
+                # An object literal a call is passed, that goes on over later
+                # lines and holds a function, owns the functions written in
+                # it, a name no source can write. Its properties are read as
+                # the ones of the object a function returns are.
+                for _, paren, _ in calls:
+                    opened = (
+                        paren
+                        + 1
+                        + len(code[paren + 1 :])
+                        - len(code[paren + 1 :].lstrip())
+                    )
+                    if code[opened : opened + 1] != "{":
+                        continue
+                    held, object_end = self._object_held(
+                        code_lines, i, opened, since, owner
+                    )
+                    if object_end <= lineno or not any(
+                        str(value).startswith("=") for value in held.values()
+                    ):
+                        continue
+                    returned_objects.append(
+                        (
+                            parent_id,
+                            lineno,
+                            object_end,
+                            self._nameless_owner(
+                                parent_id,
+                                f"object@{lineno}",
+                                lineno,
+                                object_end,
+                                "object",
+                            ),
+                            since,
+                        )
+                    )
                 if initialises:
                     # The type is that of the call's result where the value
                     # ends with the call.
@@ -11573,10 +11824,6 @@ _SPLIT_TYPE_LANGS = frozenset({"rust", "go", "clang", "dotnet", "ruby", "typescr
 # name may be a library's, so one project definition of it is not the only
 # one that fits; and what a library's call returns may be a project value.
 _UNLISTED_LIBRARY_LANGS = frozenset({"php"})
-# Languages whose receivers are always typed, or where any object may be
-# one of a library: where a call's receiver is not known, the one project
-# definition of the member's name does not pin it.
-_UNTYPED_RECEIVER_LANGS = frozenset({"dotnet", "php", "ruby"})
 # What a method calls the object or the class it is used on, by language.
 _SELF_RECEIVERS = {
     "python": frozenset({"self", "cls"}),
@@ -12426,6 +12673,20 @@ class CallResolver:
         lang = self.lang(source_id)
         qualifier, name = _split_callee(callee)
         candidates = self.by_name.get((lang, name), [])
+        if lang == "typescript" and candidates:
+            # A function or a callback is a scope: a definition written
+            # inside one is named only inside it, so one elsewhere of the
+            # same name is not a candidate the call can reach.
+            around = set(self._scopes(source_id))
+            candidates = [
+                c
+                for c in candidates
+                if all(
+                    scope in around
+                    for scope in self._scopes(c.rpartition("::")[0])
+                    if self._is_function_scope(scope)
+                )
+            ]
         if lang == "php":
             # A PHP call reaches no property or constant of its name.
             candidates = [c for c in candidates if self.nodes[c]["type"] != "Constant"]
@@ -13165,15 +13426,13 @@ class CallResolver:
             named = special or name in _stdlib.members(lang)
             standard = lang in ("python", "rust") and named
             listed = is_non_project_call(callee)
-        held = not top_level and (lang, name) in self.builder.function_properties
-        untyped = lang in _UNTYPED_RECEIVER_LANGS
-        if namespace or not pool or standard or held or listed or untyped:
-            # The receiver is not known, so neither is what is returned.
+        # A call on a receiver whose type is not known is not pinned to the
+        # one project definition of the member's name; the definitions that
+        # fit stay its candidates. Nor is a bare call whose name the
+        # standard library also has pinned to the project's definition, nor
+        # dropped.
+        if not top_level or not pool or standard or listed:
             self._result = _OPAQUE
-            # A name or receiver some library also has, or a property that
-            # holds a function, says no more than that the project's
-            # definition may not be the only one that fits: the call is not
-            # pinned to it, nor dropped.
             if pool:
                 self._candidates_now = sorted(pool)
             elif namespace:
@@ -13184,8 +13443,8 @@ class CallResolver:
             self.shared_declaration[pool] = self._shared_declaration(pool)
         hit = self.shared_declaration[pool]
         if hit:
-            # Resolved by name alone: the receiver's type not being known,
-            # what the definition returns is not evidence of this call's.
+            # Resolved by name alone: what the definition returns is not
+            # evidence of this call's.
             self._name_only = True
         else:
             if len(pool) > 1:
@@ -13278,6 +13537,13 @@ class CallResolver:
         rather than called: the value it leads to is returned."""
         read = seen is not None
         python = self.lang(source_id) == "python"
+        # `path{0=origin}`: what the callable passed as argument 0 of the
+        # call the path ends with returns.
+        results = {}
+        head, brace, passed = origin.rpartition("{")
+        if brace and re.fullmatch(r"[\d?]+=[^,=]+(?:,[\d?]+=[^,=]+)*\}", passed):
+            origin = head
+            results = dict(item.split("=") for item in passed[:-1].split(","))
         value, steps, source = self._root_value(
             origin, source_id, seen if read else set()
         )
@@ -13295,11 +13561,6 @@ class CallResolver:
         library = self.standard.get(self.lang(source_id))
         # The library's types are classes, as the project's are.
         classed = library and library.lang in ("java", "php", "ruby")
-        # `method{0=origin}`: what the callable passed as argument 0 returns.
-        results = {}
-        if steps and steps[-1].endswith("}"):
-            steps[-1], _, passed = steps[-1][:-1].partition("{")
-            results = dict(item.split("=") for item in passed.split(","))
         for index, step in enumerate(steps):
             last = index == len(steps) - 1 and not read
             if value in (_OPAQUE, _EXTERNAL):
@@ -14642,7 +14903,22 @@ class CallResolver:
                     # `void` and `dynamic` say nothing of the value.
                     unknown = named or name in ("void", "dynamic")
                     return None if unknown else _EXTERNAL
-        types = types or self._types(lang, name)
+        if not types:
+            found = self._types(lang, name)
+            types = found
+            if lang == "typescript" and found:
+                # An ECMA-262 class declaration is block-scoped: a class
+                # written inside a function or a callback is named only
+                # inside it. Is none of them in reach, the name is not the
+                # project's: the writing names the language's global.
+                around = set(self._scopes(scope_id))
+                types = [
+                    t
+                    for t in found
+                    if self._is_top_level(t) or t.rpartition("::")[0] in around
+                ]
+                if not types:
+                    return _EXTERNAL
         if lang == "rust" and qualifier:
             crate = self._use_crate("::".join(qualifier), scope_id.split("::")[0])
             if crate == ():
@@ -15213,11 +15489,13 @@ class CallResolver:
     def _is_class(self, node_id):
         node = self.nodes.get(node_id)
         # A Ruby module has members as a class has; a Rust one is a scope.
+        # A callback's owner is a scope source cannot name, not a type: its
+        # members are read where they are written, not through a receiver.
         return bool(
             node
             and node["type"] == "Class"
             and (
-                node["metadata"].get("kind") not in ("module", "namespace")
+                node["metadata"].get("kind") not in ("module", "namespace", "callback")
                 or self.lang(node_id) == "ruby"
             )
         )
@@ -15228,6 +15506,18 @@ class CallResolver:
             parent is None
             or parent["type"] == "File"
             or parent["metadata"].get("kind") == "namespace"
+        )
+
+    def _is_function_scope(self, node_id):
+        """Whether ``node_id`` is a scope names written inside it stay in:
+        a function, a method or a callback."""
+        node = self.nodes.get(node_id)
+        return bool(
+            node
+            and (
+                node["type"] in ("Function", "Method")
+                or node["metadata"].get("kind") == "callback"
+            )
         )
 
     def _enclosing_class(self, node_id):
@@ -15868,9 +16158,6 @@ class CodeGraphBuilder:
         # Type ID -> the standard traits it derives, as its language's
         # standard-library data names them
         self.derived = {}
-        # (language, name) of each property that holds a function: a value
-        # `receiver.name(...)` may call, and no graph node either.
-        self.function_properties = set()
         self.rust_aliases = {}  # Rust file ID -> names of the aliases it declares
         self.dart_packages = {}  # Dart package name -> its directory
         # Dart file ID -> the (`import`, `export` or `part`, URIs, prefix,
