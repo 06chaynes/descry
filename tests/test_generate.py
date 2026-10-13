@@ -734,6 +734,15 @@ def _calls(builder, source):
     )
 
 
+def _bases(builder, source):
+    """Targets of the INHERITS edges that leave node ``source``, sorted."""
+    return sorted(
+        e["target"]
+        for e in builder.edges
+        if e["source"] == source and e["relation"] == "INHERITS"
+    )
+
+
 def _candidates(builder, source):
     """The candidates of each call edge that leaves node ``source``, by its
     target: None for one that has none."""
@@ -7556,6 +7565,60 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:a.test.ts::callback@2") == [
             "FILE:a.test.ts::callback@2::FormData::from"
         ]
+
+    def test_a_class_written_inside_a_function_is_not_its_namesake(self, tmp_path):
+        """A class a function declares shadows one of its name outside it
+        and shares no member with it. Inside, the name is the function's
+        class; outside, a member only that class has is neither the
+        namesake's nor one a subclass has from a base of that name, and
+        no class there extends it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class K { top() {} }
+                export function f() {
+                  class K { m() {} }
+                  class Local { leak() {} }
+                  class Leaf {}
+                  const k = new K();
+                  k.m();
+                  k.top();
+                }
+                export function g() {
+                  const k = new K();
+                  k.top();
+                  k.m();
+                }
+                export class Outside extends Leaf {}
+                """,
+                "b.ts": """
+                export class Local { one() {} }
+                """,
+                "c.ts": """
+                export class Local { two() {} }
+                """,
+                "d.ts": """
+                class Sub extends Local {}
+                export function h() {
+                  const s = new Sub();
+                  s.two();
+                  s.leak();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::f") == [
+            "FILE:a.ts::f::K",
+            "FILE:a.ts::f::K::m",
+            "REF:k.top",
+        ]
+        assert _calls(builder, "FILE:a.ts::g") == ["FILE:a.ts::K", "FILE:a.ts::K::top"]
+        assert _calls(builder, "FILE:d.ts::h") == [
+            "FILE:c.ts::Local::two",
+            "FILE:d.ts::Sub",
+        ]
+        assert _bases(builder, "FILE:a.ts::Outside") == ["REF:Leaf"]
 
     def test_global_is_the_librarys_unless_its_file_binds_the_name(self, tmp_path):
         """`document` and `globalThis.console` are the browser's and the
@@ -17522,6 +17585,55 @@ class TestOneLineDefinitionCalls:
             assert _calls(builder, f"FILE:e.ts::{member}") == ["FILE:e.ts::helper"]
         assert _calls(builder, "FILE:e.ts::object@27::onClick") == ["FILE:e.ts::helper"]
 
+    def test_a_class_expression_after_other_code_on_its_line(self, tmp_path):
+        """A class written after the `}` that closes a definition is not
+        that definition's, nor is the declarator that names what holds it.
+        One whose body opens on a later line, or whose line opens a block
+        before it, has its members, also one written on the line of the
+        `}` that closes the member before it."""
+        builder = _index(
+            tmp_path,
+            {
+                "f.ts": """
+                export function helper(): any { return 1; }
+                export class Base {}
+                const p = new (class {
+                  a() {}
+                }), q = new (class {
+                  b() { helper(); }
+                });
+                const x = wrap(class extends Base
+                {
+                  c() { helper(); }
+                });
+                export class K {
+                  m() { return wrap(class {
+                      d() {
+                      } e() { helper(); }
+                    });
+                  }
+                }
+                const first = () => {
+                  helper();
+                }, second = 2;
+                """
+            },
+        )
+        kinds = {n["id"]: n["type"] for n in builder.nodes}
+        assert {i for i, kind in kinds.items() if kind == "Class"} == {
+            "FILE:f.ts::Base",
+            "FILE:f.ts::class@4",
+            "FILE:f.ts::class@6",
+            "FILE:f.ts::class@9",
+            "FILE:f.ts::K",
+            "FILE:f.ts::K::m::class@14",
+        }
+        assert kinds["FILE:f.ts::q"] == kinds["FILE:f.ts::second"] == "Constant"
+        assert "FILE:f.ts::class@4::a" in kinds
+        assert "FILE:f.ts::K::m::class@14::d" in kinds
+        for member in ("class@6::b", "class@9::c", "K::m::class@14::e"):
+            assert _calls(builder, f"FILE:f.ts::{member}") == ["FILE:f.ts::helper"]
+
     def test_members_written_with_a_quoted_name_on_the_classs_line(self, tmp_path):
         """A quoted name on the class's own line is the literal's content,
         each member its own, and an accessor written with one is filed as
@@ -17909,4 +18021,254 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, "FILE:o.js::setup") == [
             "FILE:o.js::setup::first::request",
             "FILE:o.js::setup::second::request",
+        ]
+
+
+class TestBaseTypes:
+    """An INHERITS edge reaches the type the base's name stands for where
+    the subtype is declared, never one that only shares the name."""
+
+    def test_python_base_is_what_its_import_names(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "app/__init__.py": "",
+                "app/sansio.py": """
+                class Blueprint:
+                    pass
+                """,
+                "app/blueprints.py": """
+                from .sansio import Blueprint as SansioBlueprint
+
+                class Blueprint(SansioBlueprint):
+                    pass
+                """,
+            },
+        )
+        assert _bases(builder, "FILE:app/blueprints.py::Blueprint") == [
+            "FILE:app/sansio.py::Blueprint"
+        ]
+
+    def test_ruby_base_is_looked_up_from_its_namespace(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "lib/sinatra/base.rb": """
+                module Sinatra
+                  class Base
+                  end
+                  class Request < Rack::Request
+                  end
+                end
+                """,
+                "lib/rack/protection/base.rb": """
+                module Rack
+                  module Protection
+                    class Base
+                    end
+                  end
+                end
+                """,
+                "lib/rack/protection/xss.rb": """
+                module Rack
+                  module Protection
+                    class Xss < Base
+                    end
+                  end
+                end
+                """,
+            },
+        )
+        protection = "lib/rack/protection"
+        assert _bases(builder, f"FILE:{protection}/xss.rb::Rack::Protection::Xss") == [
+            f"FILE:{protection}/base.rb::Rack::Protection::Base"
+        ]
+        assert _bases(builder, "FILE:lib/sinatra/base.rb::Sinatra::Request") == [
+            "REF:Rack::Request"
+        ]
+
+    def test_java_base_is_the_imported_or_the_qualified_type(self, tmp_path):
+        source = "src/main/java/org/x"
+        builder = _index(
+            tmp_path,
+            {
+                f"{source}/Functions.java": """
+                package org.x;
+                public class Functions {
+                    public interface FailableSupplier<T> { T get(); }
+                }
+                """,
+                f"{source}/function/FailableSupplier.java": """
+                package org.x.function;
+                public interface FailableSupplier<T> { T get(); }
+                """,
+                f"{source}/builder/Imported.java": """
+                package org.x.builder;
+                import org.x.function.FailableSupplier;
+                public abstract class Imported<T> implements FailableSupplier<T> {
+                }
+                """,
+                f"{source}/builder/Qualified.java": """
+                package org.x.builder;
+                import org.x.Functions;
+                public abstract class Qualified<T>
+                        implements Functions.FailableSupplier<T> {
+                }
+                """,
+            },
+        )
+        assert _bases(builder, f"FILE:{source}/builder/Imported.java::Imported") == [
+            f"FILE:{source}/function/FailableSupplier.java::FailableSupplier"
+        ]
+        assert _bases(builder, f"FILE:{source}/builder/Qualified.java::Qualified") == [
+            f"FILE:{source}/Functions.java::Functions::FailableSupplier"
+        ]
+
+    def test_cpp_base_keeps_its_qualifier_and_is_never_the_subtype(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "include/batch.h": """
+                namespace db {
+                class WriteBatch {
+                 public:
+                  class Handler {
+                   public:
+                    virtual void Put();
+                  };
+                };
+                }
+                """,
+                "db/model.cc": """
+                #include "batch.h"
+                namespace db {
+                class Model {
+                  void Write() {
+                    class Handler : public WriteBatch::Handler {
+                     public:
+                      void Put() override {}
+                    };
+                  }
+                };
+                template <typename T> struct formatter {};
+                template <> struct formatter<int> : formatter<long> {};
+                }
+                """,
+            },
+        )
+        assert _bases(builder, "FILE:db/model.cc::db::Model::Write::Handler") == [
+            "FILE:include/batch.h::db::WriteBatch::Handler"
+        ]
+        assert _bases(builder, "FILE:db/model.cc::db::formatter") == ["REF:formatter"]
+
+    def test_csharp_base_is_a_type_not_a_property_of_its_name(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "Src/Converters/StringEnumConverter.cs": """
+                namespace N.Converters
+                {
+                    public class StringEnumConverter
+                    {
+                        public NamingStrategy NamingStrategy { get; set; }
+                    }
+                }
+                """,
+                "Src/Serialization/NamingStrategy.cs": """
+                namespace N.Serialization
+                {
+                    public abstract class NamingStrategy { }
+                }
+                """,
+                "Src/Serialization/DefaultNamingStrategy.cs": """
+                namespace N.Serialization
+                {
+                    public class DefaultNamingStrategy : NamingStrategy { }
+                }
+                """,
+            },
+        )
+        derived = (
+            "FILE:Src/Serialization/DefaultNamingStrategy.cs::DefaultNamingStrategy"
+        )
+        assert _bases(builder, derived) == [
+            "FILE:Src/Serialization/NamingStrategy.cs::NamingStrategy"
+        ]
+
+    def test_dart_base_is_its_own_librarys(self, tmp_path):
+        library = {
+            "lib/main.dart": """
+            part 'main.g.dart';
+            class Counter extends _$Counter {}
+            """,
+            "lib/main.g.dart": """
+            part of 'main.dart';
+            abstract class _$Counter {}
+            """,
+        }
+        builder = _index(
+            tmp_path,
+            {
+                "a/pubspec.yaml": "name: a\n",
+                "b/pubspec.yaml": "name: b\n",
+                **{f"{p}/{path}": text for p in "ab" for path, text in library.items()},
+            },
+        )
+        for package in "ab":
+            assert _bases(builder, f"FILE:{package}/lib/main.dart::Counter") == [
+                f"FILE:{package}/lib/main.g.dart::_$Counter"
+            ]
+
+    def test_typescript_base_is_a_type_one_alone_fits(self, tmp_path):
+        """Of two classes of a name nothing imports, neither is the base;
+        an interface is, where a constant of its name took its ID, and a
+        local that holds a class is not."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/command.js": "export class Command {}\n",
+                "typings/index.d.ts": """
+                export class Command {}
+                export class Help {}
+                """,
+                "lib/help.js": "export class Help {}\n",
+                "a.ts": """
+                import { Help } from './lib/help.js';
+                class MyCommand extends Command {}
+                class MyHelp extends Help {}
+                export interface Check { run(): void }
+                export const Check = make();
+                export interface Max extends Check {}
+                function f() {
+                  const Parent = pick();
+                  class Definition extends Parent {}
+                }
+                """,
+            },
+        )
+        assert _bases(builder, "FILE:a.ts::MyCommand") == ["REF:Command"]
+        assert _bases(builder, "FILE:a.ts::MyHelp") == ["FILE:lib/help.js::Help"]
+        assert _bases(builder, "FILE:a.ts::Max") == ["FILE:a.ts::interface_Check"]
+        assert _bases(builder, "FILE:a.ts::f::Definition") == ["REF:Parent"]
+
+    def test_a_base_that_is_a_call_names_no_type(self, tmp_path):
+        """`extends mixin()` gives the class a base no name stands for: a
+        member it lacks may come from it, and looking one up reads on."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export function mixin(): any { return Object; }
+                export class Ext extends mixin() { m() {} }
+                const e = new Ext();
+                e.m();
+                e.other();
+                """,
+            },
+        )
+        assert _bases(builder, "FILE:a.ts::Ext") == ["REF:mixin()"]
+        assert _calls(builder, "FILE:a.ts") == [
+            "FILE:a.ts::Ext",
+            "FILE:a.ts::Ext::m",
+            "FILE:a.ts::mixin",
         ]

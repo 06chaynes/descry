@@ -9747,11 +9747,15 @@ def _member_close_column(code: str) -> int | None:
     return None if name in _JSTS_CONTROL_KEYWORDS else close
 
 
-def _braces_open(lines: list[str], first: int, index: int, column: int) -> int:
-    """How many of the `{` written from line ``first`` on are open past
-    column ``column`` of line ``index``. ``lines`` are code lines with the
-    text of their literals blanked."""
-    written = "".join(lines[first:index]) + lines[index][: column + 1]
+def _braces_open(
+    lines: list[str], first: int, start: int, index: int, column: int
+) -> int:
+    """How many of the `{` written from column ``start`` of line ``first``
+    on are open past column ``column`` of the later line ``index``.
+    ``lines`` are code lines with the text of their literals blanked."""
+    written = "".join(
+        (lines[first][start:], *lines[first + 1 : index], lines[index][: column + 1])
+    )
     return written.count("{") - written.count("}")
 
 
@@ -10578,6 +10582,7 @@ class TSParser(BaseParser):
         before = ""
         self._signatures = {}  # node ID -> the signatures it is declared with
         class_ids = set()  # class/interface/enum nodes declared in this file
+        class_at = {}  # class ID -> the column its `class` ends at on its line
         # constants of the file or a callback that hold an object literal
         object_ids = set()
         interface_ids = set()  # interfaces that have the ID `<scope>::<name>`
@@ -10646,27 +10651,28 @@ class TSParser(BaseParser):
                         return j, arrow
                 return idx, None
 
-            def consume_sig(idx):
-                """Read the declaration that starts on line ``idx`` up to the
-                `{` that opens its body, or to the end of one that has none.
-                Returns the index of that line, the declaration's text and
-                the line its body ends on: its first line when it has none,
-                and where it ends with an arrow's `=>`, the last line of the
-                expression after it."""
-                j, sig, end = read_sig(idx)
+            def consume_sig(idx, start=0):
+                """Read the declaration that starts at column ``start`` of
+                line ``idx`` up to the `{` that opens its body, or to the end
+                of one that has none. Returns the index of that line, the
+                declaration's text and the line its body ends on: its first
+                line when it has none, and where it ends with an arrow's
+                `=>`, the last line of the expression after it."""
+                j, sig, end = read_sig(idx, start)
                 if sig.rstrip().endswith("=>"):
                     end = _statement_end(code_lines, idx) + 1
                 return j, sig, end
 
-            def read_sig(idx):
+            def read_sig(idx, start):
                 """What ``consume_sig`` returns, but for an arrow's
                 expression body."""
                 sig = ""
                 stack = []  # brackets left open
                 closed = False  # a parameter list has been read
                 for j in range(idx, min(idx + 40, len(lines))):
-                    text = text_lines[j]
-                    code = code_lines[j]
+                    skipped = start if j == idx else 0
+                    text = " " * skipped + text_lines[j][skipped:]
+                    code = " " * skipped + code_lines[j][skipped:]
                     for column, char in enumerate(code):
                         if (
                             char == "{"
@@ -10785,7 +10791,7 @@ class TSParser(BaseParser):
             if (
                 cx
                 and cx.group("expression") is not None
-                and self._find_block_end(code_lines, i) <= lineno
+                and self._find_block_end(code_lines, i, cx.end()) <= lineno
             ):
                 cx = None
             if continuing or (cx and cx.group("enclosed") is None):
@@ -10978,6 +10984,7 @@ class TSParser(BaseParser):
                     code_lines,
                     next(c[1] for c in reversed(self._contexts) if c[0] == enclosing)
                     - 1,
+                    class_at.get(enclosing, 0),
                     i,
                     close_col,
                 )
@@ -11125,16 +11132,16 @@ class TSParser(BaseParser):
                 # expression's own name is visible only inside it: one given
                 # to anything else has no name that source can write.
                 name = cx.group("declarator") or cx.group("plain") or f"class@{lineno}"
-                # What the line declares holds a class written in it.
-                held_by = self.context_at(lineno)[0]
                 docstring = self.get_leading_docstring(lines, i)
-                j, full_sig, end_lineno = consume_sig(i)
+                # The statement may start before the class and go on past it:
+                # its heritage and its body are read from its keyword.
+                j, full_sig, end_lineno = consume_sig(i, cx.end())
                 body = _class_body_open(code_lines[i], cx.end())
-                if cx.group("enclosed") is not None and body is not None:
-                    # The statement goes on past the class: its heritage is
-                    # written before its body, which it ends with.
-                    full_sig = code_lines[i][cx.end() : body]
-                    end_lineno = self._find_block_end(code_lines, i, body)
+                # What its lines are all in holds the class: a definition
+                # the line declares, not one it closes.
+                held_by = next(
+                    c[0] for c in reversed(self._contexts) if end_lineno <= c[2]
+                )
                 cid = f"{held_by}::{name}"
                 token_count = (end_lineno - lineno + 1) * 10
                 self.builder.add_node(
@@ -11148,6 +11155,7 @@ class TSParser(BaseParser):
                 )
                 self.builder.add_edge(held_by, cid, "DEFINES")
                 class_ids.add(cid)
+                class_at[cid] = cx.end()
                 # The methods and accessors written on the class's own line,
                 # and the member or field the line leaves open, which ends
                 # with its statement.
@@ -11345,21 +11353,22 @@ class TSParser(BaseParser):
                     enter(callback_id, since, block_end - 1)
                 # The declarators of a statement after its first, on this line
                 # or one the statement goes on to, are definitions of their
-                # own, as its first is: a `const` a constant, a `let` or `var`
-                # one holding a function that function. One holding a
-                # function takes its calls.
+                # own, as its first is and where it is: a `const` a constant,
+                # a `let` or `var` one holding a function that function. One
+                # holding a function takes its calls.
                 if not continuing and (
                     head := _TS_DECLARATION_HEAD_RE.match(code_lines[i])
                 ):
                     for at, *declarator in _declarators(code_lines, i, head.end()):
                         later_declarators.setdefault(at, []).append(
-                            (head[1] == "const", *declarator)
+                            (parent_id, head[1] == "const", *declarator)
                         )
-                for constant, later, name_end, value_at in later_declarators.pop(i, ()):
+                declared_here = later_declarators.pop(i, ())
+                for scope_id, constant, later, name_end, value_at in declared_here:
                     held = _function_value(line[value_at:])
                     if not (constant or held):
                         continue
-                    lid = f"{parent_id}::{later}"
+                    lid = f"{scope_id}::{later}"
                     claim(lid)
                     held_typed = held and self._arrow_typed(held, line)
                     value = line[value_at : _value_end(code_lines[i], value_at)]
@@ -11373,7 +11382,7 @@ class TSParser(BaseParser):
                         docstring="",
                         signatures=held_typed and self._overloads(lid, held_typed),
                     )
-                    self.builder.add_edge(parent_id, lid, "DEFINES")
+                    self.builder.add_edge(scope_id, lid, "DEFINES")
                     if held:
                         own_defs.append((lid, name_end))
                 typed = _TS_TYPED_VALUE_RE.search(code)
@@ -12282,22 +12291,26 @@ class CallResolver:
                 self.extensions.setdefault(self._name(node_id), []).append(node_id)
         # class ID -> base type names, in Python the origin path of each
         self.bases = {}
+        # index of an INHERITS edge -> the base as written, qualifier and all
+        self.base_names = {}
         self.requires = {}  # Ruby file ID -> the paths it requires
-        for edge in builder.edges:
+        for index, edge in enumerate(builder.edges):
             if edge["relation"] == "IMPORTS" and self.lang(edge["source"]) == "ruby":
                 path = edge["target"].removeprefix("MODULE:")
                 self.requires.setdefault(edge["source"], []).append(path)
             if edge["relation"] == "INHERITS":
                 # A base the parser gave as a node is known by its name too.
-                base = edge["target"].removeprefix("REF:")
+                base = written = edge["target"].removeprefix("REF:")
                 # A PHP base is written by its full name, which names one
                 # type; a Ruby constant is looked up by its whole path.
                 lang = self.lang(edge["source"])
                 if lang not in ("php", "ruby"):
-                    base = _split_callee(base)[1]
+                    qualifier, base = _split_callee(base)
+                    written = ".".join([*qualifier, base])
                 if lang == "python":
-                    base = edge.get("metadata", {}).get("origin", base)
+                    base = written = edge.get("metadata", {}).get("origin", base)
                 self.bases.setdefault(edge["source"], []).append(base)
+                self.base_names[index] = written
         # A Go struct has the methods of the types it embeds, listed under
         # None among its fields.
         for type_id, fields in builder.fields.items():
@@ -12743,8 +12756,7 @@ class CallResolver:
         if lang == "typescript" and candidates:
             # A definition elsewhere of the same name is not a candidate
             # the call can reach.
-            around = set(self._scopes(source_id))
-            candidates = [c for c in candidates if self._named_in(c, around)]
+            candidates = self._named_from(candidates, source_id)
         if lang == "php":
             # A PHP call reaches no property or constant of its name.
             candidates = [c for c in candidates if self.nodes[c]["type"] != "Constant"]
@@ -12859,10 +12871,7 @@ class CallResolver:
             owners = [self._enclosing_class(source_id)] if len(qualifier) == 1 else []
             source = "self_type"
         else:
-            owners = self._types(lang, receiver)
-            if lang == "typescript":
-                around = set(self._scopes(source_id))
-                owners = [o for o in owners if self._named_in(o, around)]
+            owners = self._types_in(lang, receiver, source_id)
             if lang == "clang":
                 owners = [o for o in owners if self._in_reach(o, source_id)] or owners
             if lang != "rust":
@@ -14537,9 +14546,8 @@ class CallResolver:
         project declares a type of that name that is named there."""
         root = name.partition(".")[0]
         bound = self.builder.js_bound.get(scope_id.split("::")[0], ())
-        around = set(self._scopes(scope_id))
-        declared = root in self.builder.type_aliases or any(
-            self._named_in(t, around) for t in self._types("typescript", root)
+        declared = root in self.builder.type_aliases or self._types_in(
+            "typescript", root, scope_id
         )
         if root in bound or declared:
             return None
@@ -14933,7 +14941,11 @@ class CallResolver:
                 if self.nodes[t]["metadata"].get("namespace") == namespace
             ]
             return self._decide(types, scope_id) if types else _EXTERNAL
-        *qualifier, name = [part for part in re.split(r"::|\.", name) if part]
+        parts = [part for part in re.split(r"::|\.", name) if part]
+        if not parts:
+            # A base that is the value of an expression names no type.
+            return None
+        *qualifier, name = parts
         if lang == "dotnet":
             return self._dotnet_type(qualifier, name, scope_id)
         if lang == "ruby":
@@ -14961,15 +14973,11 @@ class CallResolver:
                     unknown = named or name in ("void", "dynamic")
                     return None if unknown else _EXTERNAL
         if not types:
-            found = self._types(lang, name)
-            types = found
-            if lang == "typescript" and found:
+            types = self._types_in(lang, name, scope_id)
+            if lang == "typescript" and not types and self._types(lang, name):
                 # Is none of them in reach, the name is not the project's:
                 # the writing names the language's global.
-                around = set(self._scopes(scope_id))
-                types = [t for t in found if self._named_in(t, around)]
-                if not types:
-                    return _EXTERNAL
+                return _EXTERNAL
         if lang == "rust" and qualifier:
             crate = self._use_crate("::".join(qualifier), scope_id.split("::")[0])
             if crate == ():
@@ -15281,6 +15289,15 @@ class CallResolver:
         declared = self.nodes[found]["metadata"].get("kind") != "impl"
         return found if declared else _EXTERNAL
 
+    def base_type(self, index):
+        """The project type that the base the INHERITS edge ``index`` names
+        stands for where its subtype is declared. None for a type outside
+        the project, where several fit and nothing tells which, and where
+        the name leads back to the subtype, which is no base of itself."""
+        subtype = self.builder.edges[index]["source"]
+        named = self._type_named(self.base_names[index], subtype)
+        return None if named in (_EXTERNAL, subtype) else named
+
     def type_in_scope(self, name, scope_id, origin=None):
         """The project type that ``name``, written in ``scope_id``, is shown
         to be by its origin path, by an import or by a definition in an
@@ -15559,15 +15576,21 @@ class CallResolver:
             or parent["metadata"].get("kind") == "namespace"
         )
 
-    def _named_in(self, node_id, around):
-        """Whether the TypeScript definition ``node_id`` is named in the
-        scopes ``around``. An ECMA-262 declaration is block-scoped: one
-        written inside a function or a callback is named only inside it."""
-        return all(
-            scope in around
-            for scope in self._scopes(node_id.rpartition("::")[0])
-            if self._is_function_scope(scope)
-        )
+    def _named_from(self, node_ids, scope_id):
+        """Those of the TypeScript definitions ``node_ids`` that are named
+        where ``scope_id`` is written. An ECMA-262 declaration is
+        block-scoped: one written inside a function or a callback is named
+        only inside it."""
+        around = set(self._scopes(scope_id))
+        return [
+            node_id
+            for node_id in node_ids
+            if all(
+                scope in around
+                for scope in self._scopes(node_id.rpartition("::")[0])
+                if self._is_function_scope(scope)
+            )
+        ]
 
     def _is_function_scope(self, node_id):
         """Whether ``node_id`` is a scope names written inside it stay in:
@@ -15659,6 +15682,20 @@ class CallResolver:
             if self.nodes[node_id]["type"] == "Class"
         ] + self.renamed_types.get((lang, name), [])
 
+    def _types_in(self, lang, name, scope_id):
+        """The types of ``_types`` that ``name`` can stand for where it is
+        written in ``scope_id``: in TypeScript those named there, and of
+        them the ones the innermost function or callback declares, whose
+        declaration shadows one outside it."""
+        types = self._types(lang, name)
+        if lang != "typescript":
+            return types
+        depth = {
+            t: sum(map(self._is_function_scope, self._scopes(t)))
+            for t in self._named_from(types, scope_id)
+        }
+        return [t for t in depth if depth[t] == max(depth.values())]
+
     def _find_member(self, owner_id, name, inherited_only=False, seen=None):
         """Look ``name`` up in a type or module and then in the type's bases.
 
@@ -15702,7 +15739,9 @@ class CallResolver:
                 if named == _EXTERNAL:
                     base_types = []
                 else:
-                    base_types = [named] if named else self._types(lang, base)
+                    base_types = (
+                        [named] if named else self._types_in(lang, base, declaration)
+                    )
                 if not base_types:
                     # A standard trait gives only the members it has.
                     trait = self._standard_type(base, declaration)
@@ -15776,16 +15815,17 @@ class CallResolver:
                 yield from self._lineage(named, seen)
 
     def _unit(self, node_id, lang):
-        """What bounds one split type: the file in TypeScript, the package
-        directory in Go, the crate in Rust, the enclosing namespace in
-        Ruby, in C/C++ the file that defines the type."""
+        """What bounds one split type: the scope that declares it in
+        TypeScript, the package directory in Go, the crate in Rust, the
+        enclosing namespace in Ruby, in C/C++ the file that defines the
+        type."""
         path = node_id.split("::")[0][5:]
         if lang == "ruby":
             # A scope without a name of its own is one file's.
             scope = node_id.rpartition("::")[0]
             return scope if "::<" in node_id else scope.partition("::")[2]
         if lang == "typescript":
-            return path
+            return node_id.rpartition("::")[0]
         if lang == "dotnet":
             # A partial type is one type in every file of its namespace,
             # by its name and the number of its type parameters.
@@ -16570,9 +16610,10 @@ class CodeGraphBuilder:
 
         A CALLS reference goes to SCIP first (type-aware) and then to
         CallResolver, which pins it to a definition, leaves it unresolved,
-        or drops it as external. Other references are matched by name within
-        the source's language: qualified name (Type::method), then same
-        file, then any match.
+        or drops it as external. A base type is the one CallResolver finds
+        its name to stand for where the subtype is declared. Other
+        references are matched by name within the source's language:
+        qualified name (Type::method), then same file, then any match.
 
         Args:
             scip_index: Optional ScipIndex for type-aware resolution
@@ -16748,6 +16789,11 @@ class CodeGraphBuilder:
                         edges_to_remove.add(idx)
                         stats["external"] += 1
                         continue
+                elif not resolved and edge["relation"] == "INHERITS":
+                    resolved = call_resolver.base_type(idx)
+                    if not resolved:
+                        continue
+                    resolution_source = "regex"
 
                 # Normalize crate:: prefix (Rust-specific)
                 # crate::path::Symbol -> path::Symbol for matching

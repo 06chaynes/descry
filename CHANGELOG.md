@@ -147,6 +147,13 @@ Python SDK v2, and a full-tree review's findings are fixed.
   standard library also has was left unresolved while a name only the
   project defined was resolved. C#, PHP and Ruby already behaved this
   way. A test's mock of the same name no longer captures such a call.
+- **A base type is found as a call's target is.** In every language an
+  `INHERITS` edge reaches the type the base's name stands for where the
+  subtype is declared — through its import, its qualifier, its namespace
+  or its library. It went to the first definition of that name, in the
+  same file or in any, a property or a constant among them. A base
+  outside the project, and one that several types fit with nothing to
+  tell which, stay unresolved, and no type inherits from itself.
 - **Unresolved calls name their candidates.** A `CALLS` edge that could
   reach several definitions carries them in `metadata.candidates`.
   `callers` and backward `flow` mark such a caller "one of N candidates"
@@ -266,8 +273,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   each declarator of `const a = ..., b = ...` as a constant of its own
   with its own value, and each of `let` or `var` holding a function as
   that function, after a destructured first one and on the lines the
-  statement goes on to; a method, accessor, constructor or arrow-valued
-  property, typed or not, as a member, on its class's line too, and a
+  statement goes on to, each where the statement is written, not in a
+  definition one of its lines closes; a method, accessor, constructor or
+  arrow-valued property, typed or not, as a member, on its class's line
+  too, and a
   private member (`#m`) as a member that `this.#m()` reaches. A call on a
   later line of a signature or a parameter default, an optional call
   (`f?.()`, `o.m?.()`), and a call in an arrow's expression body on the
@@ -295,8 +304,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   enclosing scope's; and a constant of a function's body holding an
   object owns the functions written in it, as at the top of a file and in
   a callback, and a member call on its value reaches them, where the
-  objects of one function were one member of it. A method or property a string literal names is a member or
-  property, filed as the name the source names — the literal's content,
+  objects of one function were one member of it. A method or property a
+  string literal names is a member or property, filed as the name the
+  source names — the literal's content,
   which no plain declaration can write for a `"~validate"` and which
   `{"m"}` and `{m}` share — where its body was read as the class's and
   made a phantom member the real method of that name shared a node with.
@@ -305,7 +315,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   written in: the `const`, `let` or `var` that declares it names it, its
   own name is visible only inside it, and one no declarator names is
   `class@<line>`, a name no source can write. Its members are its, where
-  they were the enclosing scope's; an object a string-literal key gives a
+  they were the enclosing scope's, also where its body opens on a later
+  line or other code comes before it on its line, and the definition its
+  lines are all in holds it; an object a string-literal key gives a
   function to is the property the key names, so a class written in one is
   named by the function that holds it.
 - **A class declared inside a function or a callback is named only inside
@@ -313,7 +325,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   member call on it written elsewhere — in a sibling function of the file
   or in another file — is the language's global, and the class and its
   members are not candidates a call there can reach. The class a test's
-  callback in another file declares no longer captures the name.
+  callback in another file declares no longer captures the name. Inside,
+  it shadows a class of its name written outside, the two share no
+  member, and no class written elsewhere extends it.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer
   aborts the whole index. `index` no longer encodes every symbol twice.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root
