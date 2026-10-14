@@ -10031,14 +10031,16 @@ _JS_CLOSURE_RE = re.compile(
     r"(?P<closure>(?:function\s*\*?\s*(?P<named>[\w$]+\s*)?)?"
     r"\((?P<params>[^()]*)\)(?:\s*:[^=(){]+)?\s*(?:=>|\{)|(?P<param>[\w$]+)\s*=>)"
 )
-# A `for` head up to the declaration it starts with
-_JS_FOR_HEAD_RE = re.compile(r"\bfor\s*(?:await\s*)?\(\s*$")
-# A statement a keyword starts, after any labels, and the clause that may
-# go on with one: an `if`'s `else`, a `try`'s `catch` or `finally`, a
-# `catch`'s `finally`, a `do`'s `while`
+# A `for` head up to the declaration it starts with, or a `catch` head
+# up to its binding
+_JS_FOR_HEAD_RE = re.compile(r"\b(?:for\s*(?:await\s*)?|(catch)\s*)\(\s*$")
+# What starts a statement of a keyword's: the keyword, of one that has a
+# parenthesised head or of one that has none, or a label; and the clause
+# that may go on with one: an `if`'s `else`, a `try`'s `catch` or
+# `finally`, a `catch`'s `finally`, a `do`'s `while`
 _JS_COMPOUND_RE = re.compile(
-    r"(?:[\w$]+\s*:\s*)*"
-    r"(if|for(?:\s+await)?|while|with|switch|else|do|try|catch|finally)\b"
+    r"(?:(if|for(?:\s+await)?|while|with|switch|catch)|(else|do|try|finally))\b"
+    r"|[\w$]+\s*:"
 )
 _JS_CLAUSE_RE = {
     "if": re.compile(r"else\b"),
@@ -10736,41 +10738,62 @@ class TSParser(BaseParser):
             """The line and column just past the statement that starts at or
             after column ``column`` of line ``row``: a block, a statement a
             keyword starts with its head, its body and the clauses that go on
-            with it, or one statement."""
-            row, column = code_at(row, column)
-            if row == len(code_lines):
-                return row, 0
-            if code_lines[row].startswith("{", column):
-                return past(row, column)
-            compound = _JS_COMPOUND_RE.match(code_lines[row], column)
-            if not compound:
-                return past(row, column, _statement_end(code_lines, row, column))
-            row, column = code_at(row, compound.end())
-            if row < len(code_lines) and code_lines[row].startswith("(", column):
-                row, column = past(row, column)
-            row, column = past_statement(row, column)
-            ahead, at = code_at(row, column)
-            clause = (
-                ahead < len(code_lines)
-                and compound[1] in _JS_CLAUSE_RE
-                and _JS_CLAUSE_RE[compound[1]].match(code_lines[ahead], at)
-            )
-            if not clause:
-                return row, column
-            if compound[1] == "do":
-                return past(*code_at(ahead, clause.end()))
-            return past_statement(ahead, at)
+            with it, a labelled statement, or one statement."""
+            opened = []  # the keywords of the statements whose body is read
+            while True:
+                row, column = code_at(row, column)
+                if row == len(code_lines):
+                    return row, 0
+                compound = _JS_COMPOUND_RE.match(code_lines[row], column)
+                if code_lines[row].startswith("{", column):
+                    row, column = past(row, column)
+                elif compound and not (compound[1] or compound[2]):
+                    column = compound.end()
+                    continue
+                elif compound:
+                    opened.append(compound[1] or compound[2])
+                    row, column = code_at(row, compound.end())
+                    if (
+                        compound[1]
+                        and row < len(code_lines)
+                        and code_lines[row].startswith("(", column)
+                    ):
+                        row, column = past(row, column)
+                    continue
+                else:
+                    last = _statement_end(code_lines, row, column)
+                    row, column = past(row, column, last)
+                # The statement read ends those whose body it is, but for the
+                # clause that goes on with one.
+                while opened:
+                    keyword = opened.pop()
+                    ahead, at = code_at(row, column)
+                    clause = (
+                        ahead < len(code_lines)
+                        and keyword in _JS_CLAUSE_RE
+                        and _JS_CLAUSE_RE[keyword].match(code_lines[ahead], at)
+                    )
+                    if clause and keyword == "do":
+                        row, column = past(*code_at(ahead, clause.end()))
+                        ahead, at = code_at(row, column)
+                        if ahead < len(code_lines) and code_lines[ahead].startswith(
+                            ";", at
+                        ):
+                            row, column = ahead, at + 1
+                    elif clause:
+                        row, column = ahead, at
+                        break
+                else:
+                    return row, column
 
-        def in_scope(row, column, kind, header=False):
+        def in_scope(row, column, kind, head=None):
             """The last line a variable declared at column ``column`` of line
             ``row`` is in scope on: that of the block open there, for a `var`
             that of the innermost function's block, and for the binding a
-            `for` or `catch` head declares that of the body after the head."""
-            if header and kind != "var":
-                # The head, on this line and perhaps later ones, and the
-                # statement after it
-                row, column = past(row, code_lines[row].rindex("(", 0, column))
-                row, column = past_statement(row, column)
+            `for` or `catch` head declares, whose `(` is at ``head``, that of
+            the statement after the head."""
+            if head and kind != "var":
+                row, column = past_statement(*past(*head))
                 return row + (column > 0)
             text = code_lines[row]
             stack = list(open_at[row])
@@ -10996,6 +11019,15 @@ class TSParser(BaseParser):
             # its: it declares nothing of its own, opens no nameless function
             # and holds none of the definition's `return`s.
             continuing = lineno <= signature_until
+            # A `for` or `catch` head the line above leaves open holds the
+            # line's binding, a `catch`'s as written, and the line declares
+            # nothing else.
+            above = i - 1
+            while above >= 0 and not code_lines[above].strip():
+                above -= 1
+            held_open = above >= 0 and _JS_FOR_HEAD_RE.search(code_lines[above])
+            if held_open:
+                held_open = (above, code_lines[above].rindex("("), held_open[1])
             # The class the line declares. An expression whose body closes
             # on the line is a const's value, read where the const is; one
             # that goes on over lines is the class's line, not the const's,
@@ -11008,7 +11040,7 @@ class TSParser(BaseParser):
                 and self._find_block_end(code_lines, i, cx.end()) <= lineno
             ):
                 cx = None
-            if continuing or (cx and cx.group("enclosed") is None):
+            if continuing or held_open or (cx and cx.group("enclosed") is None):
                 pass
             elif (match := re_const.search(line)) and (
                 match.group(3) is not None or not read_arrow(i)[1]
@@ -11606,14 +11638,21 @@ class TSParser(BaseParser):
                 # is in, any other to the end of its block, the binding of a
                 # `for` or a `catch` to the end of the body. The name of a
                 # function or class expression is in scope only inside it.
-                names = []
+                bindings = []
                 for found in _JS_BINDING_HEAD_RE.finditer(code):
-                    kind = found[1] or "catch"
-                    header = not found[1] or _JS_FOR_HEAD_RE.search(
-                        code, 0, found.start()
-                    )
-                    last = in_scope(i, found.end(), kind, bool(header))
-                    written = code[found.end() :]
+                    head = None
+                    if not found[1] or _JS_FOR_HEAD_RE.search(code, 0, found.start()):
+                        head = (i, code.rindex("(", 0, found.end()))
+                    elif held_open and not code[: found.start()].strip():
+                        head = held_open[:2]
+                    bindings.append((found[1] or "catch", found.end(), head))
+                written = code.lstrip()
+                if held_open and held_open[2] and re.match(r"[\w$\[{]", written):
+                    bindings.append(("catch", len(code) - len(written), held_open[:2]))
+                names = []
+                for kind, at, head in bindings:
+                    last = in_scope(i, at, kind, head)
+                    written = code[at:]
                     bound = (
                         [name for name, _ in _js_bindings(written)]
                         if written[0] in "[{"

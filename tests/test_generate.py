@@ -7922,7 +7922,26 @@ class TestTypeScriptCallResolution:
                   const { [all[x[0]]]: c } = all;
                   a(); b(); c(); d(); e();
                 }
+                export function lines(all, x) {
+                  for (const a of all) if (x) a(); else
+                    (a)
+                  for (
+                    const b of all
+                  )
+                    inner:
+                      for (const c of all)
+                        b();
+                  try {} catch (
+                    c
+                  ) { c(); }
+                  a(); b(); c();
+                }
                 """,
+                "c.js": "import { d } from './a.js';\n"
+                "export function deep(all, x) {\n"
+                "  for (const d of all)\n"
+                + "    if (x) d();\n    else\n" * 1000
+                + "      d();\n  d();\n}\n",
             },
         )
         assert _calls(builder, "FILE:b.js::parts") == []
@@ -7935,6 +7954,10 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:b.js::nested") == [
             f"FILE:a.js::{name}" for name in "abde"
         ]
+        assert _calls(builder, "FILE:b.js::lines") == [
+            f"FILE:a.js::{name}" for name in "abc"
+        ]
+        assert _calls(builder, "FILE:c.js::deep") == ["FILE:a.js::d"]
         assert _calls(builder, "FILE:b.js::outside") == [
             f"FILE:a.js::{name}" for name in "abcde"
         ]
