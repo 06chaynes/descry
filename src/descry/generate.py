@@ -10033,6 +10033,19 @@ _JS_CLOSURE_RE = re.compile(
 )
 # A `for` head up to the declaration it starts with
 _JS_FOR_HEAD_RE = re.compile(r"\bfor\s*(?:await\s*)?\(\s*$")
+# A statement a keyword starts, after any labels, and the clause that may
+# go on with one: an `if`'s `else`, a `try`'s `catch` or `finally`, a
+# `catch`'s `finally`, a `do`'s `while`
+_JS_COMPOUND_RE = re.compile(
+    r"(?:[\w$]+\s*:\s*)*"
+    r"(if|for(?:\s+await)?|while|with|switch|else|do|try|catch|finally)\b"
+)
+_JS_CLAUSE_RE = {
+    "if": re.compile(r"else\b"),
+    "try": re.compile(r"(?:catch|finally)\b"),
+    "catch": re.compile(r"finally\b"),
+    "do": re.compile(r"while\b"),
+}
 # Where a variable's binding starts, a name or a pattern, and the keyword
 # that declares it: `const`, `let`, `var`, or a `catch` clause's
 _JS_BINDING_HEAD_RE = re.compile(r"\b(?:(const|let|var)\s+|catch\s*\(\s*)(?=[\w$\[{])")
@@ -10693,31 +10706,72 @@ class TSParser(BaseParser):
                 if at <= context[2] + (context[:3] in closed_after)
             ]
 
+        def code_at(row, column):
+            """The line and column of the first code at or after column
+            ``column`` of line ``row``."""
+            while row < len(code_lines) and not code_lines[row][column:].strip():
+                row, column = row + 1, 0
+            if row < len(code_lines):
+                text = code_lines[row]
+                column = len(text) - len(text[column:].lstrip())
+            return row, column
+
+        def past(row, column, last=None):
+            """Just past the brackets that open at column ``column`` of line
+            ``row`` or, for the statement there that ends by line ``last``,
+            past its `;`, or at the bracket that closes what holds it."""
+            depth = 0
+            for at_row in range(row, len(code_lines) if last is None else last + 1):
+                for at in range(column, len(code_lines[at_row])):
+                    char = code_lines[at_row][at]
+                    depth += (char in "([{") - (char in ")]}")
+                    if depth < 0:
+                        return at_row, at
+                    if depth == 0 and (last is None or char == ";"):
+                        return at_row, at + 1
+                column = 0
+            return (len(code_lines) if last is None else last + 1), 0
+
+        def past_statement(row, column):
+            """The line and column just past the statement that starts at or
+            after column ``column`` of line ``row``: a block, a statement a
+            keyword starts with its head, its body and the clauses that go on
+            with it, or one statement."""
+            row, column = code_at(row, column)
+            if row == len(code_lines):
+                return row, 0
+            if code_lines[row].startswith("{", column):
+                return past(row, column)
+            compound = _JS_COMPOUND_RE.match(code_lines[row], column)
+            if not compound:
+                return past(row, column, _statement_end(code_lines, row, column))
+            row, column = code_at(row, compound.end())
+            if row < len(code_lines) and code_lines[row].startswith("(", column):
+                row, column = past(row, column)
+            row, column = past_statement(row, column)
+            ahead, at = code_at(row, column)
+            clause = (
+                ahead < len(code_lines)
+                and compound[1] in _JS_CLAUSE_RE
+                and _JS_CLAUSE_RE[compound[1]].match(code_lines[ahead], at)
+            )
+            if not clause:
+                return row, column
+            if compound[1] == "do":
+                return past(*code_at(ahead, clause.end()))
+            return past_statement(ahead, at)
+
         def in_scope(row, column, kind, header=False):
             """The last line a variable declared at column ``column`` of line
             ``row`` is in scope on: that of the block open there, for a `var`
             that of the innermost function's block, and for the binding a
             `for` or `catch` head declares that of the body after the head."""
             if header and kind != "var":
-                # The head's `)`, on this line or a later one, and the body
-                # after it: a block, or one statement.
-                depth = 0
-                while row < len(code_lines) and depth >= 0:
-                    char = code_lines[row][column : column + 1]
-                    if not char:
-                        row, column = row + 1, 0
-                        continue
-                    depth += (char == "(") - (char == ")")
-                    column += 1
-                if depth >= 0:
-                    return len(lines)
-                body = code_lines[row][column:]
-                if not body.strip() and row + 1 < len(code_lines):
-                    row, body = row + 1, code_lines[row + 1]
-                column = len(code_lines[row]) - len(body.lstrip())
-                if body.lstrip()[:1] != "{":
-                    return _statement_end(code_lines, row, column) + 1
-                column += 1
+                # The head, on this line and perhaps later ones, and the
+                # statement after it
+                row, column = past(row, code_lines[row].rindex("(", 0, column))
+                row, column = past_statement(row, column)
+                return row + (column > 0)
             text = code_lines[row]
             stack = list(open_at[row])
             for at, char in enumerate(text[:column]):

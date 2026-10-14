@@ -7915,8 +7915,12 @@ class TestTypeScriptCallResolution:
                        all) {
                     b();
                   }
+                  for (const d of all) for (const e of all)
+                    if (x) d();
+                    else
+                      e();
                   const { [all[x[0]]]: c } = all;
-                  a(); b(); c();
+                  a(); b(); c(); d(); e();
                 }
                 """,
             },
@@ -7928,7 +7932,9 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:b.js::heads") == [
             f"FILE:a.js::{name}" for name in "abcde"
         ]
-        assert _calls(builder, "FILE:b.js::nested") == ["FILE:a.js::a", "FILE:a.js::b"]
+        assert _calls(builder, "FILE:b.js::nested") == [
+            f"FILE:a.js::{name}" for name in "abde"
+        ]
         assert _calls(builder, "FILE:b.js::outside") == [
             f"FILE:a.js::{name}" for name in "abcde"
         ]
