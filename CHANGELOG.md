@@ -171,7 +171,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   line, and a call of such a name calls no function of the project. A
   call of a variable a function declares without a value, takes from a
   pattern, loops over or catches calls the value it holds, as one of a
-  variable given a value did. A `:` in a pattern's default
+  variable given a value did, while the variable is in scope: a `var` to
+  the end of its function, the binding of a `for` or a `catch` to the end
+  of its body, any other to the end of its block. A function or class
+  expression's name is no variable of the function around it. A `:` in a pattern's default
   (`{ a = c ? x : y }`) is no key.
 - **Unresolved calls name their candidates.** A `CALLS` edge that could
   reach several definitions carries them in `metadata.candidates`.

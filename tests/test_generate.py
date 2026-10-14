@@ -7850,8 +7850,10 @@ class TestTypeScriptCallResolution:
     def test_a_name_a_function_declares_calls_its_value(self, tmp_path):
         """A variable a function declares without a value, takes from a
         pattern, loops over or catches is the function's: a call of it calls
-        what it holds, no function of its name. One a `require` binds is
-        the module's."""
+        what it holds, no function of its name. A `var` is in scope to the
+        end of the function, any other to the end of its block, a `for`'s
+        or `catch`'s to the end of its body, and the name of a function
+        expression only inside it. One a `require` binds is the module's."""
         builder = _index(
             tmp_path,
             {
@@ -7879,10 +7881,25 @@ class TestTypeScriptCallResolution:
                   const { make } = require('./a.js');
                   make();
                 }
+                export function blocks(all, x) {
+                  for (const a of all) { a(); }
+                  try {} catch (b) { b(); }
+                  if (x) {
+                    const [c] = all;
+                    var d = all[0];
+                    c();
+                  }
+                  go(function e() {});
+                  const { [x[0]]: make } = x;
+                  a(); b(); c(); d(); e(); make();
+                }
                 """,
             },
         )
         assert _calls(builder, "FILE:b.js::parts") == []
+        assert _calls(builder, "FILE:b.js::blocks") == [
+            f"FILE:a.js::{name}" for name in "abce"
+        ]
         assert _calls(builder, "FILE:b.js::outside") == [
             f"FILE:a.js::{name}" for name in "abcde"
         ]
@@ -13890,7 +13907,7 @@ class TestClangCallResolution:
 
     def test_each_smart_pointer_parameter_has_its_own_type(self, tmp_path):
         """A parameter's type ends where its template arguments close, not
-        at the last `>` of the parameter list."""
+        at the last `>` of the parameter list, however deep they nest."""
         builder = _index(
             tmp_path,
             {
@@ -13907,9 +13924,17 @@ class TestClangCallResolution:
                     c.run();
                   }
                 }
+                template <typename T> class A { public: void run() {} };
+                void four() {
+                  try {
+                  } catch (std::unique_ptr<A<A<A<Node>>>>& e) {
+                    e->run();
+                  }
+                }
                 """,
             },
         )
+        assert _calls(builder, "FILE:main.cc::four") == ["FILE:main.cc::A::run"]
         for caller in ("two", "three"):
             assert _calls(builder, f"FILE:main.cc::{caller}") == [
                 "FILE:main.cc::Node::run"
@@ -18523,6 +18548,8 @@ class TestBaseTypes:
                 void constructed() {
                   auto p = std::make_unique<Node>();
                   p->run();
+                  auto q = ::std::make_unique<Node>();
+                  q->run();
                 }
                 template <typename Node, typename U>
                 class Rebound : public Node::template rebind<U> {
@@ -18566,7 +18593,10 @@ class TestBaseTypes:
             "REF:run",
             "REF:s->run",
         ]
-        assert _calls(builder, "FILE:use.h::constructed") == ["REF:p->run"]
+        assert _calls(builder, "FILE:use.h::constructed") == [
+            "REF:p->run",
+            "REF:q->run",
+        ]
         assert _calls(builder, "FILE:use.h::Box::use") == [
             "FILE:use.h::Box::get",
             "FILE:use.h::Box::kind",

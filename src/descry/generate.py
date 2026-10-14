@@ -10031,9 +10031,15 @@ _JS_CLOSURE_RE = re.compile(
     r"(?P<closure>(?:function\s*\*?\s*)?"
     r"\((?P<params>[^()]*)\)(?:\s*:[^=(){]+)?\s*(?:=>|\{)|(?P<param>[\w$]+)\s*=>)"
 )
+# A `for` head up to the declaration it starts with
+_JS_FOR_HEAD_RE = re.compile(r"\bfor\s*(?:await\s*)?\(\s*$")
+# The rest of a statement's head up to the `)` that closes it
+_JS_HEAD_CLOSE_RE = re.compile(r"[^()]*(?:\([^()]*\)[^()]*)*\)")
 # The key of a property in an object pattern and the `:` after it, where
 # the pattern binds another name than the key: `key: name`, `[computed]:`
-_JS_PROPERTY_KEY_RE = re.compile(r"""(\[[^\]]*\]|"[^"]*"|'[^']*'|[\w$]*)\s*(:?)""")
+_JS_PROPERTY_KEY_RE = re.compile(
+    r"""(\[(?:[^\[\]]|\[[^\[\]]*\])*\]|"[^"]*"|'[^']*'|[\w$]*)\s*(:?)"""
+)
 
 
 def _js_bindings(pattern, steps=()):
@@ -10632,7 +10638,8 @@ class TSParser(BaseParser):
         # on: those of callbacks and of nameless functions
         closed_after = set()
         expression_ids = set()  # functions whose body is an expression
-        declared_names = {}  # context -> the names its body declares
+        # context -> each name its body declares -> the lines it is in scope
+        declared_names = {}
         # The brackets open where the line being read starts, innermost
         # last, True for the `(` of a call, and the last character of code
         # before the line: an object that follows such a `(`, or a `,`
@@ -10666,7 +10673,8 @@ class TSParser(BaseParser):
                     return "?"
                 if f"{context[0]}::{name}" in self.builder.node_registry:
                     return None
-                if name in declared_names.get(context[:3], ()):
+                lines_in = declared_names.get(context[:3], {}).get(name, ())
+                if any(first <= lineno <= last for first, last in lines_in):
                     held = self.call_origin(name, lineno, since, owner)
                     return None if held else f"={name}"
             return None
@@ -10679,6 +10687,32 @@ class TSParser(BaseParser):
                 if at <= context[2] + (context[:3] in closed_after)
             ]
 
+        def in_scope(row, column, kind, header=False):
+            """The last line a variable declared at column ``column`` of line
+            ``row`` is in scope on: that of the block open there, for a `var`
+            that of the innermost function's block, and for the binding a
+            `for` or `catch` head declares that of the body after the head."""
+            text = code_lines[row]
+            if (
+                header
+                and kind != "var"
+                and (head := _JS_HEAD_CLOSE_RE.match(text, column))
+            ):
+                body = text[head.end() :].lstrip()
+                if body.startswith("{"):
+                    column = len(text) - len(body) + 1
+            stack = list(open_at[row])
+            for at, char in enumerate(text[:column]):
+                if char == "{":
+                    stack.append((row, at))
+                elif char == "}" and stack:
+                    stack.pop()
+            for opened in reversed(stack):
+                head = code_lines[opened[0]][: opened[1] + 1]
+                if kind != "var" or _JS_BLOCK_FUNCTION_RE.search(head):
+                    return closes_on.get(opened, len(lines))
+            return len(lines)
+
         # Which characters are code is read once for the file. Each of
         # ``code_lines`` is a line without its comments and with the text of
         # its literals blanked, for the braces counted on it; each of
@@ -10688,6 +10722,16 @@ class TSParser(BaseParser):
         code_lines = [_blank_js_strings(line, literals) for line in lines]
         literals = []
         text_lines = [_blank_js_strings(line, literals, keep=True) for line in lines]
+        # The `{` open where each line starts, innermost last, and the line
+        # each `{` is closed on
+        open_at, closes_on, braces = [], {}, []
+        for row, text in enumerate(code_lines):
+            open_at.append(tuple(braces))
+            for at, char in enumerate(text):
+                if char == "{":
+                    braces.append((row, at))
+                elif char == "}" and braces:
+                    closes_on[braces.pop()] = row + 1
 
         i = 0
         signature_until = 0  # the last line of a definition's signature
@@ -11473,16 +11517,29 @@ class TSParser(BaseParser):
                 ):
                     for at, *declarator in _declarators(code_lines, i, head.end()):
                         later_declarators.setdefault(at, []).append(
-                            (parent_id, head[1] == "const", *declarator)
+                            (parent_id, head[1], *declarator)
                         )
-                names = set()  # the variables the line declares
+                # The variables the line declares, each with the last line
+                # it is in scope on: a `var` to the end of the function it
+                # is in, any other to the end of its block, the binding of a
+                # `for` or a `catch` to the end of the body. The name of a
+                # function or class expression is in scope only inside it.
+                names = []
                 for found in _JS_DECLARED_RE.finditer(code):
-                    names.update(name for name, _ in _js_bindings(found[1] or found[2]))
+                    kind = found[0].split()[0]
+                    if kind not in ("const", "let", "var") and not found[2]:
+                        continue
+                    header = found[2] or _JS_FOR_HEAD_RE.search(code, 0, found.start())
+                    last = in_scope(i, found.end(), kind, bool(header))
+                    names.extend(
+                        (name, last) for name, _ in _js_bindings(found[1] or found[2])
+                    )
                 declared_here = later_declarators.pop(i, ())
-                for scope_id, constant, later, name_end, value_at in declared_here:
+                for scope_id, kind, later, name_end, value_at in declared_here:
                     held = _function_value(line[value_at:])
+                    constant = kind == "const"
                     if not (constant or held):
-                        names.add(later)
+                        names.append((later, in_scope(i, name_end, kind)))
                         continue
                     lid = f"{scope_id}::{later}"
                     claim(lid)
@@ -11508,7 +11565,10 @@ class TSParser(BaseParser):
                 if scope[0] not in (file_id, *class_ids) and not (
                     continuing or own_defs or _TS_REQUIRE_RE.search(code)
                 ):
-                    declared_names.setdefault(scope[:3], set()).update(names)
+                    for name, last in names:
+                        declared_names.setdefault(scope[:3], {}).setdefault(
+                            name, []
+                        ).append((lineno, last))
                 typed = _TS_TYPED_VALUE_RE.search(code)
                 calls = []  # (edge index, column of its `(`) of each on the line
                 # A definition on this line takes the calls its parameters

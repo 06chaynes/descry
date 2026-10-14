@@ -184,10 +184,14 @@ _TYPE = (
     + _TYPE_NAME
     + r"(?:<[^;(){}=]*>)?(?:::[A-Za-z_]\w*)*)(?:<[^;(){}=]*>)?"
 )
+# Template arguments, nested to eight levels
+_TEMPLATE_ARGUMENTS = "[^<>;(){}=]*"
+for _ in range(8):
+    _TEMPLATE_ARGUMENTS = rf"(?:[^<>;(){{}}=]|<{_TEMPLATE_ARGUMENTS}>)*"
 # A smart pointer, and in group 1 the type it points at
 _POINTER_TYPE = (
     r"(?:std::)?(?:unique_ptr|shared_ptr|optional|expected)\s*"
-    r"<(?:[^<>;(){}=]|<(?:[^<>;(){}=]|<[^<>;(){}=]*>)*>)*>"
+    rf"<{_TEMPLATE_ARGUMENTS}>"
 )
 _RE_POINTER = re.compile(
     r"((?:std::)?(?:unique_ptr|shared_ptr|optional|expected))\s*<"
@@ -1220,7 +1224,7 @@ class ClangParser(BaseParser):
                 # `f<T>`: what a template call returns may be written with
                 # its arguments, which the standard library's data reads as
                 # types.
-                std = callee.startswith("std::")
+                std = callee.removeprefix("::").startswith("std::")
                 callee += self._opaque(arguments) if std else arguments
             name = re.split(r"::|->|\.", callee)[-1]
             if name in _C_CONTROL_KEYWORDS or (skipped and skipped(match.start())):
