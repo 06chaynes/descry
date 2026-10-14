@@ -7936,6 +7936,12 @@ class TestTypeScriptCallResolution:
                   ) { c(); }
                   a(); b(); c();
                 }
+                export function members(all) {
+                  all.catch(a).then(() => a());
+                  all?.catch (
+                    b
+                  ).then(() => b());
+                }
                 """,
                 "c.js": "import { d } from './a.js';\n"
                 "export function deep(all, x) {\n"
@@ -7958,6 +7964,7 @@ class TestTypeScriptCallResolution:
             f"FILE:a.js::{name}" for name in "abc"
         ]
         assert _calls(builder, "FILE:c.js::deep") == ["FILE:a.js::d"]
+        assert _calls(builder, "FILE:b.js::members") == ["FILE:a.js::a", "FILE:a.js::b"]
         assert _calls(builder, "FILE:b.js::outside") == [
             f"FILE:a.js::{name}" for name in "abcde"
         ]

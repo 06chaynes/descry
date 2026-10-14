@@ -10033,7 +10033,7 @@ _JS_CLOSURE_RE = re.compile(
 )
 # A `for` head up to the declaration it starts with, or a `catch` head
 # up to its binding
-_JS_FOR_HEAD_RE = re.compile(r"\b(?:for\s*(?:await\s*)?|(catch)\s*)\(\s*$")
+_JS_FOR_HEAD_RE = re.compile(r"(?<![\w$.])(?:for\s*(?:await\s*)?|(catch)\s*)\(\s*$")
 # What starts a statement of a keyword's: the keyword, of one that has a
 # parenthesised head or of one that has none, or a label; and the clause
 # that may go on with one: an `if`'s `else`, a `try`'s `catch` or
@@ -10050,7 +10050,9 @@ _JS_CLAUSE_RE = {
 }
 # Where a variable's binding starts, a name or a pattern, and the keyword
 # that declares it: `const`, `let`, `var`, or a `catch` clause's
-_JS_BINDING_HEAD_RE = re.compile(r"\b(?:(const|let|var)\s+|catch\s*\(\s*)(?=[\w$\[{])")
+_JS_BINDING_HEAD_RE = re.compile(
+    r"(?<![\w$.])(?:(const|let|var)\s+|catch\s*\(\s*)(?=[\w$\[{])"
+)
 # The key of a property in an object pattern and the `:` after it, where
 # the pattern binds another name than the key: `key: name`, `[computed]:`
 _JS_PROPERTY_KEY_RE = re.compile(
