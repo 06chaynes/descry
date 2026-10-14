@@ -178,9 +178,10 @@ _TYPE_NAME = (
     r"|thread_local)\b)[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*"
 )
 # A type name with its template arguments: in `type` the name, and with it
-# the member that the arguments are followed by, `Outer<Args>::Inner`
+# the member that the arguments are followed by, `Outer<Args>::Inner`. A
+# leading `::` names the global scope, where the name is looked up anyway.
 _TYPE = (
-    r"(?P<type>"
+    r"(?:::)?(?P<type>"
     + _TYPE_NAME
     + r"(?:<[^;(){}=]*>)?(?:::[A-Za-z_]\w*)*)(?:<[^;(){}=]*>)?"
 )
@@ -204,7 +205,7 @@ _DECLARATIONS = (
     re.compile(
         r"(?:^|[;{}(,])\s*"
         + _SPECIFIERS
-        + r"(?P<type>"
+        + r"(?:::)?(?P<type>"
         + _POINTER_TYPE
         + r")"
         + _DECLARATOR
@@ -239,7 +240,7 @@ _DECLARATIONS = (
 _RE_DECLARES = re.compile(
     r"(?:^|[;{}])\s*(?:(?:"
     + _SPECIFIER_WORDS
-    + r"|[A-Z_][A-Z0-9_]*)\s+)*(?P<type>auto|"
+    + r"|[A-Z_][A-Z0-9_]*)\s+)*(?:::)?(?P<type>auto|"
     + _TYPE_NAME
     + r"(?:<[^;(){}=]*>(?:::[A-Za-z_]\w*)+)?)(?:<[^;(){}=]*>)?"
     r"(?:\s*\*+\s*|\s*&\s*|\s+)$"
@@ -247,7 +248,7 @@ _RE_DECLARES = re.compile(
 # `Type name`, `const Type& name`, `Type* const name`, `Type name[n]`
 _RE_PARAMETER = re.compile(
     _SPECIFIERS
-    + r"(?P<type>"
+    + r"(?:::)?(?P<type>"
     + _TYPE_NAME
     + r"(?:\s*<.*>)?)"
     + r"(?:\s*[*&]+\s*(?:(?:const|restrict|__restrict)\s+)?|\s+)"
@@ -258,7 +259,7 @@ _RE_PARAMETER = re.compile(
 # bit-field width, attribute macros, a braced initialiser
 _RE_FIELD = re.compile(
     _SPECIFIERS
-    + r"(?P<type>"
+    + r"(?:::)?(?P<type>"
     + _TYPE_NAME
     + r"(?:\s*<.*>)?)"
     + r"(?:\s*[*&]+\s*(?:const\s+)?|\s+)(?P<name>[A-Za-z_]\w*)"
@@ -422,7 +423,7 @@ def _held(written: str) -> str:
     arguments, unless it is a standard type — a smart pointer's, and a
     container's, name what the value's members return. `typename` only
     says that a member of a type parameter is a type."""
-    written = re.sub(r"\btypename\s+", "", written)
+    written = re.sub(r"\btypename\s+", "", written).strip().removeprefix("::")
     pointer = _RE_POINTER.match(written)
     if pointer:
         return f"{pointer[1]}<{pointer[2]}>"

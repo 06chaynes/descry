@@ -7852,8 +7852,9 @@ class TestTypeScriptCallResolution:
         pattern, loops over or catches is the function's: a call of it calls
         what it holds, no function of its name. A `var` is in scope to the
         end of the function, any other to the end of its block, a `for`'s
-        or `catch`'s to the end of its body, and the name of a function
-        expression only inside it. One a `require` binds is the module's."""
+        or `catch`'s to the end of its body however it is written, and the
+        name of a function expression only inside it, which is a scope of its
+        own. One a `require` binds is the module's."""
         builder = _index(
             tmp_path,
             {
@@ -7893,6 +7894,30 @@ class TestTypeScriptCallResolution:
                   const { [x[0]]: make } = x;
                   a(); b(); c(); d(); e(); make();
                 }
+                export function heads(all) {
+                  go(function a() {
+                    a();
+                    const b = 1;
+                    b();
+                  });
+                  all.forEach(function () { var c = 1; c(); });
+                  for (const d of all)
+                    d();
+                  try {} catch ({ e }) { e(); }
+                  a(); b(); c(); d(); e();
+                }
+                export function nested(all, x) {
+                  for (const a of f(g(all)))
+                  {
+                    a();
+                  }
+                  for (const b of
+                       all) {
+                    b();
+                  }
+                  const { [all[x[0]]]: c } = all;
+                  a(); b(); c();
+                }
                 """,
             },
         )
@@ -7900,6 +7925,10 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:b.js::blocks") == [
             f"FILE:a.js::{name}" for name in "abce"
         ]
+        assert _calls(builder, "FILE:b.js::heads") == [
+            f"FILE:a.js::{name}" for name in "abcde"
+        ]
+        assert _calls(builder, "FILE:b.js::nested") == ["FILE:a.js::a", "FILE:a.js::b"]
         assert _calls(builder, "FILE:b.js::outside") == [
             f"FILE:a.js::{name}" for name in "abcde"
         ]
@@ -13958,6 +13987,32 @@ class TestClangCallResolution:
             },
         )
         assert _calls(builder, "FILE:main.cc::K::m") == ["FILE:main.cc::T::run"] * 2
+
+    def test_a_type_written_from_the_global_scope(self, tmp_path):
+        """`::std::unique_ptr<T>` declares what `std::unique_ptr<T>` does, as
+        a local, a parameter, a field and a caught exception."""
+        builder = _index(
+            tmp_path,
+            {
+                "main.cc": """
+                #include <memory>
+                #include <vector>
+                class Node { public: void run() {} };
+                void use(::std::unique_ptr<Node>& q) {
+                  ::std::unique_ptr<Node> p;
+                  ::std::vector<Node> v;
+                  p->run();
+                  q->run();
+                  v.front().run();
+                  try {} catch (::std::unique_ptr<Node>& e) { e->run(); }
+                }
+                struct H { ::std::unique_ptr<Node> f; void m() { f->run(); } };
+                """,
+            },
+        )
+        run = "FILE:main.cc::Node::run"
+        assert _calls(builder, "FILE:main.cc::use") == [run] * 4
+        assert _calls(builder, "FILE:main.cc::H::m") == [run]
 
     def test_optional_deref_types_the_value_it_holds(self, tmp_path):
         """`o->member` on a `std::optional<T>` is `T`'s member."""

@@ -10028,17 +10028,19 @@ _JS_PATTERN_RE = re.compile(
 # `=>`, and where its body starts
 _JS_CLOSURE_RE = re.compile(
     r"(?:(?<=[(,])|(?<==)|(?<==\s)|(?<=return\s)|(?<=default\s)|^)\s*(?:async\s+)?"
-    r"(?P<closure>(?:function\s*\*?\s*)?"
+    r"(?P<closure>(?:function\s*\*?\s*(?P<named>[\w$]+\s*)?)?"
     r"\((?P<params>[^()]*)\)(?:\s*:[^=(){]+)?\s*(?:=>|\{)|(?P<param>[\w$]+)\s*=>)"
 )
 # A `for` head up to the declaration it starts with
 _JS_FOR_HEAD_RE = re.compile(r"\bfor\s*(?:await\s*)?\(\s*$")
-# The rest of a statement's head up to the `)` that closes it
-_JS_HEAD_CLOSE_RE = re.compile(r"[^()]*(?:\([^()]*\)[^()]*)*\)")
+# Where a variable's binding starts, a name or a pattern, and the keyword
+# that declares it: `const`, `let`, `var`, or a `catch` clause's
+_JS_BINDING_HEAD_RE = re.compile(r"\b(?:(const|let|var)\s+|catch\s*\(\s*)(?=[\w$\[{])")
 # The key of a property in an object pattern and the `:` after it, where
 # the pattern binds another name than the key: `key: name`, `[computed]:`
 _JS_PROPERTY_KEY_RE = re.compile(
-    r"""(\[(?:[^\[\]]|\[[^\[\]]*\])*\]|"[^"]*"|'[^']*'|[\w$]*)\s*(:?)"""
+    r"""(\[(?:[^\[\]]|\[(?:[^\[\]]|\[[^\[\]]*\])*\])*\]|"[^"]*"|'[^']*'|[\w$]*)"""
+    r"\s*(:?)"
 )
 
 
@@ -10195,8 +10197,11 @@ class TSParser(BaseParser):
 
     def _binds_name(self, name):
         """A name the file imports is what the module gives it, whatever a
-        declaration of that name in a narrower scope says."""
-        return name not in self._imported
+        declaration of that name in a narrower scope says, and one a block
+        the line closes declares is bound on no later line."""
+        return name not in self._imported and name not in self._closed_names.get(
+            self._line, ()
+        )
 
     def _read_as(self, origin):
         """The origin path a folded declaration reads a name as: what the
@@ -10640,6 +10645,7 @@ class TSParser(BaseParser):
         expression_ids = set()  # functions whose body is an expression
         # context -> each name its body declares -> the lines it is in scope
         declared_names = {}
+        self._closed_names = {}  # line -> the names declared in a block it closes
         # The brackets open where the line being read starts, innermost
         # last, True for the `(` of a call, and the last character of code
         # before the line: an object that follows such a `(`, or a `,`
@@ -10692,15 +10698,27 @@ class TSParser(BaseParser):
             ``row`` is in scope on: that of the block open there, for a `var`
             that of the innermost function's block, and for the binding a
             `for` or `catch` head declares that of the body after the head."""
+            if header and kind != "var":
+                # The head's `)`, on this line or a later one, and the body
+                # after it: a block, or one statement.
+                depth = 0
+                while row < len(code_lines) and depth >= 0:
+                    char = code_lines[row][column : column + 1]
+                    if not char:
+                        row, column = row + 1, 0
+                        continue
+                    depth += (char == "(") - (char == ")")
+                    column += 1
+                if depth >= 0:
+                    return len(lines)
+                body = code_lines[row][column:]
+                if not body.strip() and row + 1 < len(code_lines):
+                    row, body = row + 1, code_lines[row + 1]
+                column = len(code_lines[row]) - len(body.lstrip())
+                if body.lstrip()[:1] != "{":
+                    return _statement_end(code_lines, row, column) + 1
+                column += 1
             text = code_lines[row]
-            if (
-                header
-                and kind != "var"
-                and (head := _JS_HEAD_CLOSE_RE.match(text, column))
-            ):
-                body = text[head.end() :].lstrip()
-                if body.startswith("{"):
-                    column = len(text) - len(body) + 1
             stack = list(open_at[row])
             for at, char in enumerate(text[:column]):
                 if char == "{":
@@ -11464,6 +11482,10 @@ class TSParser(BaseParser):
                         found.end(),
                     )
                     for found in _JS_CLOSURE_RE.finditer(code)
+                    # A function with a name is an expression where it is a
+                    # value, else a declaration.
+                    if not found["named"]
+                    or re.search(r"(?:[(,=]|\breturn)\s*$", code[: found.start()])
                 ]
                 self._bodies = []
                 # A nameless function passed as an argument, whose block body
@@ -11495,18 +11517,24 @@ class TSParser(BaseParser):
                         # of the definition around it, and read its
                         # parameters too.
                         context = (*reaching(block_end)[0][:2], block_end - 1)
-                        closed_after.add(context)
                         self.enter_context(*context, _ts_params(code[bar : opened + 1]))
-                        continue
-                    callback_id = within = self._nameless_owner(
-                        within, f"callback@{lineno}", lineno, block_end, "callback"
-                    )
-                    callbacks.append(
-                        (block_end - 1, len(self._open_calls) + len(self._opens))
-                    )
-                    callback_ids.add(callback_id)
-                    closed_after.add((callback_id, since, block_end - 1))
-                    enter(callback_id, since, block_end - 1, code[bar : opened + 1])
+                    else:
+                        callback_id = within = self._nameless_owner(
+                            within, f"callback@{lineno}", lineno, block_end, "callback"
+                        )
+                        callbacks.append(
+                            (block_end - 1, len(self._open_calls) + len(self._opens))
+                        )
+                        callback_ids.add(callback_id)
+                        context = (callback_id, since, block_end - 1)
+                        enter(*context, code[bar : opened + 1])
+                    closed_after.add(context)
+                    # A function expression's own name is a variable of its
+                    # body.
+                    if named := re.match(r"function\b\s*\*?\s*([\w$]+)", code[bar:]):
+                        declared_names.setdefault(context, {}).setdefault(
+                            named[1], []
+                        ).append((lineno, block_end))
                 # The declarators of a statement after its first, on this line
                 # or one the statement goes on to, are definitions of their
                 # own, as its first is and where it is: a `const` a constant,
@@ -11525,15 +11553,19 @@ class TSParser(BaseParser):
                 # `for` or a `catch` to the end of the body. The name of a
                 # function or class expression is in scope only inside it.
                 names = []
-                for found in _JS_DECLARED_RE.finditer(code):
-                    kind = found[0].split()[0]
-                    if kind not in ("const", "let", "var") and not found[2]:
-                        continue
-                    header = found[2] or _JS_FOR_HEAD_RE.search(code, 0, found.start())
-                    last = in_scope(i, found.end(), kind, bool(header))
-                    names.extend(
-                        (name, last) for name, _ in _js_bindings(found[1] or found[2])
+                for found in _JS_BINDING_HEAD_RE.finditer(code):
+                    kind = found[1] or "catch"
+                    header = not found[1] or _JS_FOR_HEAD_RE.search(
+                        code, 0, found.start()
                     )
+                    last = in_scope(i, found.end(), kind, bool(header))
+                    written = code[found.end() :]
+                    bound = (
+                        [name for name, _ in _js_bindings(written)]
+                        if written[0] in "[{"
+                        else [re.match(r"[\w$]+", written)[0]]
+                    )
+                    names.extend((name, last) for name in bound)
                 declared_here = later_declarators.pop(i, ())
                 for scope_id, kind, later, name_end, value_at in declared_here:
                     held = _function_value(line[value_at:])
@@ -11558,6 +11590,8 @@ class TSParser(BaseParser):
                     self.builder.add_edge(scope_id, lid, "DEFINES")
                     if held:
                         own_defs.append((lid, name_end))
+                if closed := {name for name, last in names if last == lineno}:
+                    self._closed_names[lineno] = closed
                 # A name a function's body declares is the function's own:
                 # a call of it calls the value the name holds. A line that
                 # defines a function may declare the names in that, and one

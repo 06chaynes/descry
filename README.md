@@ -328,7 +328,7 @@ Share of project calls resolved without SCIP, measured on public repositories at
 | PHP | monolog `3bed304`, guzzle `9393947` | 95%, 93% |
 | C# | serilog `bebc771`, Newtonsoft.Json `52fa3ae` (`Src/Newtonsoft.Json`) | 94%, 91% |
 | C | jq `a19efdd`, libuv `954c1d1` | 99%, 79% |
-| C++ | leveldb `7ee830d`, fmt `c4927e6` | 97%, 85% |
+| C++ | leveldb `7ee830d`, fmt `c4927e6` | 97%, 86% |
 | Dart | shelf `b2cb503`, riverpod `1efba1c` (`packages/riverpod`) | 93%, 91% |
 | Ruby | rack `a9833c8`, sinatra `cb22afd` | 70%, 39% |
 

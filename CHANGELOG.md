@@ -173,8 +173,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   pattern, loops over or catches calls the value it holds, as one of a
   variable given a value did, while the variable is in scope: a `var` to
   the end of its function, the binding of a `for` or a `catch` to the end
-  of its body, any other to the end of its block. A function or class
-  expression's name is no variable of the function around it. A `:` in a pattern's default
+  of its body however the head and the body are written, any other to the
+  end of its block; one declared in a function a line opens and closes is
+  in scope on that line alone. A function or class expression's name is
+  no variable of the function around it. A `:` in a pattern's default
   (`{ a = c ? x : y }`) is no key.
 - **Unresolved calls name their candidates.** A `CALLS` edge that could
   reach several definitions carries them in `metadata.candidates`.
@@ -199,7 +201,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
   typed from declarations. Ruby calls written without parentheses are
   recorded. Each C++ parameter has its own type where several take
   template arguments, and a name in capitals right before a field's name
-  is the field's type, not a macro.
+  is the field's type, not a macro. A type written from the global scope
+  (`::std::unique_ptr<T>`) is the type written without the `::`.
 - **Conditional compilation.** In C, C++ and C#, a definition under `#if`
   is chosen for a call only when the call sits under the same condition,
   or when nothing else, in the project or the standard library, could be
@@ -322,9 +325,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   the class's line no longer swallows the member after it; a typed class
   property whose arrow value starts on the next line is a member; a field
   whose parenthesised value runs over lines is no member, its calls the
-  class's; and each nameless callback a call is passed is a scope of its
-  own, so a local of one callback is never filed under a local of the
-  same name in a sibling, and `function (` names no member. A local that
+  class's; and each callback a call is passed, a named function
+  expression among them, is a scope of its own, so a local of one
+  callback is never filed under a local of the same name in a sibling,
+  and `function (` names no member. A local that
   holds a function is the definition it holds when a function is passed
   to it as well. An object a call is passed, as any of its arguments,
   whose lines go on past its first and which holds a function, owns the
