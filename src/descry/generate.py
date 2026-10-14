@@ -9217,10 +9217,12 @@ _TS_DECLARATIONS = (
 
 # Where JavaScript declares names: a variable or what a pattern takes apart,
 # a function, a type, and what a `catch` is handed
+# A number written with a `.` at its end (`1.`), whose `.` is no member's
+_JS_NUMBER_DOT = r"(?<![\w$])\d\w*\."
 # A member's name, written after a `.` or a `#`, is read as one and binds
 # nothing.
 _JS_DECLARED_RE = re.compile(
-    r"[.#]\s*[\w$]+"
+    _JS_NUMBER_DOT + r"|[.#]\s*[\w$]+"
     r"|\b(?:const|let|var|function\*?|class|interface|type|enum|namespace)\s+"
     r"([\w$]+|\{[^=;]*?\}|\[[^=;]*?\])|\bcatch\s*\(\s*([\w$]+)"
 )
@@ -9242,7 +9244,8 @@ def _js_member_name(lines, row, column):
     while not before.strip() and row > 0:
         row -= 1
         before = lines[row]
-    return before.rstrip().endswith((".", "#"))
+    before = before.rstrip()
+    return before.endswith((".", "#")) and not re.search(_JS_NUMBER_DOT + r"\Z", before)
 
 
 def _js_bound(content):
@@ -10633,7 +10636,14 @@ class TSParser(BaseParser):
                 if local:
                     self.builder.imports.setdefault(file_id, {})[local] = specifier
         imported = self._imported = self.builder.imports.get(file_id, ())
-        self.builder.js_bound[file_id] = _js_bound(content).union(imported)
+        # Which characters are code is read once for the file. Each of
+        # ``code_lines`` is a line without its comments and with the text of
+        # its literals blanked, for the names it binds and the braces
+        # counted on it.
+        literals = []
+        code_lines = [_blank_js_strings(line, literals) for line in lines]
+        bound = _js_bound("\n".join(code_lines))
+        self.builder.js_bound[file_id] = bound.union(imported)
         # An imported name is what its module exports, whatever a field or
         # a parameter of that name is declared as.
         for name in imported:
@@ -10824,13 +10834,8 @@ class TSParser(BaseParser):
                     return closes_on.get(opened, len(lines))
             return len(lines)
 
-        # Which characters are code is read once for the file. Each of
-        # ``code_lines`` is a line without its comments and with the text of
-        # its literals blanked, for the braces counted on it; each of
-        # ``text_lines`` keeps the text of the literals that open on it, and
-        # is the line the loop below reads.
-        literals = []
-        code_lines = [_blank_js_strings(line, literals) for line in lines]
+        # Each of ``text_lines`` keeps the text of the literals that open on
+        # it, and is the line the loop below reads.
         literals = []
         text_lines = [_blank_js_strings(line, literals, keep=True) for line in lines]
         # The `{` open where each line starts, innermost last, and the line

@@ -7624,7 +7624,7 @@ class TestTypeScriptCallResolution:
         """`document` and `globalThis.console` are the browser's and the
         language's; a parameter called `document` is not, and no method
         it names is pinned to a project definition. A method called
-        `catch` takes no parameter."""
+        `catch` takes no parameter, and a comment declares no name."""
         builder = _index(
             tmp_path,
             {
@@ -7650,6 +7650,8 @@ class TestTypeScriptCallResolution:
                 }
                 """,
                 "c.ts": """
+                // The page reported on, unless let pages be shown.
+                let page;
                 export function report(done) {
                     done.catch(document.close);
                     document.querySelector("p");
@@ -7659,6 +7661,8 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:a.ts::draw") == ["FILE:a.ts::setup"]
         assert _calls(builder, "FILE:c.ts::report") == []
+        assert "page" in builder.js_bound["FILE:c.ts"]
+        assert "pages" not in builder.js_bound["FILE:c.ts"]
         assert _calls(builder, "FILE:b.ts::print") == [
             "REF:document.querySelector",
             "REF:document.typeset",
@@ -7954,6 +7958,9 @@ class TestTypeScriptCallResolution:
                     catch (
                       d
                     ).then(() => d());
+                  let n = 1.
+                  let e;
+                  e(n);
                 }
                 """,
                 "c.js": "import { d } from './a.js';\n"
