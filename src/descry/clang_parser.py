@@ -185,9 +185,13 @@ _TYPE = (
     + r"(?:<[^;(){}=]*>)?(?:::[A-Za-z_]\w*)*)(?:<[^;(){}=]*>)?"
 )
 # A smart pointer, and in group 1 the type it points at
-_POINTER_TYPE = r"(?:std::)?(?:unique_ptr|shared_ptr|optional|expected)\s*<[^;(){}=]*>"
+_POINTER_TYPE = (
+    r"(?:std::)?(?:unique_ptr|shared_ptr|optional|expected)\s*"
+    r"<(?:[^<>;(){}=]|<(?:[^<>;(){}=]|<[^<>;(){}=]*>)*>)*>"
+)
 _RE_POINTER = re.compile(
-    r"((?:std::)?(?:unique_ptr|shared_ptr|optional|expected))\s*<\s*(?:const\s+)?([\w:]+)"
+    r"((?:std::)?(?:unique_ptr|shared_ptr|optional|expected))\s*<"
+    r"\s*(?:(?:const|typename)\s+)*+([\w:]+)"
 )
 _DECLARATOR = r"(?:\s*[*&]+\s*(?:const\s+)?|\s+)(?P<name>[A-Za-z_]\w*)"
 
@@ -412,7 +416,9 @@ def _blank(match: re.Match) -> str:
 def _held(written: str) -> str:
     """A written type as it is kept for a value: without its template
     arguments, unless it is a standard type — a smart pointer's, and a
-    container's, name what the value's members return."""
+    container's, name what the value's members return. `typename` only
+    says that a member of a type parameter is a type."""
+    written = re.sub(r"\btypename\s+", "", written)
     pointer = _RE_POINTER.match(written)
     if pointer:
         return f"{pointer[1]}<{pointer[2]}>"
@@ -856,7 +862,8 @@ class ClangParser(BaseParser):
         else:
             generic, self._generic = self._generic, self._generic | parameters
             for base in _bracketed_parts(declared["bases"] or ""):
-                base = base.split()[-1]
+                # `T::template rebind<U>` names a member template of `T`.
+                base = re.sub(r"::\s*template\s+", "::", base).split()[-1]
                 # A type parameter, or a member of one, names no type.
                 own = self._dependent(base)
                 self.builder.add_edge(
@@ -875,11 +882,13 @@ class ClangParser(BaseParser):
         return re.match(r"\w*", written)[0] in self._generic
 
     def _opaque(self, written):
-        """``written`` with `?` for each type parameter in scope that is one
-        of its template arguments: what it stands for is not known."""
+        """``written`` with `?` for each type parameter in scope, or member
+        of one, that is one of its template arguments: what it stands for is
+        not known."""
         if not self._generic:
             return written
-        return re.sub(rf"(?<![\w:])(?:{'|'.join(self._generic)})\b", "?", written)
+        names = "|".join(self._generic)
+        return re.sub(rf"(?<![\w:])(?:{names})\b(?:::\w+)*", "?", written)
 
     def _enumerators(self, start, end, parent_id, enum=None):
         """Add the enumerators between offsets ``start`` and ``end`` to
@@ -1005,8 +1014,9 @@ class ClangParser(BaseParser):
         if function_id not in self.builder.node_registry:
             extra = {}
             returns = _returned(flat.partition("->")[2] or prefix)
-            if returns:
-                extra["return_type"] = returns
+            # A type parameter's return is not known.
+            if returns and not self._dependent(returns):
+                extra["return_type"] = self._opaque(returns)
             if name == "<init>":
                 extra["is_constructor"] = True
             if found["body"] and "0" in found["body"]:
@@ -1132,8 +1142,13 @@ class ClangParser(BaseParser):
         if owner:
             fields = self.builder.fields.setdefault(parent_id, {})
             # Macros in capitals before the declaration stand for fields of
-            # their own.
-            macros = re.match(r"(?:\s*[A-Z_][A-Z0-9_]*\b(?!\s*[*&(]))*", flat)
+            # their own; a name in capitals right before a field's name in
+            # other letters is its type.
+            macros = re.match(
+                r"(?:\s*[A-Z_][A-Z0-9_]*\b(?!\s*[*&(])"
+                r"(?!\s+(?![A-Z_][A-Z0-9_]*\b)[A-Za-z_]\w*\s*(?:[;,=\[{:]|$)))*",
+                flat,
+            )
             for macro in macros[0].split():
                 fields.setdefault(f"<{macro}>", "")
             flat = flat[macros.end() :]
@@ -1203,8 +1218,10 @@ class ClangParser(BaseParser):
             arguments = match[0][len(match[1]) : -1].strip()
             if arguments.startswith("<"):
                 # `f<T>`: what a template call returns may be written with
-                # its arguments.
-                callee += arguments
+                # its arguments, which the standard library's data reads as
+                # types.
+                std = callee.startswith("std::")
+                callee += self._opaque(arguments) if std else arguments
             name = re.split(r"::|->|\.", callee)[-1]
             if name in _C_CONTROL_KEYWORDS or (skipped and skipped(match.start())):
                 continue

@@ -156,15 +156,23 @@ Python SDK v2, and a full-tree review's findings are fixed.
   tell which, stay unresolved, and no type inherits from itself. A C++
   template's type parameter names no type of the project, whether
   written alone, as a pack (`Ts...`), with template arguments
-  (`T<int>`), before a member type (`typename T::type`) or as the
-  argument of a standard type (`std::unique_ptr<T>`): a template that
-  inherits from one has no member of a class of that name, and a member
-  called through one (`T::make()`, `p->run()`) stays unresolved. Nor
-  does a parameter of the function a TypeScript or JavaScript class is
-  written in — a method, an accessor, a callback or a function without
-  a name, an arrow function another returns, a name a destructuring
-  pattern binds: `class extends Base` there extends the value passed,
-  and a call of such a name calls no function of the project.
+  (`T<int>`), before a member type (`typename T::type`) or a member
+  template (`T::template rebind<U>`), as the argument of a standard type
+  (`std::unique_ptr<T>`) or of a standard template's call
+  (`std::make_unique<T>()`), or as a function's return type: a template
+  that inherits from one has no member of a class of that name, and a
+  member called through one (`T::make()`, `p->run()`, `get().run()`)
+  stays unresolved. Nor does a parameter of the function a TypeScript or
+  JavaScript class is written in — a method, an accessor, a callback or
+  a function without a name, an arrow function another returns, a name a
+  destructuring pattern binds, `...rest` among them, one after type
+  parameters that hold brackets: `class extends Base` there extends the
+  value passed, also where the class closes on the function's last
+  line, and a call of such a name calls no function of the project. A
+  call of a variable a function declares without a value, takes from a
+  pattern, loops over or catches calls the value it holds, as one of a
+  variable given a value did. A `:` in a pattern's default
+  (`{ a = c ? x : y }`) is no key.
 - **Unresolved calls name their candidates.** A `CALLS` edge that could
   reach several definitions carries them in `metadata.candidates`.
   `callers` and backward `flow` mark such a caller "one of N candidates"
@@ -186,7 +194,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   functions, out-of-class C++ members, Ruby singleton and generated
   methods); a call belongs to the member it is written in; receivers are
   typed from declarations. Ruby calls written without parentheses are
-  recorded.
+  recorded. Each C++ parameter has its own type where several take
+  template arguments, and a name in capitals right before a field's name
+  is the field's type, not a macro.
 - **Conditional compilation.** In C, C++ and C#, a definition under `#if`
   is chosen for a call only when the call sits under the same condition,
   or when nothing else, in the project or the standard library, could be

@@ -7809,6 +7809,85 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:a.ts::loops") == [run]
         assert _calls(builder, "FILE:a.ts::parts") == [run] * 4
 
+    def test_default_and_rest_in_a_pattern(self, tmp_path):
+        """A property's default ends nothing it holds a `:` of: the pattern
+        binds the property's name. `...rest` binds a name too, of no type
+        the value gives."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Schema { run() {} }
+                export class Decoy { run() {} }
+                export function a() {}
+                export function helper() {}
+                export function rest() {}
+                export const flag = true;
+                export function pick({ a = flag ? helper : helper, b = "x:y" }: any) {
+                    a();
+                    helper();
+                }
+                export function gather({ on, ...rest }: any, [first, ...more]: Schema[]) {
+                    rest();
+                    more.run();
+                }
+                export function parts(all: Schema[]) {
+                    const { a = flag ? helper : helper } = all;
+                    const [first, ...rest] = all;
+                    a();
+                    helper();
+                    rest();
+                    rest.run();
+                }
+                """
+            },
+        )
+        helper = "FILE:a.ts::helper"
+        assert _calls(builder, "FILE:a.ts::pick") == [helper, "REF:a"]
+        assert _calls(builder, "FILE:a.ts::gather") == ["REF:more.run", "REF:rest"]
+        assert _calls(builder, "FILE:a.ts::parts") == [helper, "REF:a", "REF:rest.run"]
+
+    def test_a_name_a_function_declares_calls_its_value(self, tmp_path):
+        """A variable a function declares without a value, takes from a
+        pattern, loops over or catches is the function's: a call of it calls
+        what it holds, no function of its name. One a `require` binds is
+        the module's."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                export function a() {}
+                export function b() {}
+                export function c() {}
+                export function d() {}
+                export function e() {}
+                export function make() {}
+                """,
+                "b.js": """
+                import { a, b, c, d, e } from './a.js';
+                export function parts(all) {
+                  var a;
+                  const [b] = all;
+                  for (const c of all) { c(); }
+                  try {} catch (d) { d(); }
+                  a(); b();
+                }
+                export function outside() {
+                  a(); b(); c(); d(); e();
+                }
+                export function lazy() {
+                  const { make } = require('./a.js');
+                  make();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:b.js::parts") == []
+        assert _calls(builder, "FILE:b.js::outside") == [
+            f"FILE:a.js::{name}" for name in "abcde"
+        ]
+        assert _calls(builder, "FILE:b.js::lazy") == ["FILE:a.js::make"]
+
     def test_variable_has_the_type_of_the_literal_it_is(self, tmp_path):
         builder = _index(
             tmp_path,
@@ -13809,6 +13888,52 @@ class TestClangCallResolution:
         ]
         assert resolved == ["FILE:s.h::S::run"]
 
+    def test_each_smart_pointer_parameter_has_its_own_type(self, tmp_path):
+        """A parameter's type ends where its template arguments close, not
+        at the last `>` of the parameter list."""
+        builder = _index(
+            tmp_path,
+            {
+                "main.cc": """
+                #include <memory>
+                #include <vector>
+                class Other { public: void run() {} };
+                class Node { public: void run() {} };
+                void two(std::unique_ptr<Other>& p, std::shared_ptr<Node>& on) {
+                  on->run();
+                }
+                void three(std::unique_ptr<Other>& p, std::vector<Node>& on) {
+                  for (auto& c : on) {
+                    c.run();
+                  }
+                }
+                """,
+            },
+        )
+        for caller in ("two", "three"):
+            assert _calls(builder, f"FILE:main.cc::{caller}") == [
+                "FILE:main.cc::Node::run"
+            ]
+
+    def test_a_name_in_capitals_before_a_field_is_its_type(self, tmp_path):
+        """A name in capitals right before a field's name is the field's
+        type; one before that is a macro."""
+        builder = _index(
+            tmp_path,
+            {
+                "main.cc": """
+                #define EXPORTED
+                class T { public: void run() {} };
+                struct K {
+                  EXPORTED T exported;
+                  T held;
+                  void m() { held.run(); exported.run(); }
+                };
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:main.cc::K::m") == ["FILE:main.cc::T::run"] * 2
+
     def test_optional_deref_types_the_value_it_holds(self, tmp_path):
         """`o->member` on a `std::optional<T>` is `T`'s member."""
         builder = _index(
@@ -18351,8 +18476,10 @@ class TestBaseTypes:
 
     def test_cpp_type_parameter_in_a_pack_a_template_id_or_an_argument(self, tmp_path):
         """A type parameter is one where it is written as a pack, with
-        template arguments, as the first part of a member type or as the
-        argument of a standard type: none of them is the class of its name."""
+        template arguments, as the first part of a member type or of a
+        member template, as the argument of a standard type or of a
+        template call, or in a return type: none of them is the class of its
+        name."""
         builder = _index(
             tmp_path,
             {
@@ -18393,6 +18520,28 @@ class TestBaseTypes:
                   p.reset();
                 }
                 template <typename Node>
+                void constructed() {
+                  auto p = std::make_unique<Node>();
+                  p->run();
+                }
+                template <typename Node, typename U>
+                class Rebound : public Node::template rebind<U> {
+                 public:
+                  void m() { this->run(); }
+                };
+                template <typename Node>
+                class Box {
+                 public:
+                  Node get() { return Node(); }
+                  typename Node::type kind() { return {}; }
+                  std::shared_ptr<typename Node::type> shared() { return {}; }
+                  void use() {
+                    get().run();
+                    kind().f();
+                    shared()->f();
+                  }
+                };
+                template <typename Node>
                 struct Holder {
                   std::unique_ptr<Node> p;
                   typename Node::type y;
@@ -18417,6 +18566,17 @@ class TestBaseTypes:
             "REF:run",
             "REF:s->run",
         ]
+        assert _calls(builder, "FILE:use.h::constructed") == ["REF:p->run"]
+        assert _calls(builder, "FILE:use.h::Box::use") == [
+            "FILE:use.h::Box::get",
+            "FILE:use.h::Box::kind",
+            "FILE:use.h::Box::shared",
+            "REF:f",
+            "REF:f",
+            "REF:run",
+        ]
+        assert _bases(builder, "FILE:use.h::Rebound") == ["REF:Node::rebind"]
+        assert _calls(builder, "FILE:use.h::Rebound::m") == []
         assert _calls(builder, "FILE:use.h::Holder::m") == ["REF:p->run", "REF:y.f"]
         assert _calls(builder, "FILE:use.h::plain") == [
             "FILE:node.h::Node::make",
@@ -18545,8 +18705,9 @@ class TestBaseTypes:
         ]
 
     def test_typescript_parameter_of_a_callback_or_in_a_pattern(self, tmp_path):
-        """A callback's parameter, one written alone before `=>` and a name
-        a destructuring parameter binds are parameters: a class that extends
+        """A callback's parameter, one written alone before `=>`, a name a
+        destructuring parameter binds and one after type parameters that
+        hold brackets are parameters: a class that extends
         one extends no class of its name, and a call of one calls no
         function of its name. A parameter of a function a line closes is
         none for the class the line goes on to."""
@@ -18581,13 +18742,16 @@ class TestBaseTypes:
                   return 1; } const After = class extends Base {
                   go() { this.run(); }
                 };
+                export function typed<T extends (() => void) | null>(helper: T) {
+                  helper();
+                }
                 """
             },
         )
         for held in ("callback@5::Listed", "callback@11::Alone", "taken::Taken"):
             assert _bases(builder, f"FILE:mix.ts::{held}") == ["REF:Base"]
             assert _calls(builder, f"FILE:mix.ts::{held}::go") == []
-        for caller in ("callback@5", "arrow", "taken"):
+        for caller in ("callback@5", "arrow", "taken", "typed"):
             assert _calls(builder, f"FILE:mix.ts::{caller}") == ["REF:helper"]
         assert _bases(builder, "FILE:mix.ts::After") == ["FILE:mix.ts::Base"]
         assert _calls(builder, "FILE:mix.ts::After::go") == ["FILE:mix.ts::Base::run"]
@@ -18596,8 +18760,9 @@ class TestBaseTypes:
         """A function that is returned, assigned or exported without a name
         is no scope of its own, but its parameters are names on the lines of
         its body, as are those of each arrow function an arrow function
-        returns. They are none past its last line, nor are those of a
-        function a line closes before it opens another."""
+        returns, and a class that closes on its last line is in it. They are
+        none past its last line, nor are those of a function a line closes
+        before it opens another."""
         builder = _index(
             tmp_path,
             {
@@ -18624,6 +18789,12 @@ class TestBaseTypes:
                   return 1; } exports.y = function (cb) {
                   helper();
                 };
+                export function shared() {
+                  return function (Base) {
+                    const Late = class extends Base {
+                      go() { this.run(); }
+                    }; };
+                }
                 """,
                 "b.js": """
                 import { helper } from './a.js';
@@ -18633,8 +18804,9 @@ class TestBaseTypes:
                 """,
             },
         )
-        assert _bases(builder, "FILE:a.js::outer::Made") == ["REF:Base"]
-        assert _calls(builder, "FILE:a.js::outer::Made::go") == []
+        for held in ("outer::Made", "shared::Late"):
+            assert _bases(builder, f"FILE:a.js::{held}") == ["REF:Base"]
+            assert _calls(builder, f"FILE:a.js::{held}::go") == []
         assert _calls(builder, "FILE:a.js::outer::inner") == ["REF:helper"]
         assert _calls(builder, "FILE:a.js::curried") == ["REF:helper"]
         assert _calls(builder, "FILE:a.js") == [

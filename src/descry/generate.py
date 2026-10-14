@@ -6785,7 +6785,7 @@ class BaseParser:
             # In a block the names last to its end, else to the end of the
             # line or of the call.
             bindings = {
-                name: ".".join([f"#{edge}|{position}|{number}", *steps])
+                name: _bound_origin(f"#{edge}|{position}|{number}", steps)
                 for number, param in enumerate(_bracketed_parts(params + ")"))
                 for name, steps in self.bindings(param)
             }
@@ -7862,6 +7862,15 @@ def _bracketed_parts(text):
             start = column + 1
     parts.append(text[start:end])
     return [part.strip() for part in parts if part.strip()]
+
+
+def _bound_origin(origin, steps):
+    """The origin of a name a pattern binds: the steps from the value's
+    ``origin`` to its part, `?` for a part of no type the value gives, and
+    None where the value's is not known."""
+    if steps is None:
+        return "?"
+    return origin and ".".join([origin, *steps])
 
 
 def _rust_held(text):
@@ -9836,7 +9845,13 @@ def _ts_params(signature: str) -> set[str]:
     if arrow and "(" not in tokens[:arrow]:
         names.add(tokens[arrow - 1])
         returned = signature[found[arrow].end() :]
-    first = tokens.index("(") if "(" in tokens and not returned else len(tokens)
+    # The parameter list is the first `(` outside the type parameters.
+    first, angles = len(tokens), 0
+    for number, token in enumerate([] if returned else tokens):
+        angles += (token == "<") - (token == ">")
+        if token == "(" and not angles:
+            first = number
+            break
     for match, token in zip(found[first:], tokens[first:]):
         if token in ("(", "<", "[", "{"):
             if at_start and token in "[{":
@@ -10016,24 +10031,28 @@ _JS_CLOSURE_RE = re.compile(
     r"(?P<closure>(?:function\s*\*?\s*)?"
     r"\((?P<params>[^()]*)\)(?:\s*:[^=(){]+)?\s*(?:=>|\{)|(?P<param>[\w$]+)\s*=>)"
 )
+# The key of a property in an object pattern and the `:` after it, where
+# the pattern binds another name than the key: `key: name`, `[computed]:`
+_JS_PROPERTY_KEY_RE = re.compile(r"""(\[[^\]]*\]|"[^"]*"|'[^']*'|[\w$]*)\s*(:?)""")
 
 
 def _js_bindings(pattern, steps=()):
     """Yield ``(name, steps)`` for each name the JavaScript pattern binds
     without declaring its type: the steps lead from the value taken apart
     to the part bound, the property's name for `{ name }` and `*` for an
-    element of `[first, second]`."""
+    element of `[first, second]`, and are None for what `...rest` gathers,
+    which is of no type the value gives."""
     pattern = pattern.strip()
     if pattern[:1] in ("[", "{"):
         for part in _bracketed_parts(pattern[1:]):
             if part.startswith("..."):
-                break
-            name, _, inner = part.partition(":")
-            if pattern[0] == "[":
+                yield from ((name, None) for name, _ in _js_bindings(part[3:]))
+            elif pattern[0] == "[":
                 yield from _js_bindings(part, (*steps, "*"))
             else:
-                key = name.partition("=")[0].strip()
-                yield from _js_bindings(inner or name, (*steps, key))
+                key = _JS_PROPERTY_KEY_RE.match(part)
+                bound = part[key.end() :] if key[2] else part
+                yield from _js_bindings(bound, (*steps, key[1]))
     elif re.fullmatch(r"[A-Za-z_$][\w$]*", name := pattern.partition("=")[0].strip()):
         yield name, steps
 
@@ -10232,7 +10251,7 @@ class TSParser(BaseParser):
                 break
             self._closures.pop(0)
             bindings = {
-                name: ".".join([f"{origin}.^{number}", *steps])
+                name: _bound_origin(f"{origin}.^{number}", steps)
                 for number, param in enumerate(_bracketed_parts(params + ")"))
                 for name, steps in self.bindings(param)
             }
@@ -10287,7 +10306,7 @@ class TSParser(BaseParser):
         elif kind:
             origin = "string()"
         bindings = {
-            name: origin and ".".join([origin, *steps])
+            name: _bound_origin(origin, steps)
             for name, steps in self.bindings(found["pattern"])
         }
         if kind:
@@ -10609,7 +10628,11 @@ class TSParser(BaseParser):
         # around it, makes a closure on a later line one of its arguments.
         callbacks = []
         callback_ids = set()  # the owners of those callbacks
+        # The contexts that end on the line before the one their block closes
+        # on: those of callbacks and of nameless functions
+        closed_after = set()
         expression_ids = set()  # functions whose body is an expression
+        declared_names = {}  # context -> the names its body declares
         # The brackets open where the line being read starts, innermost
         # last, True for the `(` of a call, and the last character of code
         # before the line: an object that follows such a `(`, or a `,`
@@ -10633,14 +10656,27 @@ class TSParser(BaseParser):
                 if arrow and signature.rpartition("=>")[2].strip() != "{":
                     expression_ids.add(node_id)
 
+        def value_of(name, lineno, since, owner):
+            """The origin of a call of ``name`` on line ``lineno`` that calls a
+            value: `?` for a parameter, and `=name` for a variable a function
+            declares, where no definition there defines the name and the
+            variable's origin is not known."""
+            for context in reaching(lineno):
+                if name in context[3]:
+                    return "?"
+                if f"{context[0]}::{name}" in self.builder.node_registry:
+                    return None
+                if name in declared_names.get(context[:3], ()):
+                    held = self.call_origin(name, lineno, since, owner)
+                    return None if held else f"={name}"
+            return None
+
         def reaching(at):
-            """The contexts that reach line ``at``, innermost first. A
-            callback's ends on the line before the one that closes its
-            block."""
+            """The contexts that reach line ``at``, innermost first."""
             return [
                 context
                 for context in reversed(self._contexts)
-                if at <= context[2] + (context[0] in callback_ids)
+                if at <= context[2] + (context[:3] in closed_after)
             ]
 
         # Which characters are code is read once for the file. Each of
@@ -11118,11 +11154,12 @@ class TSParser(BaseParser):
                     )
                     self.builder.add_edge(object_id or parent_id, mid, "DEFINES")
                     own_defs.append((mid, name_end))
+                    value = assigned and _class_property(full_sig)
                     enter(
                         mid,
                         object_scope if object_scope is not None else lineno,
                         end_lineno,
-                        full_sig,
+                        full_sig[value[2] :] if value else full_sig,
                     )
                     signature_until = j + 1  # its last line, as a line number
                 elif assigned and parent_id in class_ids:
@@ -11372,6 +11409,9 @@ class TSParser(BaseParser):
                 elif binding := self.binding_re.search(code):
                     untyped = (binding["name"], lineno)
                 since = self.context_at(lineno)[1]
+                # The definition the line is in, before it enters those the
+                # line opens
+                scope = reaching(lineno)[0]
                 owner = parent_id.split("::")[-2] if parent_id.count("::") > 1 else None
                 self._closures = [
                     (
@@ -11410,12 +11450,9 @@ class TSParser(BaseParser):
                         # Not an argument: the lines of its body are those
                         # of the definition around it, and read its
                         # parameters too.
-                        holder = reaching(block_end)[0]
-                        self.enter_context(
-                            *holder[:2],
-                            block_end - 1,
-                            _ts_params(code[bar : opened + 1]),
-                        )
+                        context = (*reaching(block_end)[0][:2], block_end - 1)
+                        closed_after.add(context)
+                        self.enter_context(*context, _ts_params(code[bar : opened + 1]))
                         continue
                     callback_id = within = self._nameless_owner(
                         within, f"callback@{lineno}", lineno, block_end, "callback"
@@ -11424,6 +11461,7 @@ class TSParser(BaseParser):
                         (block_end - 1, len(self._open_calls) + len(self._opens))
                     )
                     callback_ids.add(callback_id)
+                    closed_after.add((callback_id, since, block_end - 1))
                     enter(callback_id, since, block_end - 1, code[bar : opened + 1])
                 # The declarators of a statement after its first, on this line
                 # or one the statement goes on to, are definitions of their
@@ -11437,10 +11475,14 @@ class TSParser(BaseParser):
                         later_declarators.setdefault(at, []).append(
                             (parent_id, head[1] == "const", *declarator)
                         )
+                names = set()  # the variables the line declares
+                for found in _JS_DECLARED_RE.finditer(code):
+                    names.update(name for name, _ in _js_bindings(found[1] or found[2]))
                 declared_here = later_declarators.pop(i, ())
                 for scope_id, constant, later, name_end, value_at in declared_here:
                     held = _function_value(line[value_at:])
                     if not (constant or held):
+                        names.add(later)
                         continue
                     lid = f"{scope_id}::{later}"
                     claim(lid)
@@ -11459,6 +11501,14 @@ class TSParser(BaseParser):
                     self.builder.add_edge(scope_id, lid, "DEFINES")
                     if held:
                         own_defs.append((lid, name_end))
+                # A name a function's body declares is the function's own:
+                # a call of it calls the value the name holds. A line that
+                # defines a function may declare the names in that, and one
+                # a `require` binds is the module's.
+                if scope[0] not in (file_id, *class_ids) and not (
+                    continuing or own_defs or _TS_REQUIRE_RE.search(code)
+                ):
+                    declared_names.setdefault(scope[:3], set()).update(names)
                 typed = _TS_TYPED_VALUE_RE.search(code)
                 calls = []  # (edge index, column of its `(`) of each on the line
                 # A definition on this line takes the calls its parameters
@@ -11512,12 +11562,11 @@ class TSParser(BaseParser):
                                 paren += offset + 1 + len(rest) - len(rest.lstrip())
                                 break
                     if code[paren : paren + 1] == "(":
-                        # A call of a value passed in as a parameter, unless
-                        # the name is a member of an expression.
-                        is_parameter = any(
-                            callee in params for *_, params in reaching(lineno)
-                        ) and not code[: match.start(1)].rstrip().endswith(".")
-                        origin = "?" if is_parameter else None
+                        # A call of a value a parameter or a variable holds,
+                        # unless the name is a member of an expression.
+                        origin = None
+                        if not code[: match.start(1)].rstrip().endswith("."):
+                            origin = value_of(callee, lineno, since, owner)
                         # A literal is a value of its built-in type.
                         quote = _JS_LITERAL_RECEIVER_RE.search(code[: match.start(1)])
                         if quote:
