@@ -9747,6 +9747,19 @@ def _member_close_column(code: str) -> int | None:
     return None if name in _JSTS_CONTROL_KEYWORDS else close
 
 
+def _closes_first(code: str) -> bool:
+    """Whether the `}` of ``code`` that close blocks opened on earlier lines
+    lead it: there is one, and before the last of them the line has nothing
+    but closing brackets and separators."""
+    depth = lowest = 0
+    last = None
+    for column, char in enumerate(code):
+        depth += (char == "{") - (char == "}")
+        if depth < lowest:
+            lowest, last = depth, column
+    return last is not None and not code[:last].strip("})];, \t")
+
+
 def _braces_open(
     lines: list[str], first: int, start: int, index: int, column: int
 ) -> int:
@@ -10574,6 +10587,7 @@ class TSParser(BaseParser):
         # around it, makes a closure on a later line one of its arguments.
         callbacks = []
         callback_ids = set()  # the owners of those callbacks
+        expression_ids = set()  # functions whose body is an expression
         # The brackets open where the line being read starts, innermost
         # last, True for the `(` of a call, and the last character of code
         # before the line: an object that follows such a `(`, or a `,`
@@ -10592,6 +10606,9 @@ class TSParser(BaseParser):
             """Make a definition that spans further lines the context."""
             if end_lineno > lineno:
                 self.enter_context(node_id, lineno, end_lineno, _ts_params(signature))
+                arrow, _, body = signature.rpartition("=>")
+                if arrow and body.strip() != "{":
+                    expression_ids.add(node_id)
 
         # Which characters are code is read once for the file. Each of
         # ``code_lines`` is a line without its comments and with the text of
@@ -10619,6 +10636,18 @@ class TSParser(BaseParser):
             nodes_before = len(self.builder.nodes)
 
             parent_id = self.context_at(lineno)[0]
+            # The line that the `}` closing a definition leads is read
+            # outside it, as the line that closes a callback is. An
+            # expression body ends with its statement, not at a `}`.
+            if lineno > signature_until and _closes_first(code_lines[i]):
+                unclosed = callback_ids | expression_ids
+                while len(self._contexts) > 1 and (
+                    self._contexts[-1][2] < lineno
+                    or self._contexts[-1][2] == lineno
+                    and self._contexts[-1][0] not in unclosed
+                ):
+                    self._contexts.pop()
+                parent_id = self._contexts[-1][0]
             # The object the definition returns, where the line being read is
             # one of its lines: a function written there is a member of that
             # object, which no source can name, and reads the names the
@@ -11138,9 +11167,12 @@ class TSParser(BaseParser):
                 j, full_sig, end_lineno = consume_sig(i, cx.end())
                 body = _class_body_open(code_lines[i], cx.end())
                 # What its lines are all in holds the class: a definition
-                # the line declares, not one it closes.
+                # the line declares, not one it closes. A callback's context
+                # ends on the line before the one that closes its block.
                 held_by = next(
-                    c[0] for c in reversed(self._contexts) if end_lineno <= c[2]
+                    c[0]
+                    for c in reversed(self._contexts)
+                    if end_lineno <= c[2] + (c[0] in callback_ids)
                 )
                 cid = f"{held_by}::{name}"
                 token_count = (end_lineno - lineno + 1) * 10
@@ -11178,7 +11210,18 @@ class TSParser(BaseParser):
                 if "extends" in heritage:
                     try:
                         base = heritage.split("extends")[1].split()[0].split("{")[0]
-                        self.builder.add_edge(cid, f"REF:{base}", "INHERITS")
+                        # A parameter of a definition around the class holds
+                        # a value: its name is no type's.
+                        passed = any(
+                            base.split(".")[0] in params
+                            for *_, params in self._contexts
+                        )
+                        self.builder.add_edge(
+                            cid,
+                            f"REF:{base}",
+                            "INHERITS",
+                            {"origin": f"={base}"} if passed else None,
+                        )
                     except (IndexError, ValueError):
                         pass
                 enter(cid, lineno, end_lineno)
@@ -12307,8 +12350,12 @@ class CallResolver:
                 if lang not in ("php", "ruby"):
                     qualifier, base = _split_callee(base)
                     written = ".".join([*qualifier, base])
+                origin = edge.get("metadata", {}).get("origin", "")
                 if lang == "python":
-                    base = written = edge.get("metadata", {}).get("origin", base)
+                    base = written = origin or base
+                elif origin.startswith("="):
+                    # A type parameter names no type.
+                    base = written = ""
                 self.bases.setdefault(edge["source"], []).append(base)
                 self.base_names[index] = written
         # A Go struct has the methods of the types it embeds, listed under

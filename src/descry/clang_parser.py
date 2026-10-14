@@ -854,9 +854,17 @@ class ClangParser(BaseParser):
         if kind == "enum":
             self._enumerators(at + 1, closer, type_id, name)
         else:
-            for base in _bracketed_parts(declared["bases"] or ""):
-                self.builder.add_edge(type_id, f"REF:{base.split()[-1]}", "INHERITS")
             generic, self._generic = self._generic, self._generic | parameters
+            for base in _bracketed_parts(declared["bases"] or ""):
+                base = base.split()[-1]
+                # A type parameter, or a member of one, names no type.
+                own = base.split("::")[0] in self._generic
+                self.builder.add_edge(
+                    type_id,
+                    f"REF:{base}",
+                    "INHERITS",
+                    {"origin": f"={base}"} if own else None,
+                )
             self._body(at + 1, closer, type_id, name)
             self._generic = generic
         return stop + 1
@@ -1203,6 +1211,9 @@ class ClangParser(BaseParser):
             if callee in self._generic:
                 # A type parameter is the function's own.
                 origin = f"={callee}"
+            elif callee.split("::")[0] in self._generic:
+                # What a member of one is depends on its argument.
+                origin = f"?.{name}"
             elif (
                 name == callee
                 and (outer[0] or "").isidentifier()

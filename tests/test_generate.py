@@ -17634,6 +17634,98 @@ class TestOneLineDefinitionCalls:
         for member in ("class@6::b", "class@9::c", "K::m::class@14::e"):
             assert _calls(builder, f"FILE:f.ts::{member}") == ["FILE:f.ts::helper"]
 
+    def test_a_class_that_ends_on_its_callbacks_last_line(self, tmp_path):
+        """A class a callback declares is the callback's when the `}` that
+        closes the class is on the line of the `}` that closes the callback:
+        code outside the callback cannot name it."""
+        builder = _index(
+            tmp_path,
+            {
+                "f.ts": """
+                export function it(name: string, fn: () => void) { fn(); }
+                it("a", () => {
+                  const c = class {
+                    m() {}
+                  } });
+                export function outer() {
+                  it("b", () => {
+                    it("c", () => {
+                      wrap(class {
+                        n() {}
+                      }) }) });
+                }
+                const inst = new c();
+                inst.m();
+                """
+            },
+        )
+        assert {n["id"] for n in builder.nodes if n["type"] == "Method"} == {
+            "FILE:f.ts::callback@3::c::m",
+            "FILE:f.ts::outer::callback@8::callback@9::class@10::n",
+        }
+        assert _calls(builder, "FILE:f.ts") == ["FILE:f.ts::it"]
+
+    def test_code_after_the_brace_that_closes_a_definition(self, tmp_path):
+        """What a line goes on to after the `}` that closes a class, a
+        function, a method or an object is outside it: a call there is the
+        enclosing scope's, as is the callback the line opens. A `}` that
+        closes a block inside the definition, and one an expression body
+        goes on after, leave the line the definition's."""
+        builder = _index(
+            tmp_path,
+            {
+                "f.ts": """
+                export function it(name: string, fn: () => void) { fn(); }
+                export function g(o?: any): any { return o; }
+                export function h() {}
+                export class K {
+                  m() {
+                    g();
+                  } n() {}
+                } it("class", () => {
+                  g();
+                });
+                export function f(x: boolean) {
+                  if (x) {
+                    g();
+                  } h(); }
+                const o = {
+                  p() {},
+                }; it("object", () => {
+                  g();
+                });
+                const block = () => {
+                  g();
+                }; h();
+                const chained = () =>
+                  g({
+                    a: 1,
+                  }).then(h());
+                it("outer", () => {
+                  const c = class {
+                    q() {}
+                  } }); it("after", () => {
+                  g();
+                });
+                """
+            },
+        )
+        assert {n["id"] for n in builder.nodes if "callback@" in n["id"]} == {
+            "FILE:f.ts::callback@9",
+            "FILE:f.ts::callback@18",
+            "FILE:f.ts::callback@28",
+            "FILE:f.ts::callback@28::c",
+            "FILE:f.ts::callback@28::c::q",
+            "FILE:f.ts::callback@31",
+        }
+        assert "FILE:f.ts::K::n" in {n["id"] for n in builder.nodes}
+        assert _calls(builder, "FILE:f.ts::K") == []
+        assert _calls(builder, "FILE:f.ts::o") == []
+        assert _calls(builder, "FILE:f.ts::f") == ["FILE:f.ts::g", "FILE:f.ts::h"]
+        assert _calls(builder, "FILE:f.ts::block") == ["FILE:f.ts::g"]
+        assert _calls(builder, "FILE:f.ts::chained") == ["FILE:f.ts::g", "FILE:f.ts::h"]
+        assert _calls(builder, "FILE:f.ts") == ["FILE:f.ts::h"] + ["FILE:f.ts::it"] * 4
+
     def test_members_written_with_a_quoted_name_on_the_classs_line(self, tmp_path):
         """A quoted name on the class's own line is the literal's content,
         each member its own, and an accessor written with one is filed as
@@ -18161,6 +18253,56 @@ class TestBaseTypes:
         ]
         assert _bases(builder, "FILE:db/model.cc::db::formatter") == ["REF:formatter"]
 
+    def test_cpp_base_that_is_a_type_parameter_names_no_type(self, tmp_path):
+        """A template's type parameter stands for its argument, not for a
+        class of the project that has its name: the template inherits no
+        member of that class, and a member of the parameter is not one of
+        the class."""
+        builder = _index(
+            tmp_path,
+            {
+                "base.h": """
+                class Base {
+                 public:
+                  void run() {}
+                  static void make() {}
+                };
+                """,
+                "mix.h": """
+                #include "base.h"
+                template <typename Base>
+                class Mixin : public Base {
+                 public:
+                  void extra() { this->run(); Base::make(); }
+                };
+                template <typename Base>
+                struct Outer {
+                  struct Inner : Base {
+                    void in() { this->run(); }
+                  };
+                };
+                class Solid : public Base {
+                 public:
+                  void s() { this->run(); Base::make(); }
+                };
+                void use() {
+                  Mixin<Solid> m;
+                  m.run();
+                }
+                """,
+            },
+        )
+        assert _bases(builder, "FILE:mix.h::Mixin") == ["REF:Base"]
+        assert _bases(builder, "FILE:mix.h::Outer::Inner") == ["REF:Base"]
+        assert _bases(builder, "FILE:mix.h::Solid") == ["FILE:base.h::Base"]
+        assert _calls(builder, "FILE:mix.h::Mixin::extra") == ["REF:Base::make"]
+        assert _calls(builder, "FILE:mix.h::Outer::Inner::in") == []
+        assert _calls(builder, "FILE:mix.h::use") == []
+        assert _calls(builder, "FILE:mix.h::Solid::s") == [
+            "FILE:base.h::Base::make",
+            "FILE:base.h::Base::run",
+        ]
+
     def test_csharp_base_is_a_type_not_a_property_of_its_name(self, tmp_path):
         builder = _index(
             tmp_path,
@@ -18250,6 +18392,36 @@ class TestBaseTypes:
         assert _bases(builder, "FILE:a.ts::MyHelp") == ["FILE:lib/help.js::Help"]
         assert _bases(builder, "FILE:a.ts::Max") == ["FILE:a.ts::interface_Check"]
         assert _bases(builder, "FILE:a.ts::f::Definition") == ["REF:Parent"]
+
+    def test_typescript_base_that_is_a_parameter_names_no_type(self, tmp_path):
+        """A class that extends a parameter of the function it is written
+        in extends the value passed, not a class of the parameter's name."""
+        builder = _index(
+            tmp_path,
+            {
+                "mix.ts": """
+                export class Base { run() {} }
+                export function mix(Base: any) {
+                  const Mixed = class extends Base {
+                    go() { this.run(); }
+                  };
+                  return Mixed;
+                }
+                export function plain() {
+                  const Sub = class extends Base {
+                    go() { this.run(); }
+                  };
+                  return Sub;
+                }
+                """
+            },
+        )
+        assert _bases(builder, "FILE:mix.ts::mix::Mixed") == ["REF:Base"]
+        assert _calls(builder, "FILE:mix.ts::mix::Mixed::go") == []
+        assert _bases(builder, "FILE:mix.ts::plain::Sub") == ["FILE:mix.ts::Base"]
+        assert _calls(builder, "FILE:mix.ts::plain::Sub::go") == [
+            "FILE:mix.ts::Base::run"
+        ]
 
     def test_a_base_that_is_a_call_names_no_type(self, tmp_path):
         """`extends mixin()` gives the class a base no name stands for: a
