@@ -7623,7 +7623,8 @@ class TestTypeScriptCallResolution:
     def test_global_is_the_librarys_unless_its_file_binds_the_name(self, tmp_path):
         """`document` and `globalThis.console` are the browser's and the
         language's; a parameter called `document` is not, and no method
-        it names is pinned to a project definition."""
+        it names is pinned to a project definition. A method called
+        `catch` takes no parameter."""
         builder = _index(
             tmp_path,
             {
@@ -7648,9 +7649,16 @@ class TestTypeScriptCallResolution:
                     document.querySelector("p");
                 }
                 """,
+                "c.ts": """
+                export function report(done) {
+                    done.catch(document.close);
+                    document.querySelector("p");
+                }
+                """,
             },
         )
         assert _calls(builder, "FILE:a.ts::draw") == ["FILE:a.ts::setup"]
+        assert _calls(builder, "FILE:c.ts::report") == []
         assert _calls(builder, "FILE:b.ts::print") == [
             "REF:document.querySelector",
             "REF:document.typeset",
@@ -7941,6 +7949,11 @@ class TestTypeScriptCallResolution:
                   all?.catch (
                     b
                   ).then(() => b());
+                  all . catch (c).then(() => c());
+                  all.
+                    catch (
+                      d
+                    ).then(() => d());
                 }
                 """,
                 "c.js": "import { d } from './a.js';\n"
@@ -7964,7 +7977,9 @@ class TestTypeScriptCallResolution:
             f"FILE:a.js::{name}" for name in "abc"
         ]
         assert _calls(builder, "FILE:c.js::deep") == ["FILE:a.js::d"]
-        assert _calls(builder, "FILE:b.js::members") == ["FILE:a.js::a", "FILE:a.js::b"]
+        assert _calls(builder, "FILE:b.js::members") == [
+            f"FILE:a.js::{name}" for name in "abcd"
+        ]
         assert _calls(builder, "FILE:b.js::outside") == [
             f"FILE:a.js::{name}" for name in "abcde"
         ]

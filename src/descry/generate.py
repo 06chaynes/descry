@@ -9217,8 +9217,11 @@ _TS_DECLARATIONS = (
 
 # Where JavaScript declares names: a variable or what a pattern takes apart,
 # a function, a type, and what a `catch` is handed
+# A member's name, written after a `.` or a `#`, is read as one and binds
+# nothing.
 _JS_DECLARED_RE = re.compile(
-    r"\b(?:const|let|var|function\*?|class|interface|type|enum|namespace)\s+"
+    r"[.#]\s*[\w$]+"
+    r"|\b(?:const|let|var|function\*?|class|interface|type|enum|namespace)\s+"
     r"([\w$]+|\{[^=;]*?\}|\[[^=;]*?\])|\bcatch\s*\(\s*([\w$]+)"
 )
 # A parameter list, as a function's is followed by its body or its `=>`,
@@ -9229,6 +9232,17 @@ _JS_PARAMETERS_RE = re.compile(
 )
 # The statements whose parenthesised head is followed by a block
 _JS_BLOCK_RE = re.compile(r"\b(?:if|for|while|switch|catch|with)\s*$")
+
+
+def _js_member_name(lines, row, column):
+    """Whether the word at column ``column`` of line ``row`` of ``lines`` is
+    a member's name: written after a `.` or a `#`, on its line or one
+    above."""
+    before = lines[row][:column]
+    while not before.strip() and row > 0:
+        row -= 1
+        before = lines[row]
+    return before.rstrip().endswith((".", "#"))
 
 
 def _js_bound(content):
@@ -10033,7 +10047,7 @@ _JS_CLOSURE_RE = re.compile(
 )
 # A `for` head up to the declaration it starts with, or a `catch` head
 # up to its binding
-_JS_FOR_HEAD_RE = re.compile(r"(?<![\w$.])(?:for\s*(?:await\s*)?|(catch)\s*)\(\s*$")
+_JS_FOR_HEAD_RE = re.compile(r"(?<![\w$])(?:for\s*(?:await\s*)?|(catch)\s*)\(\s*$")
 # What starts a statement of a keyword's: the keyword, of one that has a
 # parenthesised head or of one that has none, or a label; and the clause
 # that may go on with one: an `if`'s `else`, a `try`'s `catch` or
@@ -10051,7 +10065,7 @@ _JS_CLAUSE_RE = {
 # Where a variable's binding starts, a name or a pattern, and the keyword
 # that declares it: `const`, `let`, `var`, or a `catch` clause's
 _JS_BINDING_HEAD_RE = re.compile(
-    r"(?<![\w$.])(?:(const|let|var)\s+|catch\s*\(\s*)(?=[\w$\[{])"
+    r"(?<![\w$])(?:(const|let|var)\s+|catch\s*\(\s*)(?=[\w$\[{])"
 )
 # The key of a property in an object pattern and the `:` after it, where
 # the pattern binds another name than the key: `key: name`, `[computed]:`
@@ -11028,6 +11042,8 @@ class TSParser(BaseParser):
             while above >= 0 and not code_lines[above].strip():
                 above -= 1
             held_open = above >= 0 and _JS_FOR_HEAD_RE.search(code_lines[above])
+            if held_open and _js_member_name(code_lines, above, held_open.start()):
+                held_open = None
             if held_open:
                 held_open = (above, code_lines[above].rindex("("), held_open[1])
             # The class the line declares. An expression whose body closes
@@ -11642,6 +11658,8 @@ class TSParser(BaseParser):
                 # function or class expression is in scope only inside it.
                 bindings = []
                 for found in _JS_BINDING_HEAD_RE.finditer(code):
+                    if _js_member_name(code_lines, i, found.start()):
+                        continue
                     head = None
                     if not found[1] or _JS_FOR_HEAD_RE.search(code, 0, found.start()):
                         head = (i, code.rindex("(", 0, found.end()))
