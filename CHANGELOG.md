@@ -154,11 +154,17 @@ Python SDK v2, and a full-tree review's findings are fixed.
   same file or in any, a property or a constant among them. A base
   outside the project, and one that several types fit with nothing to
   tell which, stay unresolved, and no type inherits from itself. A C++
-  template's type parameter names no type of the project: a template
-  that inherits from one has no member of a class of that name, and a
-  member called through one (`T::make()`) stays unresolved. Nor does a
-  parameter of the function a TypeScript or JavaScript class is written
-  in: `class extends Base` there extends the value passed.
+  template's type parameter names no type of the project, whether
+  written alone, as a pack (`Ts...`), with template arguments
+  (`T<int>`), before a member type (`typename T::type`) or as the
+  argument of a standard type (`std::unique_ptr<T>`): a template that
+  inherits from one has no member of a class of that name, and a member
+  called through one (`T::make()`, `p->run()`) stays unresolved. Nor
+  does a parameter of the function a TypeScript or JavaScript class is
+  written in — a method, an accessor, a callback or a function without
+  a name, an arrow function another returns, a name a destructuring
+  pattern binds: `class extends Base` there extends the value passed,
+  and a call of such a name calls no function of the project.
 - **Unresolved calls name their candidates.** A `CALLS` edge that could
   reach several definitions carries them in `metadata.candidates`.
   `callers` and backward `flow` mark such a caller "one of N candidates"
@@ -297,7 +303,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   member of the class, not a call taken for one; what a line goes on to
   after the `}` that closes a class, a function, a method or an object —
   a call, or a callback it opens — is the enclosing scope's, not the
-  closed definition's; a body-less overload on
+  closed definition's; the calls in the body of a class's accessor are
+  the accessor's, not the class's, and a local it declares is no member
+  of the class; a body-less overload on
   the class's line no longer swallows the member after it; a typed class
   property whose arrow value starts on the next line is a member; a field
   whose parenthesised value runs over lines is no member, its calls the

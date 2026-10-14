@@ -9823,18 +9823,33 @@ def _definition_time_region(code: str) -> tuple[int, int] | None:
 
 
 def _ts_params(signature: str) -> set[str]:
-    """Names of the parameters in the first parameter list of ``signature``."""
+    """The names that the parameters of ``signature`` bind: those in its
+    first parameter list, or the one written alone before its `=>`, and
+    those of an arrow function it returns (`a => (b) => ...`)."""
     names = set()
     depth = 0
     at_start = False
-    tokens = re.findall(r"[A-Za-z_$][\w$]*|\.\.\.|=>|\S", signature)
-    for token in tokens[tokens.index("(") if "(" in tokens else len(tokens) :]:
+    found = list(re.finditer(r"[A-Za-z_$][\w$]*|\.\.\.|=>|\S", signature))
+    tokens = [match[0] for match in found]
+    arrow = tokens.index("=>") if "=>" in tokens else 0
+    returned = ""
+    if arrow and "(" not in tokens[:arrow]:
+        names.add(tokens[arrow - 1])
+        returned = signature[found[arrow].end() :]
+    first = tokens.index("(") if "(" in tokens and not returned else len(tokens)
+    for match, token in zip(found[first:], tokens[first:]):
         if token in ("(", "<", "[", "{"):
+            if at_start and token in "[{":
+                names.update(
+                    name for name, _ in _js_bindings(signature[match.start() :])
+                )
             depth += 1
             at_start = depth == 1
         elif token in (")", ">", "]", "}"):
             depth -= 1
             if depth == 0:
+                body = re.match(r"\s*(?::[^=(){]+)?=>", signature[match.end() :])
+                returned = body.string[body.end() :] if body else ""
                 break
         elif depth == 1 and token == ",":
             at_start = True
@@ -9842,9 +9857,15 @@ def _ts_params(signature: str) -> set[str]:
             if token[0].isalpha() or token[0] in "_$":
                 names.add(token)
             at_start = False
+    if _TS_ARROW_HEAD_RE.match(returned):
+        names |= _ts_params(returned)
     return names
 
 
+# An arrow function from its parameters to its `=>`
+_TS_ARROW_HEAD_RE = re.compile(
+    r"\s*(?:async\s+)?(?:\([^()]*\)\s*(?::[^=(){]+)?|[\w$]+\s*)=>"
+)
 _TS_METHOD_MODIFIERS = ("", "async", "static", "get", "set", "*", "async *")
 # Modifiers a class member is declared behind, in any order
 _TS_MEMBER_MODIFIERS = r"(?:(?:private|public|protected|static|abstract|override|declare|readonly|async)\s+)*"
@@ -9991,7 +10012,7 @@ _JS_PATTERN_RE = re.compile(
 # A function passed to a call: its parameters, in a list or alone before the
 # `=>`, and where its body starts
 _JS_CLOSURE_RE = re.compile(
-    r"(?:(?<=[(,])|(?<==)|(?<==\s)|(?<=return\s)|^)\s*(?:async\s+)?"
+    r"(?:(?<=[(,])|(?<==)|(?<==\s)|(?<=return\s)|(?<=default\s)|^)\s*(?:async\s+)?"
     r"(?P<closure>(?:function\s*\*?\s*)?"
     r"\((?P<params>[^()]*)\)(?:\s*:[^=(){]+)?\s*(?:=>|\{)|(?P<param>[\w$]+)\s*=>)"
 )
@@ -10002,10 +10023,8 @@ def _js_bindings(pattern, steps=()):
     without declaring its type: the steps lead from the value taken apart
     to the part bound, the property's name for `{ name }` and `*` for an
     element of `[first, second]`."""
-    pattern = pattern.partition("=")[0].strip()
-    if re.fullmatch(r"[A-Za-z_$][\w$]*", pattern):
-        yield pattern, steps
-    elif pattern[:1] in ("[", "{"):
+    pattern = pattern.strip()
+    if pattern[:1] in ("[", "{"):
         for part in _bracketed_parts(pattern[1:]):
             if part.startswith("..."):
                 break
@@ -10013,7 +10032,10 @@ def _js_bindings(pattern, steps=()):
             if pattern[0] == "[":
                 yield from _js_bindings(part, (*steps, "*"))
             else:
-                yield from _js_bindings(inner or name, (*steps, name.strip()))
+                key = name.partition("=")[0].strip()
+                yield from _js_bindings(inner or name, (*steps, key))
+    elif re.fullmatch(r"[A-Za-z_$][\w$]*", name := pattern.partition("=")[0].strip()):
+        yield name, steps
 
 
 def _blank_js_strings(line: str, stack: list | None = None, keep=False) -> str:
@@ -10606,9 +10628,20 @@ class TSParser(BaseParser):
             """Make a definition that spans further lines the context."""
             if end_lineno > lineno:
                 self.enter_context(node_id, lineno, end_lineno, _ts_params(signature))
-                arrow, _, body = signature.rpartition("=>")
-                if arrow and body.strip() != "{":
+                # An arrow function's signature starts with its parameters.
+                arrow = re.match(r"\s*(?:\(|[\w$]+\s*=>)", signature)
+                if arrow and signature.rpartition("=>")[2].strip() != "{":
                     expression_ids.add(node_id)
+
+        def reaching(at):
+            """The contexts that reach line ``at``, innermost first. A
+            callback's ends on the line before the one that closes its
+            block."""
+            return [
+                context
+                for context in reversed(self._contexts)
+                if at <= context[2] + (context[0] in callback_ids)
+            ]
 
         # Which characters are code is read once for the file. Each of
         # ``code_lines`` is a line without its comments and with the text of
@@ -11140,18 +11173,12 @@ class TSParser(BaseParser):
                 )
                 self.builder.add_edge(object_id or parent_id, mid, "DEFINES")
                 own_defs.append((mid, match.end(2)))
-                # Don't push getters/setters to context - they're leaf methods
-                # that shouldn't contain nested definitions. In an object that
-                # owns what it holds, one returned, passed to a call, or held
-                # by a constant, a getter's body is one of its members, as a
-                # method's is.
-                if object_id:
-                    enter(
-                        mid,
-                        object_scope if object_scope is not None else lineno,
-                        end_lineno,
-                        full_sig,
-                    )
+                enter(
+                    mid,
+                    object_scope if object_scope is not None else lineno,
+                    end_lineno,
+                    full_sig,
+                )
                 signature_until = j + 1  # its last line, as a line number
             elif match := re_import.search(line):
                 self.builder.add_edge(file_id, f"MODULE:{match.group(2)}", "IMPORTS")
@@ -11167,13 +11194,9 @@ class TSParser(BaseParser):
                 j, full_sig, end_lineno = consume_sig(i, cx.end())
                 body = _class_body_open(code_lines[i], cx.end())
                 # What its lines are all in holds the class: a definition
-                # the line declares, not one it closes. A callback's context
-                # ends on the line before the one that closes its block.
-                held_by = next(
-                    c[0]
-                    for c in reversed(self._contexts)
-                    if end_lineno <= c[2] + (c[0] in callback_ids)
-                )
+                # the line declares, not one it closes.
+                holders = reaching(end_lineno)
+                held_by = holders[0][0]
                 cid = f"{held_by}::{name}"
                 token_count = (end_lineno - lineno + 1) * 10
                 self.builder.add_node(
@@ -11213,8 +11236,7 @@ class TSParser(BaseParser):
                         # A parameter of a definition around the class holds
                         # a value: its name is no type's.
                         passed = any(
-                            base.split(".")[0] in params
-                            for *_, params in self._contexts
+                            base.split(".")[0] in params for *_, params in holders
                         )
                         self.builder.add_edge(
                             cid,
@@ -11381,10 +11403,19 @@ class TSParser(BaseParser):
                     while callbacks and callbacks[-1][0] < lineno:
                         callbacks.pop()
                     outer = callbacks[-1][1] if callbacks else 0
-                    if not around and len(self._open_calls) <= outer:
-                        continue  # not an argument
                     block_end = self._find_block_end(code_lines, i, opened)
                     if block_end <= lineno:
+                        continue
+                    if not around and len(self._open_calls) <= outer:
+                        # Not an argument: the lines of its body are those
+                        # of the definition around it, and read its
+                        # parameters too.
+                        holder = reaching(block_end)[0]
+                        self.enter_context(
+                            *holder[:2],
+                            block_end - 1,
+                            _ts_params(code[bar : opened + 1]),
+                        )
                         continue
                     callback_id = within = self._nameless_owner(
                         within, f"callback@{lineno}", lineno, block_end, "callback"
@@ -11393,7 +11424,7 @@ class TSParser(BaseParser):
                         (block_end - 1, len(self._open_calls) + len(self._opens))
                     )
                     callback_ids.add(callback_id)
-                    enter(callback_id, since, block_end - 1)
+                    enter(callback_id, since, block_end - 1, code[bar : opened + 1])
                 # The declarators of a statement after its first, on this line
                 # or one the statement goes on to, are definitions of their
                 # own, as its first is and where it is: a `const` a constant,
@@ -11484,7 +11515,7 @@ class TSParser(BaseParser):
                         # A call of a value passed in as a parameter, unless
                         # the name is a member of an expression.
                         is_parameter = any(
-                            callee in params for *_, params in self._contexts
+                            callee in params for *_, params in reaching(lineno)
                         ) and not code[: match.start(1)].rstrip().endswith(".")
                         origin = "?" if is_parameter else None
                         # A literal is a value of its built-in type.

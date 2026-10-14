@@ -17726,6 +17726,52 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, "FILE:f.ts::chained") == ["FILE:f.ts::g", "FILE:f.ts::h"]
         assert _calls(builder, "FILE:f.ts") == ["FILE:f.ts::h"] + ["FILE:f.ts::it"] * 4
 
+    def test_a_block_body_after_an_arrow_in_the_signature(self, tmp_path):
+        """A function or method with `=>` in its parameters or its return
+        type has a block for a body: the line its `}` leads is read outside
+        it. A class's accessor is a scope as its methods are: the calls on
+        the lines of its body are its own, and a local it declares is no
+        member of the class."""
+        builder = _index(
+            tmp_path,
+            {
+                "f.ts": """
+                export function g(o?: any): any { return o; }
+                export function h() {}
+                export function typed(cb: () => void): () => void {
+                  g();
+                } h();
+                export const held = function (cb = () => 1) {
+                  g();
+                }; h();
+                export class K {
+                  m(cb: () => void) {
+                    g();
+                  } n() {}
+                  get size() {
+                    const local = g();
+                    return local;
+                  }
+                  set size(g) {
+                    g();
+                    h();
+                  }
+                }
+                """
+            },
+        )
+        ids = {n["id"] for n in builder.nodes}
+        assert "FILE:f.ts::K::n" in ids
+        assert "FILE:f.ts::K::get size::local" in ids
+        assert "FILE:f.ts::K::local" not in ids
+        assert _calls(builder, "FILE:f.ts::typed") == ["FILE:f.ts::g"]
+        assert _calls(builder, "FILE:f.ts::held") == ["FILE:f.ts::g"]
+        assert _calls(builder, "FILE:f.ts") == ["FILE:f.ts::h"] * 2
+        assert _calls(builder, "FILE:f.ts::K") == []
+        assert _calls(builder, "FILE:f.ts::K::m") == ["FILE:f.ts::g"]
+        assert _calls(builder, "FILE:f.ts::K::get size") == ["FILE:f.ts::g"]
+        assert _calls(builder, "FILE:f.ts::K::set size") == ["FILE:f.ts::h", "REF:g"]
+
     def test_members_written_with_a_quoted_name_on_the_classs_line(self, tmp_path):
         """A quoted name on the class's own line is the literal's content,
         each member its own, and an accessor written with one is filed as
@@ -18303,6 +18349,81 @@ class TestBaseTypes:
             "FILE:base.h::Base::run",
         ]
 
+    def test_cpp_type_parameter_in_a_pack_a_template_id_or_an_argument(self, tmp_path):
+        """A type parameter is one where it is written as a pack, with
+        template arguments, as the first part of a member type or as the
+        argument of a standard type: none of them is the class of its name."""
+        builder = _index(
+            tmp_path,
+            {
+                "node.h": """
+                #include <memory>
+                #include <vector>
+                class Node {
+                 public:
+                  void run() {}
+                  static void make() {}
+                  class type {
+                   public:
+                    void f() {}
+                  };
+                };
+                """,
+                "use.h": """
+                #include "node.h"
+                template <typename... Node>
+                class Pack : public Node... {
+                 public:
+                  void m() { this->run(); }
+                };
+                template <template <class> class Node>
+                void made() { Node<int>::make(); }
+                template <typename Node>
+                void member() {
+                  typename Node::type y;
+                  y.f();
+                }
+                template <typename Node>
+                void held(std::shared_ptr<Node> s) {
+                  std::unique_ptr<Node> p;
+                  std::vector<Node> v;
+                  p->run();
+                  s->run();
+                  v.front().run();
+                  p.reset();
+                }
+                template <typename Node>
+                struct Holder {
+                  std::unique_ptr<Node> p;
+                  typename Node::type y;
+                  void m() { p->run(); y.f(); p.reset(); }
+                };
+                void plain() {
+                  Node::type y;
+                  std::unique_ptr<Node> p;
+                  y.f();
+                  p->run();
+                  Node::make();
+                }
+                """,
+            },
+        )
+        assert _bases(builder, "FILE:use.h::Pack") == ["REF:Node..."]
+        assert _calls(builder, "FILE:use.h::Pack::m") == []
+        assert _calls(builder, "FILE:use.h::made") == ["REF:Node<int>::make"]
+        assert _calls(builder, "FILE:use.h::member") == ["REF:y.f"]
+        assert _calls(builder, "FILE:use.h::held") == [
+            "REF:p->run",
+            "REF:run",
+            "REF:s->run",
+        ]
+        assert _calls(builder, "FILE:use.h::Holder::m") == ["REF:p->run", "REF:y.f"]
+        assert _calls(builder, "FILE:use.h::plain") == [
+            "FILE:node.h::Node::make",
+            "FILE:node.h::Node::run",
+            "FILE:node.h::Node::type::f",
+        ]
+
     def test_csharp_base_is_a_type_not_a_property_of_its_name(self, tmp_path):
         builder = _index(
             tmp_path,
@@ -18422,6 +18543,106 @@ class TestBaseTypes:
         assert _calls(builder, "FILE:mix.ts::plain::Sub::go") == [
             "FILE:mix.ts::Base::run"
         ]
+
+    def test_typescript_parameter_of_a_callback_or_in_a_pattern(self, tmp_path):
+        """A callback's parameter, one written alone before `=>` and a name
+        a destructuring parameter binds are parameters: a class that extends
+        one extends no class of its name, and a call of one calls no
+        function of its name. A parameter of a function a line closes is
+        none for the class the line goes on to."""
+        builder = _index(
+            tmp_path,
+            {
+                "mix.ts": """
+                export class Base { run() {} }
+                export function helper() {}
+                export function it(name: string, fn: (b?: any) => void) { fn(); }
+                it("list", (Base: any, helper: any) => {
+                  const Listed = class extends Base {
+                    go() { this.run(); }
+                  };
+                  helper();
+                });
+                it("alone", Base => {
+                  const Alone = class extends Base {
+                    go() { this.run(); }
+                  };
+                });
+                export const arrow = helper => {
+                  helper();
+                };
+                export function taken({ on = 1, Base, as: helper }: any, [first]: any) {
+                  const Taken = class extends Base {
+                    go() { this.run(); }
+                  };
+                  helper();
+                }
+                export function closed(Base: any) {
+                  return 1; } const After = class extends Base {
+                  go() { this.run(); }
+                };
+                """
+            },
+        )
+        for held in ("callback@5::Listed", "callback@11::Alone", "taken::Taken"):
+            assert _bases(builder, f"FILE:mix.ts::{held}") == ["REF:Base"]
+            assert _calls(builder, f"FILE:mix.ts::{held}::go") == []
+        for caller in ("callback@5", "arrow", "taken"):
+            assert _calls(builder, f"FILE:mix.ts::{caller}") == ["REF:helper"]
+        assert _bases(builder, "FILE:mix.ts::After") == ["FILE:mix.ts::Base"]
+        assert _calls(builder, "FILE:mix.ts::After::go") == ["FILE:mix.ts::Base::run"]
+
+    def test_typescript_parameter_of_a_function_without_a_name(self, tmp_path):
+        """A function that is returned, assigned or exported without a name
+        is no scope of its own, but its parameters are names on the lines of
+        its body, as are those of each arrow function an arrow function
+        returns. They are none past its last line, nor are those of a
+        function a line closes before it opens another."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                export class Base { run() {} }
+                export function helper() {}
+                export function outer() {
+                  return function (Base, helper) {
+                    const Made = class extends Base {
+                      go() { this.run(); }
+                    };
+                    function inner() { helper(); }
+                    return inner;
+                  };
+                }
+                module.exports = (helper) => {
+                  helper();
+                };
+                helper();
+                export const curried = (store) => helper => (action) => {
+                  helper(action);
+                };
+                export function closed(helper) {
+                  return 1; } exports.y = function (cb) {
+                  helper();
+                };
+                """,
+                "b.js": """
+                import { helper } from './a.js';
+                export default function (helper) {
+                  helper();
+                }
+                """,
+            },
+        )
+        assert _bases(builder, "FILE:a.js::outer::Made") == ["REF:Base"]
+        assert _calls(builder, "FILE:a.js::outer::Made::go") == []
+        assert _calls(builder, "FILE:a.js::outer::inner") == ["REF:helper"]
+        assert _calls(builder, "FILE:a.js::curried") == ["REF:helper"]
+        assert _calls(builder, "FILE:a.js") == [
+            "FILE:a.js::helper",
+            "FILE:a.js::helper",
+            "REF:helper",
+        ]
+        assert _calls(builder, "FILE:b.js") == ["REF:helper"]
 
     def test_a_base_that_is_a_call_names_no_type(self, tmp_path):
         """`extends mixin()` gives the class a base no name stands for: a

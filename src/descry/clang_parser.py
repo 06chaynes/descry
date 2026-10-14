@@ -858,7 +858,7 @@ class ClangParser(BaseParser):
             for base in _bracketed_parts(declared["bases"] or ""):
                 base = base.split()[-1]
                 # A type parameter, or a member of one, names no type.
-                own = base.split("::")[0] in self._generic
+                own = self._dependent(base)
                 self.builder.add_edge(
                     type_id,
                     f"REF:{base}",
@@ -868,6 +868,18 @@ class ClangParser(BaseParser):
             self._body(at + 1, closer, type_id, name)
             self._generic = generic
         return stop + 1
+
+    def _dependent(self, written):
+        """Whether ``written`` starts with a type parameter in scope: the
+        parameter, a pack of it, a template it names or a member of one."""
+        return re.match(r"\w*", written)[0] in self._generic
+
+    def _opaque(self, written):
+        """``written`` with `?` for each type parameter in scope that is one
+        of its template arguments: what it stands for is not known."""
+        if not self._generic:
+            return written
+        return re.sub(rf"(?<![\w:])(?:{'|'.join(self._generic)})\b", "?", written)
 
     def _enumerators(self, start, end, parent_id, enum=None):
         """Add the enumerators between offsets ``start`` and ``end`` to
@@ -1133,7 +1145,8 @@ class ClangParser(BaseParser):
             pointer = spans and re.match(r"\s*\*\s*(\w+)", head[spans[0][0] + 1 :])
             if pointer:
                 fields.setdefault(pointer[1], "")
-            if field and held not in self._generic:
+            if field and not self._dependent(held):
+                held = self._opaque(held)
                 fields.setdefault(field["name"], held)
                 for part in parts[1:]:
                     if more := re.match(r"[*&\s]*([A-Za-z_]\w*)", part):
@@ -1211,7 +1224,7 @@ class ClangParser(BaseParser):
             if callee in self._generic:
                 # A type parameter is the function's own.
                 origin = f"={callee}"
-            elif callee.split("::")[0] in self._generic:
+            elif self._dependent(callee):
                 # What a member of one is depends on its argument.
                 origin = f"?.{name}"
             elif (
@@ -1262,6 +1275,9 @@ class ClangParser(BaseParser):
         if not steps or "::" in root:
             return None
         held = None if root == "this" else self._declared(root, lineno, since)
+        if held and self._dependent(held):
+            return None
+        held = held and self._opaque(held)
         pointer = held and _RE_POINTER.match(held)
         if held == "?":
             origin = held
@@ -1269,8 +1285,6 @@ class ClangParser(BaseParser):
             if root == "this" and len(steps) == 2 or not self._member:
                 return None
             origin = "self" if root == "this" else f"self.{root}"
-        elif held.removesuffix("()") in self._generic:
-            return None
         elif pointer:
             # `->` reaches what the pointer points at; `.` reaches the
             # pointer's own members — its type argument intact, so a
