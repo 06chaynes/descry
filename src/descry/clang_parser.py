@@ -11,7 +11,8 @@ a compile database is available.
 from __future__ import annotations
 
 import re
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
+from itertools import accumulate
 
 from descry.generate import (
     BaseParser,
@@ -1192,16 +1193,19 @@ class ClangParser(BaseParser):
         if self._skip_calls:
             return
         nesting = []
+        # The parentheses open before each offset from ``start`` on
+        opened = initialisers and list(
+            accumulate(
+                ((c == "(") - (c == ")") for c in self._text[start:end]), initial=0
+            )
+        )
         first = bisect_right(self._starts, start) - 1
         for index in range(first, bisect_right(self._starts, end - 1)):
             offset = self._starts[index]
             low = max(start - offset, 0)
             code = " " * low + self._lines[index][low : end - offset]
             skipped = initialisers and (
-                lambda column, offset=offset: (
-                    self._text.count("(", start, offset + column)
-                    == self._text.count(")", start, offset + column)
-                )
+                lambda column, offset=offset: not opened[offset + column - start]
             )
             if code.strip():
                 self._line_calls(source_id, since, index, code, nesting, skipped)
@@ -1216,6 +1220,7 @@ class ClangParser(BaseParser):
         code = code.replace("->", "?.")
         self.begin_line(code, index + 1, source_id, self._source[index])
         matches = {match.start(1): match for match in _RE_CALL.finditer(code)}
+        ends = [found.start() for found in re.finditer(r"[;{}]", code)]
         parens = {match.end() - 1: match[1] for match in matches.values()}
         for column, char in enumerate(code):
             if char == "(":
@@ -1239,11 +1244,16 @@ class ClangParser(BaseParser):
             name = re.split(r"::|->|\.", callee)[-1]
             if name in _C_CONTROL_KEYWORDS or (skipped and skipped(match.start())):
                 continue
-            before = code[: match.start()]
-            if _RE_TYPE_KEYWORD.search(before):
+            at = lead = match.start()
+            while lead and code[lead - 1].isspace():
+                lead -= 1
+            if _RE_TYPE_KEYWORD.search(code, max(lead - 6, 0), at):
                 # `struct name (*values)[n];` declares too.
                 continue
-            declared = name == callee and _RE_DECLARES.search(before)
+            statement = bisect_left(ends, at)
+            declared = name == callee and _RE_DECLARES.match(
+                code, ends[statement - 1] if statement else 0, at
+            )
             if declared:
                 # `Type name(args);` declares `name`.
                 self.declared.setdefault(name, []).append(
@@ -1262,7 +1272,7 @@ class ClangParser(BaseParser):
                 name == callee
                 and (outer[0] or "").isidentifier()
                 and (source_id, name) not in self._locals
-                and not before.rstrip().endswith(".")
+                and code[lead - 1 : lead] != "."
             ):
                 origin = f"^{outer[0]}^{outer[1]}"
             self.add_call(
