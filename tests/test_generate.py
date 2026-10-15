@@ -4122,7 +4122,8 @@ class TestRustCallResolution:
 
     def test_question_mark_takes_the_value_out_of_a_standard_type(self, tmp_path):
         """`?` on an `io::Result<T>` or an `Option<T>` gives a `T`: each
-        `?` of `??` in its turn, and one that ends the line before."""
+        `?` of `??` in its turn, and one that ends the line before, with or
+        without the `.` of the call."""
         builder = _index(
             tmp_path,
             {
@@ -4157,6 +4158,8 @@ class TestRustCallResolution:
                     find()?
                         .unwrap()
                         .ship();
+                    find()??.
+                        ship();
                     None
                 }
                 """
@@ -4167,12 +4170,8 @@ class TestRustCallResolution:
             "FILE:src/lib.rs::load",
         ]
         assert _calls(builder, "FILE:src/lib.rs::pick") == [
-            "FILE:src/lib.rs::Product::ship",
-            "FILE:src/lib.rs::Product::ship",
-            "FILE:src/lib.rs::Product::ship",
-            "FILE:src/lib.rs::find",
-            "FILE:src/lib.rs::find",
-            "FILE:src/lib.rs::find",
+            *["FILE:src/lib.rs::Product::ship"] * 4,
+            *["FILE:src/lib.rs::find"] * 4,
         ]
 
     def test_type_argument_of_unknown_type_is_not_guessed(self, tmp_path):

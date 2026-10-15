@@ -6576,8 +6576,9 @@ class BaseParser:
             _NUMBER_DOT + r"\Z", value
         )
         chain = value[:-1].rstrip() if dot else value
-        self._tail = self._closes.get(len(chain) - 1) if chain else None
-        self._tail_unwraps = len(statement) - len(value)
+        called = chain.rstrip("?")
+        self._tail = self._closes.get(len(called) - 1) if called else None
+        self._tail_unwraps = len(statement) - len(value) + len(chain) - len(called)
         ends_with = None if self._tail is not None else _TRAILING_PATH_RE.search(chain)
         continued, self._tail_dot = self._tail_dot, dot
         if ends_with and continued and not chain[: ends_with.start()].strip():

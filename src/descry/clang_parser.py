@@ -409,7 +409,7 @@ def _declarators(tail: str) -> list[str]:
     each without `[[...]]` and without the calls in it: an attribute or a
     macro, or the parameters of a function type, none of which names the
     type."""
-    flat, previous = _RE_ATTRIBUTE.sub("", tail), None
+    flat, previous = _without_attributes(tail, ""), None
     while flat != previous:
         previous, flat = flat, re.sub(r"\((?:[^()]|\(\))+\)", "()", flat)
     return re.sub(r"\w+\s*\(\)", "", flat).split(",")
@@ -417,6 +417,14 @@ def _declarators(tail: str) -> list[str]:
 
 def _blank(match: re.Match) -> str:
     return " " * len(match.group())
+
+
+def _without_attributes(text: str, written) -> str:
+    """``text`` with each `[[...]]` in it replaced as ``re.sub`` replaces
+    with ``written``. No `[[` after the last `]]` closes, so the search
+    ends there."""
+    end = text.rfind("]]") + 2
+    return _RE_ATTRIBUTE.sub(written, text[:end]) + text[end:]
 
 
 def _held(written: str) -> str:
@@ -711,7 +719,7 @@ class ClangParser(BaseParser):
                     flat.append(" " * (kept - opened - 1))
                     spans.append((opened, kept))
         flat.append(" " * (len(head) - opened - 1) if depth else head[kept:])
-        flat = _RE_ATTRIBUTE.sub(_blank, "".join(flat))
+        flat = _without_attributes("".join(flat), _blank)
         parameters = set()
         while prefix := _RE_TEMPLATE.match(flat):
             end, depth = prefix.end(), 1
