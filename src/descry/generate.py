@@ -13977,22 +13977,32 @@ class CallResolver:
             and "=>" in written
             and self.lang(scope_id) == "typescript"
         ):
-            # `(...)` or, where an origin path carries the writing, `<...>`
-            # in its place: the parameter list the function type takes.
-            opened = written.find("(")
-            left, right = "(", ")"
-            if opened < 0:
-                opened = written.find("<")
-                left, right = "<", ">"
-            if opened < 0:
-                return ()
-            depth, close = 0, -1
-            for at, char in enumerate(written[opened:], opened):
-                depth += (char == left) - (char == right)
-                if not depth:
-                    close = at
+            # `(...) => ...` or, where an origin path carries the writing,
+            # `<...>` in place of `(...)`: the parameter list the function
+            # type takes, the parentheses a type is written in aside. A
+            # union or an intersection of function types, and a generic
+            # one, whose type parameters a parameter's type can name, take
+            # none known.
+            written = written.strip()
+            while True:
+                left, right = written[0], ")" if written[0] == "(" else ">"
+                depth, close = 0, -1
+                for at, char in enumerate(written):
+                    if char == ">" and written[at - 1 : at] == "=":
+                        continue
+                    depth += (char == left) - (char == right)
+                    if not depth:
+                        close = at
+                        break
+                rest = written[close + 1 :].strip()
+                if close < 0 or rest:
                     break
-            params = _bracketed_parts(written[opened + 1 : close] + ")")
+                written = written[1:close].strip()
+                if not written.startswith(("(", "<")):
+                    return ()
+            if close < 0 or not rest.startswith("=>"):
+                return ()
+            params = _bracketed_parts(written[1:close] + ")")
             return tuple(
                 self._returned_type(param.partition(":")[2].strip() or "any", scope_id)
                 for param in params

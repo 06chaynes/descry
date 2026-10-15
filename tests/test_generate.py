@@ -4788,8 +4788,8 @@ class TestTypeScriptCallResolution:
         """`const f: (x: Dog) => Dog = (y) => y.fetch()` types `y`; the call
         is the arrow's, on its own line. A type named for the function, one
         declared inside the arrow under its name, a Java interface of that
-        name, a variable of no known type, or a pattern typed where it is
-        written, leaves the call unresolved."""
+        name, a variable of no known type, a union of function types, or a
+        pattern typed where it is written, leaves the call unresolved."""
         builder = _index(
             tmp_path,
             {
@@ -4816,6 +4816,11 @@ class TestTypeScriptCallResolution:
                     y.fetch();
                   };
                 }
+                function either(): ((x: Dog) => void) | ((x: Cat) => void) {
+                  return (y) => {
+                    y.fetch();
+                  };
+                }
                 function later() {
                   let run;
                   run = (y) => {
@@ -4834,7 +4839,7 @@ class TestTypeScriptCallResolution:
             },
         )
         assert _calls(builder, "FILE:a.ts::typed") == ["FILE:a.ts::Dog::fetch"]
-        for name in ("aliased", "shadowed", "returned", "later"):
+        for name in ("aliased", "shadowed", "returned", "either", "later"):
             assert _calls(builder, f"FILE:a.ts::{name}") == ["REF:y.fetch"]
         assert _calls(builder, "FILE:a.ts::unpacked") == ["REF:dog.fetch"]
 

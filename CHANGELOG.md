@@ -308,7 +308,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   with a function-type annotation resolves its body calls through the
   annotation, not through a local of its name the arrow declares; a
   Java interface no longer types a TypeScript arrow's parameters where
-  it shares the name of the type the arrow is given. A generic arrow (`<T>(x: T) => ...`) is read as a function,
+  it shares the name of the type the arrow is given, and a union or an
+  intersection of function types no longer types them as its first.
+  A generic arrow (`<T>(x: T) => ...`) is read as a function,
   each declarator of `const a = ..., b = ...` as a constant of its own
   with its own value, and each of `let` or `var` holding a function as
   that function, after a destructured first one and on the lines the
