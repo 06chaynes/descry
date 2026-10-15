@@ -195,6 +195,11 @@ class TestSourceContainment:
         r = client.get("/api/source?file=legacy.c")
         assert r.status_code == 200
 
+    def test_lines_end_where_the_indexer_ends_them(self, client, web_project):
+        (web_project / "old.c").write_bytes(b"int a;\rint b;\r\nint c;\f\n")
+        r = client.get("/api/source?file=old.c&line=3")
+        assert r.json()["content"] == "int a;\nint b;\nint c;\f\n"
+
     def test_directory_is_not_a_regular_file(self, client, web_project):
         (web_project / "pkg").mkdir()
         r = client.get("/api/source?file=pkg")

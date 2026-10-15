@@ -6359,6 +6359,7 @@ class BaseParser:
         self._tail = None  # edge index of the call the previous line ends with
         self._tail_unwraps = 0  # `?` operators that follow that call
         self._tail_name = None  # name path the previous line ends with instead
+        self._tail_dot = False  # whether the previous line ends with a member's `.`
         self._scope = None  # definition the line being read belongs to
         self._raw = ""  # the line being read, as written
         self._locals = set()  # (definition ID, name of a parameter or variable)
@@ -6572,8 +6573,15 @@ class BaseParser:
         chain = value.rstrip(".").rstrip()
         self._tail = self._closes.get(len(chain) - 1) if chain else None
         self._tail_unwraps = len(statement) - len(value)
-        ends_with = None if self._tail is not None else _TRAILING_PATH_RE.search(value)
+        ends_with = None if self._tail is not None else _TRAILING_PATH_RE.search(chain)
         self._tail_name = ends_with and ends_with.group()
+        # A `.` a line ends with is a member's, where it is no range's,
+        # spread's or number's: the next line goes on with that member.
+        continued, self._tail_dot = (
+            self._tail_dot,
+            bool(re.search(r"(?<!\.)\.\Z", value))
+            and not re.search(_NUMBER_DOT + r"\Z", value),
+        )
         binding = self.binding_re.search(self._code) if self.binding_re else None
         if binding and not self._binds_name(binding["name"]):
             # A name the file gets from elsewhere is no declaration of it.
@@ -6604,7 +6612,7 @@ class BaseParser:
         ):
             self._code = ""
             return
-        elif self._pending and self._code.lstrip()[:1] in (".", ")"):
+        elif self._pending and (continued or self._code.lstrip()[:1] in (".", ")")):
             name, unwrap, _ = self._pending
             declares = self._pending_typed
             expression = self._code
@@ -6829,6 +6837,8 @@ class BaseParser:
         name_start = start + len(callee) - len(_split_callee(callee)[1])
         if origin is None:
             before = self._code[:start].rstrip()
+            if not before and self._tail_dot:
+                before = "."
             if before.strip() == "." and self._tail is None and self._tail_name:
                 # The receiver is the name the line before ends with.
                 callee = f"{self._tail_name}.{callee}"
@@ -9226,13 +9236,14 @@ _TS_DECLARATIONS = (
 
 # A number written with a `.` at its end (`1.`), whose `.` is no member's:
 # its decimal point, after decimal digits that no `.`, prefix, exponent or
-# `n` comes with (`1.5.`, `0x1.`, `3e5.` and `1n.` are read through a member)
-_JS_NUMBER_DOT = r"(?<![\w$.])\d[\d_]*\."
+# suffix comes with (`1.5.`, `0x1.`, `3e5.` and `1n.` are read through a
+# member), in JavaScript and Rust alike
+_NUMBER_DOT = r"(?<![\w$.])\d[\d_]*\."
 # Where JavaScript declares names: a variable or what a pattern takes apart,
 # a function, a type, and what a `catch` is handed. A member's name, written
 # after a `.` or a `#`, is read as one and binds nothing.
 _JS_DECLARED_RE = re.compile(
-    _JS_NUMBER_DOT + r"|[.#]\s*[\w$]+"
+    _NUMBER_DOT + r"|[.#]\s*[\w$]+"
     r"|\b(?:const|let|var|function\*?|class|interface|type|enum|namespace)\s+"
     r"([\w$]+|\{[^=;]*?\}|\[[^=;]*?\])|\bcatch\s*\(\s*([\w$]+)"
 )
@@ -9255,7 +9266,7 @@ def _js_member_name(lines, row, column):
         row -= 1
         before = lines[row]
     before = before.rstrip()
-    return before.endswith((".", "#")) and not re.search(_JS_NUMBER_DOT + r"\Z", before)
+    return before.endswith((".", "#")) and not re.search(_NUMBER_DOT + r"\Z", before)
 
 
 def _js_bound(content):
@@ -9315,7 +9326,11 @@ def _ts_compound(text):
             depth += 1
         elif char in ")]}" or (char == ">" and text[column - 1] != "="):
             depth -= 1
-        elif not depth and char in "?:&|" and "::" not in text[column - 1 : column + 2]:
+        elif (
+            not depth
+            and char in "?:&|"
+            and "::" not in text[max(column - 1, 0) : column + 2]
+        ):
             # A `::` is the `.` of a name an origin path writes, which no
             # TypeScript type has.
             marks.append((column, char))
@@ -9337,9 +9352,9 @@ def _ts_compound(text):
     if {char for _, char in marks} == {"&"}:
         cuts = [-1, *(column for column, _ in marks), len(text)]
         return "&", [text[cuts[n] + 1 : cuts[n + 1]] for n in range(len(marks) + 1)]
-    if {char for _, char in marks} == {"|"}:
-        cuts = [-1, *(column for column, _ in marks), len(text)]
-        alternatives = [text[cuts[n] + 1 : cuts[n + 1]] for n in range(len(marks) + 1)]
+    if {char for _, char in marks} in ({"|"}, {"|", "&"}):
+        cuts = [-1, *(column for column, char in marks if char == "|"), len(text)]
+        alternatives = [text[cuts[n] + 1 : cuts[n + 1]] for n in range(len(cuts) - 1)]
         alternatives = [
             one.strip()
             for one in alternatives
@@ -10295,6 +10310,8 @@ def _blank_js_strings(
                     stack.pop()
                 else:
                     stack[-1] -= 1
+            elif ch == "\ufeff":
+                ch = " "
             out.append(ch)
         i += 1
     # Only a template literal, a block comment, a JSX element and the value of
@@ -11898,9 +11915,8 @@ class TSParser(BaseParser):
                     # JS/TS control-flow keywords look like calls (`if(x)`,
                     # `while (y)`). Reject them by name — language general,
                     # not codebase specific. After a `.` one names a member.
-                    if callee in _JSTS_CONTROL_KEYWORDS and not (
-                        code[: match.start(1)].rstrip().endswith(".")
-                    ):
+                    member = _js_member_name(code_lines, i, match.start(1))
+                    if callee in _JSTS_CONTROL_KEYWORDS and not member:
                         continue
                     paren = match.end()
                     if code[paren] == "<":
@@ -11916,7 +11932,7 @@ class TSParser(BaseParser):
                         # A call of a value a parameter or a variable holds,
                         # unless the name is a member of an expression.
                         origin = None
-                        if not code[: match.start(1)].rstrip().endswith("."):
+                        if not member:
                             origin = value_of(callee, lineno, since, owner)
                         # A literal is a value of its built-in type.
                         quote = _JS_LITERAL_RECEIVER_RE.search(code[: match.start(1)])
@@ -11927,7 +11943,7 @@ class TSParser(BaseParser):
                         # `a.b.name()` is called on the property `b` of `a`.
                         receiver, _, called = callee.rpartition(".")
                         start = match.start(1)
-                        if "." in receiver and not code[:start].rstrip().endswith("."):
+                        if "." in receiver and not member:
                             span = (start, start + len(receiver))
                             held = self._expression_origin(
                                 code, *span, lineno, since, owner

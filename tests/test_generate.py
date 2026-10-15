@@ -4078,6 +4078,37 @@ class TestRustCallResolution:
         assert _calls(builder, "FILE:src/lib.rs::total") == []
         assert _calls(builder, "FILE:src/lib.rs::mapped") == ["REF:ship"]
 
+    def test_a_method_whose_dot_ends_the_line_before(self, tmp_path):
+        """A call after a `.` that ends the line before is a method of what
+        that line ends with; after a range's `..` it is the function's."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                fn n() -> i32 { 1 }
+                pub struct S;
+                impl S {
+                    fn n(&self) -> i32 { 2 }
+                    fn me(&self) -> &S { self }
+                }
+                pub fn run(s: &S) {
+                    let t = s.
+                        n();
+                    let u = s.me().
+                        n();
+                    let r = 0..
+                        n();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::run") == [
+            "FILE:src/lib.rs::S::me",
+            "FILE:src/lib.rs::S::n",
+            "FILE:src/lib.rs::S::n",
+            "FILE:src/lib.rs::n",
+        ]
+
     def test_question_mark_takes_the_value_out_of_a_standard_type(self, tmp_path):
         """`?` on an `io::Result<T>` or an `Option<T>` gives a `T`: each
         `?` of `??` in its turn, and one that ends the line before."""
@@ -4791,8 +4822,9 @@ class TestTypeScriptCallResolution:
         name, a variable of no known type, a union of function types, a
         parameter of a function type, or a pattern typed where it is
         written, leaves the call unresolved, as does a union a module's
-        type is in. A `this` parameter is none, a type a module names is
-        read, and a parameter list of no names is no file's end."""
+        type is in, one of whose alternatives may be an intersection. A
+        `this` parameter is none, a type a module names is read, and a
+        parameter list of no names is no file's end."""
         builder = _index(
             tmp_path,
             {
@@ -4839,6 +4871,9 @@ class TestTypeScriptCallResolution:
                 const unioned: (x: Pets.Pup | Cat) => void = (y) => {
                   y.fetch();
                 };
+                const mixed: (x: Pets.Pup | Dog & Cat) => void = (y) => {
+                  y.fetch();
+                };
                 function later() {
                   let run;
                   run = (y) => {
@@ -4878,9 +4913,56 @@ class TestTypeScriptCallResolution:
             "curried",
             "later",
             "unioned",
+            "mixed",
         ):
             assert _calls(builder, f"FILE:a.ts::{name}") == ["REF:y.fetch"]
         assert _calls(builder, "FILE:a.ts::unpacked") == ["REF:dog.fetch"]
+
+    def test_a_member_whose_dot_ends_the_line_before(self, tmp_path):
+        """A call after a `.` that ends the line before is of a member of
+        what that line ends with, past a comment, and a value's chain goes
+        on through it. After a spread or a number's decimal point a call is
+        of the name."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                function blip() { return 1; }
+                class Box {
+                  open(): Lid { return new Lid(); }
+                  blip() { return 2; }
+                }
+                class Lid { shut() { return 3; } }
+                export function run(b: Box, any) {
+                  const lid = b.
+                    open();
+                  lid.shut();
+                  b.
+                    // the box's own
+                    blip();
+                  b.open().
+                    shut();
+                  any.
+                    blip();
+                }
+                export function bare() {
+                  const n = 3.
+                  blip();
+                  return [...
+                    blip()];
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::run") == [
+            "FILE:a.ts::Box::blip",
+            "FILE:a.ts::Box::open",
+            "FILE:a.ts::Box::open",
+            "FILE:a.ts::Lid::shut",
+            "FILE:a.ts::Lid::shut",
+            "REF:any.blip",
+        ]
+        assert _calls(builder, "FILE:a.ts::bare") == ["FILE:a.ts::blip"] * 2
 
     def test_union_member_calls_stay_alternatives(self, tmp_path):
         """`a.fetch()` on `Dog | Cat`, which both define, is genuinely
@@ -7823,6 +7905,8 @@ class TestTypeScriptCallResolution:
                         <p>setup()</p>;
                         continue\vouter
                         <p>setup()</p>;
+                        break\ufeffouter
+                        /setup()/g.test("");
                     }
                     return [...
                         <p>setup()</p>];

@@ -387,8 +387,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   line, as an editor and the source view show it, so the definitions and
   calls after it are no longer filed a line or more below where they are
   written. A JavaScript or TypeScript parameter list that names nothing,
-  `(:)`, no longer fails its file. `index` no longer encodes every symbol
-  twice.
+  `(:)`, no longer fails its file. A call after a `.` or a `->` that
+  ends the line before is a member of what that line ends with, no longer
+  a call of the function of its name. `index` no longer encodes every
+  symbol twice.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root
   when given `--project-root` alone, and refuses a path outside it.
   scip-java no longer passes the Gradle init-script on Maven or sbt
@@ -456,8 +458,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
 - **Web.** `/api/ensure` without a body, unvalidated `direction`, errors
   returned as `200`, IPv6 loopback `Host`, a NUL byte in `?file=`, an
   `Origin` header that is not a URL, text files in other encodings refused
-  by `/api/source`, and no syntax language for most extensions in the
-  source view.
+  by `/api/source`, no syntax language for most extensions in the
+  source view, and a file whose lines end in a carriage return alone shown
+  there as one line.
 - **Packaging.** `descry-mcp` and `descry-web` name the extra to install
   when it is missing. `pi-extension` uses one interpreter name and a
   Windows-safe script path. Licence metadata uses the SPDX form.

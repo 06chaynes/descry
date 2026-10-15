@@ -803,7 +803,7 @@ async def api_source(request: Request) -> JSONResponse:
     content = raw.decode("utf-8", errors="replace")
 
     lang = _get_syntax_lang(str(file_path), cfg.syntax_lang_map)
-    lines = content.split("\n")
+    lines = re.split(r"\r\n?|\n", content)
 
     # If a target line is specified, return a window around it
     context_lines = 50
