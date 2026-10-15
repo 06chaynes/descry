@@ -4790,8 +4790,9 @@ class TestTypeScriptCallResolution:
         declared inside the arrow under its name, a Java interface of that
         name, a variable of no known type, a union of function types, a
         parameter of a function type, or a pattern typed where it is
-        written, leaves the call unresolved. A `this` parameter is none, and
-        a type a module names is read."""
+        written, leaves the call unresolved, as does a union a module's
+        type is in. A `this` parameter is none, a type a module names is
+        read, and a parameter list of no names is no file's end."""
         builder = _index(
             tmp_path,
             {
@@ -4835,6 +4836,9 @@ class TestTypeScriptCallResolution:
                 const qualified: (x: Pets.Pup) => void = (y) => {
                   y.fetch();
                 };
+                const unioned: (x: Pets.Pup | Cat) => void = (y) => {
+                  y.fetch();
+                };
                 function later() {
                   let run;
                   run = (y) => {
@@ -4855,12 +4859,26 @@ class TestTypeScriptCallResolution:
                   fetch(): number { return 3; }
                 }
                 """,
+                "broken.ts": """
+                const unnamed: (:) => void = (y) => {
+                  y.fetch();
+                };
+                """,
             },
         )
         for name in ("typed", "bound"):
             assert _calls(builder, f"FILE:a.ts::{name}") == ["FILE:a.ts::Dog::fetch"]
         assert _calls(builder, "FILE:a.ts::qualified") == ["FILE:pets.ts::Pup::fetch"]
-        for name in ("aliased", "shadowed", "returned", "either", "curried", "later"):
+        assert _calls(builder, "FILE:broken.ts::unnamed") == ["REF:y.fetch"]
+        for name in (
+            "aliased",
+            "shadowed",
+            "returned",
+            "either",
+            "curried",
+            "later",
+            "unioned",
+        ):
             assert _calls(builder, f"FILE:a.ts::{name}") == ["REF:y.fetch"]
         assert _calls(builder, "FILE:a.ts::unpacked") == ["REF:dog.fetch"]
 
@@ -5963,7 +5981,8 @@ class TestTypeScriptCallResolution:
         expression divides, so the comment after it is one, as does one that
         starts a line after a value, a member's name among them, or after
         a `break` its line ends; a regular expression after a number's `.`
-        and a statement head is none."""
+        and a statement head is none, where a hexadecimal number's `.` is a
+        member's."""
         builder = _index(
             tmp_path,
             {
@@ -6011,6 +6030,11 @@ class TestTypeScriptCallResolution:
                     if (c) /parse("")/g.test("");
                 }
 
+                function hex(c: any, g: number) {
+                    return 0x1.
+                        if (c) /parse("")/g;
+                }
+
                 function parse(s: string) {}
                 function emit(s: string) {}
                 """,
@@ -6029,7 +6053,7 @@ class TestTypeScriptCallResolution:
         assert span["ratio"] == (16, 19)
         assert _calls(builder, "FILE:g.ts::parseUrl") == ["FILE:g.ts::parse"]
         assert _calls(builder, "FILE:g.ts::describe") == ["FILE:g.ts::emit"]
-        for name in ("share", "shareOf", "halt"):
+        for name in ("share", "shareOf", "halt", "hex"):
             assert _calls(builder, f"FILE:g.ts::{name}") == ["FILE:g.ts::parse"]
         assert _calls(builder, "FILE:g.ts::since") == []
 
@@ -7796,6 +7820,8 @@ class TestTypeScriptCallResolution:
                     <p>setup()</p>;
                     outer: for (;;) {
                         break outer
+                        <p>setup()</p>;
+                        continue\vouter
                         <p>setup()</p>;
                     }
                     return [...
@@ -19133,3 +19159,31 @@ class TestBaseTypes:
             "FILE:a.ts::Ext::m",
             "FILE:a.ts::mixin",
         ]
+
+
+def test_a_form_feed_ends_no_line(tmp_path):
+    """A definition is on the line an editor shows it on, after a comment
+    that holds a form feed, which `str.splitlines` would end a line at."""
+    builder = _index(
+        tmp_path,
+        {
+            "a.py": "# a\fb\n\ndef run(): pass\n",
+            "a.rs": "// a\fb\n\nfn run() {}\n",
+            "a.proto": "// a\fb\n\nmessage Run {}\n",
+            "a.ts": "// a\fb\n\nfunction run() {}\n",
+            "a.go": "// a\fb\npackage a\nfunc run() {}\n",
+            "Run.java": "// a\fb\n\nclass Run {}\n",
+            "Run.cs": "// a\fb\n\nclass Run {}\n",
+            "a.php": "<?php // a\fb\n\nfunction run() {}\n",
+            "a.dart": "// a\fb\n\nvoid run() {}\n",
+            "a.rb": "# a\fb\n\ndef run; end\n",
+            "a.c": "// a\fb\n\nvoid run(void) {}\n",
+        },
+    )
+    found = {
+        n["id"]: n["metadata"]["lineno"]
+        for n in builder.nodes
+        if n["id"].lower().endswith("::run")
+    }
+    assert len(found) == 11
+    assert set(found.values()) == {3}

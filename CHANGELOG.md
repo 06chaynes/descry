@@ -382,7 +382,13 @@ Python SDK v2, and a full-tree review's findings are fixed.
   aborts the whole index, nor does resolving a member of a union one of
   whose alternatives is a standard type, a value a dynamic `import()`
   gives over several lines, or a Dart variable whose value is a call of
-  a standard type's method. `index` no longer encodes every symbol twice.
+  a standard type's method. A line holding a form feed, a vertical tab
+  or another character Python's `str.splitlines` ends a line at is one
+  line, as an editor and the source view show it, so the definitions and
+  calls after it are no longer filed a line or more below where they are
+  written. A JavaScript or TypeScript parameter list that names nothing,
+  `(:)`, no longer fails its file. `index` no longer encodes every symbol
+  twice.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root
   when given `--project-root` alone, and refuses a path outside it.
   scip-java no longer passes the Gradle init-script on Maven or sbt

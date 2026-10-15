@@ -26,6 +26,7 @@ from descry.generate import (
     _strip_generics,
     blank_strings,
     is_generated_source,
+    source_lines,
 )
 
 # Package declaration: `package com.foo.bar;`
@@ -360,7 +361,7 @@ class JavaParser(BaseParser):
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
 
-        lines = content.splitlines()
+        lines = source_lines(content)
         skip_calls = is_generated_source(content)
 
         # Package declaration (informational only; Java resolution is

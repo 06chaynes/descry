@@ -18,6 +18,7 @@ from descry.generate import (
     _use_leaves,
     blank_strings,
     is_generated_source,
+    source_lines,
 )
 
 # namespace App\\Foo;  (one-line) or  namespace App\\Foo { ... }  (block),
@@ -465,7 +466,7 @@ class PhpParser(BaseParser):
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
 
-        lines = content.splitlines()
+        lines = source_lines(content)
         skip_calls = is_generated_source(content)
         # Declarations and calls are read from `codes`; `lines` keeps the
         # doc comments.

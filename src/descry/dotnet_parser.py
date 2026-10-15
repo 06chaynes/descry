@@ -16,7 +16,12 @@ import posixpath
 import re
 
 from descry.clang_parser import _if_signs
-from descry.generate import BaseParser, _strip_generics, is_generated_source
+from descry.generate import (
+    BaseParser,
+    _strip_generics,
+    is_generated_source,
+    source_lines,
+)
 
 # namespace App.Foo  (block) or  namespace App.Foo;  (file-scoped, C# 10+)
 _RE_NAMESPACE = re.compile(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)")
@@ -650,7 +655,7 @@ class DotnetParser(BaseParser):
         if rel_path.endswith(".vb"):
             return
 
-        lines = content.removeprefix("\ufeff").splitlines()
+        lines = source_lines(content.removeprefix("\ufeff"))
         skip_calls = is_generated_source(content)
         # Declarations and calls are read from `code_lines`, which hold no
         # comment and no text of a literal.

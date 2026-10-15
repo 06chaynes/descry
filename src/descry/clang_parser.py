@@ -21,6 +21,7 @@ from descry.generate import (
     _strip_generics,
     blank_strings,
     is_generated_source,
+    source_lines,
 )
 
 # #include <foo.h>  /  #include "foo.h"
@@ -492,7 +493,7 @@ class ClangParser(BaseParser):
 
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
-        self._source = content.splitlines()
+        self._source = source_lines(content)
         self._skip_calls = is_generated_source(content)
         self._macros = {}  # ID of each macro of the file -> its metadata
         self._guarded = {}  # line -> the conditionals that enclose it

@@ -25,6 +25,7 @@ from descry.generate import (
     _strip_parens,
     blank_strings,
     is_generated_source,
+    source_lines,
 )
 
 # import 'package:foo/bar.dart'; / export 'src/baz.dart'; / part 'foo.g.dart';
@@ -450,7 +451,7 @@ class DartParser(BaseParser):
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
 
-        raw_lines = content.splitlines()
+        raw_lines = source_lines(content)
         skip_calls = is_generated_source(content)
 
         # Each line without its comments and with its string literals

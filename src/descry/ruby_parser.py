@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-from descry.generate import BaseParser, _strip_parens, is_generated_source
+from descry.generate import BaseParser, _strip_parens, is_generated_source, source_lines
 
 _CONST = r"(?:::)?[A-Z]\w*(?:::[A-Z]\w*)*"
 # A method name: an identifier, a setter, or an operator
@@ -705,7 +705,7 @@ class RubyParser(BaseParser):
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
 
-        lines = content.splitlines()
+        lines = source_lines(content)
         skip_calls = is_generated_source(content)
 
         code_lines = _code_lines(lines)
