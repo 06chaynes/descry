@@ -9982,9 +9982,10 @@ _JS_OPERAND_WORDS = {
     "break",
     "continue",
 }
+# A `break` or `continue` with the label it names on its line, which end a
+# statement
+_JS_LABEL_RE = re.compile(r"(?<![\w$.])(?:break|continue)[ \t]+[\w$]+$")
 # The keyword whose parenthesised head a statement follows
-# A `break` or `continue` with the label it names, which end a statement
-_JS_LABEL_RE = re.compile(r"(?<![\w$.])(?:break|continue)\s+[\w$]+$")
 _JS_STATEMENT_HEAD_RE = re.compile(r"(?<![\w$])(?:if|for(?:\s+await)?|while|with)\s*$")
 
 
@@ -9999,7 +10000,7 @@ def _js_regex_position(text):
     tail = text.rstrip()
 
     def member(word):
-        return tail[: word.start()].rstrip().endswith(".")
+        return _js_member_name([tail], 0, word.start())
 
     if not tail:
         return True
@@ -14012,18 +14013,19 @@ class CallResolver:
             if close < 0 or not rest.startswith("=>"):
                 return ()
             # A parameter's name is what its list writes before a `:` no
-            # bracket holds; `this` names the receiver's type, no parameter,
-            # and the type of a rest parameter, whose `.` the origin path
-            # writes as `::`, is the list's, not that of a parameter it
-            # takes in.
+            # bracket holds, and its type what follows that `:`; `this`
+            # names the receiver's type, no parameter, and the type of a
+            # rest parameter, whose `.` the origin path writes as `::`, is
+            # the list's, not that of a parameter it takes in.
             values = []
             for param in _bracketed_parts(written[1:close] + ")"):
-                name, *typed = _bracketed_parts(param + ")", ":")
-                if param.startswith(("...", ":")):
-                    typed = ()
+                name = _bracketed_parts(param + ")", ":")[0]
+                typed = param[len(name) :].lstrip()
+                if param.startswith(("...", ":")) or not typed.startswith(":"):
+                    typed = ":"
                 if name != "this":
                     values.append(
-                        self._returned_type(":".join(typed).strip() or "any", scope_id)
+                        self._returned_type(typed[1:].strip() or "any", scope_id)
                     )
             return tuple(values)
         if self.lang(scope_id) != "java":
