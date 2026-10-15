@@ -4080,7 +4080,9 @@ class TestRustCallResolution:
 
     def test_a_method_whose_dot_ends_the_line_before(self, tmp_path):
         """A call after a `.` that ends the line before is a method of what
-        that line ends with; after a range's `..` it is the function's."""
+        that line ends with, the path the lines before it end with all
+        read; after a range's `..` it is the function's, and a `.` that
+        starts the line after one is no member of the range's start."""
         builder = _index(
             tmp_path,
             {
@@ -4099,6 +4101,14 @@ class TestRustCallResolution:
                     let r = 0..
                         n();
                 }
+                pub struct H { pub field: Vec<u8> }
+                pub fn hop(h: &H, field: &S) {
+                    h.
+                        field.
+                        n();
+                    let r = field..
+                        .n();
+                }
                 """
             },
         )
@@ -4108,6 +4118,7 @@ class TestRustCallResolution:
             "FILE:src/lib.rs::S::n",
             "FILE:src/lib.rs::n",
         ]
+        assert _calls(builder, "FILE:src/lib.rs::hop") == ["REF:h.field.n", "REF:n"]
 
     def test_question_mark_takes_the_value_out_of_a_standard_type(self, tmp_path):
         """`?` on an `io::Result<T>` or an `Option<T>` gives a `T`: each

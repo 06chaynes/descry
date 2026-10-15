@@ -6570,18 +6570,21 @@ class BaseParser:
         self._open_calls.extend(self._opens.values())
         statement = self._code.rstrip().rstrip(";").rstrip()
         value = statement.rstrip("?")
-        chain = value.rstrip(".").rstrip()
+        # A `.` a line ends with is a member's, where it is no range's,
+        # spread's or number's: the next line goes on with that member.
+        dot = bool(re.search(r"(?<!\.)\.\Z", value)) and not re.search(
+            _NUMBER_DOT + r"\Z", value
+        )
+        chain = value[:-1].rstrip() if dot else value
         self._tail = self._closes.get(len(chain) - 1) if chain else None
         self._tail_unwraps = len(statement) - len(value)
         ends_with = None if self._tail is not None else _TRAILING_PATH_RE.search(chain)
-        self._tail_name = ends_with and ends_with.group()
-        # A `.` a line ends with is a member's, where it is no range's,
-        # spread's or number's: the next line goes on with that member.
-        continued, self._tail_dot = (
-            self._tail_dot,
-            bool(re.search(r"(?<!\.)\.\Z", value))
-            and not re.search(_NUMBER_DOT + r"\Z", value),
-        )
+        continued, self._tail_dot = self._tail_dot, dot
+        if ends_with and continued and not chain[: ends_with.start()].strip():
+            # The path goes on from the one the line before ends with.
+            self._tail_name = self._tail_name and f"{self._tail_name}.{ends_with[0]}"
+        else:
+            self._tail_name = ends_with and ends_with.group()
         binding = self.binding_re.search(self._code) if self.binding_re else None
         if binding and not self._binds_name(binding["name"]):
             # A name the file gets from elsewhere is no declaration of it.

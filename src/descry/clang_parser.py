@@ -142,7 +142,7 @@ _RE_FUNCTION = re.compile(
     r"(?P<params>\(\s*\))" + _AFTER_PARAMS + r"\s*(?P<body>=\s*\w+\s*)?$"
 )
 # The `:` that starts a constructor's member initialisers
-_RE_INITIALISERS = re.compile(r"\)[^:;]*?(?<!:):(?!:)")
+_RE_INITIALISERS = re.compile(r"\)[^:;)]*(?<!:):(?!:)")
 # A head is searched for a function this far back from its end.
 _HEAD_LIMIT = 2000
 
