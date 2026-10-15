@@ -4786,14 +4786,19 @@ class TestTypeScriptCallResolution:
 
     def test_arrow_assigned_a_function_type_reads_its_params(self, tmp_path):
         """`const f: (x: Dog) => Dog = (y) => y.fetch()` types `y`; the call
-        is the arrow's, on its own line. A type named for the function, or a
-        pattern typed where it is written, leaves the call unresolved."""
+        is the arrow's, on its own line. A type named for the function, one
+        declared inside the arrow under its name, a Java interface of that
+        name, a variable of no known type, or a pattern typed where it is
+        written, leaves the call unresolved."""
         builder = _index(
             tmp_path,
             {
                 "a.ts": """
                 class Dog {
                   fetch(): number { return 1; }
+                }
+                class Cat {
+                  fetch(): number { return 2; }
                 }
                 type Fetcher = (x: Dog) => Dog;
                 type Kennel = { dog: Dog };
@@ -4802,14 +4807,35 @@ class TestTypeScriptCallResolution:
                 const aliased: Fetcher = (y) => {
                   y.fetch();
                 };
+                const shadowed: Fetcher = (y) => {
+                  const shadowed: (c: Cat) => void = (c) => c.fetch();
+                  y.fetch();
+                };
+                function returned(): Fetcher {
+                  return (y) => {
+                    y.fetch();
+                  };
+                }
+                function later() {
+                  let run;
+                  run = (y) => {
+                    y.fetch();
+                  };
+                }
                 const unpacked = ({ dog }: Kennel) => {
                   dog.fetch();
                 };
-                """
+                """,
+                "Fetcher.java": """
+                interface Fetcher {
+                    void take(Cat c);
+                }
+                """,
             },
         )
         assert _calls(builder, "FILE:a.ts::typed") == ["FILE:a.ts::Dog::fetch"]
-        assert _calls(builder, "FILE:a.ts::aliased") == ["REF:y.fetch"]
+        for name in ("aliased", "shadowed", "returned", "later"):
+            assert _calls(builder, f"FILE:a.ts::{name}") == ["REF:y.fetch"]
         assert _calls(builder, "FILE:a.ts::unpacked") == ["REF:dog.fetch"]
 
     def test_union_member_calls_stay_alternatives(self, tmp_path):
@@ -7660,7 +7686,8 @@ class TestTypeScriptCallResolution:
         language's; a parameter called `document` is not, and no method
         it names is pinned to a project definition. A method called
         `catch` takes no parameter, a comment or JSX text declares no name,
-        and what follows a `/* */` comment is read."""
+        what follows a `/* */` comment is read, and a `<` that goes on with
+        a comparison from the line before opens no element."""
         builder = _index(
             tmp_path,
             {
@@ -7699,8 +7726,10 @@ class TestTypeScriptCallResolution:
                 export function Help() {
                     return <p>Pick a type document, or a `</p>;
                 }
-                export function show() {
+                export function show(a, b) {
                     document.querySelector("p");
+                    const fits = a
+                        <b && b > 0;
                     setup();
                 }
                 """,
@@ -15453,14 +15482,19 @@ class TestDartCallResolution:
     def test_declared_type_of_a_local_a_parameter_or_a_field(self, tmp_path):
         """A typed local, a positional, named or optional parameter, an
         initializing formal, a field the class declares or inherits, and a
-        field without a type whose value is one constructor call."""
+        field without a type whose value is one constructor call, or one
+        call of a standard type's method, whose members are the library's."""
         builder = _index(
             tmp_path,
             {
                 "lib/store.dart": """
                 class Reader {
+                  String name = "";
                   int peek() => 0;
                 }
+
+                final reader = Reader();
+                final shown = reader.name.trim();
 
                 class Writer {
                   int peek() => 0;
@@ -15488,7 +15522,8 @@ class TestDartCallResolution:
                         _reader.peek() +
                         _spare.peek() +
                         maybe?.peek() +
-                        inherited.peek();
+                        inherited.peek() +
+                        shown.length.peek();
                   }
                 }
                 """,

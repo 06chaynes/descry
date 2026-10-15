@@ -281,8 +281,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a
-  parameter of an arrow constant, dropped as external where it is left
-  unresolved; chained calls; declarations recorded as calls; braces and
+  parameter of an arrow constant or of an arrow assigned to a variable,
+  dropped as external where it is left unresolved; a `<` that goes on
+  with a comparison from the line before, read as a JSX element that hid
+  the rest of the file; chained calls; declarations recorded as calls; braces and
   calls inside string literals in C#, PHP, Dart and C/C++; a licence notice
   inside a file read as the next symbol's docstring; inheritance from a
   project type named like a standard one; calls in a second Svelte
@@ -300,7 +302,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   enclosing file or class; a decorator or computed key on the line runs
   where the class or object is defined, and an arrow constant written
   with a function-type annotation resolves its body calls through the
-  annotation. A generic arrow (`<T>(x: T) => ...`) is read as a function,
+  annotation, not through a local of its name the arrow declares; a
+  Java interface no longer types a TypeScript arrow's parameters where
+  it shares the name of the type the arrow is given. A generic arrow (`<T>(x: T) => ...`) is read as a function,
   each declarator of `const a = ..., b = ...` as a constant of its own
   with its own value, and each of `let` or `var` holding a function as
   that function, after a destructured first one and on the lines the
@@ -367,8 +371,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   member, and no class written elsewhere extends it.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer
   aborts the whole index, nor does resolving a member of a union one of
-  whose alternatives is a standard type, or a value a dynamic `import()`
-  gives over several lines. `index` no longer encodes every symbol twice.
+  whose alternatives is a standard type, a value a dynamic `import()`
+  gives over several lines, or a Dart variable whose value is a call of
+  a standard type's method. `index` no longer encodes every symbol twice.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root
   when given `--project-root` alone, and refuses a path outside it.
   scip-java no longer passes the Gradle init-script on Maven or sbt
@@ -419,8 +424,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   once; `min_score` applies after re-ranking; a stale or mismatched cache
   is detected; NaN scores and empty graphs are handled; a gated model
   fails with the licence page and login command. The MCP pre-warm waits
-  for the load it starts, where after 60 seconds it reported a timeout
-  while the load went on and a search started a second one.
+  for the load it starts, and a search that has waited `embedding_seconds`
+  for the load it starts is told the embeddings are loading while the
+  load goes on to cache them; both reported a timeout while the load went
+  on, and a search started a second one.
 - **Git history.** Changes over a range reaching the root commit, the
   default range in a one-commit repository, non-ASCII paths, SHA-256
   repositories and shallow-clone detection in worktrees.

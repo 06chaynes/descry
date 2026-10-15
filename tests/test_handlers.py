@@ -1359,8 +1359,10 @@ class TestSemanticText:
     }
 
     def _svc(self, tmp_path, case):
-        """A service whose semantic search is in the state named by `case`."""
-        config = _plain_config(tmp_path)
+        """A service whose semantic search is in the state named by `case`:
+        a load not done in time is loading for every search while it goes
+        on."""
+        config = _plain_config(tmp_path, embedding_timeout=0.01)
         _write_graph(config, nodes=[self.NODE])
         svc = DescryService(config)
         load_error = {
@@ -1373,6 +1375,8 @@ class TestSemanticText:
             def __init__(self, graph_path, **kwargs):
                 if load_error is not None:
                     raise load_error
+                if case == "loading":
+                    time.sleep(0.2)
 
             def search(self, query, limit=10):
                 if case == "search-fails":
@@ -1381,7 +1385,6 @@ class TestSemanticText:
 
         svc._semantic_available = case != "unavailable"
         svc._SemanticSearcher = Searcher
-        svc._semantic_cache["loading"] = case == "loading"
         if case == "no-graph":
             config.graph_path.unlink()
         return svc

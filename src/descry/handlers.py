@@ -1058,6 +1058,7 @@ class DescryService:
             "loading": False,
             "error": None,
         }
+        self._semantic_load = None
         self._git_cache = {"analyzer": None, "graph_mtime": None}
         self._dedup_cache: dict[str, tuple[float, str]] = {}
         self._max_dedup_entries = 100
@@ -1269,8 +1270,8 @@ class DescryService:
 
         Returns the cached SemanticSearcher, rebuilding if
         codebase_graph.json mtime changed. Returns None if embeddings are
-        unavailable (module missing or disabled) or if the graph file does
-        not exist.
+        unavailable (module missing or disabled), if the graph file does
+        not exist, or while a load is not done.
 
         Uses _semantic_cache_lock; construction runs in asyncio.to_thread so
         the event loop is not blocked by model load. Callers that want to
@@ -1294,31 +1295,36 @@ class DescryService:
             self._semantic_cache["loading"] = True
             self._semantic_cache["error"] = None
 
+        async def load():
+            try:
+                searcher = await asyncio.to_thread(self._new_searcher)
+                async with self._semantic_cache_lock:
+                    self._semantic_cache["mtime"] = mtime
+                    self._semantic_cache["instance"] = searcher
+                    self._semantic_cache["error"] = None
+                return searcher
+            except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and returned
+                async with self._semantic_cache_lock:
+                    self._semantic_cache["error"] = str(e)
+                logger.warning(f"Embeddings load failed: {e}")
+                return None
+            finally:
+                async with self._semantic_cache_lock:
+                    self._semantic_cache["loading"] = False
+
+        # The thread cannot be stopped: a load not done in time goes on and
+        # caches what it builds, and a search meanwhile is told it is loading.
+        self._semantic_load = asyncio.create_task(load())
         try:
-            searcher = await asyncio.wait_for(
-                asyncio.to_thread(self._new_searcher),
+            return await asyncio.wait_for(
+                asyncio.shield(self._semantic_load),
                 timeout=self.config.embedding_timeout,
             )
-            async with self._semantic_cache_lock:
-                self._semantic_cache["mtime"] = mtime
-                self._semantic_cache["instance"] = searcher
-                self._semantic_cache["error"] = None
-            return searcher
         except TimeoutError:
-            async with self._semantic_cache_lock:
-                self._semantic_cache["error"] = (
-                    f"Timeout loading embeddings ({self.config.embedding_timeout}s)"
-                )
-            logger.warning("Embeddings load timed out")
+            logger.warning(
+                f"Embeddings still loading after {self.config.embedding_timeout}s"
+            )
             return None
-        except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and returned
-            async with self._semantic_cache_lock:
-                self._semantic_cache["error"] = str(e)
-            logger.warning(f"Embeddings load failed: {e}")
-            return None
-        finally:
-            async with self._semantic_cache_lock:
-                self._semantic_cache["loading"] = False
 
     # --- Public API (handle_* → service methods) ---
 

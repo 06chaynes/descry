@@ -10112,7 +10112,7 @@ def _js_bindings(pattern, steps=()):
 
 
 def _blank_js_strings(
-    line: str, stack: list | None = None, keep=False, jsx=False
+    line: str, stack: list | None = None, keep=False, jsx=False, before=""
 ) -> str:
     """Return ``line`` with the text of "...", '...', `...` and /.../
     literals and of ``/* */`` comments turned to spaces, and everything a
@@ -10123,7 +10123,9 @@ def _blank_js_strings(
     that closes it. ``keep`` leaves the text of the literals that open on
     the line where it is, for a reader of what a literal holds: an import's
     module, a constant's value. With ``jsx``, the text of a JSX element is
-    turned to spaces too, and its tags and `{...}` expressions are kept."""
+    turned to spaces too, and its tags and `{...}` expressions are kept;
+    ``before`` is the code the line follows, which no line break ends
+    before a `<`."""
     out = []
     # open literals and comments: a quote character, a `${`'s brace depth,
     # `/*` for a comment still open, `<` or `</` for a JSX tag and `>` for
@@ -10210,7 +10212,7 @@ def _blank_js_strings(
                 and (tag := _JSX_TAG_RE.match(line, i))
                 and not _TS_TYPE_PARAMETERS_RE.match(line, i)
                 # An element starts where a value can.
-                and _js_regex_position("".join(out))
+                and _js_regex_position(before + "\n" + "".join(out))
             ):
                 stack.append("<")
                 out.append(tag.group())
@@ -10251,6 +10253,18 @@ def _blank_js_strings(
     while stack[-1:] in (['"'], ["'"]) and stack[-2:-1] != ["<"]:
         stack.pop()
     return "".join(out)[: len(line)]
+
+
+def _blank_js_lines(lines, keep=False, jsx=False):
+    """``_blank_js_strings`` of each of a file's ``lines``, read in turn."""
+    stack, blanked, before = [], [], ""
+    for line in lines:
+        blanked.append(_blank_js_strings(line, stack, keep, jsx, before))
+        if blanked[-1].strip():
+            # A `}` that ends a line is read as a block's, after which a
+            # statement starts.
+            before = "" if blanked[-1].rstrip().endswith("}") else blanked[-1]
+    return blanked
 
 
 # What a declaration ends with where a type is still to come, so that a `{`
@@ -10342,11 +10356,12 @@ class TSParser(BaseParser):
                     head,
                 )
                 assigned = re.search(r"(?<![\w$.])([\w$]+)\s*=(?![=>])\s*$", head)
-                if declared and (declared[2] or "").lstrip().startswith(("(", "<")):
-                    # The annotation is the closure's own function type:
-                    # read its parameters where they are written, not
-                    # through the variable — a definition the value
-                    # becomes does not hold it as a member.
+                if declared and declared[2]:
+                    # The annotation is the closure's own type: read its
+                    # parameters where they are written, not through the
+                    # variable — a definition the value becomes does not
+                    # hold it as a member. A declaration without a type
+                    # gives the closure none.
                     escaped = (
                         declared[2]
                         .strip()
@@ -10355,11 +10370,8 @@ class TSParser(BaseParser):
                         .replace(".", "::")
                     )
                     origin = f">{escaped}"
-                elif declared:
-                    # A declaration without a type gives the closure none.
-                    origin = f"={declared[1]}" if declared[2] else None
-                else:
-                    origin = f"={assigned[1]}" if assigned else None
+                elif assigned and not declared:
+                    origin = f"={assigned[1]}"
             if origin is None:
                 break
             self._closures.pop(0)
@@ -10715,9 +10727,8 @@ class TSParser(BaseParser):
         # ``code_lines`` is a line without its comments and with the text of
         # its literals blanked, for the names it binds and the braces
         # counted on it.
-        literals = []
         jsx = str(file_path).endswith(_JSX_EXTENSIONS)
-        code_lines = [_blank_js_strings(line, literals, jsx=jsx) for line in lines]
+        code_lines = _blank_js_lines(lines, jsx=jsx)
         bound = _js_bound("\n".join(code_lines))
         self.builder.js_bound[file_id] = bound.union(imported)
         # An imported name is what its module exports, whatever a field or
@@ -10912,10 +10923,7 @@ class TSParser(BaseParser):
 
         # Each of ``text_lines`` keeps the text of the literals that open on
         # it, and is the line the loop below reads.
-        literals = []
-        text_lines = [
-            _blank_js_strings(line, literals, keep=True, jsx=jsx) for line in lines
-        ]
+        text_lines = _blank_js_lines(lines, keep=True, jsx=jsx)
         # The `{` open where each line starts, innermost last, and the line
         # each `{` is closed on
         open_at, closes_on, braces = [], {}, []
@@ -13939,6 +13947,7 @@ class CallResolver:
         for an interface of that name. ``()`` where the writing is neither."""
         if (
             isinstance(written, str)
+            and written.startswith(("(", "<"))
             and "=>" in written
             and self.lang(scope_id) == "typescript"
         ):
@@ -13962,6 +13971,8 @@ class CallResolver:
                 self._returned_type(param.partition(":")[2].strip() or "any", scope_id)
                 for param in params
             )
+        if self.lang(scope_id) != "java":
+            return ()
         arguments = ()
         type_id = None
         if isinstance(written, tuple) and len(written) > 1:
@@ -14029,10 +14040,12 @@ class CallResolver:
         )
         if value is None and origin.startswith("@") and not read:
             return None, _UNRESOLVED
-        if value is None and origin.startswith("="):
+        reads_parameter = steps[:1] and steps[0].startswith("^")
+        if value is None and origin.startswith("=") and not reads_parameter:
             # A value held in a variable is no definition. What calling it
             # returns is what the function it holds declares, `>Type`, and
-            # not known without that.
+            # not known without that; a parameter of that function is of a
+            # type not known.
             declared = origin.partition(">")[2]
             held = declared and self._returned_type(declared, source_id)
             self._result = held or _OPAQUE
@@ -14311,10 +14324,8 @@ class CallResolver:
                 # the call is genuinely ambiguous.
                 if step == "?":
                     continue
-                # A standard alternative's member is the library's, read
-                # by none of this: the call is left unresolved.
                 outcomes = [
-                    None if one[0] == "outside" else self._attr(one, step, called=last)
+                    self._attr(one, step, called=last)
                     for one in value[1]
                     if isinstance(one, tuple)
                 ]
@@ -14509,17 +14520,7 @@ class CallResolver:
                 hit = None
                 value = self._name_value(expr, source_id, set())
             else:
-                name = expr.partition(">")[0]
-                hit = self.members.get(source_id, {}).get(name)
-                if (
-                    not hit
-                    and steps[:1]
-                    and steps[0].startswith("^")
-                    and source_id.rpartition("::")[2] == name
-                ):
-                    # A parameter of a closure that is the value of the name
-                    # it is read through, read in the closure's own body
-                    hit = source_id
+                hit = self.members.get(source_id, {}).get(expr.partition(">")[0])
                 value = ("def", hit) if hit else None
             if not hit and steps and self.lang(source_id) == "dart":
                 # `=value.call`: a variable holding `value` is called.
@@ -15167,7 +15168,10 @@ class CallResolver:
     def _attr(self, value, name, seen=None, called=False):
         """Value of attribute ``name`` of ``value``; ``called`` says the
         attribute is the callee itself rather than part of its receiver."""
-        kind, ref = value
+        kind, ref = value[:2]
+        if kind == "outside":
+            # A standard type's member is the library's, read by none of this.
+            return None
         if kind == "library":
             dotted = f"{ref}.{name}"
             return ("library", dotted) if dotted in _py_std_names() else _EXTERNAL
@@ -15339,7 +15343,15 @@ class CallResolver:
             for step in steps:
                 if not isinstance(value, tuple):
                     break
-                value = self._attr(value, step)
+                if value[0] == "outside":
+                    # A standard type's member is the library's.
+                    known, value = self.standard["dart"].member(value, step)
+                    value = value if known else None
+                else:
+                    value = self._attr(value, step)
+            if isinstance(value, tuple) and value[0] == "outside":
+                # What the library says the standard method called returns
+                return value
             return self._called(value) if isinstance(value, tuple) else value
         return declared and self._returned_type(declared, node_id)
 
@@ -15756,7 +15768,7 @@ class CallResolver:
     def _called(self, value, receiver=None):
         """Value returned by calling ``value``, a method of the type
         ``receiver`` where that is known."""
-        kind, ref = value
+        kind, ref = value[:2]
         if kind == "cls" or (kind == "def" and self.nodes[ref]["type"] == "Class"):
             return ("self", ref)
         if kind != "def":
