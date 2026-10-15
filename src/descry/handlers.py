@@ -1231,13 +1231,13 @@ class DescryService:
 
     async def _load_embeddings_background(self):
         async with self._semantic_cache_lock:
-            if (
-                self._semantic_cache["instance"] is not None
-                or self._semantic_cache["loading"]
-            ):
+            # A reindex replaces the cache, so a load writes only to its own.
+            cache = self._semantic_cache
+            if cache["instance"] is not None or cache["loading"]:
                 return
-            self._semantic_cache["loading"] = True
-            self._semantic_cache["error"] = None
+            cache["loading"] = True
+            cache["error"] = None
+            mtime = self._graph_mtime() or 0
 
         try:
 
@@ -1254,16 +1254,16 @@ class DescryService:
             searcher = await asyncio.to_thread(load_sync)
 
             async with self._semantic_cache_lock:
-                self._semantic_cache["mtime"] = self._graph_mtime() or 0
-                self._semantic_cache["instance"] = searcher
+                cache["mtime"] = mtime
+                cache["instance"] = searcher
                 logger.info("Pre-warm: embeddings ready")
         except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and logged
             async with self._semantic_cache_lock:
-                self._semantic_cache["error"] = str(e)
+                cache["error"] = str(e)
             logger.warning(f"Pre-warm: embeddings failed: {e}")
         finally:
             async with self._semantic_cache_lock:
-                self._semantic_cache["loading"] = False
+                cache["loading"] = False
 
     async def _get_semantic_searcher(self):
         """Single-flight accessor for the semantic searcher.
@@ -1276,7 +1276,8 @@ class DescryService:
         Uses _semantic_cache_lock; construction runs in asyncio.to_thread so
         the event loop is not blocked by model load. Callers that want to
         surface an "embeddings loading" UX string should check
-        _semantic_cache["loading"] / ["error"] before calling this helper.
+        _semantic_cache["error"] when this returns None: it is the last
+        failed load's until a load succeeds.
         """
         if not self._semantic_available or self._SemanticSearcher is None:
             return None
@@ -1285,32 +1286,29 @@ class DescryService:
             return None
 
         async with self._semantic_cache_lock:
-            if (
-                self._semantic_cache["instance"] is not None
-                and self._semantic_cache["mtime"] == mtime
-            ):
-                return self._semantic_cache["instance"]
-            if self._semantic_cache["loading"]:
+            cache = self._semantic_cache
+            if cache["instance"] is not None and cache["mtime"] == mtime:
+                return cache["instance"]
+            if cache["loading"]:
                 return None
-            self._semantic_cache["loading"] = True
-            self._semantic_cache["error"] = None
+            cache["loading"] = True
 
         async def load():
             try:
                 searcher = await asyncio.to_thread(self._new_searcher)
                 async with self._semantic_cache_lock:
-                    self._semantic_cache["mtime"] = mtime
-                    self._semantic_cache["instance"] = searcher
-                    self._semantic_cache["error"] = None
+                    cache["mtime"] = mtime
+                    cache["instance"] = searcher
+                    cache["error"] = None
                 return searcher
             except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and returned
                 async with self._semantic_cache_lock:
-                    self._semantic_cache["error"] = str(e)
+                    cache["error"] = str(e)
                 logger.warning(f"Embeddings load failed: {e}")
                 return None
             finally:
                 async with self._semantic_cache_lock:
-                    self._semantic_cache["loading"] = False
+                    cache["loading"] = False
 
         # The thread cannot be stopped: a load not done in time goes on and
         # caches what it builds, and a search meanwhile is told it is loading.
@@ -1677,10 +1675,10 @@ class DescryService:
                         # Reset the cache, then construct in a thread so the
                         # event loop is not blocked.
                         async with self._semantic_cache_lock:
-                            self._semantic_cache = {
+                            cache = self._semantic_cache = {
                                 "mtime": 0,
                                 "instance": None,
-                                "loading": False,
+                                "loading": True,
                                 "error": None,
                             }
                         logger.info("Generating embeddings for semantic search...")
@@ -1704,14 +1702,17 @@ class DescryService:
                         # Seed the cache with the freshly-built instance so
                         # the next search() call reuses it.
                         async with self._semantic_cache_lock:
-                            self._semantic_cache["mtime"] = self._graph_mtime() or 0
-                            self._semantic_cache["instance"] = searcher
+                            cache["mtime"] = self._graph_mtime() or 0
+                            cache["instance"] = searcher
                         embeddings_status = (
                             f"\nEmbeddings: {len(searcher.nodes):,} nodes indexed"
                         )
                     except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch; reported in the index summary
                         embeddings_status = f"\nEmbeddings: Failed ({e})"
                         logger.warning(f"Embeddings generation failed: {e}")
+                    finally:
+                        async with self._semantic_cache_lock:
+                            cache["loading"] = False
 
                 return f"Index complete.{scip_status}{embeddings_status}\n{output}"
             else:
@@ -2355,8 +2356,8 @@ class DescryService:
         elif not self.config.graph_path.exists():
             reason, error = "no_graph", _GRAPH_NOT_FOUND
         elif (searcher := await self._get_semantic_searcher()) is None:
-            # A load in flight has cleared the error; a failed one has set it,
-            # to an empty string if the exception carried no message.
+            # A failed load has set the error, to an empty string if the
+            # exception carried no message, and a load that succeeds clears it.
             load_error = self._semantic_cache["error"]
             if load_error is None:
                 reason, error = "loading", "Embeddings are loading. Try again shortly."

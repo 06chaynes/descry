@@ -5934,7 +5934,8 @@ class TestTypeScriptCallResolution:
         regular expression is no comment, and a template literal opened
         with `${` on one line and closed on a later one keeps the lines
         between out of the block count. A `/` straight after a regular
-        expression divides, so the comment after it is one."""
+        expression divides, so the comment after it is one, as does one that
+        starts a line after a value."""
         builder = _index(
             tmp_path,
             {
@@ -5958,6 +5959,12 @@ class TestTypeScriptCallResolution:
                     return parse(s);
                 }
 
+                function share(a: number) {
+                    return a
+                        / parse("") /
+                        2;
+                }
+
                 function parse(s: string) {}
                 function emit(s: string) {}
                 """,
@@ -5976,6 +5983,7 @@ class TestTypeScriptCallResolution:
         assert span["ratio"] == (16, 19)
         assert _calls(builder, "FILE:g.ts::parseUrl") == ["FILE:g.ts::parse"]
         assert _calls(builder, "FILE:g.ts::describe") == ["FILE:g.ts::emit"]
+        assert _calls(builder, "FILE:g.ts::share") == ["FILE:g.ts::parse"]
 
     def test_a_literal_keeps_its_text_where_it_opens(self, tmp_path):
         """A constant's value and an import's module are read with the text
@@ -7687,7 +7695,8 @@ class TestTypeScriptCallResolution:
         it names is pinned to a project definition. A method called
         `catch` takes no parameter, a comment or JSX text declares no name,
         what follows a `/* */` comment is read, and a `<` that goes on with
-        a comparison from the line before opens no element."""
+        a comparison from the line before opens no element, as one where a
+        statement or a value starts does."""
         builder = _index(
             tmp_path,
             {
@@ -7732,12 +7741,21 @@ class TestTypeScriptCallResolution:
                         <b && b > 0;
                     setup();
                 }
+                export function Note(c) {
+                    if (c)
+                        <p>setup()</p>;
+                    const shown = /setup()/g
+                    <p>setup()</p>;
+                    return [...
+                        <p>setup()</p>];
+                }
                 """,
             },
         )
         assert _calls(builder, "FILE:a.ts::draw") == ["FILE:a.ts::setup"] * 2
         assert _calls(builder, "FILE:c.ts::report") == []
         assert _calls(builder, "FILE:d.tsx::show") == ["FILE:a.ts::setup"]
+        assert _calls(builder, "FILE:d.tsx::Note") == []
         assert "page" in builder.js_bound["FILE:c.ts"]
         assert "pages" not in builder.js_bound["FILE:c.ts"]
         assert _calls(builder, "FILE:b.ts::print") == [

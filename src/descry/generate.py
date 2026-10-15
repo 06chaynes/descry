@@ -9952,8 +9952,8 @@ _TS_TYPE_PARAMETERS_RE = re.compile(
 # The files JSX can be written in
 _JSX_EXTENSIONS = (".tsx", ".js", ".jsx", ".mjs", ".cjs")
 # A /.../ literal with its flags, before what can follow a value. One starts
-# where a value can: at the start of a line, or after what no value ends
-# with.
+# where a value can: after what no value ends with, on its line or the one
+# before.
 _JS_REGEX_RE = re.compile(
     r"/(?:[^/\\\[*]|\\.|\[(?:[^\]\\]|\\.)*\])(?:[^/\\\[]|\\.|\[(?:[^\]\\]|\\.)*\])*/[a-z]*(?=\s*(?:[.,;:)\]}|&?/]|$))"
 )
@@ -9978,24 +9978,41 @@ _JS_OPERAND_WORDS = {
     "await",
     "do",
     "else",
+    "default",
+    "break",
+    "continue",
 }
+# The keyword whose parenthesised head a statement follows
+_JS_STATEMENT_HEAD_RE = re.compile(r"(?<![\w$.])(?:if|for(?:\s+await)?|while|with)\s*$")
 
 
 def _js_regex_position(text):
     """Whether a ``/`` after ``text`` can open a regular expression: true
     where no value precedes it, so at a line's start or after an operator,
-    a bracket that opens, or a keyword that expects an operand. False after
-    what ends a value: a word, `)`, `]`, `}`, `.`, a postfix `++`/`--`, a
-    quote a blanked literal leaves, and ``/`` itself (`x / /re/`)."""
+    a bracket that opens, a spread's `...`, the `)` of an `if`, `for`,
+    `while` or `with` head, or a keyword that expects an operand. False
+    after what ends a value: a word, a member's name, any other `)`, `]`,
+    `}`, `.`, a postfix `++`/`--`, a quote a blanked literal leaves, and
+    ``/`` itself (`x / /re/`)."""
     tail = text.rstrip()
     if not tail:
         return True
     if tail.endswith(("++", "--")):
         return False
+    if tail.endswith("..."):
+        return True
     word = _JS_OPERAND_WORD_RE.search(tail)
     if word:
-        return word.group() in _JS_OPERAND_WORDS
-    return tail[-1] not in ")]}.`'\""
+        member = tail[: word.start()].rstrip().endswith(".")
+        return word.group() in _JS_OPERAND_WORDS and not member
+    if tail[-1] == ")":
+        depth = 0
+        for at in range(len(tail) - 1, -1, -1):
+            depth += {")": 1, "(": -1}.get(tail[at], 0)
+            if not depth:
+                return bool(_JS_STATEMENT_HEAD_RE.search(tail, 0, at))
+        return False
+    return tail[-1] not in "]}.`'\""
 
 
 # The end of a blanked /.../, "...", '...' or `...` literal a member is read of
@@ -10125,7 +10142,7 @@ def _blank_js_strings(
     module, a constant's value. With ``jsx``, the text of a JSX element is
     turned to spaces too, and its tags and `{...}` expressions are kept;
     ``before`` is the code the line follows, which no line break ends
-    before a `<`."""
+    before a `<` or a `/`."""
     out = []
     # open literals and comments: a quote character, a `${`'s brace depth,
     # `/*` for a comment still open, `<` or `</` for a JSX tag and `>` for
@@ -10133,6 +10150,9 @@ def _blank_js_strings(
     stack = [] if stack is None else stack
     carried = len(stack)
     ended = None  # how much of `out` there was where a /.../ literal ended
+    # What ``keep`` shows at a place of `out`, which holds the blanked line
+    # either way, so that what is code is read alike with ``keep`` and without
+    kept_at = {}
     i = 0
     while i < len(line):
         ch = line[i]
@@ -10188,7 +10208,9 @@ def _blank_js_strings(
             # The text of a literal that opened on this line.
             kept = keep and len(stack) > carried
             if ch == "\\":
-                out.append(line[i : i + 2] if kept else "  ")
+                if kept:
+                    kept_at[len(out)] = line[i : i + 2]
+                out.append("  ")
                 i += 2
                 continue
             if top == "`" and line.startswith("${", i):
@@ -10202,7 +10224,9 @@ def _blank_js_strings(
                 # A literal carried over has ended.
                 carried = len(stack)
                 ch = " "
-            out.append(ch if ch == top or kept else " ")
+            if kept:
+                kept_at[len(out)] = ch
+            out.append(ch if ch == top else " ")
         else:
             if ch in ('"', "`") or (ch == "'" and _JS_SINGLE_QUOTED_RE.match(line, i)):
                 stack.append(ch)
@@ -10223,12 +10247,11 @@ def _blank_js_strings(
                 and (regex := _JS_REGEX_RE.match(line, i))
                 # Straight after a /.../ literal a `/` divides.
                 and (ended is None or "".join(out[ended:]).strip())
-                and _js_regex_position("".join(out))
+                and _js_regex_position(before + "\n" + "".join(out))
             ):
                 if keep:
-                    out.append(regex.group())
-                else:
-                    out.append(f"/{' ' * (len(regex.group()) - 1)}")
+                    kept_at[len(out)] = regex.group()
+                out.append(f"/{' ' * (len(regex.group()) - 1)}")
                 ended = len(out)
                 i = regex.end()
                 continue
@@ -10252,18 +10275,21 @@ def _blank_js_strings(
     # one of its tag's attributes go on over the next line.
     while stack[-1:] in (['"'], ["'"]) and stack[-2:-1] != ["<"]:
         stack.pop()
-    return "".join(out)[: len(line)]
+    return "".join(kept_at.get(at, piece) for at, piece in enumerate(out))[: len(line)]
 
 
-def _blank_js_lines(lines, keep=False, jsx=False):
-    """``_blank_js_strings`` of each of a file's ``lines``, read in turn."""
+def _blank_js_lines(lines, keep=False, jsx=False, code=None):
+    """``_blank_js_strings`` of each of a file's ``lines``, read in turn.
+    ``code`` is what this returns for them without ``keep``, the code a line
+    follows."""
     stack, blanked, before = [], [], ""
-    for line in lines:
+    for row, line in enumerate(lines):
         blanked.append(_blank_js_strings(line, stack, keep, jsx, before))
-        if blanked[-1].strip():
+        read = (code or blanked)[row]
+        if read.strip():
             # A `}` that ends a line is read as a block's, after which a
             # statement starts.
-            before = "" if blanked[-1].rstrip().endswith("}") else blanked[-1]
+            before = "" if read.rstrip().endswith("}") else read
     return blanked
 
 
@@ -10923,7 +10949,7 @@ class TSParser(BaseParser):
 
         # Each of ``text_lines`` keeps the text of the literals that open on
         # it, and is the line the loop below reads.
-        text_lines = _blank_js_lines(lines, keep=True, jsx=jsx)
+        text_lines = _blank_js_lines(lines, keep=True, jsx=jsx, code=code_lines)
         # The `{` open where each line starts, innermost last, and the line
         # each `{` is closed on
         open_at, closes_on, braces = [], {}, []
@@ -11632,7 +11658,7 @@ class TSParser(BaseParser):
             # Calls (regex fallback - only used if ast-grep unavailable)
             # Module-level calls are sourced at the file, as with ast-grep.
             if not self.builder.use_ast_grep:
-                code = _blank_js_strings(line)
+                code = code_lines[lineno - 1]
                 # The type arguments of a call are no part of its chain.
                 code = _JS_TYPE_ARGUMENTS_RE.sub(lambda m: " " * len(m[0]), code)
                 if _TS_VARIABLE_RE.match(code):

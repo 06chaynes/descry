@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -360,6 +361,7 @@ class TestDescryServiceIndex:
             def __init__(self, graph_path, **kwargs):
                 self.kwargs = kwargs
                 self.model_loads = 0
+                self.loading = svc._semantic_cache["loading"]
                 built.append(self)
 
             def ensure_model(self):
@@ -374,10 +376,25 @@ class TestDescryServiceIndex:
     async def test_index_loads_the_childs_embeddings_instead_of_rebuilding(
         self, indexed
     ):
+        """A search meanwhile is told they are loading, and a load a search
+        started before the index caches nothing over them."""
         svc, built = indexed
+        release = threading.Event()
+
+        class Earlier:
+            def __init__(self, graph_path, **kwargs):
+                release.wait(5)
+
+        svc._SemanticSearcher, searcher = Earlier, svc._SemanticSearcher
+        svc.config.embedding_timeout = 0.01
+        assert await svc._get_semantic_searcher() is None
+        svc._SemanticSearcher = searcher
         result = await svc.index()
+        release.set()
+        await svc._semantic_load
         assert "Index complete" in result
         assert len(built) == 1
+        assert built[0].loading
         assert not built[0].kwargs.get("force_rebuild")
         assert built[0].model_loads == 0, "a one-shot index must not load the model"
         assert svc._semantic_cache["instance"] is built[0]
@@ -1361,7 +1378,7 @@ class TestSemanticText:
     def _svc(self, tmp_path, case):
         """A service whose semantic search is in the state named by `case`:
         a load not done in time is loading for every search while it goes
-        on."""
+        on, and a silent failure comes after the search has stopped waiting."""
         config = _plain_config(tmp_path, embedding_timeout=0.01)
         _write_graph(config, nodes=[self.NODE])
         svc = DescryService(config)
@@ -1373,10 +1390,10 @@ class TestSemanticText:
 
         class Searcher:
             def __init__(self, graph_path, **kwargs):
+                if case in ("loading", "load-fails-silently"):
+                    time.sleep(0.2)
                 if load_error is not None:
                     raise load_error
-                if case == "loading":
-                    time.sleep(0.2)
 
             def search(self, query, limit=10):
                 if case == "search-fails":
@@ -1443,7 +1460,10 @@ class TestSemanticText:
     async def test_load_failure_without_a_message_is_not_reported_as_loading(
         self, tmp_path
     ):
+        """Nor is a retry of a failed load."""
         svc = self._svc(tmp_path, "load-fails-silently")
+        assert (await svc.semantic_data("q"))["reason"] == "loading"
+        await svc._semantic_load
         data = await svc.semantic_data("q")
         assert (data["ok"], data["reason"]) == (False, "failed")
         assert data["error"] == "Semantic search unavailable."

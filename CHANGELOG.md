@@ -282,10 +282,14 @@ Python SDK v2, and a full-tree review's findings are fixed.
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a
   parameter of an arrow constant or of an arrow assigned to a variable,
-  dropped as external where it is left unresolved; a `<` that goes on
-  with a comparison from the line before, read as a JSX element that hid
-  the rest of the file; chained calls; declarations recorded as calls; braces and
-  calls inside string literals in C#, PHP, Dart and C/C++; a licence notice
+  dropped as external where it is left unresolved; a `<` or `/` that
+  goes on with a comparison or a division from the line before, read as
+  a JSX element that hid the rest of the file or as a regular
+  expression; a JSX element or regular expression after the head of an
+  `if`, `for`, `while` or `with`, a spread's `...` or `default`, read as
+  a comparison or a division; chained calls; declarations recorded as
+  calls; braces and calls inside string literals in C#, PHP, Dart and
+  C/C++; a licence notice
   inside a file read as the next symbol's docstring; inheritance from a
   project type named like a standard one; calls in a second Svelte
   `<script>` block; calls in a nested Python function's default arguments;
@@ -427,7 +431,11 @@ Python SDK v2, and a full-tree review's findings are fixed.
   for the load it starts, and a search that has waited `embedding_seconds`
   for the load it starts is told the embeddings are loading while the
   load goes on to cache them; both reported a timeout while the load went
-  on, and a search started a second one.
+  on, and a search started a second one. A search during a reindex's load
+  is told the embeddings are loading rather than starting another, a load
+  begun before a reindex no longer caches the old graph's embeddings as
+  the new one's, and a failed load is reported to every search until one
+  succeeds.
 - **Git history.** Changes over a range reaching the root commit, the
   default range in a one-commit repository, non-ASCII paths, SHA-256
   repositories and shallow-clone detection in worktrees.
