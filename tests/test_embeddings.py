@@ -1006,7 +1006,7 @@ class TestCacheDirPropagation:
 
     Without it the graph lands in the configured directory while embeddings go
     to `<configured>/.descry_cache`, so a warm index reads as missing and the
-    60s pre-warm rebuilds it from scratch.
+    pre-warm rebuilds it from scratch.
     """
 
     def test_service_passes_cache_dir_to_the_searcher(self):

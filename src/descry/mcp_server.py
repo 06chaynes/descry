@@ -140,6 +140,11 @@ async def server_lifespan(_server: MCPServer):
         yield
     finally:
         for task in tasks:
+            if not task.done():
+                logger.info(
+                    "Pre-warm: the server exits once the embeddings it is "
+                    "loading are cached"
+                )
             task.cancel()
 
 

@@ -277,8 +277,12 @@ Python SDK v2, and a full-tree review's findings are fixed.
   generic receivers, one-line functions; Ruby one-line classes and modules,
   `#` docstrings; C# properties and verbatim strings; TypeScript and
   JavaScript `.jsx`/`.mjs`/`.cjs`/`.mts`/`.cts` files, `$` identifiers,
-  typed arrow constants, file-level calls; calls in comments and string
-  literals; chained calls; declarations recorded as calls; braces and
+  typed arrow constants, file-level calls; calls in comments, string
+  literals and JSX text; the character after a JavaScript or TypeScript
+  `/* */` comment, which was dropped; a `require` or dynamic `import()`
+  with a comment before its module or written over lines; a call on a
+  parameter of an arrow constant, dropped as external where it is left
+  unresolved; chained calls; declarations recorded as calls; braces and
   calls inside string literals in C#, PHP, Dart and C/C++; a licence notice
   inside a file read as the next symbol's docstring; inheritance from a
   project type named like a standard one; calls in a second Svelte
@@ -362,7 +366,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   it shadows a class of its name written outside, the two share no
   member, and no class written elsewhere extends it.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer
-  aborts the whole index. `index` no longer encodes every symbol twice.
+  aborts the whole index, nor does resolving a member of a union one of
+  whose alternatives is a standard type, or a value a dynamic `import()`
+  gives over several lines. `index` no longer encodes every symbol twice.
   `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root
   when given `--project-root` alone, and refuses a path outside it.
   scip-java no longer passes the Gradle init-script on Maven or sbt
@@ -412,7 +418,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   another process's temporary; concurrent first searches load the model
   once; `min_score` applies after re-ranking; a stale or mismatched cache
   is detected; NaN scores and empty graphs are handled; a gated model
-  fails with the licence page and login command.
+  fails with the licence page and login command. The MCP pre-warm waits
+  for the load it starts, where after 60 seconds it reported a timeout
+  while the load went on and a search started a second one.
 - **Git history.** Changes over a range reaching the root commit, the
   default range in a one-commit repository, non-ASCII paths, SHA-256
   repositories and shallow-clone detection in worktrees.

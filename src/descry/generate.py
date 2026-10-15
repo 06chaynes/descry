@@ -9215,12 +9215,11 @@ _TS_DECLARATIONS = (
 )
 
 
-# Where JavaScript declares names: a variable or what a pattern takes apart,
-# a function, a type, and what a `catch` is handed
 # A number written with a `.` at its end (`1.`), whose `.` is no member's
 _JS_NUMBER_DOT = r"(?<![\w$])\d\w*\."
-# A member's name, written after a `.` or a `#`, is read as one and binds
-# nothing.
+# Where JavaScript declares names: a variable or what a pattern takes apart,
+# a function, a type, and what a `catch` is handed. A member's name, written
+# after a `.` or a `#`, is read as one and binds nothing.
 _JS_DECLARED_RE = re.compile(
     _JS_NUMBER_DOT + r"|[.#]\s*[\w$]+"
     r"|\b(?:const|let|var|function\*?|class|interface|type|enum|namespace)\s+"
@@ -9239,7 +9238,7 @@ _JS_BLOCK_RE = re.compile(r"\b(?:if|for|while|switch|catch|with)\s*$")
 def _js_member_name(lines, row, column):
     """Whether the word at column ``column`` of line ``row`` of ``lines`` is
     a member's name: written after a `.` or a `#`, on its line or one
-    above."""
+    above, where the `.` ends no number."""
     before = lines[row][:column]
     while not before.strip() and row > 0:
         row -= 1
@@ -9917,10 +9916,11 @@ _TS_LINE_MEMBER_RE = re.compile(
     rf"\s*{_TS_MEMBER_MODIFIERS}(?:(get|set)\s+)?(?:\*\s*)?"
     rf"({_TS_WRITTEN_MEMBER_NAME})\s*(?:<[^>]*>)?\s*\("
 )
-# `const name = require("m")`, `const { a, b: c } = await import("m")`
+# `const name = require("m")`, `const { a, b: c } = await import("m")`, a
+# `/* */` comment before the module too
 _TS_REQUIRE_RE = re.compile(
     r"""\b(?:const|let|var)\s+([\w$]+|\{[^}]*\})\s*=\s*(?:await\s+)?"""
-    r"""(?:require|import)\(\s*['"]([^'"]+)['"]\s*\)"""
+    r"""(?:require|import)\(\s*(?:/\*(?:[^*]|\*(?!/))*\*/\s*)*['"]([^'"]+)['"]\s*\)"""
 )
 _TS_PARAM_MODIFIERS = ("...", "public", "private", "protected", "readonly")
 # `export * from "<specifier>"`, `export { <clause> } from "<specifier>"` and,
@@ -9939,6 +9939,18 @@ _TS_IMPORT_RE = re.compile(
 
 # A '...' literal closed on its line; a lone apostrophe, as in JSX text, is not one.
 _JS_SINGLE_QUOTED_RE = re.compile(r"'(?:[^'\\]|\\.)*'")
+# A JSX element's opening tag up to its attributes: its name with the type
+# arguments TypeScript gives it, or no name for a fragment's `<>`
+_JSX_TAG_RE = re.compile(
+    r"<(?:[A-Za-z_$][\w$.:-]*(?:\s*<[^<>]*(?:<[^<>]*>[^<>]*)*>)?(?=[\s/>{]|$)|(?=>))"
+)
+# Type parameters where a value can start, which a `.tsx` file writes as
+# `<T,>`, `<T extends U>` or `<T = U>`, and as `<T>` before a parameter list
+_TS_TYPE_PARAMETERS_RE = re.compile(
+    r"<\s*(?:const\s+)?[\w$]+\s*(?:,|=|extends\b|>\s*\()"
+)
+# The files JSX can be written in
+_JSX_EXTENSIONS = (".tsx", ".js", ".jsx", ".mjs", ".cjs")
 # A /.../ literal with its flags, before what can follow a value. One starts
 # where a value can: at the start of a line, or after what no value ends
 # with.
@@ -10099,7 +10111,9 @@ def _js_bindings(pattern, steps=()):
         yield name, steps
 
 
-def _blank_js_strings(line: str, stack: list | None = None, keep=False) -> str:
+def _blank_js_strings(
+    line: str, stack: list | None = None, keep=False, jsx=False
+) -> str:
     """Return ``line`` with the text of "...", '...', `...` and /.../
     literals and of ``/* */`` comments turned to spaces, and everything a
     ``//`` comment covers cut. The `${...}` expressions of a template
@@ -10108,10 +10122,12 @@ def _blank_js_strings(line: str, stack: list | None = None, keep=False) -> str:
     carried over from an earlier line is blanked together with the quote
     that closes it. ``keep`` leaves the text of the literals that open on
     the line where it is, for a reader of what a literal holds: an import's
-    module, a constant's value."""
+    module, a constant's value. With ``jsx``, the text of a JSX element is
+    turned to spaces too, and its tags and `{...}` expressions are kept."""
     out = []
     # open literals and comments: a quote character, a `${`'s brace depth,
-    # or `/*` for a comment still open
+    # `/*` for a comment still open, `<` or `</` for a JSX tag and `>` for
+    # an element's text
     stack = [] if stack is None else stack
     carried = len(stack)
     ended = None  # how much of `out` there was where a /.../ literal ended
@@ -10129,6 +10145,43 @@ def _blank_js_strings(line: str, stack: list | None = None, keep=False) -> str:
             carried = min(carried, len(stack))
             out.append(" " * (end + 2 - i))
             i = end + 2
+            continue
+        elif top == ">":
+            # An element's text, up to a `{...}` or a tag in it
+            if ch == "{":
+                stack.append(0)
+            elif line.startswith("</", i):
+                stack.append("</")
+            elif tag := _JSX_TAG_RE.match(line, i):
+                stack.append("<")
+                out.append(tag.group())
+                i = tag.end()
+                continue
+            out.append(ch if ch in "{<" else " ")
+        elif top in ("<", "</"):
+            # A tag: its name, its attributes, their "..." and {...} values
+            if ch in "\"'":
+                stack.append(ch)
+            elif ch == "{":
+                stack.append(0)
+            elif ch == "/" and line[i + 1 : i + 2] == "/":
+                break
+            elif ch == "/" and line[i + 1 : i + 2] == "*":
+                stack.append("/*")
+                out.append("  ")
+                i += 2
+                continue
+            elif ch == ">" and top == "<":
+                stack[-1] = ">"
+            elif ch == ">" or line.startswith("/>", i):
+                # A closing tag, or a tag that closes itself, ends its element.
+                del stack[-2 if top == "</" else -1 :]
+                carried = min(carried, len(stack))
+                if ch == "/":
+                    out.append("/")
+                    i += 1
+                ch = ">"
+            out.append(ch)
         elif isinstance(top, str):
             # The text of a literal that opened on this line.
             kept = keep and len(stack) > carried
@@ -10151,6 +10204,18 @@ def _blank_js_strings(line: str, stack: list | None = None, keep=False) -> str:
         else:
             if ch in ('"', "`") or (ch == "'" and _JS_SINGLE_QUOTED_RE.match(line, i)):
                 stack.append(ch)
+            elif (
+                jsx
+                and ch == "<"
+                and (tag := _JSX_TAG_RE.match(line, i))
+                and not _TS_TYPE_PARAMETERS_RE.match(line, i)
+                # An element starts where a value can.
+                and _js_regex_position("".join(out))
+            ):
+                stack.append("<")
+                out.append(tag.group())
+                i = tag.end()
+                continue
             elif (
                 ch == "/"
                 and (regex := _JS_REGEX_RE.match(line, i))
@@ -10181,8 +10246,9 @@ def _blank_js_strings(line: str, stack: list | None = None, keep=False) -> str:
                     stack[-1] -= 1
             out.append(ch)
         i += 1
-    # Only a template literal or a block comment goes on over the next line.
-    while stack[-1:] in (['"'], ["'"]):
+    # Only a template literal, a block comment, a JSX element and the value of
+    # one of its tag's attributes go on over the next line.
+    while stack[-1:] in (['"'], ["'"]) and stack[-2:-1] != ["<"]:
         stack.pop()
     return "".join(out)[: len(line)]
 
@@ -10289,9 +10355,11 @@ class TSParser(BaseParser):
                         .replace(".", "::")
                     )
                     origin = f">{escaped}"
+                elif declared:
+                    # A declaration without a type gives the closure none.
+                    origin = f"={declared[1]}" if declared[2] else None
                 else:
-                    given = declared or assigned
-                    origin = f"={given[1]}" if given else None
+                    origin = f"={assigned[1]}" if assigned else None
             if origin is None:
                 break
             self._closures.pop(0)
@@ -10491,8 +10559,11 @@ class TSParser(BaseParser):
             for column, char in enumerate(line):
                 depth += (char == "(") - (char == ")")
                 if not depth:
+                    # A `(` no call was read at, as `import(`'s, holds no
+                    # call's result.
+                    edge = self._opens[opened[0]]
                     ended = not line[column + 1 :].strip(" ;")
-                    return f"#{self._opens[opened[0]]}" if ended else None
+                    return f"#{edge}" if ended and edge is not None else None
         return None
 
     def _ends_value(self, code, edge):
@@ -10629,7 +10700,11 @@ class TSParser(BaseParser):
                     self.builder.imports.setdefault(file_id, {})[local[0]] = specifier
                     if part.split()[0] == "*":
                         modules[local[0]] = specifier
-        for clause, specifier in _TS_REQUIRE_RE.findall(content):
+        # The lines a `require` or an `import()` binds names on
+        required = set()
+        for found in _TS_REQUIRE_RE.finditer(content):
+            clause, specifier = found.groups()
+            required.add(content.count("\n", 0, found.start()))
             for part in re.split(r"[{},]", clause):
                 # `name`, or `name: local` in a destructuring pattern
                 local = part.rpartition(":")[2].strip()
@@ -10641,7 +10716,8 @@ class TSParser(BaseParser):
         # its literals blanked, for the names it binds and the braces
         # counted on it.
         literals = []
-        code_lines = [_blank_js_strings(line, literals) for line in lines]
+        jsx = str(file_path).endswith(_JSX_EXTENSIONS)
+        code_lines = [_blank_js_strings(line, literals, jsx=jsx) for line in lines]
         bound = _js_bound("\n".join(code_lines))
         self.builder.js_bound[file_id] = bound.union(imported)
         # An imported name is what its module exports, whatever a field or
@@ -10837,7 +10913,9 @@ class TSParser(BaseParser):
         # Each of ``text_lines`` keeps the text of the literals that open on
         # it, and is the line the loop below reads.
         literals = []
-        text_lines = [_blank_js_strings(line, literals, keep=True) for line in lines]
+        text_lines = [
+            _blank_js_strings(line, literals, keep=True, jsx=jsx) for line in lines
+        ]
         # The `{` open where each line starts, innermost last, and the line
         # each `{` is closed on
         open_at, closes_on, braces = [], {}, []
@@ -11715,7 +11793,7 @@ class TSParser(BaseParser):
                 # defines a function may declare the names in that, and one
                 # a `require` binds is the module's.
                 if scope[0] not in (file_id, *class_ids) and not (
-                    continuing or own_defs or _TS_REQUIRE_RE.search(code)
+                    continuing or own_defs or i in required
                 ):
                     for name, last in names:
                         declared_names.setdefault(scope[:3], {}).setdefault(
@@ -14233,8 +14311,10 @@ class CallResolver:
                 # the call is genuinely ambiguous.
                 if step == "?":
                     continue
+                # A standard alternative's member is the library's, read
+                # by none of this: the call is left unresolved.
                 outcomes = [
-                    self._attr(one, step, called=last)
+                    None if one[0] == "outside" else self._attr(one, step, called=last)
                     for one in value[1]
                     if isinstance(one, tuple)
                 ]
@@ -14429,7 +14509,17 @@ class CallResolver:
                 hit = None
                 value = self._name_value(expr, source_id, set())
             else:
-                hit = self.members.get(source_id, {}).get(expr.partition(">")[0])
+                name = expr.partition(">")[0]
+                hit = self.members.get(source_id, {}).get(name)
+                if (
+                    not hit
+                    and steps[:1]
+                    and steps[0].startswith("^")
+                    and source_id.rpartition("::")[2] == name
+                ):
+                    # A parameter of a closure that is the value of the name
+                    # it is read through, read in the closure's own body
+                    hit = source_id
                 value = ("def", hit) if hit else None
             if not hit and steps and self.lang(source_id) == "dart":
                 # `=value.call`: a variable holding `value` is called.

@@ -1248,18 +1248,14 @@ class DescryService:
                 searcher.ensure_model()
                 return searcher
 
-            searcher = await asyncio.wait_for(
-                asyncio.to_thread(load_sync), timeout=60.0
-            )
+            # No timeout: the thread cannot be stopped, so a load given up on
+            # would go on building the cache while a search started another.
+            searcher = await asyncio.to_thread(load_sync)
 
             async with self._semantic_cache_lock:
                 self._semantic_cache["mtime"] = self._graph_mtime() or 0
                 self._semantic_cache["instance"] = searcher
                 logger.info("Pre-warm: embeddings ready")
-        except TimeoutError:
-            async with self._semantic_cache_lock:
-                self._semantic_cache["error"] = "Timeout loading embeddings (60s)"
-            logger.warning("Pre-warm: embeddings load timed out")
         except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and logged
             async with self._semantic_cache_lock:
                 self._semantic_cache["error"] = str(e)

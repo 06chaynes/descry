@@ -4786,7 +4786,8 @@ class TestTypeScriptCallResolution:
 
     def test_arrow_assigned_a_function_type_reads_its_params(self, tmp_path):
         """`const f: (x: Dog) => Dog = (y) => y.fetch()` types `y`; the call
-        is the arrow's, on its own line."""
+        is the arrow's, on its own line. A type named for the function, or a
+        pattern typed where it is written, leaves the call unresolved."""
         builder = _index(
             tmp_path,
             {
@@ -4794,16 +4795,27 @@ class TestTypeScriptCallResolution:
                 class Dog {
                   fetch(): number { return 1; }
                 }
+                type Fetcher = (x: Dog) => Dog;
+                type Kennel = { dog: Dog };
 
                 const typed: (x: Dog) => Dog = (y) => y.fetch();
+                const aliased: Fetcher = (y) => {
+                  y.fetch();
+                };
+                const unpacked = ({ dog }: Kennel) => {
+                  dog.fetch();
+                };
                 """
             },
         )
         assert _calls(builder, "FILE:a.ts::typed") == ["FILE:a.ts::Dog::fetch"]
+        assert _calls(builder, "FILE:a.ts::aliased") == ["REF:y.fetch"]
+        assert _calls(builder, "FILE:a.ts::unpacked") == ["REF:dog.fetch"]
 
     def test_union_member_calls_stay_alternatives(self, tmp_path):
         """`a.fetch()` on `Dog | Cat`, which both define, is genuinely
-        ambiguous: the edge names the members it may reach."""
+        ambiguous: the edge names the members it may reach. On `string |
+        Dog` the member may be the library's."""
         builder = _index(
             tmp_path,
             {
@@ -4816,10 +4828,13 @@ class TestTypeScriptCallResolution:
                   purr(): number { return 3; }
                 }
                 function makeA(): Dog | Cat { return new Dog(); }
+                function makeB(): string | Dog { return new Dog(); }
                 function run() {
                   const a = makeA();
                   a.fetch();
                   a.purr();
+                  const b = makeB();
+                  b.fetch((x) => x);
                 }
                 """
             },
@@ -4836,6 +4851,9 @@ class TestTypeScriptCallResolution:
             "FILE:a.ts::Dog::fetch",
         ]
         assert edges["REF:a.purr"]["metadata"]["candidates"] == ["FILE:a.ts::Cat::purr"]
+        assert edges["REF:b.fetch"]["metadata"]["candidates"] == [
+            "FILE:a.ts::Dog::fetch"
+        ]
 
     def test_call_statement_is_not_a_method_definition(self, tmp_path):
         """`name(arg, {` inside a function body is a call; only `name(...) {`
@@ -6136,7 +6154,9 @@ class TestTypeScriptCallResolution:
         """What a function returns as an object has the members the object
         names, read where the function is written: through the result, a
         name bound to it and a pattern that takes it apart, whatever return
-        type the function declares."""
+        type the function declares. A module imported with a comment before
+        its name is still read, and a value no call was read for gives
+        none."""
         builder = _index(
             tmp_path,
             {
@@ -6220,6 +6240,17 @@ class TestTypeScriptCallResolution:
                 export function after() {
                     looped.load();
                 }
+
+                export async function later(path: string) {
+                    const { default: client } = await import(
+                        path
+                    );
+                    const { Registry } = await import(
+                        /* chunk */ './make'
+                    );
+                    client('u');
+                    new Registry().has('k');
+                }
                 """,
                 "Comp.svelte": (
                     '<script lang="ts">\n'
@@ -6252,6 +6283,10 @@ class TestTypeScriptCallResolution:
             "FILE:make.ts::odd::parse",
         ]
         assert _calls(builder, "FILE:use.ts::after") == ["REF:looped.load"]
+        assert _calls(builder, "FILE:use.ts::later") == [
+            "FILE:make.ts::Registry",
+            "FILE:make.ts::Registry::has",
+        ]
 
     def test_a_constant_declared_with_a_type_reads_what_its_value_returns(
         self, tmp_path
@@ -7624,7 +7659,8 @@ class TestTypeScriptCallResolution:
         """`document` and `globalThis.console` are the browser's and the
         language's; a parameter called `document` is not, and no method
         it names is pinned to a project definition. A method called
-        `catch` takes no parameter, and a comment declares no name."""
+        `catch` takes no parameter, a comment or JSX text declares no name,
+        and what follows a `/* */` comment is read."""
         builder = _index(
             tmp_path,
             {
@@ -7641,6 +7677,7 @@ class TestTypeScriptCallResolution:
                     document.querySelector("p").remove();
                     globalThis.console.log("drawn");
                     globalThis.setup();
+                    const tip = /* shown */"it's"; setup();
                 }
                 """,
                 "b.ts": """
@@ -7657,10 +7694,21 @@ class TestTypeScriptCallResolution:
                     document.querySelector("p");
                 }
                 """,
+                "d.tsx": """
+                import { setup } from "./a";
+                export function Help() {
+                    return <p>Pick a type document, or a `</p>;
+                }
+                export function show() {
+                    document.querySelector("p");
+                    setup();
+                }
+                """,
             },
         )
-        assert _calls(builder, "FILE:a.ts::draw") == ["FILE:a.ts::setup"]
+        assert _calls(builder, "FILE:a.ts::draw") == ["FILE:a.ts::setup"] * 2
         assert _calls(builder, "FILE:c.ts::report") == []
+        assert _calls(builder, "FILE:d.tsx::show") == ["FILE:a.ts::setup"]
         assert "page" in builder.js_bound["FILE:c.ts"]
         assert "pages" not in builder.js_bound["FILE:c.ts"]
         assert _calls(builder, "FILE:b.ts::print") == [
