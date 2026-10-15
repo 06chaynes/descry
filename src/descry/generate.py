@@ -7845,9 +7845,9 @@ def _rust_declarations():
 _TYPE_ALIAS_RE = re.compile(r"^[ \t]*(?:[\w()]+\s+)*type\s+(\w+)[^=;{]*=", re.MULTILINE)
 
 
-def _bracketed_parts(text):
-    """The comma-separated parts of ``text``, which follows an opening
-    bracket, up to the bracket that closes it."""
+def _bracketed_parts(text, separator=","):
+    """The ``separator``-separated parts of ``text``, which follows an
+    opening bracket, up to the bracket that closes it."""
     parts, depth, start, end = [], 0, 0, len(text)
     for column, char in enumerate(text):
         if char in "<([{":
@@ -7857,7 +7857,7 @@ def _bracketed_parts(text):
         if depth < 0:
             end = column
             break
-        if char == "," and not depth:
+        if char == separator and not depth:
             parts.append(text[start:column])
             start = column + 1
     parts.append(text[start:end])
@@ -9983,18 +9983,24 @@ _JS_OPERAND_WORDS = {
     "continue",
 }
 # The keyword whose parenthesised head a statement follows
-_JS_STATEMENT_HEAD_RE = re.compile(r"(?<![\w$.])(?:if|for(?:\s+await)?|while|with)\s*$")
+# A `break` or `continue` with the label it names, which end a statement
+_JS_LABEL_RE = re.compile(r"(?<![\w$.])(?:break|continue)\s+[\w$]+$")
+_JS_STATEMENT_HEAD_RE = re.compile(r"(?<![\w$])(?:if|for(?:\s+await)?|while|with)\s*$")
 
 
 def _js_regex_position(text):
     """Whether a ``/`` after ``text`` can open a regular expression: true
     where no value precedes it, so at a line's start or after an operator,
     a bracket that opens, a spread's `...`, the `)` of an `if`, `for`,
-    `while` or `with` head, or a keyword that expects an operand. False
-    after what ends a value: a word, a member's name, any other `)`, `]`,
-    `}`, `.`, a postfix `++`/`--`, a quote a blanked literal leaves, and
-    ``/`` itself (`x / /re/`)."""
+    `while` or `with` head, a keyword that expects an operand, or the label
+    of a `break` or `continue`. False after what ends a value: a word, a
+    member's name, any other `)`, `]`, `}`, `.`, a postfix `++`/`--`, and a
+    quote a blanked literal leaves."""
     tail = text.rstrip()
+
+    def member(word):
+        return tail[: word.start()].rstrip().endswith(".")
+
     if not tail:
         return True
     if tail.endswith(("++", "--")):
@@ -10003,14 +10009,16 @@ def _js_regex_position(text):
         return True
     word = _JS_OPERAND_WORD_RE.search(tail)
     if word:
-        member = tail[: word.start()].rstrip().endswith(".")
-        return word.group() in _JS_OPERAND_WORDS and not member
+        if _JS_LABEL_RE.search(tail):
+            return True
+        return word.group() in _JS_OPERAND_WORDS and not member(word)
     if tail[-1] == ")":
         depth = 0
         for at in range(len(tail) - 1, -1, -1):
             depth += {")": 1, "(": -1}.get(tail[at], 0)
             if not depth:
-                return bool(_JS_STATEMENT_HEAD_RE.search(tail, 0, at))
+                head = _JS_STATEMENT_HEAD_RE.search(tail, 0, at)
+                return bool(head) and not member(head)
         return False
     return tail[-1] not in "]}.`'\""
 
@@ -10278,13 +10286,14 @@ def _blank_js_strings(
     return "".join(kept_at.get(at, piece) for at, piece in enumerate(out))[: len(line)]
 
 
-def _blank_js_lines(lines, keep=False, jsx=False, code=None):
+def _blank_js_lines(lines, jsx=False, code=None):
     """``_blank_js_strings`` of each of a file's ``lines``, read in turn.
-    ``code`` is what this returns for them without ``keep``, the code a line
-    follows."""
+    Given ``code``, what this returns for them without it, the text of the
+    literals that open on a line is kept, and the code a line follows is
+    read from ``code``."""
     stack, blanked, before = [], [], ""
     for row, line in enumerate(lines):
-        blanked.append(_blank_js_strings(line, stack, keep, jsx, before))
+        blanked.append(_blank_js_strings(line, stack, code is not None, jsx, before))
         read = (code or blanked)[row]
         if read.strip():
             # A `}` that ends a line is read as a block's, after which a
@@ -10949,7 +10958,7 @@ class TSParser(BaseParser):
 
         # Each of ``text_lines`` keeps the text of the literals that open on
         # it, and is the line the loop below reads.
-        text_lines = _blank_js_lines(lines, keep=True, jsx=jsx, code=code_lines)
+        text_lines = _blank_js_lines(lines, jsx=jsx, code=code_lines)
         # The `{` open where each line starts, innermost last, and the line
         # each `{` is closed on
         open_at, closes_on, braces = [], {}, []
@@ -14002,11 +14011,21 @@ class CallResolver:
                     return ()
             if close < 0 or not rest.startswith("=>"):
                 return ()
-            params = _bracketed_parts(written[1:close] + ")")
-            return tuple(
-                self._returned_type(param.partition(":")[2].strip() or "any", scope_id)
-                for param in params
-            )
+            # A parameter's name is what its list writes before a `:` no
+            # bracket holds; `this` names the receiver's type, no parameter,
+            # and the type of a rest parameter, whose `.` the origin path
+            # writes as `::`, is the list's, not that of a parameter it
+            # takes in.
+            values = []
+            for param in _bracketed_parts(written[1:close] + ")"):
+                name, *typed = _bracketed_parts(param + ")", ":")
+                if param.startswith(("...", ":")):
+                    typed = ()
+                if name != "this":
+                    values.append(
+                        self._returned_type(":".join(typed).strip() or "any", scope_id)
+                    )
+            return tuple(values)
         if self.lang(scope_id) != "java":
             return ()
         arguments = ()

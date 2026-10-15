@@ -376,8 +376,9 @@ class TestDescryServiceIndex:
     async def test_index_loads_the_childs_embeddings_instead_of_rebuilding(
         self, indexed
     ):
-        """A search meanwhile is told they are loading, and a load a search
-        started before the index caches nothing over them."""
+        """A search meanwhile is told they are loading, a load a search
+        started before the index caches nothing over them, and they are
+        held as of the graph their load began on."""
         svc, built = indexed
         release = threading.Event()
 
@@ -388,7 +389,13 @@ class TestDescryServiceIndex:
         svc._SemanticSearcher, searcher = Earlier, svc._SemanticSearcher
         svc.config.embedding_timeout = 0.01
         assert await svc._get_semantic_searcher() is None
-        svc._SemanticSearcher = searcher
+
+        class Rewritten(searcher):
+            def __init__(self, graph_path, **kwargs):
+                super().__init__(graph_path, **kwargs)
+                os.utime(graph_path, (1, 1))
+
+        svc._SemanticSearcher = Rewritten
         result = await svc.index()
         release.set()
         await svc._semantic_load
@@ -398,6 +405,7 @@ class TestDescryServiceIndex:
         assert not built[0].kwargs.get("force_rebuild")
         assert built[0].model_loads == 0, "a one-shot index must not load the model"
         assert svc._semantic_cache["instance"] is built[0]
+        assert svc._semantic_cache["mtime"] != svc._graph_mtime()
 
     @pytest.mark.asyncio
     async def test_every_searcher_is_given_the_project_root_as_source_root(

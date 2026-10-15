@@ -191,8 +191,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   its result is typed for the next call in a chain. The files are written
   by `tools/stdlib/` from each language's own machine-readable description
   (rustdoc JSON, TypeScript's `lib.*.d.ts`, typeshed, Go's `api/*.txt`,
-  `javap`, phpstorm-stubs, .NET reflection, RBS, the Dart SDK, clang's AST)
-  and replace the hand-written name lists for those languages.
+  `javap`, phpstorm-stubs, reflection over the .NET shared runtime, RBS,
+  the Dart SDK, clang's AST) and replace the hand-written name lists for
+  those languages.
 - **C#, PHP, Ruby, Dart, C and C++ parsers are rewritten.** Every
   definition is a node under its real parent with its line range
   (overloads, constructors, properties, accessors, enum members, local
@@ -282,14 +283,16 @@ Python SDK v2, and a full-tree review's findings are fixed.
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a
   parameter of an arrow constant or of an arrow assigned to a variable,
-  dropped as external where it is left unresolved; a `<` or `/` that
-  goes on with a comparison or a division from the line before, read as
-  a JSX element that hid the rest of the file or as a regular
-  expression; a JSX element or regular expression after the head of an
-  `if`, `for`, `while` or `with`, a spread's `...` or `default`, read as
-  a comparison or a division; chained calls; declarations recorded as
-  calls; braces and calls inside string literals in C#, PHP, Dart and
-  C/C++; a licence notice
+  dropped as external where it is left unresolved; a parameter of a
+  function type that is itself a function, and a `this` parameter,
+  typing an arrow's parameter; a `<` or `/` that goes on with a
+  comparison or a division from the line before, read as a JSX element
+  that hid the rest of the file or as a regular expression; a JSX
+  element or regular expression after the head of an `if`, `for`,
+  `while` or `with`, a spread's `...`, `default`, or a `break` or
+  `continue` and its label, read as a comparison or a division; chained
+  calls; declarations recorded as calls; braces and calls inside string
+  literals in C#, PHP, Dart and C/C++; a licence notice
   inside a file read as the next symbol's docstring; inheritance from a
   project type named like a standard one; calls in a second Svelte
   `<script>` block; calls in a nested Python function's default arguments;

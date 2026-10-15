@@ -4788,8 +4788,9 @@ class TestTypeScriptCallResolution:
         """`const f: (x: Dog) => Dog = (y) => y.fetch()` types `y`; the call
         is the arrow's, on its own line. A type named for the function, one
         declared inside the arrow under its name, a Java interface of that
-        name, a variable of no known type, a union of function types, or a
-        pattern typed where it is written, leaves the call unresolved."""
+        name, a variable of no known type, a union of function types, a
+        parameter of a function type, or a pattern typed where it is
+        written, leaves the call unresolved. A `this` parameter is none."""
         builder = _index(
             tmp_path,
             {
@@ -4821,6 +4822,14 @@ class TestTypeScriptCallResolution:
                     y.fetch();
                   };
                 }
+                function curried(): ((x: Dog) => void) => Cat {
+                  return (y) => {
+                    y.fetch();
+                  };
+                }
+                const bound: (this: Cat, x: Dog) => void = (y) => {
+                  y.fetch();
+                };
                 function later() {
                   let run;
                   run = (y) => {
@@ -4838,8 +4847,9 @@ class TestTypeScriptCallResolution:
                 """,
             },
         )
-        assert _calls(builder, "FILE:a.ts::typed") == ["FILE:a.ts::Dog::fetch"]
-        for name in ("aliased", "shadowed", "returned", "either", "later"):
+        for name in ("typed", "bound"):
+            assert _calls(builder, f"FILE:a.ts::{name}") == ["FILE:a.ts::Dog::fetch"]
+        for name in ("aliased", "shadowed", "returned", "either", "curried", "later"):
             assert _calls(builder, f"FILE:a.ts::{name}") == ["REF:y.fetch"]
         assert _calls(builder, "FILE:a.ts::unpacked") == ["REF:dog.fetch"]
 
@@ -5940,7 +5950,7 @@ class TestTypeScriptCallResolution:
         with `${` on one line and closed on a later one keeps the lines
         between out of the block count. A `/` straight after a regular
         expression divides, so the comment after it is one, as does one that
-        starts a line after a value."""
+        starts a line after a value, a member's name among them."""
         builder = _index(
             tmp_path,
             {
@@ -5970,6 +5980,12 @@ class TestTypeScriptCallResolution:
                         2;
                 }
 
+                function shareOf(a: any) {
+                    return a. if(1)
+                        / parse("") /
+                        2;
+                }
+
                 function parse(s: string) {}
                 function emit(s: string) {}
                 """,
@@ -5988,7 +6004,8 @@ class TestTypeScriptCallResolution:
         assert span["ratio"] == (16, 19)
         assert _calls(builder, "FILE:g.ts::parseUrl") == ["FILE:g.ts::parse"]
         assert _calls(builder, "FILE:g.ts::describe") == ["FILE:g.ts::emit"]
-        assert _calls(builder, "FILE:g.ts::share") == ["FILE:g.ts::parse"]
+        for name in ("share", "shareOf"):
+            assert _calls(builder, f"FILE:g.ts::{name}") == ["FILE:g.ts::parse"]
 
     def test_a_literal_keeps_its_text_where_it_opens(self, tmp_path):
         """A constant's value and an import's module are read with the text
@@ -7751,6 +7768,10 @@ class TestTypeScriptCallResolution:
                         <p>setup()</p>;
                     const shown = /setup()/g
                     <p>setup()</p>;
+                    outer: for (;;) {
+                        break outer
+                        <p>setup()</p>;
+                    }
                     return [...
                         <p>setup()</p>];
                 }

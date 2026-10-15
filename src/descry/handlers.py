@@ -1236,7 +1236,6 @@ class DescryService:
             if cache["instance"] is not None or cache["loading"]:
                 return
             cache["loading"] = True
-            cache["error"] = None
             mtime = self._graph_mtime() or 0
 
         try:
@@ -1256,6 +1255,7 @@ class DescryService:
             async with self._semantic_cache_lock:
                 cache["mtime"] = mtime
                 cache["instance"] = searcher
+                cache["error"] = None
                 logger.info("Pre-warm: embeddings ready")
         except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and logged
             async with self._semantic_cache_lock:
@@ -1682,6 +1682,7 @@ class DescryService:
                                 "error": None,
                             }
                         logger.info("Generating embeddings for semantic search...")
+                        mtime = self._graph_mtime() or 0
 
                         def _build_searcher():
                             # The child process has just embedded this graph
@@ -1702,7 +1703,7 @@ class DescryService:
                         # Seed the cache with the freshly-built instance so
                         # the next search() call reuses it.
                         async with self._semantic_cache_lock:
-                            cache["mtime"] = self._graph_mtime() or 0
+                            cache["mtime"] = mtime
                             cache["instance"] = searcher
                         embeddings_status = (
                             f"\nEmbeddings: {len(searcher.nodes):,} nodes indexed"

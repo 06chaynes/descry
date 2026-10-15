@@ -478,12 +478,8 @@ def test_generator_reproduces_the_file(lang, tmp_path):
     elif lang == "dotnet":
         shell = os.environ.get("PWSH") or shutil.which("pwsh") or ""
         source = Path(shell).parent if shell else None
-        version = load("dotnet")["source"].split()[2]
         if not source or not (source / "System.Private.CoreLib.dll").is_file():
             pytest.skip("pwsh is not installed to reflect the .NET runtime with")
-        release = source / "Microsoft.NETCore.App.deps.json"
-        if release.is_file() and version not in release.read_text("utf-8"):
-            pytest.skip(f"pwsh is not the .NET {version} the data was read from")
     else:
         source = Path(os.environ.get("DESCRY_STDLIB_SOURCES", ""), DOWNLOADS[lang])
         if not source.exists():
@@ -491,4 +487,10 @@ def test_generator_reproduces_the_file(lang, tmp_path):
     out = tmp_path / f"{lang}.json"
     generator = GENERATORS / f"gen_{lang}.py"
     subprocess.run([sys.executable, "-I", generator, source, out], check=True)
+    # The runtime pwsh runs on is named as the generator reads it.
+    read_from = load(lang)["source"]
+    if lang == "dotnet" and json.loads(out.read_text("utf-8"))["source"] != read_from:
+        pytest.skip(
+            f"pwsh is not the .NET {read_from.split()[2]} the data was read from"
+        )
     assert out.read_bytes() == _file(lang).read_bytes()

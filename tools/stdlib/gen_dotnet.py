@@ -6,7 +6,10 @@ RUNTIME is the directory that holds the shared runtime's assemblies
 (`System.Private.CoreLib.dll` and the `System.*.dll` beside it). The
 public and protected types and members of the `System` and `netstandard`
 assemblies are read by reflection in PowerShell (`pwsh`), which is the
-only thing of the runtime that runs.
+only thing of the runtime that runs: the `pwsh` in RUNTIME where it has
+one, since a process reflects the runtime it runs on. Where a
+`*.deps.json` there names the runtime pack an application carries, only
+the assemblies of that pack are read, not the packages beside them.
 
 An extension method is written as a method of the type it is written for:
 ``Enumerable.Where`` is a method of ``IEnumerable`1`` — which is what a
@@ -26,10 +29,12 @@ from common import new_type, record
 
 DUMP = r"""
 $dir = $args[0]
+$pack = @(Get-Content $args[1])
 $out = @()
 foreach ($path in Get-ChildItem $dir -Filter "*.dll") {
     $base = $path.BaseName
     if ($base -ne "netstandard" -and -not $base.StartsWith("System.")) { continue }
+    if ($pack.Count -and $pack -notcontains $path.Name) { continue }
     $asm = $null
     try { $asm = [System.Reflection.Assembly]::LoadFrom($path.FullName) } catch {
         try { $asm = [System.Reflection.Assembly]::Load($base) } catch { continue }
@@ -39,7 +44,12 @@ foreach ($path in Get-ChildItem $dir -Filter "*.dll") {
         $types = $_.Exception.Types | Where-Object { $null -ne $_ }
     } catch { continue }
     foreach ($t in $types) {
-        if (-not ($t.IsPublic -or $t.IsNestedPublic -or $t.IsNestedFamily -or $t.IsNestedFamORAssem)) { continue }
+        # A nested type is seen where every type around it is.
+        $seen = $t
+        while ($null -ne $seen -and ($seen.IsPublic -or $seen.IsNestedPublic -or $seen.IsNestedFamily -or $seen.IsNestedFamORAssem)) {
+            $seen = $seen.DeclaringType
+        }
+        if ($null -ne $seen) { continue }
         $methods = @()
         foreach ($m in $t.GetMethods("Public,NonPublic,Instance,Static,DeclaredOnly")) {
             if (-not ($m.IsPublic -or $m.IsFamily -or $m.IsFamilyOrAssembly)) { continue }
@@ -124,12 +134,34 @@ def written(path, names):
     return f"{name}<{', '.join(held)}>" if args else name
 
 
+def _runtime_pack(origin):
+    """The assemblies of the runtime pack an application in ``origin``
+    carries, by the ``*.deps.json`` that lists them; none where it has no
+    such list."""
+    for listing in Path(origin).glob("*.deps.json"):
+        for target in json.loads(listing.read_text("utf-8"))["targets"].values():
+            for library, held in target.items():
+                if library.startswith("runtimepack.Microsoft.NETCore.App."):
+                    return [Path(name).name for name in held.get("runtime", ())]
+    return []
+
+
 def build(origin):
+    shell = Path(origin) / "pwsh"
     with tempfile.TemporaryDirectory() as tmp:
         script = Path(tmp) / "dump.ps1"
         script.write_text(DUMP, encoding="utf-8")
+        pack = Path(tmp) / "pack.txt"
+        pack.write_text("\n".join(_runtime_pack(origin)), encoding="utf-8")
         dump = subprocess.run(
-            ["pwsh", "-NoProfile", "-File", str(script), str(origin)],
+            [
+                str(shell) if shell.is_file() else "pwsh",
+                "-NoProfile",
+                "-File",
+                str(script),
+                str(origin),
+                str(pack),
+            ],
             capture_output=True,
             text=True,
             check=True,
