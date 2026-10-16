@@ -18,6 +18,8 @@ import re
 from descry.clang_parser import _if_signs
 from descry.generate import (
     BaseParser,
+    _bracketed_parts,
+    _generic_metadata,
     _strip_generics,
     is_generated_source,
     source_lines,
@@ -337,7 +339,7 @@ _DECLARATIONS = (
         rf"(?P<generic>{_GENERIC})?\s*\??\s*;"
     ),
     # The first type a type parameter is constrained to: `where T : Type`
-    re.compile(
+    _RE_WHERE := re.compile(
         rf"\bwhere\s+(?P<param>{_NAME})\s*:\s*"
         r"(?:(?:class|struct|notnull|unmanaged|default)\??\s*,\s*)*"
         rf"(?!(?:class|struct|notnull|unmanaged|default|new)\b)(?P<type>{_PATH})"
@@ -514,9 +516,10 @@ def _plain(code):
 
 
 def _type_parameters(generic):
-    """Names of the type parameters in ``generic``, a `<...>` list or None."""
+    """Names of the type parameters in ``generic``, a `<...>` list or None,
+    in order."""
     listed = _strip_generics(generic[1:-1]) if generic else ""
-    return frozenset(re.findall(rf"({_NAME})\s*(?:,|$)", listed))
+    return tuple(re.findall(rf"({_NAME})\s*(?:,|$)", listed))
 
 
 def _held_type(written, parameters):
@@ -790,7 +793,9 @@ class DotnetParser(BaseParser):
         self.enter_context(file_id, 0, len(lines))
         declaring = {file_id}
         since = {}  # member ID -> first line of the member it is, or is local to
-        generics = {file_id: frozenset()}  # ID -> the type parameters in scope
+        # ID -> the type parameters in scope that are a method's or a local
+        # function's, of no type the resolver reads
+        generics = {file_id: frozenset()}
         namespaces = []  # (name, last line) of each namespace the line is in
         # Type ID -> (name, origin of its value) of each parameter of its
         # primary constructor
@@ -861,7 +866,9 @@ class DotnetParser(BaseParser):
                 ):
                     function_id = self._member_id(context_id, local["name"])
                     end_lineno = self._body_end(code_lines, opened)
-                    scope = generics[context_id] | _type_parameters(local["generic"])
+                    scope = generics[context_id] | set(
+                        _type_parameters(local["generic"])
+                    )
                     declare(
                         function_id,
                         "Function",
@@ -963,7 +970,7 @@ class DotnetParser(BaseParser):
                     kind=kind,
                     **metadata,
                 )
-                generics[type_id] = generics[context_id] | scope
+                generics[type_id] = generics[context_id]
                 primary = _RE_PRIMARY_CONSTRUCTOR.match(code, m_type.end())
                 close = primary and _closing(code_lines, i, primary.end())
                 if close:
@@ -998,13 +1005,17 @@ class DotnetParser(BaseParser):
                             value_type=_held_type(parameter["type"], generics[type_id]),
                         )
                 header = _text(code_lines, i, m_type.end(), *opened[:2])
-                flat = _flat(_strip_generics(header))
-                bases = re.split(r"\bwhere\b", flat.partition(":")[2])[0]
-                for base in bases.split(",") if kind != "enum" else ():
-                    if base.split():
-                        self.builder.add_edge(
-                            type_id, f"REF:{base.split()[0]}", "INHERITS"
-                        )
+                # A base is written with its type arguments, before the
+                # constraints of the type parameters, which are none.
+                bases = re.split(r"\bwhere\b", _flat(header))[0].partition(":")[2]
+                for base in _bracketed_parts(bases) if kind != "enum" else ():
+                    self.builder.add_edge(
+                        type_id, f"REF:{' '.join(base.split())}", "INHERITS"
+                    )
+                bounds = {w["param"]: w["type"] for w in _RE_WHERE.finditer(header)}
+                self.builder.nodes[-1]["metadata"].update(
+                    _generic_metadata({name: bounds.get(name, "") for name in scope})
+                )
                 scan(type_id, i, len(code), lineno)
                 if kind == "enum":
                     for at in range(opened[0], end_lineno):
@@ -1065,7 +1076,7 @@ class DotnetParser(BaseParser):
                 else:
                     name, returns = member["name"], member["type"]
                     paren = member.end() - 1
-                    scope |= _type_parameters(member["generic"])
+                    scope |= set(_type_parameters(member["generic"]))
                     if not member["type"] and name == owner:
                         static = "static" in member["modifiers"].split()
                         name = "<clinit>" if static else "<init>"

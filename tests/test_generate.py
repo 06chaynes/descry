@@ -8671,6 +8671,36 @@ class TestTypeScriptCallResolution:
         assert calls.count(meow) == 4 and calls.count(bark) == 1
         assert _calls(builder, "FILE:A.java::Bounded::go") == [bark]
 
+    def test_a_csharp_generic_type_holds_its_type_arguments(self, tmp_path):
+        """`Box<Cat>`'s `T` is a cat through a field, a method's return,
+        `this` and a subclass that writes its base's arguments; a class's
+        `where T : Dog` bounds `T` inside it and is no base of it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cs": """
+                namespace N {
+                  public class Dog { public void Bark() {} }
+                  public class Cat { public void Meow() {} }
+                  public class Box<T> { public T Held; public T Get() { return Held; } }
+                  public class Coop<T> where T : Dog { T held; public void Go() { held.Bark(); } }
+                  public class Sub : Box<Cat> {}
+                  public class Use {
+                    public void Run(Box<Cat> b, Sub s) {
+                      b.Held.Meow();
+                      b.Get().Meow();
+                      s.Get().Meow();
+                    }
+                  }
+                }
+                """
+            },
+        )
+        meow = "FILE:a.cs::Cat::Meow"
+        assert _calls(builder, "FILE:a.cs::Use::Run").count(meow) == 3
+        assert _calls(builder, "FILE:a.cs::Coop::Go") == ["FILE:a.cs::Dog::Bark"]
+        assert not _bases(builder, "FILE:a.cs::Coop")
+
     def test_go_generic_struct_fields_and_named_arrays(self, tmp_path):
         """A generic struct's fields are read after its type parameters, not
         as an array's elements, and `type A [5]T` is an array of `T`, its

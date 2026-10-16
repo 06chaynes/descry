@@ -350,7 +350,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   Java generic type, whose type parameters were each read as the bound
   any class of the file gave one of their name, so `Box<Cat>`'s `T` was
   a `Dog` where `Bounded<T extends Dog>` was written beside it; a base is
-  kept with its type arguments; calls in comments, string
+  kept with its type arguments. So does a C# generic type, whose members
+  of a type parameter's type had none, and a class's `where T : Dog`, read
+  as a base of the class, bounds `T` inside it; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a
