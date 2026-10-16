@@ -8348,6 +8348,23 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:a.ts::check") == ["REF:suite.test"]
 
+    def test_a_string_literal_type_holds_no_mark(self, tmp_path):
+        """`"a|b"` is a string, whatever its text holds: a method called on
+        what returns one is the standard library's, not a project's."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Text { trim() {} }
+                function kind(): "a|b" { return "a|b"; }
+                export function f() {
+                  kind().trim();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::f") == ["FILE:a.ts::kind"]
+
     def test_a_later_declarator_and_a_pattern_over_lines_are_typed(self, tmp_path):
         """`b` in `let a = d, b = d` has `d`'s type, as `a` does, and the
         names a pattern written over lines binds are typed by its value."""

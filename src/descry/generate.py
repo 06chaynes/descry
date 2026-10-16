@@ -9516,21 +9516,40 @@ def _js_bound(content):
 _TS_UNION_RE = re.compile(r"\s*\|\s*(?![^<>\[\](){}]*[>\])}])")
 
 
+# A string literal type, as written
+_TS_STRING_RE = re.compile(r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|`[^`]*`")
+
+
+def _ts_unquoted(text):
+    """``text`` with the text of each string literal in it turned to `_`,
+    its quotes and columns kept."""
+    return _TS_STRING_RE.sub(
+        lambda found: found[0][0] + "_" * (len(found[0]) - 2) + found[0][-1], text
+    )
+
+
 @cache
 def _ts_type_parts(text):
     """``(name, type arguments, {})`` of a TypeScript type as written,
     whether or not it may be undefined or null instead. An array is an
-    `Array`, `this` is `Self`, and what a type predicate stands for is a
-    `boolean`. A union of two types, a tuple, an object and a function type
-    have no name."""
-    # An origin path writes the `.` of a qualified type as `::`.
-    options = set(_TS_UNION_RE.split(text.replace("::", ".").strip()))
+    `Array`, `this` is `Self`, what a type predicate stands for is a
+    `boolean` and a string literal type is a `string`. A union of two types,
+    a tuple, an object and a function type have no name."""
+    # An origin path writes the `.` of a qualified type as `::`. A string
+    # literal's text holds no mark.
+    written = text.replace("::", ".").strip()
+    marks = list(_TS_UNION_RE.finditer(_ts_unquoted(written)))
+    starts = [0] + [mark.end() for mark in marks]
+    ends = [mark.start() for mark in marks] + [len(written)]
+    options = {written[start:end] for start, end in zip(starts, ends)}
     options -= {"undefined", "null"}
     text = options.pop() if len(options) == 1 else ""
     if text.endswith("[]"):
         return "Array", (text[:-2].removeprefix("readonly "),), {}
     if re.search(r"\bis\s", text):
         return "boolean", (), {}
+    if _TS_STRING_RE.fullmatch(text):
+        return "string", (), {}
     name = re.match(r"[\w$.]*", text)[0]
     arguments = ()
     if text.startswith("<", len(name)) and text.endswith(">"):
@@ -9547,7 +9566,7 @@ def _ts_compound(text):
     a union — None for any other. A union's `null` and `undefined`
     alternatives are dropped: a value that may be one reads as the rest."""
     depth, marks = 0, []
-    for column, char in enumerate(text):
+    for column, char in enumerate(_ts_unquoted(text)):
         if char in "<([{":
             depth += 1
         elif char in ")]}" or (char == ">" and text[column - 1] != "="):
