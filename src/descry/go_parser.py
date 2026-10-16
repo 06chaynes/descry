@@ -46,12 +46,16 @@ _RE_IMPORT_BLOCK_LINE = re.compile(
 
 # What a declaration's name is followed by in brackets: its type parameters,
 # `[K comparable, V any]`, or for a type the length of the array it is
-_TYPE_PARAMS = r"\[(?P<generics>(?:[^][]|\[[^][]*\])+)\]"
+# Type parameters, `[K comparable, V any]`: names, then a constraint, which
+# an array's length, `[5]`, is not
+_TYPE_PARAMS = (
+    r"\[(?P<generics>\s*[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*\s+(?:[^][]|\[[^][]*\])+)\]"
+)
 
 # Type declaration: `type Name struct {`, `type Name interface {`, `type Name = AliasTarget`
 _RE_TYPE_DECL = re.compile(
     rf"^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*{_TYPE_PARAMS}\s*|\s+)"
-    r"(struct|interface|func|chan|map|\[\]|\*|=|[A-Za-z])"
+    r"(struct|interface|func|chan|map|\[|\*|=|[A-Za-z])"
 )
 
 # What a Go type's body of fields or methods opens after, and a declaration
@@ -675,7 +679,7 @@ class GoParser(BaseParser):
                         if field["embedded"]:
                             fields.setdefault(None, []).append(held)
                 # A named slice, array, map or channel holds what that does.
-                held, parts, _ = _go_type_parts(line[m_type.end(1) :].strip())
+                held, parts, _ = _go_type_parts(line[m_type.start(3) :].strip())
                 if held in ("[]", "map", "chan"):
                     fields = dict(enumerate(parts))
                 if fields:

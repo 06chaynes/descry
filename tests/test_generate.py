@@ -8594,6 +8594,37 @@ class TestTypeScriptCallResolution:
             "FILE:a.ts::ns::inner",
         ]
 
+    def test_go_generic_struct_fields_and_named_arrays(self, tmp_path):
+        """A generic struct's fields are read after its type parameters, not
+        as an array's elements, and `type A [5]T` is an array of `T`, its
+        `[5]` no type parameters."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/p\n\ngo 1.21\n",
+                "a.go": """
+                package p
+
+                type Dog struct{}
+
+                func (d Dog) Bark() {}
+
+                type Box[T any] struct{ Held T }
+
+                type Arr [5]Dog
+
+                type Lst []Dog
+
+                func use(a Arr, l Lst) {
+                	a[0].Bark()
+                	l[1].Bark()
+                }
+                """,
+            },
+        )
+        assert builder.fields["FILE:a.go::Box"] == {"Held": "T"}
+        assert _calls(builder, "FILE:a.go::use") == ["FILE:a.go::Dog::Bark"] * 2
+
     def test_a_python_import_is_of_the_importer_s_own_root(self, tmp_path):
         """A module path more than one directory gives, `pkg.models` below
         `src/` and `lib/`, is the one below the importing file's own; one

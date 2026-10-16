@@ -278,7 +278,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   generic receivers, one-line functions, generic types and functions with
   brackets in their type parameters, which had no node, and a method of
   a type parameter's value, dropped as external instead of read through
-  its constraint; Ruby one-line classes and modules,
+  its constraint, a generic struct's fields, read as an array's elements
+  from its type parameters, and `type A [5]T`, whose `[5]` was read as
+  type parameters; Ruby one-line classes and modules,
   `#` docstrings; C# properties and verbatim strings; TypeScript and
   JavaScript `.jsx`/`.mjs`/`.cjs`/`.mts`/`.cts` files, `$` identifiers,
   typed arrow constants, file-level calls, a definition after the `}` or
