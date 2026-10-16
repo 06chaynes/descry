@@ -6276,9 +6276,8 @@ class TestTypeScriptCallResolution:
 
     def test_object_is_an_owner_where_it_holds_a_member_node(self, tmp_path):
         """An accessor is a member, and so is a function written after a
-        brace in a property's value or in a comment. An object that holds no
-        function below the line of its `return` gets no `object@` node, and
-        a call of a function written on that line is no other definition's."""
+        brace in a property's value or in a comment, or on the line of the
+        `return`. An object that holds no function gets no `object@` node."""
         builder = _index(
             tmp_path,
             {
@@ -6339,7 +6338,9 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:a.ts::use") == [
             "FILE:a.ts::firstLine",
+            "FILE:a.ts::firstLine::object@25::error",
             "FILE:a.ts::oneLine",
+            "FILE:a.ts::oneLine::object@10::error",
             "FILE:a.ts::pattern",
             "FILE:a.ts::pattern::object@30::error",
         ]
@@ -6349,8 +6350,12 @@ class TestTypeScriptCallResolution:
             "FILE:a.ts::accessors::object@14",
             "FILE:a.ts::accessors::object@14::get size",
             "FILE:a.ts::accessors::object@14::set size",
+            "FILE:a.ts::firstLine::object@25",
+            "FILE:a.ts::firstLine::object@25::error",
             "FILE:a.ts::noted::object@37",
             "FILE:a.ts::noted::object@37::error",
+            "FILE:a.ts::oneLine::object@10",
+            "FILE:a.ts::oneLine::object@10::error",
             "FILE:a.ts::pattern::object@30",
             "FILE:a.ts::pattern::object@30::error",
         ]
@@ -8595,6 +8600,43 @@ class TestTypeScriptCallResolution:
             "FILE:a.ts::lib::Cancelled",
             "FILE:a.ts::ns::inner",
             "FILE:a.ts::ns::inner",
+        ]
+
+    def test_a_returned_object_holds_what_each_of_its_lines_gives(self, tmp_path):
+        """An object a function returns or an arrow declared as one gives,
+        on one line or several, owns the functions written in it, and a
+        property given a call on a later line holds what the call returns."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Status { dirty() {} }
+                export function inner() {}
+                export function first() {
+                    return { run: () => inner(),
+                    };
+                }
+                export const one = (a: number) => ({ run: () => inner() });
+                export function params() {
+                    return {
+                        status: new Status(),
+                    };
+                }
+                export function use() {
+                    first().run();
+                    one(1).run();
+                    params().status.dirty();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::use") == [
+            "FILE:a.ts::Status::dirty",
+            "FILE:a.ts::first",
+            "FILE:a.ts::first::object@5::run",
+            "FILE:a.ts::one",
+            "FILE:a.ts::one::object@8::run",
+            "FILE:a.ts::params",
         ]
 
     def test_a_template_over_lines_with_a_template_in_it_ends_no_block(self, tmp_path):
@@ -17847,8 +17889,7 @@ class TestOneLineDefinitionCalls:
 
     def test_every_row_of_the_fixture(self, tmp_path):
         """The one-line shapes: a function, a method, a named arrow, the
-        members of a returned object; the return-line member keeps the
-        owner's decision and a later line's member takes its own."""
+        members of a returned object, on the line of the `return` too."""
         builder = _index(
             tmp_path,
             {
@@ -17887,10 +17928,10 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, f"{file}::make::object@12::load") == [f"{file}::helper"]
         assert _calls(builder, f"{file}::make::object@12::save") == [f"{file}::helper"]
         assert _calls(builder, f"{file}::make::object@12::run") == [f"{file}::helper"]
-        # The member on the return line has no node: the owner's decision
-        # keeps its call with the function that returns the object.
-        assert _calls(builder, f"{file}::makeLine") == [f"{file}::helper"]
-        assert _calls(builder, f"{file}::makeLine::save") == [f"{file}::helper"]
+        line = f"{file}::makeLine::object@21"
+        assert _calls(builder, f"{file}::makeLine") == []
+        assert _calls(builder, f"{line}::load") == [f"{file}::helper"]
+        assert _calls(builder, f"{line}::save") == [f"{file}::helper"]
 
     def test_an_arrow_with_one_unparenthesised_parameter(self, tmp_path):
         """`x => g(x)`: the call is the arrow's, not the call's `(` taken

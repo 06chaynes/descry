@@ -10733,12 +10733,15 @@ def _opens_body(signature: str, start: int = 0) -> bool:
 # What a class's `extends` gives as its base, up to the body or `implements`
 _TS_EXTENDS_RE = re.compile(r"\bextends\s+(.+?)\s*(?:\bimplements\b[^{]*)?\{?\s*$")
 # What a class's or an interface's body, or that of an object a
-# declaration, `export default` or a property gives, opens after
+# declaration, an arrow it declares, `export default`, a `return` or a
+# property gives, opens after
 _TS_BODY_HEAD_RE = re.compile(
     r"\s*(?:(?P<type>(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?"
     r"(?:class|interface)\b[^{]*"
     r"|(?:extends|implements)\b[^{]*)"
-    r"|(?:export\s+default|(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*(?::[^=]*)?=\s*\[?"
+    r"|(?:export\s+default|return"
+    r"|(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*(?::[^=]*)?=\s*"
+    r"(?:\[|(?:async\s+)?(?:\([^()]*\)|[\w$]+)\s*(?::[^=]*?)?=>\s*\()?"
     rf"|(?P<nested>{_TS_WRITTEN_MEMBER_NAME})\s*:)\s*\Z)"
 )
 # A line that opens an object it ends with: `export default {`, a
@@ -11101,7 +11104,7 @@ class TSParser(BaseParser):
             name, value = head.strip(), tail.strip()
             # A function written in the object is a member of it, filed
             # under the object's own ID, where it is written below the line
-            # of the `return`. That line is read as the `return` alone, so a
+            # the object opens on. That line is read as what opens it, so a
             # function on it gets no node.
             member = start > len(written[0])
             method = re.fullmatch(
@@ -11118,13 +11121,12 @@ class TSParser(BaseParser):
             else:
                 made = "=>" in value or re.match(r"(?:async\s+)?function\b", value)
                 value_at = start + len(head) + 1 + len(tail) - len(tail.lstrip())
-                held[name] = (
-                    (f"={name}" if member else name)
-                    if made
-                    else self._call_held(
-                        index, column, value_at, at - 1, len(written[0]), since, owner
+                if made:
+                    held[name] = f"={name}" if member else name
+                else:
+                    self._call_held(
+                        held, name, text, index, column, value_at, at - 1, since, owner
                     )
-                )
         return held, index + 1 + text.count("\n", 0, end)
 
     def _returned_object_at(self, returned_objects, parent_id, lineno):
@@ -11144,13 +11146,21 @@ class TSParser(BaseParser):
         bound = re.fullmatch(r"[\w$]+", value) and self._declared(value, lineno, since)
         return bound if bound and bound.startswith("#") else value
 
-    def _call_held(self, index, column, start, end, width, since, owner):
-        """Origin path of the call that the property at column ``start`` to
-        ``end`` of the object's text is given, where the line being read,
-        ``index``, has it, else None."""
-        if end > width:
-            return None
-        return self._expression_origin(
+    def _call_held(self, held, name, text, index, column, start, end, since, owner):
+        """Set ``held[name]`` to the origin path of the call that the
+        property at ``start`` to ``end`` of the text of the object that
+        opens at ``column`` of line ``index`` is given: now for one on that
+        line, the line being read, else once its own line is read."""
+        row = text.count("\n", 0, start)
+        held[name] = None
+        if row != text.count("\n", 0, end):
+            return
+        if row:
+            line_start = text.rfind("\n", 0, start) + 1
+            later = (held, name, start - line_start, end - line_start)
+            self._held_later.setdefault(index + row, []).append(later)
+            return
+        held[name] = self._expression_origin(
             self._code, column + start, column + end, index + 1, since, owner
         )
 
@@ -11395,6 +11405,9 @@ class TSParser(BaseParser):
         # object spans and the object's own ID. A function written on one of
         # those lines is a member of the object, not of the definition.
         returned_objects = []
+        # Line index -> (what an object holds, property, columns of its
+        # value) for each property given on that line of an object read before
+        self._held_later = {}
         # Each callback given an owner, innermost last: its last line and how
         # many calls are open around it. A call left open inside it, not one
         # around it, makes a closure on a later line one of its arguments.
@@ -12876,6 +12889,12 @@ class TSParser(BaseParser):
                     and self.context_at(lineno + 1)[0] == parent_id
                 ):
                     nameless[parent_id] = self._find_block_end(code_lines, i)
+                for held, name, start, end in self._held_later.pop(i, ()):
+                    # A property an object read on an earlier line is given
+                    # on this one holds what this line's calls give it.
+                    held[name] = self._expression_origin(
+                        code, start, end, lineno, since, owner
+                    )
                 self._bind_closures(code, i, code_lines, len(code))
                 self._name_results(code, lineno, since, owner)
                 self._bind_patterns(code, i, code_lines, since, owner)

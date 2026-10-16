@@ -315,7 +315,11 @@ Python SDK v2, and a full-tree review's findings are fixed.
   package's conditional export is the first that applies to a `require`
   or an import, not to either, and `./index.d.cts` is that file, not
   `index.d.ts`. What is declared `typeof x`, a variable, a parameter or
-  a field, holds `x`; calls in comments, string
+  a field, holds `x`. A function written on the line of a `return {`
+  or of a declared arrow's `=> ({`, which had no node, its calls the
+  returning function's, is the object's member as on a later line, and
+  a property of a returned object given a call on a later line holds
+  what the call returns, where it held nothing; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a
