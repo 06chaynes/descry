@@ -10518,6 +10518,8 @@ def _opens_body(signature: str, start: int = 0) -> bool:
     return False
 
 
+# What a class's `extends` gives as its base, up to the body or `implements`
+_TS_EXTENDS_RE = re.compile(r"\bextends\s+(.+?)\s*(?:\bimplements\b[^{]*)?\{?\s*$")
 # What may follow the `}` or `;` that ends a statement before the next
 _TS_SEPARATORS_RE = re.compile(r"[ \t,;]*")
 # What a line may go on to after the `}` or `;` that ends a definition:
@@ -10993,11 +10995,17 @@ class TSParser(BaseParser):
         for clause, specifier in _TS_IMPORT_RE.findall(content):
             for part in re.split(r"[{},]", clause):
                 # `name`, `type name`, `name as alias`, `* as alias`
-                local = part.rpartition(" as ")[2].split()[-1:]
+                original, renamed, alias = part.partition(" as ")
+                local = alias.split()[-1:] if renamed else original.split()[-1:]
                 if local:
                     self.builder.imports.setdefault(file_id, {})[local[0]] = specifier
                     if part.split()[0] == "*":
                         modules[local[0]] = specifier
+                    elif renamed and original.split():
+                        exported = original.split()[-1]
+                        self.builder.import_names.setdefault(file_id, {})[local[0]] = (
+                            exported
+                        )
         # The lines a `require` or an `import()` binds names on
         required = set()
         for found in _TS_REQUIRE_RE.finditer(content):
@@ -11005,9 +11013,14 @@ class TSParser(BaseParser):
             required.add(first_rows[content.count("\n", 0, found.start())])
             for part in re.split(r"[{},]", clause):
                 # `name`, or `name: local` in a destructuring pattern
-                local = part.rpartition(":")[2].strip()
+                exported, renamed, local = part.rpartition(":")
+                local = local.strip()
                 if local:
                     self.builder.imports.setdefault(file_id, {})[local] = specifier
+                    if renamed and exported.strip():
+                        self.builder.import_names.setdefault(file_id, {})[local] = (
+                            exported.strip()
+                        )
         imported = self._imported = self.builder.imports.get(file_id, ())
         # Which characters are code is read once for the file. Each of
         # ``code_lines`` is a line without its comments and with the text of
@@ -11870,23 +11883,20 @@ class TSParser(BaseParser):
                         signature_until = sig_until
                 # Generic arguments go first: `class A<T extends B> extends C<T>`
                 # inherits from C.
+                # The base is an expression: a name a type has, or a value
+                # no name stands for, a call's or a cast's, as written.
                 heritage = _strip_generics(full_sig)
-                if "extends" in heritage:
-                    try:
-                        base = heritage.split("extends")[1].split()[0].split("{")[0]
-                        # A parameter of a definition around the class holds
-                        # a value: its name is no type's.
-                        passed = any(
-                            base.split(".")[0] in params for *_, params in holders
-                        )
-                        self.builder.add_edge(
-                            cid,
-                            f"REF:{base}",
-                            "INHERITS",
-                            {"origin": f"={base}"} if passed else None,
-                        )
-                    except (IndexError, ValueError):
-                        pass
+                if extended := _TS_EXTENDS_RE.search(heritage):
+                    base = " ".join(extended[1].split())
+                    # A parameter of a definition around the class holds a
+                    # value: its name is no type's.
+                    passed = any(base.split(".")[0] in params for *_, params in holders)
+                    self.builder.add_edge(
+                        cid,
+                        f"REF:{base}",
+                        "INHERITS",
+                        {"origin": f"={base}"} if passed else None,
+                    )
                 enter(cid, lineno, end_lineno)
                 if open_member:
                     enter(*open_member)
@@ -13669,14 +13679,19 @@ class CallResolver:
             if lang in _NAMESPACE_RECEIVER_LANGS:
                 # A named import of a receiver is what the scope holds
                 # under the receiver's name.
-                paths.append(qualifier)
+                head = qualifier[:1] and [self._exported_as(qualifier[0], source_id)]
+                paths.append(head + qualifier[1:])
+            looked_up = name if qualifier else self._exported_as(name, source_id)
             for path in paths:
                 scopes = imported
                 for segment in path:
                     found = (self._find_member(scope, segment)[0] for scope in scopes)
                     scopes = [scope for scope in found if scope]
-                hits = {i for i in scopes if not qualifier and i.endswith(f"::{name}")}
-                hits |= {self._find_member(scope, name)[0] for scope in scopes} - {None}
+                hits = {
+                    i for i in scopes if not qualifier and i.endswith(f"::{looked_up}")
+                }
+                hits |= {self._find_member(scope, looked_up)[0] for scope in scopes}
+                hits.discard(None)
                 if hits:
                     break
             if hits or (candidates and len(qualifier) <= 1):
@@ -13784,6 +13799,12 @@ class CallResolver:
         value = self.standard["php"].function(key, source_id)[1]
         self._result = value or _OPAQUE
         return None, _EXTERNAL
+
+    def _exported_as(self, name, scope_id):
+        """The name the module an import in the file of ``scope_id`` binds
+        ``name`` from exports it as."""
+        renamed = self.builder.import_names.get(scope_id.split("::")[0], {})
+        return renamed.get(name, name)
 
     def _imported(self, name, scope_id):
         """What an import in the file of ``scope_id`` binds ``name`` to: the
@@ -15827,7 +15848,8 @@ class CallResolver:
         types = [] if qualifier else [i for i in imported or () if self._is_class(i)]
         if not types and imported:
             # The import names the scope the type is in.
-            found = (self._find_member(scope, name)[0] for scope in imported)
+            exported = name if qualifier else self._exported_as(name, scope_id)
+            found = (self._find_member(scope, exported)[0] for scope in imported)
             found = (self.companions.get(hit, hit) for hit in found)
             types = [hit for hit in found if hit and self._is_class(hit)]
         if lang == "dart" and (imported or not qualifier):
@@ -16178,8 +16200,9 @@ class CallResolver:
             found = [self._lexical(name, scope_id, skip_classes=True)]
             imported = self._imported(name, scope_id)
             if imported not in (None, _EXTERNAL):
+                exported = self._exported_as(name, scope_id)
                 found += imported
-                found += [self._find_member(scope, name)[0] for scope in imported]
+                found += [self._find_member(scope, exported)[0] for scope in imported]
         for hit in found:
             # A type the project only writes impl blocks for is declared
             # outside it.
@@ -17123,6 +17146,9 @@ class CodeGraphBuilder:
         self.ts_configs = {}
         # JS/TS file ID -> [(exported name or "*", module specifier, name there)]
         self.reexports = {}
+        # JS/TS file ID -> {local name: the name its module exports it as},
+        # for an import that renames what it binds
+        self.import_names = {}
         # (defining file or class ID, fixture name) -> (function ID, origin
         # path of the value the fixture returns or yields, if it has one,
         # whether it yields it)

@@ -19583,6 +19583,44 @@ class TestBaseTypes:
             "FILE:a.ts::mixin",
         ]
 
+    def test_a_cast_base_is_written_whole(self, tmp_path):
+        """`extends (Base as any)` gives a base no name stands for, written
+        as the expression is, not its first word."""
+        builder = _index(
+            tmp_path,
+            {"a.ts": "export class G<T> extends (Object as any) {}\n"},
+        )
+        assert _bases(builder, "FILE:a.ts::G") == ["REF:(Object as any)"]
+
+    def test_a_renamed_import_is_what_its_module_exports(self, tmp_path):
+        """`import { Dog as Pup }`, `const { Dog: Hound } = require(...)`
+        and `await import(...)` bind the module's `Dog` under another name:
+        a base, a parameter's type and a constructor are the module's."""
+        builder = _index(
+            tmp_path,
+            {
+                "dog.ts": "export class Dog { bark() {} }\n",
+                "a.ts": """
+                import { Dog as Pup } from "./dog";
+                export class Kennel extends Pup {}
+                export function walk(p: Pup) { p.bark(); }
+                """,
+                "b.js": """
+                const { Dog: Hound } = require("./dog");
+                function make() { new Hound().bark(); }
+                async function later() {
+                  const { Dog: Late } = await import("./dog");
+                  new Late().bark();
+                }
+                """,
+            },
+        )
+        dog, bark = "FILE:dog.ts::Dog", "FILE:dog.ts::Dog::bark"
+        assert _bases(builder, "FILE:a.ts::Kennel") == [dog]
+        assert _calls(builder, "FILE:a.ts::walk") == [bark]
+        assert _calls(builder, "FILE:b.js::make") == [dog, bark]
+        assert _calls(builder, "FILE:b.js::later") == [dog, bark]
+
 
 def test_a_form_feed_ends_no_line(tmp_path):
     """A definition is on the line an editor shows it on, after a comment
