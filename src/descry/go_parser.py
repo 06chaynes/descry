@@ -20,6 +20,7 @@ import re
 from descry._comments import strip_block_comments, strip_line_comment
 from descry.generate import (
     BaseParser,
+    _bracketed_parts,
     _go_type_parts,
     blank_strings,
     go_constraints,
@@ -43,20 +44,26 @@ _RE_IMPORT_BLOCK_LINE = re.compile(
     r'^\s*(?:([A-Za-z_][A-Za-z0-9_]*)\s+|\.\s+)?"([^"]+)"'
 )
 
+# What a declaration's name is followed by in brackets: its type parameters,
+# `[K comparable, V any]`, or for a type the length of the array it is
+_TYPE_PARAMS = r"\[(?P<generics>(?:[^][]|\[[^][]*\])+)\]"
+
 # Type declaration: `type Name struct {`, `type Name interface {`, `type Name = AliasTarget`
 _RE_TYPE_DECL = re.compile(
-    r"^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)\s+"
+    rf"^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s*{_TYPE_PARAMS}\s*|\s+)"
     r"(struct|interface|func|chan|map|\[\]|\*|=|[A-Za-z])"
 )
 
 # Function (free) declaration: `func Name(...) ...`
-_RE_FUNC = re.compile(r"^\s*func\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^]]+\])?\s*\(")
+_RE_FUNC = re.compile(
+    rf"^\s*func\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:{_TYPE_PARAMS})?\s*\("
+)
 
 # Method declaration: `func (receiver *Type) Name(...)` / `func (Type) Name(...)`
 _RE_METHOD = re.compile(
     r"^\s*func\s+"
     r"\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s+)?\*?\s*([A-Za-z_][A-Za-z0-9_]*)"
-    r"(?:\[[^]]*\])?\s*\)\s+"  # optional type parameters: (s *Stack[T])
+    r"(?:\[(?P<generics>[^]]*)\])?\s*\)\s+"  # type parameters: (s *Stack[T])
     r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^]]+\])?\s*\("
 )
 
@@ -223,6 +230,26 @@ def _list_items(text: str) -> list[list[str]]:
     return segments
 
 
+def _type_parameters(written: str | None) -> dict[str, str | None] | None:
+    """``{name: type}`` of each parameter of the type parameter list
+    ``written``, the text in its brackets: its constraint where that is one
+    named type, else None. None where ``written`` is an array's length,
+    which no constraint follows."""
+    parts = _bracketed_parts(f"{written}]")
+    if not parts or not re.match(r"[A-Za-z_]\w*\s+[\w~\[]", parts[-1]):
+        return None
+    params, names = {}, []
+    for part in parts:
+        name, *constraint = part.split(None, 1)
+        names.append(name)
+        if constraint:
+            named = re.fullmatch(r"[A-Za-z_][\w.]*", constraint[0].strip())
+            bound = named and named[0] not in ("any", "comparable") and named[0]
+            params.update(dict.fromkeys(names, bound or None))
+            names = []
+    return params
+
+
 def _parameter_names(parameters: str) -> list[str]:
     """Names of the parameters in the text of a parameter list, which names
     all of them or none."""
@@ -326,6 +353,13 @@ class GoParser(BaseParser):
         variable of its name. None for any other name."""
         value, _, rest = path.partition(".")
         origin = self._declared(value, lineno, since)
+        if parameter := re.fullmatch(r"(\w+)\(\)", origin or ""):
+            # A value of a type parameter's type has its constraint's methods.
+            for first, last, params in reversed(self._generics):
+                if first <= lineno <= last and parameter[1] in params:
+                    bound = params[parameter[1]]
+                    origin = f"{bound.replace('.', '::')}()" if bound else "?"
+                    break
         if origin is None and (self._scope, value) in self._locals:
             origin = "?"
         return origin and ".".join(filter(None, (origin, rest)))
@@ -453,6 +487,9 @@ class GoParser(BaseParser):
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
         self._switches = []  # (indent, variable, origin of its value) of each
+        # The first and last line of each declaration with type parameters,
+        # and the type each parameter stands for (see `_type_parameters`)
+        self._generics = []
 
         lines = source_lines(content)
 
@@ -492,6 +529,13 @@ class GoParser(BaseParser):
         )
         self.enter_context(file_id, 0, len(lines))
         receivers: dict[str, tuple[str, int]] = {}  # type id -> (name, lineno)
+        # The type parameters of each generic type the file declares, which
+        # a method's receiver names in their order
+        declared_generics = {
+            found[1]: list(params.values())
+            for found in map(_RE_TYPE_DECL.match, lines)
+            if found and (params := _type_parameters(found["generics"]))
+        }
 
         i = 0
         n = len(lines)
@@ -584,10 +628,12 @@ class GoParser(BaseParser):
             # Type declarations
             m_type = _RE_TYPE_DECL.match(line)
             if m_type:
-                name, kind = m_type.groups()
+                name, generics, kind = m_type.groups()
                 parent_id = context_id
                 type_id = f"{parent_id}::{name}"
                 end_lineno = self._find_block_end(lines, i) if "{" in line else lineno
+                if params := _type_parameters(generics):
+                    self._generics.append((lineno, end_lineno, params))
                 docstring = self.get_leading_docstring(lines, i)
                 self.builder.add_node(
                     type_id,
@@ -654,7 +700,7 @@ class GoParser(BaseParser):
             # Methods (receiver-bound)
             m_method = _RE_METHOD.match(line)
             if m_method:
-                receiver_type, method_name = m_method.groups()
+                receiver_type, generics, method_name = m_method.groups()
                 # Method lives under its receiver type.
                 method_id = f"{file_id}::{receiver_type}::{method_name}"
                 return_type, body, parameters, opens = _signature_tail(
@@ -663,6 +709,11 @@ class GoParser(BaseParser):
                 end_lineno = lineno
                 if opens is not None:
                     end_lineno = self._find_block_end(lines, opens)
+                if generics:
+                    bounds = declared_generics.get(receiver_type, [])
+                    names = [name.strip() for name in generics.split(",")]
+                    params = dict(zip(names, bounds + [None] * len(names)))
+                    self._generics.append((lineno, end_lineno, params))
                 docstring = self.get_leading_docstring(lines, i)
                 self.builder.add_node(
                     method_id,
@@ -700,6 +751,8 @@ class GoParser(BaseParser):
                 end_lineno = lineno
                 if opens is not None:
                     end_lineno = self._find_block_end(lines, opens)
+                if params := _type_parameters(m_func["generics"]):
+                    self._generics.append((lineno, end_lineno, params))
                 docstring = self.get_leading_docstring(lines, i)
                 self.builder.add_node(
                     func_id,

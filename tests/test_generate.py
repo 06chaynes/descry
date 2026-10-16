@@ -8519,6 +8519,38 @@ class TestGoCallResolution:
             "FILE:cmd.go::MarkRequired"
         ]
 
+    def test_a_value_of_a_type_parameter_has_its_constraints_methods(self, tmp_path):
+        """A method of a type parameter's value is its named constraint's;
+        under any other constraint the call stays unresolved, not external."""
+        builder = _index(
+            tmp_path,
+            {
+                "dog.go": """
+                package dog
+
+                type Barker interface {
+                \tBark()
+                }
+
+                type Dog struct{}
+
+                func (d Dog) Bark() {}
+
+                func Named[T Barker](t T) {
+                \tt.Bark()
+                }
+
+                func Inline[T interface{ Bark() }](t T) {
+                \tt.Bark()
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:dog.go::Named") == ["FILE:dog.go::Barker::Bark"]
+        assert _candidates(builder, "FILE:dog.go::Inline") == {
+            "REF:t.Bark": ["FILE:dog.go::Barker::Bark", "FILE:dog.go::Dog::Bark"]
+        }
+
     def test_receiver_type_resolves_a_common_method_name(self, tmp_path):
         """`c.Flags()` on a `*Command` receiver reaches Command.Flags, a name
         that is also a library method."""

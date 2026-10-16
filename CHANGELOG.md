@@ -275,7 +275,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   Java Allman braces, class scope ended by a `'}'` literal, calls
   attributed to the class instead of the method, members of an anonymous
   class filed under the enclosing one; Go unexported types,
-  generic receivers, one-line functions; Ruby one-line classes and modules,
+  generic receivers, one-line functions, generic types and functions with
+  brackets in their type parameters, which had no node, and a method of
+  a type parameter's value, dropped as external instead of read through
+  its constraint; Ruby one-line classes and modules,
   `#` docstrings; C# properties and verbatim strings; TypeScript and
   JavaScript `.jsx`/`.mjs`/`.cjs`/`.mts`/`.cts` files, `$` identifiers,
   typed arrow constants, file-level calls; calls in comments, string

@@ -167,6 +167,27 @@ func Identity[T any](v T) T {
         _parse(builder, src)
         assert "FILE:pkg/app.go::Identity" in _node_ids(builder)
 
+    def test_generic_declarations_with_bracketed_constraints(self, builder):
+        """A type parameter list may hold brackets of its own; a generic
+        type is a type. A length in brackets is an array's."""
+        src = """
+package app
+
+func Map[S ~[]E, E any](s S) S {
+    return s
+}
+
+type Set[K comparable] struct{}
+
+type Pair[A, B any] struct{}
+
+type Grid [4]int
+""".strip()
+        _parse(builder, src)
+        ids = _node_ids(builder)
+        for name in ("Map", "Set", "Pair", "Grid"):
+            assert f"FILE:pkg/app.go::{name}" in ids
+
     def test_return_type_lists_every_result(self, builder):
         src = """
 package app
