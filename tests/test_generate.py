@@ -2408,6 +2408,52 @@ class TestPythonCallResolution:
             "FILE:m.py::started",
         ]
 
+    def test_a_name_is_read_as_bound_where_it_is_read(self, tmp_path):
+        """A binding takes effect where what makes it ends, on its line as
+        on any other: a read after it on the line sees it, a read before
+        it the binding before. A parameter, a loop's, a `with`'s and an
+        `except`'s names are bound from the start of their body."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class A:
+                    def go(self): pass
+                    def items(self): pass
+                class B:
+                    def go(self): pass
+                    def run(self): self.go()
+                    def __enter__(self): return self
+
+                def same():
+                    a = A()
+                    a = B(); a.go()
+
+                def walrus():
+                    a = A()
+                    (a := B()); a.go()
+
+                def before(a: A):
+                    a.go(); a = B()
+
+                def loop(x: A):
+                    for x in x.items(): pass
+
+                def entered():
+                    with B() as b: b.go()
+                """
+            },
+        )
+        a, b = "FILE:m.py::A::go", "FILE:m.py::B::go"
+        assert b in _calls(builder, "FILE:m.py::same")
+        assert a not in _calls(builder, "FILE:m.py::same")
+        assert b in _calls(builder, "FILE:m.py::walrus")
+        assert a not in _calls(builder, "FILE:m.py::walrus")
+        assert _calls(builder, "FILE:m.py::before") == [a, "FILE:m.py::B"]
+        assert _calls(builder, "FILE:m.py::loop") == ["FILE:m.py::A::items"]
+        assert _calls(builder, "FILE:m.py::entered") == ["FILE:m.py::B", b]
+        assert _calls(builder, "FILE:m.py::B::run") == [b]
+
 
 class TestRustCallResolution:
     def test_path_through_non_project_type_is_external(self, tmp_path):

@@ -13,6 +13,7 @@ import threading
 from bisect import bisect_left, bisect_right
 from collections import deque
 from functools import cache
+from operator import itemgetter
 from pathlib import Path
 
 from descry import _stdlib
@@ -7093,6 +7094,19 @@ class BaseParser:
 
 
 _PY_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _py_start(node):
+    """The line and column ``node`` starts at, its decorators included."""
+    first = (getattr(node, "decorator_list", None) or [node])[0]
+    return first.lineno, first.col_offset
+
+
+def _py_end(node):
+    """The line and column ``node`` ends at."""
+    return node.end_lineno, node.end_col_offset
+
+
 # Compound statements whose blocks can hold definitions and imports.
 _PY_COMPOUND_STMTS = (
     ast.If,
@@ -7548,10 +7562,11 @@ class PythonParser(BaseParser):
         if isinstance(node, ast.Name):
             if id(node) in self.scoped:
                 return self.scoped[id(node)]
+            read = getattr(node, "lineno", lineno), getattr(node, "col_offset", 0)
             for depth, frame in enumerate(reversed(self.bindings)):
                 if node.id in frame:
-                    bound = [o for at, o in frame[node.id] if depth or at < lineno]
-                    return bound[-1] if bound else "?"
+                    bound = [b for b in frame[node.id] if depth or b[0] <= read]
+                    return max(bound, key=itemgetter(0))[1] if bound else "?"
             imported = self.import_targets.get(node.id)
             return f"@{imported}" if imported else node.id
         if isinstance(node, ast.Attribute):
@@ -7619,14 +7634,16 @@ class PythonParser(BaseParser):
 
     def _push_bindings(self, body, func=None, is_method=False):
         """Push a frame mapping each name bound in ``body`` (and by the
-        parameters of ``func``) to its ``(lineno, origin)`` bindings in
-        source order. Module-level imports go to ``import_targets``."""
+        parameters of ``func``) to its ``((line, column), origin)``
+        bindings, at where each takes effect: the end of what binds it, or
+        the start of the body a parameter, a loop, a `with` or an `except`
+        binds it for. Module-level imports go to ``import_targets``."""
         frame = {}
         self.bindings.append(frame)
 
-        def bind(target, lineno, origin):
+        def bind(target, at, origin):
             for name, bound in _py_targets(target, origin):
-                frame.setdefault(name, []).append((lineno, bound))
+                frame.setdefault(name, []).append((at, bound))
 
         def iterated(value, loop, lineno):
             """Origin of what ``loop`` binds on each pass over ``value``."""
@@ -7700,7 +7717,7 @@ class PythonParser(BaseParser):
                     origin = f"~{arg.arg}"
                 else:
                     origin = "?"
-                frame[arg.arg] = [(func.lineno, origin)]
+                frame[arg.arg] = [(_py_start(func.body[0]), origin)]
 
         found = []
         self.exits = []  # the `return` and `yield` nodes of ``body``
@@ -7718,20 +7735,21 @@ class PythonParser(BaseParser):
             elif isinstance(node, ast.Assign) and not _py_is_none(node.value):
                 origin = self._origin(node.value, lineno)
                 for target in node.targets:
-                    bind(target, lineno, origin)
+                    bind(target, _py_end(node), origin)
             elif isinstance(node, ast.AnnAssign):
                 origin = self._instance_origin(node.annotation)
-                bind(node.target, lineno, origin)
+                bind(node.target, _py_end(node), origin)
             elif isinstance(node, ast.NamedExpr):
-                bind(node.target, lineno, self._origin(node.value, lineno))
+                bind(node.target, _py_end(node), self._origin(node.value, lineno))
             elif isinstance(node, (ast.Import, ast.ImportFrom)):
                 for name, target in _py_import_bindings(node):
                     if func is None:
                         self.import_targets[name] = target
                     else:
-                        frame.setdefault(name, []).append((lineno, f"@{target}"))
+                        frame.setdefault(name, []).append((_py_end(node), f"@{target}"))
             elif isinstance(node, (ast.For, ast.AsyncFor)):
-                bind(node.target, lineno - 1, iterated(node.iter, node, lineno))
+                origin = iterated(node.iter, node, lineno)
+                bind(node.target, _py_start(node.body[0]), origin)
             elif isinstance(node, _PY_COMPREHENSIONS):
                 for generator in node.generators:
                     origin = iterated(generator.iter, generator, lineno)
@@ -7740,7 +7758,7 @@ class PythonParser(BaseParser):
                 enter = "__enter__" if isinstance(node, ast.With) else "__aenter__"
                 for item in node.items:
                     origin = f"{self._origin(item.context_expr, lineno)}.{enter}()"
-                    bind(item.optional_vars, lineno - 1, origin)
+                    bind(item.optional_vars, _py_start(node.body[0]), origin)
             elif isinstance(node, ast.Lambda):
                 for arg in ast.walk(node.args):
                     if isinstance(arg, ast.arg):
@@ -7752,7 +7770,7 @@ class PythonParser(BaseParser):
             elif isinstance(node, ast.Assert):
                 for name, origin in checked(node.test):
                     if name.id in frame and "?" not in origin:
-                        bind(name, lineno, origin)
+                        bind(name, _py_end(node), origin)
             elif isinstance(node, ast.Match) and isinstance(node.subject, ast.Name):
                 for case in node.cases:
                     pattern = getattr(case.pattern, "pattern", None) or case.pattern
@@ -7763,7 +7781,9 @@ class PythonParser(BaseParser):
                 origin = "?"
                 if isinstance(getattr(node, "pattern", None), ast.MatchClass):
                     origin = self._instance_origin(node.pattern.cls)
-                frame.setdefault(node.name, []).append((lineno - 1, origin))
+                body = getattr(node, "body", None)
+                at = _py_start(body[0]) if body else _py_end(node)
+                frame.setdefault(node.name, []).append((at, origin))
             elif isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom)):
                 self.exits.append(node)
 
