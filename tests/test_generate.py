@@ -7899,6 +7899,26 @@ class TestTypeScriptCallResolution:
         ]
         assert _bases(builder, "FILE:a.ts::Outside") == ["REF:Leaf"]
 
+    def test_a_member_two_namesake_bases_have_is_neither_ones(self, tmp_path):
+        """Where a base's name may stand for either of two classes that
+        both have the member, the call reaches one of them: it is left
+        with both, not given the first."""
+        builder = _index(
+            tmp_path,
+            {
+                "b.ts": "export class Base { run() {} }\n",
+                "c.ts": "export class Base { run() {} }\n",
+                "d.ts": """
+                class Sub extends Base {
+                  go() { this.run(); }
+                }
+                """,
+            },
+        )
+        assert _candidates(builder, "FILE:d.ts::Sub::go") == {
+            "REF:this.run": ["FILE:b.ts::Base::run", "FILE:c.ts::Base::run"]
+        }
+
     def test_global_is_the_librarys_unless_its_file_binds_the_name(self, tmp_path):
         """`document` and `globalThis.console` are the browser's and the
         language's; a parameter called `document` is not, and no method

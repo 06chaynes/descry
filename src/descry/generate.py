@@ -12748,6 +12748,9 @@ def _ancestors(folder):
 
 
 _UNRESOLVED = "unresolved"
+# What `_find_member` gives for whether its lookup is complete where the
+# several types a base may be have the member: a miss that is not one
+_SEVERAL = "several"
 # What a call returns when nothing is known of it, not even that it comes
 # from outside the project.
 _OPAQUE = "opaque"
@@ -14144,9 +14147,11 @@ class CallResolver:
             return hit, "regex"
         owner = None if explicit else self._enclosing_class(source_id)
         if owner:
-            hit, _ = self._find_member(owner, name)
+            hit, complete = self._find_member(owner, name)
             if hit:
                 return hit, "regex"
+            if complete == _SEVERAL:
+                return None, _UNRESOLVED
         inherited = False
         around = filter(self._is_class, self._scopes(owner))
         for scope in around if lang == "java" else ():
@@ -16562,7 +16567,9 @@ class CallResolver:
         """Look ``name`` up in a type or module and then in the type's bases.
 
         Returns ``(node_id, complete)``; ``complete`` is False when a base is
-        not a project type, so a miss may be a member defined outside.
+        not a project type, so a miss may be a member defined outside, and
+        `_SEVERAL` when the types a base may be have several members of the
+        name, which the miss leaves as the candidates.
         """
         if not self._is_class(owner_id):
             # A variable has the members of the type it is declared as.
@@ -16611,11 +16618,22 @@ class CallResolver:
                     complete = (
                         complete and bool(trait) and not self._std_given(*given)[0]
                     )
+                hits = set()
                 for base_type in base_types:
                     hit, base_complete = self._find_member(base_type, name, seen=seen)
-                    if hit:
-                        return hit, True
+                    if base_complete == _SEVERAL:
+                        return None, _SEVERAL
+                    hits.add(hit)
                     complete = complete and base_complete
+                # Where the base may be any of several types, the member is
+                # the one of those that has it; where several do, the call
+                # reaches one of theirs.
+                hits.discard(None)
+                if len(hits) == 1:
+                    return hits.pop(), True
+                if hits:
+                    self._candidates_now = sorted(hits)
+                    return None, _SEVERAL
             for trait in self.builder.derived.get(declaration, ()):
                 given = (trait, declaration, name, owner_id)
                 complete = complete and not self._std_given(*given)[0]
