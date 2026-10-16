@@ -18453,6 +18453,34 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, "FILE:f.ts::chained") == ["FILE:f.ts::g", "FILE:f.ts::h"]
         assert _calls(builder, "FILE:f.ts") == ["FILE:f.ts::h"] + ["FILE:f.ts::it"] * 4
 
+    def test_a_scope_holds_its_columns_of_the_lines_it_opens_and_closes(self, tmp_path):
+        """A call before the `}` that closes a definition or a callback is
+        theirs, one after it the enclosing scope's, and a call after a
+        callback's `{` on its first line is the callback's."""
+        builder = _index(
+            tmp_path,
+            {
+                "f.ts": """
+                export function x() {}
+                export function b() {}
+                export function a() {
+                  x(); } b();
+                export function outer() {
+                  [1].forEach(function () { x();
+                    x(); }); b();
+                  [1].map((v) => { x();
+                    x(); }).forEach(b);
+                }
+                """
+            },
+        )
+        x, b = "FILE:f.ts::x", "FILE:f.ts::b"
+        assert _calls(builder, "FILE:f.ts::a") == [x]
+        assert _calls(builder, "FILE:f.ts") == [b]
+        assert _calls(builder, "FILE:f.ts::outer::callback@7") == [x, x]
+        assert _calls(builder, "FILE:f.ts::outer::callback@9") == [x, x]
+        assert _calls(builder, "FILE:f.ts::outer") == ["FILE:f.ts::b"]
+
     def test_a_block_body_after_an_arrow_in_the_signature(self, tmp_path):
         """A function or method with `=>` in its parameters or its return
         type has a block for a body: the line its `}` leads is read outside

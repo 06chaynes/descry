@@ -10991,6 +10991,9 @@ class TSParser(BaseParser):
         # on: those of callbacks and of nameless functions
         closed_after = set()
         expression_ids = set()  # functions whose body is an expression
+        # The definition, and its first and last line and column, of each
+        # context: a column of None where it holds the whole line
+        extents = []
         # context -> each name its body declares -> the lines it is in scope
         declared_names = {}
         self._closed_names = {}  # line -> the names declared in a block it closes
@@ -11008,14 +11011,58 @@ class TSParser(BaseParser):
         interface_ids = set()  # interfaces that have the ID `<scope>::<name>`
         value_ids = set()  # functions and variables, which always have it
 
-        def enter(node_id, lineno, end_lineno, signature=""):
-            """Make a definition that spans further lines the context."""
+        def enter(node_id, lineno, end_lineno, signature="", span=None):
+            """Make a definition that spans further lines the context, and
+            record its ``span``: by default from the line after ``lineno``
+            to the `}` that closes its body on line ``end_lineno``, or that
+            whole line where its body is an expression."""
             if end_lineno > lineno:
                 self.enter_context(node_id, lineno, end_lineno, _ts_params(signature))
                 # An arrow function's signature starts with its parameters.
                 arrow = re.match(r"\s*(?:\(|[\w$]+\s*=>)", signature)
                 if arrow and signature.rpartition("=>")[2].strip() != "{":
                     expression_ids.add(node_id)
+                closed = None
+                if node_id not in expression_ids:
+                    closed = body_end(lineno, end_lineno)
+                extents.append(
+                    (node_id, *(span or ((lineno - 1, None), (end_lineno - 1, closed))))
+                )
+
+        def body_end(lineno, end_lineno):
+            """The column of the `}` on line ``end_lineno`` that closes the
+            body of a definition written on line ``lineno``: the one whose
+            `{` opens first there or after. None where there is none."""
+            row = end_lineno - 1
+            columns = braces_on[row][0] if row < len(braces_on) else ()
+            closing = [
+                (open_at[(row, column)], column)
+                for column in columns
+                if (row, column) in open_at and open_at[(row, column)][0] >= lineno - 1
+            ]
+            return min(closing)[1] if closing else None
+
+        def owner_at(row, column):
+            """The innermost definition whose span holds column ``column``
+            of line ``row``, where a span starts or ends at a known column
+            of it; else None, and the line is read whole. ``extents`` holds
+            those that end on the line or after, outermost first."""
+            if not any(
+                start[0] == row
+                and start[1] is not None
+                or end[0] == row
+                and end[1] is not None
+                for _, start, end in extents
+            ):
+                return None
+            for node_id, (first, opened), (last, closed) in reversed(extents):
+                after = first < row or (
+                    first == row and opened is not None and opened < column
+                )
+                before = last > row or closed is None or column < closed
+                if after and before:
+                    return node_id
+            return file_id
 
         def value_of(name, lineno, since, owner):
             """The origin of a call of ``name`` on line ``lineno`` that calls a
@@ -11149,6 +11196,8 @@ class TSParser(BaseParser):
         # and for each line the columns of its braces with the innermost
         # `{` open before the first and after each
         braces_on, closes_on, outer_brace, braces = [], {}, {}, []
+        # (line, column) of each `}` -> that of the `{` it closes, and back
+        open_at, close_at = {}, {}
         for row, text in enumerate(code_lines):
             columns, innermost = [], [braces[-1] if braces else None]
             for at, char in enumerate(text):
@@ -11156,6 +11205,8 @@ class TSParser(BaseParser):
                     outer_brace[(row, at)] = innermost[-1]
                     braces.append((row, at))
                 elif char == "}" and braces:
+                    open_at[(row, at)] = braces[-1]
+                    close_at[braces[-1]] = row, at
                     closes_on[braces.pop()] = row + 1
                 else:
                     continue
@@ -11178,6 +11229,7 @@ class TSParser(BaseParser):
             field_spans = []  # (start, end, class ID) of a field's value on it
             nodes_before = len(self.builder.nodes)
 
+            extents[:] = [extent for extent in extents if extent[2][0] >= i]
             parent_id = self.context_at(lineno)[0]
             # The line that the `}` closing a definition leads is read
             # outside it, as the line that closes a callback is. An
@@ -11953,7 +12005,11 @@ class TSParser(BaseParser):
                         )
                         callback_ids.add(callback_id)
                         context = (callback_id, since, block_end - 1)
-                        enter(*context, code[bar : opened + 1])
+                        span = (
+                            (i, opened),
+                            close_at.get((i, opened), (block_end - 1, None)),
+                        )
+                        enter(*context, code[bar : opened + 1], span)
                     closed_after.add(context)
                     # A function expression's own name is a variable of its
                     # body.
@@ -12129,7 +12185,7 @@ class TSParser(BaseParser):
                             held = self._this_in_object(code, match.start(1))
                             if held:
                                 origin = f"{held}.{called}"
-                        source = parent_id
+                        source = owner_at(i, match.start(1)) or parent_id
                         for span_start, span_end, node_id in spans:
                             if span_start <= match.start(1) < span_end:
                                 source = node_id
