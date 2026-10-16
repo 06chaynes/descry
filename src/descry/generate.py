@@ -10352,6 +10352,12 @@ _JS_FOR_RE = re.compile(
     r"\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+(?P<pattern>.+?)\s+"
     r"(?P<kind>of|in)\s+(?P<value>.+?)" + _JS_HEAD_END
 )
+# The line a declaration's pattern goes on over lines from, and the last
+# line of one, which closes it and gives the value
+_JS_PATTERN_OPENS_RE = re.compile(r"\b(?:const|let|var)\s+(?P<open>[\[{])[^\]}=]*$")
+_JS_PATTERN_END_RE = re.compile(
+    r"\s*[^=]*?(?P<close>[\]}])\s*=(?![=>])\s*(?P<value>.+?);?\s*$"
+)
 # A declaration that takes a value apart: `const { a, b } = value`
 _JS_PATTERN_RE = re.compile(
     r"\b(?:const|let|var)\s+(?P<pattern>[\[{].*[\]}])\s*=(?!=)\s*(?P<value>.+?);?\s*$"
@@ -10862,6 +10868,18 @@ class TSParser(BaseParser):
         found = (
             _JS_HEAD_END_RE.search(code) and _JS_FOR_RE.search(code)
         ) or _JS_PATTERN_RE.search(code)
+        pattern = found and found["pattern"]
+        if not found and (ended := _JS_PATTERN_END_RE.match(code)):
+            # A pattern over lines, from the line its declaration opens it on.
+            opened = None
+            for row in range(index - 1, max(index - 40, -1), -1):
+                if opened := _JS_PATTERN_OPENS_RE.search(lines[row]):
+                    break
+            if not opened:
+                return
+            parts = [lines[row][opened.start("open") :], *lines[row + 1 : index]]
+            pattern = " ".join([*parts, code[: ended.end("close")]])
+            found = ended
         if not found:
             return
         lineno = index + 1
@@ -10881,8 +10899,7 @@ class TSParser(BaseParser):
         elif kind:
             origin = "string()"
         bindings = {
-            name: _bound_origin(origin, steps)
-            for name, steps in self.bindings(found["pattern"])
+            name: _bound_origin(origin, steps) for name, steps in self.bindings(pattern)
         }
         if kind:
             self._bind(bindings, index, lines, code.rstrip().endswith("{"))
@@ -12387,6 +12404,15 @@ class TSParser(BaseParser):
                     names.extend((name, last) for name in bound)
                 declared_here = later_declarators.pop(i, ())
                 for scope_id, kind, later, name_end, value_at in declared_here:
+                    # A later declarator is typed by its value as the first is.
+                    value_end = _value_end(code_lines[i], value_at)
+                    typed_as = self._expression_origin(
+                        code, value_at, value_end, lineno, since, owner
+                    )
+                    if typed_as:
+                        self.declared.setdefault(later, []).append(
+                            (lineno, typed_as, self._binds_file(later))
+                        )
                     held = _function_value(line[value_at:])
                     constant = kind == "const"
                     if not (constant or held):

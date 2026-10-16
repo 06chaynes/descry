@@ -8348,6 +8348,33 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:a.ts::check") == ["REF:suite.test"]
 
+    def test_a_later_declarator_and_a_pattern_over_lines_are_typed(self, tmp_path):
+        """`b` in `let a = d, b = d` has `d`'s type, as `a` does, and the
+        names a pattern written over lines binds are typed by its value."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Dog { bark() {} }
+                class Box { dog: Dog = new Dog(); }
+                function make(): Box { return new Box(); }
+                export function later(d: Dog) {
+                  let a = d, b = d;
+                  b.bark();
+                }
+                export function spread() {
+                  const {
+                    dog,
+                  } = make();
+                  dog.bark();
+                }
+                """
+            },
+        )
+        bark = "FILE:a.ts::Dog::bark"
+        assert bark in _calls(builder, "FILE:a.ts::later")
+        assert bark in _calls(builder, "FILE:a.ts::spread")
+
     def test_a_block_scoped_variable_is_read_in_its_block_only(self, tmp_path):
         """A `const` a block declares hides one outside it in the block, to
         its `}`: after it, on its line or below, the outer one is read."""
