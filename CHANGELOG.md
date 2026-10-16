@@ -319,7 +319,17 @@ Python SDK v2, and a full-tree review's findings are fixed.
   or of a declared arrow's `=> ({`, which had no node, its calls the
   returning function's, is the object's member as on a later line, and
   a property of a returned object given a call on a later line holds
-  what the call returns, where it held nothing; calls in comments, string
+  what the call returns, where it held nothing. A property of a function
+  type in an interface, `run: (c: Dog) => void`, which was no member, so
+  `b.run()` reached nothing, is a method the interface declares, and an
+  object type, `type T = {...}`, which had no node, owns its members as
+  an interface does. A function written as a property of an object
+  literal passed to a call, `use({ run: (c) => c.bark() })`, on the
+  call's line or a later one, takes the parameters that property's type
+  declares in the call's parameter; `items[i]` is an element of the
+  array `items` is, and a rest parameter, declared or gathering those of
+  a function type, is an array of its type, where each was untyped;
+  calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a

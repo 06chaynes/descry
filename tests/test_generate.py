@@ -8602,6 +8602,114 @@ class TestTypeScriptCallResolution:
             "FILE:a.ts::ns::inner",
         ]
 
+    def test_a_property_of_a_function_type_is_a_member(self, tmp_path):
+        """An interface's or an object type's property of a function type is
+        a method it declares, and an object type, `type T = {...}`, owns its
+        members as an interface does; a property of a nested object type is
+        no member of the outer one."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Dog { bark() {} }
+                interface B { run: (c: Dog) => void; readonly go?: (c: Dog) => void }
+                type C = { run: (c: Dog) => void };
+                type Deep = {
+                  opts: {
+                    inner: () => void;
+                  };
+                };
+                declare const b: B;
+                declare const c: C;
+                export function use() {
+                  b.run(new Dog());
+                  b.go?.(new Dog());
+                  c.run(new Dog());
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::use") == [
+            "FILE:a.ts::B::go",
+            "FILE:a.ts::B::run",
+            "FILE:a.ts::C::run",
+            "FILE:a.ts::Dog",
+            "FILE:a.ts::Dog",
+            "FILE:a.ts::Dog",
+        ]
+        assert "FILE:a.ts::Deep::inner" not in builder.node_registry
+
+    def test_a_function_in_an_object_argument_takes_what_its_property_types(
+        self, tmp_path
+    ):
+        """A function written as a property of an object literal passed to a
+        call, on the call's line or a later one and in a nested object too,
+        takes the parameters the property's function type declares in the
+        type of the call's parameter: an object type or a named one."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Dog { bark() {} }
+                interface Opts { run: (c: Dog) => void }
+                type Deep = { opts: { run: (c: Dog) => void } };
+                function withDog(o: { run: (c: Dog) => void }) {}
+                function withOpts(o: Opts) {}
+                function withDeep(d: Deep) {}
+                export function one() {
+                  withDog({ run: (c) => c.bark() });
+                  withOpts({ run: (c) => c.bark() });
+                  withDeep({ opts: { run: (c) => c.bark() } });
+                }
+                export function lines() {
+                  withOpts({
+                    run: (c) => {
+                      c.bark();
+                    },
+                  });
+                  withDeep({
+                    opts: {
+                      run: (c) => c.bark(),
+                    },
+                  });
+                }
+                """
+            },
+        )
+        bark = "FILE:a.ts::Dog::bark"
+        assert _calls(builder, "FILE:a.ts::one").count(bark) == 3
+        lines = [
+            e["target"]
+            for e in builder.edges
+            if e["source"].startswith("FILE:a.ts::lines")
+            and e["relation"].startswith("CALLS")
+        ]
+        assert lines.count(bark) == 2
+
+    def test_an_element_and_a_rest_parameter_have_the_array_s_type(self, tmp_path):
+        """`items[i]` is an element of the array `items` is, a rest
+        parameter declared `...rest: T[]` is that array, and one of a
+        function passed where a function type is expected gathers the
+        parameters from its own on."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Dog { bark() {} }
+                declare const arr: Dog[];
+                function all(f: (a: Dog, b: Dog) => void) {}
+                export function use(xs: Dog[], ...rs: Dog[]) {
+                  arr[0].bark();
+                  xs[1].bark();
+                  rs[0].bark();
+                  all((...dogs) => dogs[0].bark());
+                }
+                """
+            },
+        )
+        bark = "FILE:a.ts::Dog::bark"
+        assert _calls(builder, "FILE:a.ts::use") == [bark] * 4 + ["FILE:a.ts::all"]
+
     def test_a_returned_object_holds_what_each_of_its_lines_gives(self, tmp_path):
         """An object a function returns or an arrow declared as one gives,
         on one line or several, owns the functions written in it, and a

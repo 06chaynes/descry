@@ -6431,6 +6431,9 @@ class BaseParser:
         # earlier line left open and the character "" for none
         self._brackets, self._inside = [], [(None, "")]
         self._carried = ""  # the brackets open across lines, outermost first
+        # What each of them holds, by ``_held_label``, and what the innermost
+        # of them that is open at each bracket holds
+        self._carried_labels, self._inside_labels = [], [None]
         self._open_calls = []  # edge index of each call open across lines
         self._tail = None  # edge index of the call the previous line ends with
         self._tail_unwraps = 0  # `?` operators that follow that call
@@ -6638,8 +6641,11 @@ class BaseParser:
             # An unindented line starts a top-level item, unless it opens
             # with what closes the one before.
             self._open_calls.clear()
-            self._carried = ""
+            self._carried, self._carried_labels = "", []
         self._brackets, self._inside = [], [(None, self._carried[-1:])]
+        self._inside_labels = [
+            self._carried_labels[-1] if self._carried_labels else None
+        ]
         stack, brackets = [], []
         depth = self._pending[2] if self._pending else None
         for column, char in enumerate(code):
@@ -6661,14 +6667,20 @@ class BaseParser:
             elif brackets:
                 brackets.pop()
             else:
-                self._carried = self._carried[:-1]
+                self._carried, self._carried_labels = (
+                    self._carried[:-1],
+                    self._carried_labels[:-1],
+                )
             self._brackets.append(column + (char in "([{"))
             self._inside.append(
                 (brackets[-1], code[brackets[-1]])
                 if brackets
                 else (None, self._carried[-1:])
             )
+            held = not brackets and self._carried_labels
+            self._inside_labels.append(held[-1] if held else None)
         self._carried += "".join(code[column] for column in brackets)
+        self._left_open = brackets
         self._opens = dict.fromkeys(stack)
 
     def _end_line(self):
@@ -6678,6 +6690,9 @@ class BaseParser:
         lines leave the open statement alone."""
         if not self._code.strip():
             return
+        self._carried_labels += [
+            self._held_label(self._code, c) for c in self._left_open
+        ]
         open_before = len(self._open_calls)
         self._open_calls.extend(self._opens.values())
         statement = self._code.rstrip().rstrip(";").rstrip()
@@ -6793,6 +6808,20 @@ class BaseParser:
         its column, None for one an earlier line left open, and its
         character, "" for none."""
         return self._inside[bisect_right(self._brackets, column)]
+
+    def _element_origin(self, end, callee, lineno, since, source_id):
+        """Origin path of a call of ``callee`` on what the code before
+        column ``end`` of the line being read, an element access, gives;
+        None for no reader of it."""
+
+    def held_around(self, column):
+        """What the bracket an earlier line left open that is innermost at
+        ``column`` of the line being read holds, by ``_held_label``."""
+        return self._inside_labels[bisect_right(self._brackets, column)]
+
+    def _held_label(self, code, column):
+        """What the bracket at ``column`` of ``code``, which the line leaves
+        open, holds as a call's argument; None for no reader of it."""
 
     def call_closed_at(self, column):
         """The call whose `)` is at ``column`` of the line being read, as
@@ -6990,7 +7019,10 @@ class BaseParser:
                 edge = self._closes.get(called - 1) if receiver else self._tail
                 unwrap = ".?" * (receiver - called if receiver else self._tail_unwraps)
                 origin = (
-                    f"#{edge}{unwrap}.{callee}" if edge is not None else f"?.{callee}"
+                    f"#{edge}{unwrap}.{callee}"
+                    if edge is not None
+                    else self._element_origin(called, callee, lineno, since, source_id)
+                    or f"?.{callee}"
                 )
         if origin is None and (source_id, callee) in self._locals:
             origin = f"={callee}"
@@ -9495,7 +9527,7 @@ _TS_DECLARATIONS = (
     # an array and whether or not it may be undefined or null instead
     re.compile(
         r"(?:^|[(,]|\b(?:const|let|var|private|public|protected|readonly)\s)\s*"
-        r"(?P<name>[A-Za-z_$][\w$]*)\??\s*:\s*(?P<type>(?:(?:[a-z_$][\w$]*\.)*"
+        r"(?:\.\.\.)?(?P<name>[A-Za-z_$][\w$]*)\??\s*:\s*(?P<type>(?:(?:[a-z_$][\w$]*\.)*"
         rf"[A-Z$][\w$.]*(?:{_TS_ARGUMENTS})?|string|number|boolean|bigint|symbol"
         r"|typeof\s+[\w$]+(?:\.[\w$]+)*)"
         r"(?:\[\])*)(?:\s*\|\s*(?:undefined|null))*(?=\s*(?:[,)=;]|$))"
@@ -9733,6 +9765,12 @@ def _arrow_function(statement: str) -> tuple[str, str] | None:
     return (_ts_unquote(match.group(1)), value) if value else None
 
 
+_TS_OBJECT_PROPERTY_RE = re.compile(r"\s*(?:readonly\s+)?([\w$]+)\??\s*:\s*\{")
+_TS_FUNCTION_PROPERTY_RE = re.compile(
+    r"\s*(?:readonly\s+)?([\w$]+)\??\s*:\s*(<[^()=]*>)?\s*\("
+)
+
+
 def _function_value(text: str) -> str | None:
     """The function ``text``, the value given a name, is written as, from
     its parameters on, where it is an arrow function or a `function`
@@ -9763,6 +9801,40 @@ def _function_value(text: str) -> str | None:
             rest = value[column + 1 :].lstrip()
             is_arrow = rest.startswith("=>") or (rest.startswith(":") and "=>" in rest)
             return value if is_arrow else None
+    return None
+
+
+def _ts_type_member(lines: list[str], index: int) -> tuple[str, str] | None:
+    """``(name, type)`` of a property that line ``index`` of ``lines``, code
+    lines, declares in an interface or an object type: a function type as
+    ``_ts_function_property`` writes it, or an object type whole, over the
+    lines it goes on to. None for any other line."""
+    if written := _ts_function_property(lines[index]):
+        return written
+    found = _TS_OBJECT_PROPERTY_RE.match(lines[index])
+    if not found:
+        return None
+    text = "\n".join(lines[index : index + 40])
+    close = _block_close(text, found.end() - 1)
+    return close and (found[1], " ".join(text[found.end() - 1 : close + 1].split()))
+
+
+def _ts_function_property(code: str) -> tuple[str, str] | None:
+    """``(name, signature)`` of a property ``code`` declares with a
+    function type, `name?: <T>(a: A) => R;`, the signature written as a
+    method's, `name<T>(a: A): R`; None for any other line."""
+    found = _TS_FUNCTION_PROPERTY_RE.match(code)
+    if not found:
+        return None
+    depth = 0
+    for column in range(found.end() - 1, len(code)):
+        depth += (code[column] == "(") - (code[column] == ")")
+        if not depth:
+            returned = re.match(r"\s*=>\s*(.+?)\s*[;,]?\s*$", code[column + 1 :])
+            params = code[found.end() - 1 : column + 1]
+            if returned:
+                return found[1], f"{found[1]}{found[2] or ''}{params}: {returned[1]}"
+            return None
     return None
 
 
@@ -10475,6 +10547,12 @@ _JS_CLOSURE_RE = re.compile(
     r"(?P<closure>(?:function\s*\*?\s*(?P<named>[\w$]+\s*)?)?"
     r"\((?P<params>[^()]*)\)(?:\s*:[^=(){]+)?\s*(?:=>|\{)|(?P<param>[\w$]+)\s*=>)"
 )
+# A function written as a property's value: `key: (params) =>`, `key: p =>`
+# or `key: function (params) {`
+_JS_PROPERTY_CLOSURE_RE = re.compile(
+    r"(?:^|[{,])\s*[\w$]+\s*:\s*(?:async\s+)?(?P<closure>(?:function\s*\*?\s*[\w$]*\s*)?"
+    r"\((?P<params>[^()]*)\)(?:\s*:[^=(){]+)?\s*(?:=>|\{)|(?P<param>[\w$]+)\s*=>)"
+)
 # A `for` head up to the declaration it starts with, or a `catch` head
 # up to its binding
 _JS_FOR_HEAD_RE = re.compile(r"(?<![\w$])(?:for\s*(?:await\s*)?|(catch)\s*)\(\s*$")
@@ -10510,7 +10588,8 @@ def _js_bindings(pattern, steps=()):
     without declaring its type: the steps lead from the value taken apart
     to the part bound, the property's name for `{ name }` and `*` for an
     element of `[first, second]`, and are None for what `...rest` gathers,
-    which is of no type the value gives."""
+    which is of no type the value gives; `&` for a rest parameter, which
+    gathers the parameters from its own on."""
     pattern = pattern.strip()
     if pattern[:1] in ("[", "{"):
         for part in _bracketed_parts(pattern[1:]):
@@ -10522,6 +10601,9 @@ def _js_bindings(pattern, steps=()):
                 key = _JS_PROPERTY_KEY_RE.match(part)
                 bound = part[key.end() :] if key[2] else part
                 yield from _js_bindings(bound, (*steps, key[1]))
+    elif pattern.startswith("..."):
+        if re.fullmatch(r"[A-Za-z_$][\w$]*", name := pattern[3:].strip()):
+            yield name, (*steps, "&")
     elif re.fullmatch(r"[A-Za-z_$][\w$]*", name := pattern.partition("=")[0].strip()):
         yield name, steps
 
@@ -10737,7 +10819,7 @@ _TS_EXTENDS_RE = re.compile(r"\bextends\s+(.+?)\s*(?:\bimplements\b[^{]*)?\{?\s*
 # property gives, opens after
 _TS_BODY_HEAD_RE = re.compile(
     r"\s*(?:(?P<type>(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?"
-    r"(?:class|interface)\b[^{]*"
+    r"(?:class|interface)\b[^{]*|type\s+[\w$]+\s*(?:<[^{]*>)?\s*="
     r"|(?:extends|implements)\b[^{]*)"
     r"|(?:export\s+default|return"
     r"|(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*(?::[^=]*)?=\s*"
@@ -10967,7 +11049,70 @@ class TSParser(BaseParser):
                 for name, steps in self.bindings(param)
             }
             self._bind(bindings, index, lines, code.rstrip().endswith("{"))
+        while self._held_closures and self._held_closures[0][0] < before:
+            # A function given as a property of an object literal that a
+            # call is passed takes what the call passes to that property.
+            bar, params = self._held_closures.pop(0)
+            if held := self._argument_label(code, bar):
+                bindings = {
+                    name: _bound_origin(f"{held}|{number}", steps)
+                    for number, param in enumerate(_bracketed_parts(params + ")"))
+                    for name, steps in self.bindings(param)
+                }
+                self._bind(bindings, index, lines, code.rstrip().endswith("{"))
         super()._bind_closures(code, index, lines, before)
+
+    def _held_label(self, code, column):
+        return self._argument_label(code, column)
+
+    def _element_origin(self, end, callee, lineno, since, source_id):
+        """`items.*.callee` for a call on an element of an array,
+        `items[i].callee()`: what iterating `items` gives."""
+        code = self._code
+        if code[end - 1 : end] != "]":
+            return None
+        depth = 0
+        for at in range(end - 1, -1, -1):
+            depth += (code[at] == "]") - (code[at] == "[")
+            if not depth:
+                break
+        if depth:
+            return None
+        if code[at - 1 : at] == ")":
+            edge = self._closes.get(at - 1)
+            held = None if edge is None else f"#{edge}"
+        else:
+            path = re.search(r"(?<![\w$.])(?:this\.)?[\w$]+(?:\.[\w$]+)*$", code[:at])
+            owner = source_id.split("::")[-2] if source_id.count("::") > 1 else None
+            held = path and self.call_origin(f"{path[0]}.x", lineno, since, owner)
+            held = held and held[:-2]
+        return held and f"{held}.*.{callee}"
+
+    def _argument_label(self, code, column):
+        """``#edge|argument`` for what starts at ``column`` of the line
+        being read where it is an argument of a call on the line, and
+        ``...:key`` where it is the value of the property `key` of an object
+        literal so labelled, opened on the line or an earlier one; else
+        None."""
+        opened, bracket = self.bracket_around(column)
+        if bracket == "(" and opened is not None:
+            edge = self._closes.get(self._pairs.get(opened), self._opens.get(opened))
+            parts = _bracketed_parts(code[opened + 1 : column] + "x", expression=True)
+            if edge is None or parts[-1].strip() != "x":
+                return None
+            return f"#{edge}|{len(parts) - 1}"
+        key = bracket == "{" and re.search(
+            r"(?:^|[{,])\s*([\w$]+)\s*:\s*(?:async\s+)?$",
+            code[opened or 0 : column],
+        )
+        if not key:
+            return None
+        held = (
+            self.held_around(column)
+            if opened is None
+            else self._argument_label(code, opened)
+        )
+        return held and f"{held}:{key[1]}"
 
     def _this_in_object(self, code, column):
         """``#edge|argument|this`` origin for a `this` at ``column`` that is
@@ -11278,7 +11423,11 @@ class TSParser(BaseParser):
             r"|^\s*(?:export\s+(?:default\s+)?)?(?:declare\s+)?(?:abstract\s+)?class\b(?!\s*=)"
             r"(?:\s+(?!extends\b|implements\b)(?P<plain>[a-zA-Z0-9_$]+))?"
         )
-        re_interface = re.compile(r"^\s*(?:export\s+)?interface\s+([a-zA-Z0-9_$]+)")
+        # `interface Name` and an object type, `type Name<T> = {`
+        re_interface = re.compile(
+            r"^\s*(?:export\s+)?(?:declare\s+)?"
+            r"(?:interface\s+([\w$]+)|type\s+([\w$]+)\s*(?:<[^=]*>)?\s*=\s*\{)"
+        )
         re_func = re.compile(
             r"^\s*(?:export\s+)?(?:declare\s+)?(?:default\s+)?(?:async\s+)?"
             r"function\s+([a-zA-Z0-9_$]+)"
@@ -11408,6 +11557,7 @@ class TSParser(BaseParser):
         # Line index -> (what an object holds, property, columns of its
         # value) for each property given on that line of an object read before
         self._held_later = {}
+        self._held_closures = []
         # Each callback given an owner, innermost last: its last line and how
         # many calls are open around it. A call left open inside it, not one
         # around it, makes a closure on a later line one of its arguments.
@@ -11436,6 +11586,7 @@ class TSParser(BaseParser):
         # constants of the file or a callback that hold an object literal
         object_ids = set()
         interface_ids = set()  # interfaces that have the ID `<scope>::<name>`
+        type_bodies = set()  # interfaces and object types, whatever their ID
         value_ids = set()  # functions and variables, which always have it
 
         def enter(node_id, lineno, end_lineno, signature="", span=None):
@@ -11990,7 +12141,7 @@ class TSParser(BaseParser):
                     owner = nested
                 enter(owner, lineno, last)
             elif match := re_interface.search(line):
-                name = match.group(1)
+                name = match.group(1) or match.group(2)
                 docstring = self.get_leading_docstring(lines, i)
                 j, full_sig, end_lineno = consume_sig(i)
                 cid = f"{parent_id}::{name}"
@@ -12011,6 +12162,7 @@ class TSParser(BaseParser):
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
                 class_ids.add(cid)
+                type_bodies.add(cid)
                 heritage = _strip_generics(full_sig)
                 if "extends" in heritage:
                     try:
@@ -12102,6 +12254,43 @@ class TSParser(BaseParser):
                 spread, key, name = match.groups()
                 held = ("*" if spread else key or name, "", name)
                 self.builder.reexports.setdefault(parent_id, []).append(held)
+            elif (
+                parent_id in type_bodies
+                and (written := _ts_type_member(code_lines, i))
+                and _braces_open(
+                    code_lines,
+                    next(c[1] for c in reversed(self._contexts) if c[0] == parent_id)
+                    - 1,
+                    0,
+                    i,
+                    -1,
+                )
+                == 1
+            ):
+                # A property of a function type is a method the type
+                # declares; one of an object type a field of that type.
+                name, full_sig = written
+                if full_sig.startswith("{"):
+                    self.builder.fields.setdefault(parent_id, {})[name] = full_sig
+                else:
+                    mid = f"{parent_id}::{name}"
+                    return_type, param_types, typed = self._extract_ts_types(full_sig)
+                    self.builder.add_node(
+                        mid,
+                        "Method",
+                        name=name,
+                        signature=self._build_ts_signature(
+                            name, param_types, return_type
+                        ),
+                        lineno=lineno,
+                        end_lineno=lineno,
+                        token_count=10,
+                        docstring=self.get_leading_docstring(lines, i),
+                        return_type=return_type,
+                        param_types=param_types,
+                        signatures=self._overloads(mid, typed),
+                    )
+                    self.builder.add_edge(parent_id, mid, "DEFINES")
             elif (
                 parent_id in class_ids
                 and not re_method.search(line)
@@ -12478,6 +12667,10 @@ class TSParser(BaseParser):
                     or _JS_VALUE_START_RE.search(
                         code, max(_run_start(code, found.start()) - 7, 0), found.start()
                     )
+                ]
+                self._held_closures = [
+                    (found.start("closure"), found["params"] or found["param"] or "")
+                    for found in _JS_PROPERTY_CLOSURE_RE.finditer(code)
                 ]
                 self._bodies = []
                 # A nameless function passed as an argument, whose block body
@@ -13737,6 +13930,8 @@ class CallResolver:
         # edge index of a call -> {argument position: values of the
         # parameters of the callable passed there}
         self.callables = {}
+        # edge index -> (callee, its parameters as written)
+        self.declared_params = {}
         self._callables = {}  # those of the call being resolved
         self.this_args = {}  # call index -> {argument: `ThisType` value}
         self._this_args = {}  # those of the call being resolved
@@ -13799,6 +13994,7 @@ class CallResolver:
         self._bound = None, {}, None
         if target in self.builder.signatures:
             self._bind_call(target, site, edge["source"])
+            self.declared_params[index] = target, self._bound[2]["params"]
             self._callables = {
                 position: [
                     self._returned_type(written, target, self._receiver)
@@ -14875,6 +15071,50 @@ class CallResolver:
                 self._candidates_now = sorted(pool)
         return (hit, "regex") if hit else (None, _UNRESOLVED)
 
+    def _property_params(self, call, argument):
+        """The parameters of the function the property `A:key` of an object
+        literal passed to call ``call`` holds: those of the function type
+        the property has in the type of the call's parameter `A`."""
+        target, declared = self.declared_params.get(call, (None, ()))
+        position, *path = argument.split(":")
+        if int(position) >= len(declared):
+            return ()
+        written, scope = declared[int(position)].partition(":")[2].strip(), target
+        for key in path:
+            written, scope = self._property_type(written, key, scope)
+            if not written:
+                return ()
+        return self._functional_params(written, scope)
+
+    def _property_type(self, written, key, scope_id):
+        """``(type, scope)`` of the property ``key`` of the TypeScript type
+        ``written`` in ``scope_id``: an object type's, or a member's of the
+        type it names, a method's as a function type; None for none."""
+        if written.startswith("{") and written.endswith("}"):
+            for part in _bracketed_parts(written[1:-1].replace(";", ",")):
+                method = _ts_function_property(part) or (
+                    re.match(r"\s*([\w$]+)\??\s*(\(.*\))\s*:\s*(.+)", part)
+                )
+                if method and isinstance(method, tuple) and method[0] == key:
+                    name, signature = method
+                    params, _, returned = signature[len(name) :].rpartition("):")
+                    return f"{params}) => {returned.strip()}", scope_id
+                if method and not isinstance(method, tuple) and method[1] == key:
+                    return f"{method[2]} => {method[3]}", scope_id
+                name, colon, held = part.partition(":")
+                if colon and name.strip().rstrip("?") == key:
+                    return held.strip(), scope_id
+            return None, scope_id
+        type_id = self._type_named(written, scope_id)
+        if type_id in (None, _EXTERNAL):
+            return None, scope_id
+        member = self._find_member(type_id, key)[0]
+        if member in self.builder.signatures:
+            signature = self.builder.signatures[member][0]
+            returned = signature["returns"] or "void"
+            return f"({', '.join(signature['params'])}) => {returned}", member
+        return self.builder.fields.get(type_id, {}).get(key), type_id
+
     def _functional_params(self, written, scope_id):
         """``[values]`` of the parameters of the function ``written``'s
         type declares: the single abstract method of the project
@@ -15448,7 +15688,8 @@ class CallResolver:
             value = self._annotated(root[1:], source_id)
         elif root.startswith("#") and "|" in root.partition(">")[0]:
             # `#N|A|P`: parameter P of the callable passed to call N as
-            # argument A, or as the only one that is a callable (`?`);
+            # argument A, or as the only one that is a callable (`?`), or
+            # given as the property `key` of an object passed as A (`A:key`);
             # `#N|A|this` is the `ThisType` parameter A declares.
             call, argument, parameter = root[1:].split("|")
             if parameter == "this":
@@ -15458,7 +15699,18 @@ class CallResolver:
                 if argument == "?" and len(callables) == 1:
                     argument = next(iter(callables))
                 params = callables.get(argument, ())
+                if ":" in argument:
+                    params = self._property_params(int(call), argument)
                 value = params[int(parameter)] if int(parameter) < len(params) else None
+                if steps[:1] == ["&"]:
+                    # A rest parameter: an array of the parameters it gathers,
+                    # where they are of one type.
+                    gathered = list(params[int(parameter) :])
+                    if gathered and gathered[-1] and gathered[-1][0] == "rest":
+                        gathered[-1] = gathered[-1][1]
+                    one = gathered and all(held == gathered[0] for held in gathered)
+                    value = ("outside", "Array", (gathered[0],)) if one else None
+                    steps = steps[1:]
         elif root.startswith("#"):
             # `#N>Type`: what the call at edge index N returned, read for
             # the members the type a variable it is bound to is declared
