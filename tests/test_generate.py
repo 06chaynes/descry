@@ -8369,6 +8369,45 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:a.ts::show") == [bark]
         assert _calls(builder, "FILE:a.ts::each") == [bark]
 
+    def test_a_namespace_owns_what_it_declares(self, tmp_path):
+        """A namespace, dotted or not, owns its members, which a call names
+        through it; one that is a value too, `declare const lib: lib.Api`,
+        has the members of the value's type."""
+        builder = _index(
+            tmp_path,
+            {
+                "pkg/index.d.ts": """
+                declare namespace lib {
+                  interface Client { get(url: string): void; }
+                  interface Api extends Client { create(): Client; }
+                }
+                declare const lib: lib.Api;
+                export = lib;
+                """,
+                "a.ts": """
+                import lib = require("./pkg");
+                function a() {}
+                export namespace N {
+                  export function f() { a(); }
+                }
+                namespace A.B {
+                  export function g() { a(); }
+                }
+                export function use() {
+                  N.f();
+                  A.B.g();
+                  lib.get("/x");
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::N::f") == ["FILE:a.ts::a"]
+        assert _calls(builder, "FILE:a.ts::use") == [
+            "FILE:a.ts::A::B::g",
+            "FILE:a.ts::N::f",
+            "FILE:pkg/index.d.ts::lib::Client::get",
+        ]
+
     def test_a_string_literal_type_holds_no_mark(self, tmp_path):
         """`"a|b"` is a string, whatever its text holds: a method called on
         what returns one is the standard library's, not a project's."""

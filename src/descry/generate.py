@@ -10683,6 +10683,10 @@ _TS_STATEMENT_START_RE = re.compile(
 # A keyword whose block a `{` after it opens, as a head's `)`, an arrow's
 # `>` and the start of a statement are
 _BLOCK_KEYWORD_RE = re.compile(r"(?<![\w$])(?:else|try|finally|do)\Z")
+# A namespace written with its name, not a module a string names
+_TS_NAMESPACE_RE = re.compile(
+    r"\s*(?:export\s+)?(?:declare\s+)?(?:namespace|module)\s+([\w$]+(?:\.[\w$]+)*)\s*\{"
+)
 # What may follow the `}` or `;` that ends a statement before the next
 _TS_SEPARATORS_RE = re.compile(r"[ \t,;]*")
 _TS_SPACE_RE = re.compile(r"[ \t]*")
@@ -11207,8 +11211,9 @@ class TSParser(BaseParser):
         # `const name: Type = value;`, the type kept where it is one named
         # type, or `const name` of a statement that goes on over the next lines
         re_const = re.compile(
-            r"^\s*(?:export\s+)?const\s+([a-zA-Z0-9_$]+)"
-            r"(?:\s*:\s*(\([^()]*\)\s*=>\s*[\w$.]+|[\w$.]+(?:<[^|&]*>)?)(?=\s*=(?!>)))?"
+            r"^\s*(?:export\s+)?(?:declare\s+)?const\s+([a-zA-Z0-9_$]+)"
+            r"(?:\s*:\s*(\([^()]*\)\s*=>\s*[\w$.]+|[\w$.]+(?:<[^|&]*>)?)"
+            r"(?=\s*(?:=(?!>)|;?\s*$)))?"
             r"(?:\s*(?::\s*.*?)?\s*=(?![=>])\s*(.*?);)?"
         )
         re_import = re.compile(r'import\s+.*?from\s+([\'"])(.*?)\1')
@@ -11329,6 +11334,7 @@ class TSParser(BaseParser):
         before = ""
         self._signatures = {}  # node ID -> the signatures it is declared with
         class_ids = set()  # class/interface/enum nodes declared in this file
+        namespaces = {}  # namespace ID -> the metadata of its node
         class_at = {}  # class ID -> the column its `class` ends at on its line
         # constants of the file or a callback that hold an object literal
         object_ids = set()
@@ -11779,6 +11785,10 @@ class TSParser(BaseParser):
                 cid = f"{parent_id}::{name}"
                 claim(cid)
                 holder = cid, match.end(1)
+                if value_type and cid in namespaces:
+                    # A namespace and a value of one name are one: the
+                    # value's type gives the members the namespace has not.
+                    namespaces[cid]["value_type"] = value_type
                 if val and (held := _arrow_function(line)):
                     valued = self._arrow_typed(held[1], line)
                     arrow_id = cid
@@ -11855,6 +11865,28 @@ class TSParser(BaseParser):
                 class_ids.add(cid)
                 if "{" in line:
                     enter(cid, lineno, self._find_block_end(code_lines, i))
+            elif match := _TS_NAMESPACE_RE.match(code_lines[i]):
+                # A namespace owns what it declares, which source names
+                # through it; `A.B` is `B` in `A`.
+                last = self._find_block_end(code_lines, i)
+                owner = parent_id
+                for part in match[1].split("."):
+                    nested = f"{owner}::{part}"
+                    if nested not in self.builder.node_registry:
+                        self.builder.add_node(
+                            nested,
+                            "Class",
+                            name=part,
+                            kind="namespace",
+                            lineno=lineno,
+                            end_lineno=last,
+                            token_count=(last - lineno + 1) * 10,
+                            docstring=self.get_leading_docstring(lines, i),
+                        )
+                        self.builder.add_edge(owner, nested, "DEFINES")
+                        namespaces[nested] = self.builder.nodes[-1]["metadata"]
+                    owner = nested
+                enter(owner, lineno, last)
             elif match := re_interface.search(line):
                 name = match.group(1)
                 docstring = self.get_leading_docstring(lines, i)
@@ -14068,8 +14100,12 @@ class CallResolver:
             hits, complete = set(), True
             for owner in owners:
                 hit, owner_complete = self._find_member(owner, name)
-                # A namespace may hold more than the project puts in it.
-                open_scope = self.nodes[owner]["metadata"].get("kind") == "namespace"
+                # A namespace may hold more than the project puts in it,
+                # unless it is a value too, whose type tells what it holds.
+                metadata = self.nodes[owner]["metadata"]
+                open_scope = metadata.get("kind") == "namespace" and not metadata.get(
+                    "value_type"
+                )
                 complete = complete and owner_complete and not open_scope
                 if hit:
                     hits.add(hit)
@@ -16957,6 +16993,14 @@ class CallResolver:
         `_SEVERAL` when the types a base may be have several members of the
         name, which the miss leaves as the candidates.
         """
+        held = self.nodes[owner_id]["metadata"].get("kind") == "namespace" and (
+            self._declared_type(owner_id)
+        )
+        # A value of a namespace's name has the members of its type the
+        # namespace has not.
+        valued = isinstance(held, tuple) and held[0] == "self"
+        if valued and not self.members.get(owner_id, {}).get(name):
+            return self._find_member(held[1], name, seen=seen)
         if not self._is_class(owner_id):
             # A variable has the members of the type it is declared as.
             held = self._declared_type(owner_id)

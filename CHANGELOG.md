@@ -296,7 +296,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   `export default` gives, of a property's or an element's object, and
   of one written on its constant's line, which had no owner, a function
   after `?`, `||`, `&&`, `!` or `void`, read as none, and a class whose
-  body opens on a later line with members on it; calls in comments, string
+  body opens on a later line with members on it, a namespace, `namespace
+  A.B` or `declare namespace`, whose members had no owner, and a
+  `declare const`, which was no constant, so a namespace that is a value
+  too had neither's members; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a
