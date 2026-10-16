@@ -18545,6 +18545,54 @@ class TestOneLineDefinitionCalls:
         assert not any("class@16" in node_id for node_id in ids)
         assert _calls(builder, "FILE:a.tsx::view") == ["FILE:a.tsx::a"]
 
+    def test_an_object_and_a_function_value_own_what_they_hold(self, tmp_path):
+        """The object `export default` gives, a property's and an element's
+        own their functions and accessors, on a line of their own or over
+        lines; a property is reached through its key. A function after `?`,
+        `||` or `!` in a constant's value is the constant's. An object type
+        in an annotation is no object."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                function a() {}
+                export default {
+                  m() { a(); },
+                };
+                const o = { get v() { return a(); }, set v(x) { a(); } };
+                const holder = { inner: { m() { a(); } } };
+                const arr = [
+                  {
+                    m() { a(); },
+                  },
+                ];
+                const p = true ? function named() {
+                  a();
+                } : null;
+                const q = null || function () {
+                  a();
+                };
+                const typed = (x: number): { at: { y: number } } => {
+                  return { at: { y: x } };
+                };
+                class M
+                  extends Object { n() { a(); } }
+                """
+            },
+        )
+        for owner in (
+            "object@3::m",
+            "o::get v",
+            "o::set v",
+            "holder::inner::m",
+            "arr::object@9::m",
+            "p",
+            "q",
+            "M::n",
+        ):
+            assert _calls(builder, f"FILE:a.ts::{owner}") == ["FILE:a.ts::a"]
+        assert not any("typed::at" in n["id"] for n in builder.nodes)
+
     def test_a_definition_after_the_end_of_another_on_its_line(self, tmp_path):
         """What a line goes on to after the `}` or `;` that ends a
         definition is read as a line of its own: a function, a class, a

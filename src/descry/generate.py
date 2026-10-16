@@ -6975,11 +6975,13 @@ class BaseParser:
             blanked.append(code)
         return blanked
 
-    def split_source(self, lines, code_lines, definition_head, type_head=None):
+    def split_source(
+        self, lines, code_lines, definition_head, type_head=None, ends=";"
+    ):
         """The lines to read ``lines`` as, split as `_split_lines` splits
         them; `restore_source_lines` gives what is read their source lines."""
         lines, self._rows, self._shifts = _split_lines(
-            lines, code_lines, definition_head, type_head
+            lines, code_lines, definition_head, type_head, ends
         )
         self._first_rows = {
             row: at for at, row in reversed(list(enumerate(self._rows)))
@@ -10312,7 +10314,7 @@ _JS_BLOCK_FUNCTION_RE = re.compile(
 _JS_NEW_RE = re.compile(r"\bnew\s+$")
 _JS_FUNCTION_HEAD_RE = re.compile(r"\bfunction\s*\*?\s*$")
 # What a function expression follows where it is a value
-_JS_VALUE_START_RE = re.compile(r"(?:[(,=]|\breturn)\s*$")
+_JS_VALUE_START_RE = re.compile(r"(?:[(,=?:!|&]|\b(?:return|default|void))\s*$")
 # A parameter that is passed a function, with that function's parameters
 _TS_CALLABLE_RE = re.compile(r"[\w$]+\??\s*:\s*\(?\((?P<params>[^()]*)\)\s*=>")
 # A variable whose value is one blanked literal, or an array
@@ -10337,7 +10339,8 @@ _JS_PATTERN_RE = re.compile(
 # A function passed to a call: its parameters, in a list or alone before the
 # `=>`, and where its body starts
 _JS_CLOSURE_RE = re.compile(
-    r"(?:(?<=[(,])|(?<==)|(?<==\s)|(?<=return\s)|(?<=default\s)|^)\s*(?:async\s+)?"
+    r"(?:(?<=[(,=?!|&])|(?<=[=?!|&]\s)|(?<=return\s)|(?<=default\s)|(?<=void\s)"
+    r"|(?<=:)(?=\s*(?:async\s+)?function\b)|^)\s*(?:async\s+)?"
     r"(?P<closure>(?:function\s*\*?\s*(?P<named>[\w$]+\s*)?)?"
     r"\((?P<params>[^()]*)\)(?:\s*:[^=(){]+)?\s*(?:=>|\{)|(?P<param>[\w$]+)\s*=>)"
 )
@@ -10598,6 +10601,20 @@ def _opens_body(signature: str, start: int = 0) -> bool:
 
 # What a class's `extends` gives as its base, up to the body or `implements`
 _TS_EXTENDS_RE = re.compile(r"\bextends\s+(.+?)\s*(?:\bimplements\b[^{]*)?\{?\s*$")
+# What a class's body, or that of an object a declaration, `export default`
+# or a property gives, opens after
+_TS_BODY_HEAD_RE = re.compile(
+    r"\s*(?:(?P<type>(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?class\b[^{]*"
+    r"|(?:extends|implements)\b[^{]*)"
+    r"|(?:export\s+default|(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*(?::[^=]*)?=\s*\[?"
+    rf"|(?P<nested>{_TS_WRITTEN_MEMBER_NAME})\s*:)\s*\Z)"
+)
+# A line that opens an object it ends with: `export default {`, a
+# property's `key: {` or an element's `{`
+_TS_OBJECT_OPENS_RE = re.compile(
+    rf"\s*(?:(?P<default>export\s+default\s*)|(?P<key>{_TS_WRITTEN_MEMBER_NAME})\s*:\s*)?"
+    r"\{\s*$"
+)
 # What may follow the `}` or `;` that ends a statement before the next
 _TS_SEPARATORS_RE = re.compile(r"[ \t,;]*")
 # What a line may go on to after the `}` or `;` that ends a definition:
@@ -10609,26 +10626,34 @@ _TS_DEFINITION_HEAD_RE = re.compile(
 )
 
 
-def _split_lines(lines, code_lines, definition_head, type_head=None):
+def _split_lines(lines, code_lines, definition_head, type_head=None, ends=";"):
     """``lines`` with a line split where it goes on to a definition after
     the `}` or `;` that ends the one before it, and where a type's body
     that opens on it holds members: after the body's `{`, after each member
     and before its `}`. ``definition_head`` matches where a definition
     starts, its group `member`, where it has one, a member that needs a
     body; ``type_head`` the start of a statement that a type body's `{`
-    ends. Each part
+    ends, its group `type`, where it has one, a type's, else an object's,
+    and its group `nested` one that opens an object only in an object. Each
+    part
     after the first is indented as its line is and once more for each such
-    body it is in. Returns the lines, for each the index in ``lines`` of the
-    one it is part of, and the code units (see `_code_units`) its columns
-    are right of its own there. ``code_lines`` are ``lines`` blanked."""
+    body it is in; a member ends with its `}` or a character of ``ends``.
+    Returns the lines, for each the index in ``lines`` of the one it is
+    part of, and the code units (see `_code_units`) its columns are right
+    of its own there. ``code_lines`` are ``lines`` blanked."""
     split, rows, shifts = [], [], []
     for row, (line, code) in enumerate(zip(lines, code_lines)):
         indent = line[: len(line) - len(line.lstrip())]
         cuts = []  # the column each part starts at, and the bodies it is in
         depth, bodies, statement = 0, [], 0
         for column, char in enumerate(code):
-            if char == "{" and type_head and type_head.match(code, statement, column):
-                bodies.append((depth + 1, column))
+            head = (
+                char == "{" and type_head and type_head.match(code, statement, column)
+            )
+            # A head that opens a body only inside the body of an object.
+            nested = head and head.groupdict().get("nested")
+            if head and (not nested or bodies and bodies[-1][2]):
+                bodies.append((depth + 1, column, not head.groupdict().get("type")))
                 cuts.append((column + 1, len(bodies)))
             if char in "([{":
                 depth += 1
@@ -10643,11 +10668,9 @@ def _split_lines(lines, code_lines, definition_head, type_head=None):
                 depth -= 1
             if char in "{};":
                 statement = column + 1
-            if char not in "};":
-                continue
-            if bodies and depth == bodies[-1][0]:
+            if bodies and depth == bodies[-1][0] and (char == "}" or char in ends):
                 cuts.append((column + 1, len(bodies)))
-            elif not bodies and depth <= 0:
+            elif char in "};" and not bodies and depth <= 0:
                 at = _TS_SEPARATORS_RE.match(code, column + 1).end()
                 head = definition_head.match(code, at)
                 member = head and head.groupdict().get("member")
@@ -11007,7 +11030,11 @@ class TSParser(BaseParser):
         # The lines read, a definition after another's end on a line on one
         # of its own, and the source line each is part of
         lines = self.split_source(
-            lines, _blank_js_lines(lines, jsx=jsx), _TS_DEFINITION_HEAD_RE
+            lines,
+            _blank_js_lines(lines, jsx=jsx),
+            _TS_DEFINITION_HEAD_RE,
+            _TS_BODY_HEAD_RE,
+            ";,",
         )
 
         written = (line for line in lines if line.strip())
@@ -11150,6 +11177,8 @@ class TSParser(BaseParser):
         # and that type, until the call is closed
         initialises = None
         array = None  # the array literal being read, and its open brackets
+        # The constant whose value is an array over lines, and its last line
+        elements_of = None
         # The call a `return` gives that is still open, with where it is
         # recorded, and the last line of the nameless functions each
         # definition being read has open: a `return` past it is that
@@ -11404,6 +11433,7 @@ class TSParser(BaseParser):
             valued = None  # the signature of the arrow function the line is
             arrow_id = None  # the node of the arrow function the line declares
             own_defs = []  # (node ID, end of its name) declared on the line
+            holder = None  # the constant the line declares, and where its value starts
             field_spans = []  # (start, end, class ID) of a field's value on it
             nodes_before = len(self.builder.nodes)
 
@@ -11613,6 +11643,7 @@ class TSParser(BaseParser):
                 doc = self.get_leading_docstring(lines, i)
                 cid = f"{parent_id}::{name}"
                 claim(cid)
+                holder = cid, match.end(1)
                 if val and (held := _arrow_function(line)):
                     valued = self._arrow_typed(held[1], line)
                     arrow_id = cid
@@ -11635,6 +11666,49 @@ class TSParser(BaseParser):
                     # The functions it holds are its members.
                     object_ids.add(cid)
                     enter(cid, lineno, self._find_block_end(code_lines, i))
+                elif parent_id not in class_ids and re.search(r"=\s*\[\s*$", line):
+                    elements_of = cid, _statement_end(code_lines, i) + 1
+                elif parent_id not in class_ids and re.search(r"=\s*\[\s*\{\s*$", line):
+                    # Its first element, an object, owns the functions it holds.
+                    last = self._find_block_end(code_lines, i)
+                    element = self._nameless_owner(
+                        cid,
+                        f"object@{self.source_line(lineno)}",
+                        lineno,
+                        last,
+                        "object",
+                    )
+                    object_ids.add(element)
+                    enter(element, lineno, last)
+            elif parent_id not in class_ids and (
+                opened := _TS_OBJECT_OPENS_RE.match(code_lines[i])
+            ):
+                # An object `export default` gives, a property's or an
+                # element's: its functions are its members. A property's is
+                # named as source reaches it, through its key; the others no
+                # name source writes.
+                last = self._find_block_end(code_lines, i)
+                key = opened["key"] and parent_id in object_ids and opened["key"]
+                if key:
+                    oid = f"{parent_id}::{_ts_unquote(key)}"
+                    self.builder.add_node(
+                        oid, "Constant", name=_ts_unquote(key), lineno=lineno
+                    )
+                    self.builder.add_edge(parent_id, oid, "DEFINES")
+                elif opened["key"] is None and (opened["default"] or array):
+                    held = elements_of and lineno <= elements_of[1] and elements_of[0]
+                    oid = self._nameless_owner(
+                        held or parent_id,
+                        f"object@{self.source_line(lineno)}",
+                        lineno,
+                        last,
+                        "object",
+                    )
+                else:
+                    oid = None
+                if oid:
+                    object_ids.add(oid)
+                    enter(oid, lineno, last)
             elif match := re_enum.search(line):
                 name = match.group(1)
                 doc = self.get_leading_docstring(lines, i)
@@ -11880,6 +11954,7 @@ class TSParser(BaseParser):
             # what it holds — one returned, passed to a call, or a constant's
             elif (
                 object_id
+                or parent_id in object_ids
                 or (
                     "::" in parent_id
                     and parent_id != file_id
@@ -12138,7 +12213,7 @@ class TSParser(BaseParser):
                     # value, else a declaration.
                     if not found["named"]
                     or _JS_VALUE_START_RE.search(
-                        code, max(_run_start(code, found.start()) - 6, 0), found.start()
+                        code, max(_run_start(code, found.start()) - 7, 0), found.start()
                     )
                 ]
                 self._bodies = []
@@ -12169,9 +12244,11 @@ class TSParser(BaseParser):
                         and len(self._open_calls) <= outer
                     ):
                         # Not an argument: the lines of its body are those
-                        # of the definition around it, and read its
-                        # parameters too.
+                        # of the definition around it, or of the constant
+                        # whose value holds it, and read its parameters too.
                         context = (*reaching(block_end)[0][:2], block_end - 1)
+                        if holder and ";" not in code[holder[1] : bar]:
+                            context = (holder[0], lineno, block_end - 1)
                         self.enter_context(*context, _ts_params(code[bar : opened + 1]))
                     else:
                         callback_id = within = self._nameless_owner(
