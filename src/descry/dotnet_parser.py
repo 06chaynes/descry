@@ -524,13 +524,13 @@ class DotnetParser(BaseParser):
             member_id = f"{parent_id}::overload{count}_{name}"
         return member_id
 
-    def _type_id(self, parent_id, name, arity):
+    def _type_id(self, parent_id, name, arity, namespace=None):
         """ID for the type ``name`` with ``arity`` type parameters declared
-        in ``parent_id``: that of its other declarations, another than that
-        of a type with more or fewer, as `Pair<T>` is another type than
-        `Pair<T, U>`."""
+        in ``parent_id`` and ``namespace``: that of its other declarations,
+        another than that of a type with more or fewer, as `Pair<T>` is
+        another type than `Pair<T, U>`, or of another namespace."""
         type_id = self._member_id(parent_id, name)
-        return self._arities.setdefault((parent_id, name, arity), type_id)
+        return self._arities.setdefault((parent_id, namespace, name, arity), type_id)
 
     @staticmethod
     def _body_end(code_lines, opened):
@@ -871,7 +871,9 @@ class DotnetParser(BaseParser):
                     metadata.update(partial=True, arity=len(scope))
             if m_type and opened[2] in "{;":
                 kind, name = m_type.groups()
-                type_id = self._type_id(context_id, name, len(scope))
+                type_id = self._type_id(
+                    context_id, name, len(scope), metadata.get("namespace")
+                )
                 end_lineno = opened[0] + 1
                 if opened[2] == "{":
                     end_lineno = self._find_block_end(code_lines, *opened[:2])
@@ -956,7 +958,9 @@ class DotnetParser(BaseParser):
                     i = opened[0]
             elif m_delegate and opened[2] == ";":
                 name = m_delegate[1]
-                delegate_id = self._type_id(context_id, name, len(scope))
+                delegate_id = self._type_id(
+                    context_id, name, len(scope), metadata.get("namespace")
+                )
                 declare(
                     delegate_id,
                     "Class",

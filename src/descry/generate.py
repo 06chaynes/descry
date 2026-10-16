@@ -13301,10 +13301,8 @@ class CallResolver:
                 elif origin.startswith("="):
                     # A type parameter names no type.
                     base = written = ""
-                # A base is looked up as written, its qualifier with it; a
-                # Dart one's is an import's prefix.
-                kept = base if lang == "dart" else written
-                self.bases.setdefault(edge["source"], []).append(kept)
+                # A base is looked up as written, its qualifier with it.
+                self.bases.setdefault(edge["source"], []).append(written)
                 self.base_names[index] = written
         # A Go struct has the methods of the types it embeds, listed under
         # None among its fields.
@@ -13425,7 +13423,9 @@ class CallResolver:
             if node["metadata"].get("kind") == "extension":
                 # A Dart extension gives its members to the type it is on.
                 for base in self.bases.get(node_id, ()):
-                    self.impl_types.setdefault(base, []).append(node_id)
+                    self.impl_types.setdefault(_split_callee(base)[1], []).append(
+                        node_id
+                    )
         self.dart_parts = {}  # Dart file ID -> the library file it is a part of
         for file_id, directives in builder.dart_directives.items():
             for keyword, uris, *_ in directives:
@@ -16341,7 +16341,10 @@ class CallResolver:
         the project, where several fit and nothing tells which, and where
         the name leads back to the subtype, which is no base of itself."""
         subtype = self.builder.edges[index]["source"]
+        # The types several fit are no call's candidates.
+        reached = self._candidates_now
         named = self._type_named(self.base_names[index], subtype)
+        self._candidates_now = reached
         return None if named in (_EXTERNAL, subtype) else named
 
     def type_in_scope(self, name, scope_id, origin=None):

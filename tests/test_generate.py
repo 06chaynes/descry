@@ -12935,6 +12935,27 @@ class TestPhpCallResolution:
 
 
 class TestDotnetCallResolution:
+    def test_namesake_types_of_two_namespaces_of_a_file(self, tmp_path):
+        """Two namespaces of one file may each declare a type of one name:
+        they are two types, and a base is the one its namespace names."""
+        builder = _index(
+            tmp_path,
+            {
+                "A.cs": """
+                namespace X { public class Base { public void Run() {} } }
+                namespace Y { public class Base { public void Run() {} public void Stop() {} } }
+                namespace Z {
+                  class A : X.Base {
+                    void M() { Run(); Stop(); }
+                  }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:A.cs::A::M") == ["FILE:A.cs::Base::Run"]
+        stops = [n for n in builder.nodes if n["id"].endswith("::Stop")]
+        assert [n["id"] for n in stops] == ["FILE:A.cs::overload2_Base::Stop"]
+
     def test_declared_type_picks_the_method(self, tmp_path):
         """A parameter, a local, a field and a property are of the type they
         are declared as."""
@@ -15641,6 +15662,24 @@ class TestRubyCallResolution:
 
 
 class TestDartCallResolution:
+    def test_a_base_behind_an_import_prefix(self, tmp_path):
+        """`extends p.Base` is the `Base` of the library imported as `p`:
+        its members are the subclass's."""
+        builder = _index(
+            tmp_path,
+            {
+                "b.dart": "class Base { void run() {} }\n",
+                "c.dart": "class Base { void run() {} void stop() {} }\n",
+                "a.dart": """
+                import 'b.dart' as p;
+                class A extends p.Base {
+                  void m() { run(); stop(); }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.dart::A::m") == ["FILE:b.dart::Base::run"]
+
     def test_bare_call_reaches_only_what_the_library_has_in_scope(self, tmp_path):
         """`expect` comes from a package outside the project: it is not the
         method of that name of a project class the file never extends. A
