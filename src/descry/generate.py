@@ -6226,9 +6226,10 @@ def _blank_from(line, position, inside, spanning, holes, depth=None):
 
 
 # The line that opens the body of a type: `struct Name`, `class Name`,
-# `interface Name`, or Go's `type Name struct`
+# `interface Name`, Go's `type Name struct` or TypeScript's `type Name = {`
 _TYPE_HEADER_RE = re.compile(
     r"\btype\s+(\w+)\s+struct\b|\b(?:struct|class|interface)\s+([A-Za-z_$][\w$]*)"
+    r"|\btype\s+([A-Za-z_$][\w$]*)\s*(?:<[^=]*>)?\s*=\s*\{"
 )
 # What may stand before the name of a field where it is declared
 _FIELD_MODIFIERS_RE = re.compile(
@@ -6408,7 +6409,7 @@ class BaseParser:
                 depth = 0
                 owner = None
             if header := _TYPE_HEADER_RE.search(line):
-                owner = header[1] or header[2]
+                owner = header[1] or header[2] or header[3]
             for pattern in patterns:
                 for match in pattern.finditer(line):
                     groups = match.groupdict()
@@ -9537,6 +9538,27 @@ def _function_value(text: str) -> str | None:
     return None
 
 
+def _ts_type_parameters(text: str) -> dict[str, str]:
+    """``{name: bound}`` of the type parameters ``text`` opens with,
+    `<const T extends Bound = Default, U>`, the bound "" for one of none."""
+    text = text.lstrip()
+    found = {}
+    for part in _bracketed_parts(text[1:]) if text.startswith("<") else ():
+        name, _, bound = re.split(r"\s*=(?!>)", part)[0].partition(" extends ")
+        if name.split():
+            found[name.split()[-1]] = bound.strip()
+    return found
+
+
+def _ts_generic(params: dict[str, str]) -> dict:
+    """The metadata of a type that declares the type parameters ``params``:
+    their names in order and the bounds of those that have one."""
+    if not params:
+        return {}
+    bounds = {name: bound for name, bound in params.items() if bound}
+    return {"generics": tuple(params), **({"type_bounds": bounds} if bounds else {})}
+
+
 def _ts_type_member(lines: list[str], index: int) -> tuple[str, str] | None:
     """``(name, type)`` of a property that line ``index`` of ``lines``, code
     lines, declares in an interface or an object type: a function type as
@@ -11875,6 +11897,9 @@ class TSParser(BaseParser):
                     end_lineno=end_lineno,
                     token_count=token_count,
                     docstring=docstring,
+                    **_ts_generic(
+                        _ts_type_parameters(line[match.end(1 if match[1] else 2) :])
+                    ),
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
                 class_ids.add(cid)
@@ -12204,6 +12229,7 @@ class TSParser(BaseParser):
                     end_lineno=end_lineno,
                     token_count=token_count,
                     docstring=docstring,
+                    **_ts_generic(_ts_type_parameters(full_sig)),
                 )
                 self.builder.add_edge(held_by, cid, "DEFINES")
                 class_ids.add(cid)
@@ -12892,11 +12918,7 @@ class TSParser(BaseParser):
                 typed["returned"] = None
 
             if angle is not None and full_sig[:opened].rstrip().endswith(">"):
-                # `<const T extends Bound = Default>`
-                for part in _bracketed_parts(full_sig[angle + 1 : opened]):
-                    part = re.split(r"\s*=(?!>)", part)[0]
-                    name, _, bound = part.partition(" extends ")
-                    typed["generics"][name.split()[-1]] = bound.strip()
+                typed["generics"].update(_ts_type_parameters(full_sig[angle:opened]))
 
             if opened is not None:
                 params_str = full_sig[opened + 1 : closing].strip()
@@ -13762,6 +13784,11 @@ class CallResolver:
         returned = [self._returned_type(one["returns"], function_id) for one in fitting]
         agreed = returned[0] is not None and returned.count(returned[0]) == len(fitting)
         chosen = {"generics": {}, "params": [], "returns": "", "callbacks": {}}
+        types = [value and value[:2] for value in returned]
+        if not agreed and types[0] and types.count(types[0]) == len(fitting):
+            # One type with arguments that differ: that type, its arguments
+            # not known.
+            chosen = {**fitting[0], "returns": _strip_generics(fitting[0]["returns"])}
         self.overloads[key] = fitting[0] if len(taken) == 1 or agreed else chosen
         return self.overloads[key]
 
@@ -15276,7 +15303,10 @@ class CallResolver:
                 own = _EXTERNAL if self.lang(source_id) == "clang" else None
                 value = unwrapped if step == "?" else own
             elif step != "?":
+                # A value of a generic type carries its type arguments.
                 self._receiver = value[1] if value[0] == "self" else None
+                if value[0] == "self" and len(value) > 2:
+                    self._receiver = value
                 value = self._attr(value, step, called=last)
                 if value is None and last:
                     return None, _UNRESOLVED
@@ -15519,9 +15549,16 @@ class CallResolver:
                 held = [h for h in held if h and self.nodes[h]["type"] == "Constant"]
                 if held:
                     return self._declared_type(held[0])
+            given = generic and written.endswith(">")
             generic = generic and lang not in _OWN_METHOD_LANGS
             found = self._type_named(name, scope_id)
             name = name.rpartition("::")[2]
+            if given and found and found != _EXTERNAL:
+                # A generic type written with its arguments: an instance of
+                # it holds them.
+                made = self._returned_type(written, scope_id)
+                if made and len(made) > 2:
+                    return ("def", found, made[2])
             if generic and found == _EXTERNAL:
                 # A wrapper from outside around what may be a project type;
                 # in C# its members are its own.
@@ -15745,7 +15782,7 @@ class CallResolver:
             for declaration in self._declarations(owner) if owner else ():
                 written = self.builder.fields.get(declaration, {}).get(key)
                 if written:
-                    return self._returned_type(written, declaration)
+                    return self._returned_type(written, declaration, value)
             return None
         if len(value) < 3:
             return None
@@ -16722,7 +16759,7 @@ class CallResolver:
         ``receiver`` where that is known."""
         kind, ref = value[:2]
         if kind == "cls" or (kind == "def" and self.nodes[ref]["type"] == "Class"):
-            return ("self", ref)
+            return ("self", ref, *value[2:])
         if kind != "def":
             return None
         returns = self.nodes[ref]["metadata"].get("return_type") or ""
@@ -16778,6 +16815,7 @@ class CallResolver:
         type. None where one of them is not known or they differ."""
         returned = self.builder.signatures[function_id][-1]["returned"]
         key = function_id, receiver
+        receiver = receiver[1] if isinstance(receiver, tuple) else receiver
         if key not in self.body_values:
             # A function that returns its own call has no value from that.
             self.body_values[key] = None
@@ -16846,6 +16884,8 @@ class CallResolver:
         an instance of a project type, a wrapper around one (`Result<T, E>`,
         `Promise<T>`), ``"external"``, or None. `this` and `Self` are
         ``receiver``, the type the method was called on, where that is known."""
+        instance = receiver if isinstance(receiver, tuple) else None
+        receiver = instance[1] if instance else receiver
         if self.lang(function_id) == "python":
             return self._annotated(returns, function_id, receiver)
         if function_id == self._bound[0] and returns in self._bound[1]:
@@ -16865,7 +16905,7 @@ class CallResolver:
         compound = self.lang(function_id) == "typescript" and _ts_compound(returns)
         if compound:
             values = [
-                self._returned_type(part.strip(), function_id, receiver)
+                self._returned_type(part.strip(), function_id, instance or receiver)
                 for part in compound[1]
             ]
             if compound[0] == "|":
@@ -16894,7 +16934,8 @@ class CallResolver:
                 "outside",
                 "()",
                 tuple(
-                    self._returned_type(part, function_id, receiver) for part in parts
+                    self._returned_type(part, function_id, instance or receiver)
+                    for part in parts
                 ),
             )
         library = self.standard.get(self.lang(function_id))
@@ -16902,7 +16943,10 @@ class CallResolver:
         if name:
             # A standard type holds what its type arguments are.
             arguments = library.parts(returns)[1]
-            held = (self._returned_type(a, function_id, receiver) for a in arguments)
+            held = (
+                self._returned_type(a, function_id, instance or receiver)
+                for a in arguments
+            )
             return ("outside", name, tuple(held))
         if self.lang(function_id) == "rust":
             returns = _RUST_BORROW_RE.sub("", returns)
@@ -16938,6 +16982,9 @@ class CallResolver:
                 }
                 if owner_id in declared or self._name(owner_id) in bases:
                     return ("self", received_id)
+        held = self._type_argument(match[1], function_id, instance)
+        if held is not False:
+            return held
         standard = None
         for kind, name in zip(("self", "wrapped"), match.group(1, 3)):
             if name in ("Self", "this"):
@@ -16951,9 +16998,59 @@ class CallResolver:
                 continue
             if found == _EXTERNAL:
                 return _EXTERNAL if kind == "self" else standard
+            generic = found and kind == "self" and match[2]
+            if generic and self.nodes[found]["metadata"].get("generics"):
+                # A generic type written with its arguments holds them.
+                given = _bracketed_parts(returns[returns.index("<") + 1 :])
+                return (
+                    kind,
+                    found,
+                    tuple(
+                        self._returned_type(a, function_id, instance or receiver)
+                        for a in given
+                    ),
+                )
             if found:
                 return (kind, found)
         return standard
+
+    def _type_argument(self, name, scope_id, instance):
+        """What the type parameter ``name`` of a type around ``scope_id``
+        stands for: the argument ``instance``, a value of that type or of
+        one derived from it, gives it, else its bound, None for neither;
+        False where no type around declares the parameter."""
+        for scope in self._scopes(scope_id):
+            metadata = self.nodes.get(scope, {}).get("metadata", {})
+            generics = list(metadata.get("generics") or ())
+            if name in generics and self._is_class(scope):
+                given = self._instance_arguments(scope, instance)
+                at = generics.index(name)
+                if at < len(given) and given[at] is not None:
+                    return given[at]
+                bound = (metadata.get("type_bounds") or {}).get(name)
+                return self._returned_type(bound, scope) if bound else None
+        return False
+
+    def _instance_arguments(self, type_id, instance):
+        """The type arguments ``instance`` gives the generic type
+        ``type_id``: its own where it is one, those its type writes a base
+        of that type with where it derives from it."""
+        if not instance:
+            return ()
+        own, given = instance[1], instance[2] if len(instance) > 2 else ()
+        if type_id in self._declarations(own):
+            return given
+        reached = self._candidates_now
+        for base in self.bases.get(own, ()):
+            name, opened, written = base.partition("<")
+            if opened and self._type_named(name, own) == type_id:
+                self._candidates_now = reached
+                held = ("self", own, given)
+                return tuple(
+                    self._returned_type(a, own, held) for a in _bracketed_parts(written)
+                )
+        self._candidates_now = reached
+        return ()
 
     def _scopes(self, node_id):
         """Yield ``node_id`` and each scope enclosing it, out to its file."""

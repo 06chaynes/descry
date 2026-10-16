@@ -8594,6 +8594,53 @@ class TestTypeScriptCallResolution:
             "FILE:a.ts::ns::inner",
         ]
 
+    def test_a_generic_type_holds_its_type_arguments(self, tmp_path):
+        """`Box<Dog>` is a box whose `T` is a dog, through a field, a
+        method's return, `this` and a subclass that names its base's
+        arguments; inside the type a parameter is its bound, and overloads
+        that return one type with other arguments return that type."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Dog { bark() {} }
+                class Cat { meow() {} }
+                class Box<T extends Dog, U = string> {
+                  held: T;
+                  get(): T { return this.held; }
+                  inner(): Box<T, U> { return this; }
+                }
+                interface Wrap<T> { value: T; get(): T; }
+                type Pair<A, B> = { first: A; second: B };
+                class Sub extends Box<Dog, number> {}
+                class Inside<T extends Cat> { item: T; run() { this.item.meow(); } }
+                class Make {
+                  static of(): Box<Dog, number>;
+                  static of(a: Dog): Box<Dog, string>;
+                  static of(a?: Dog) { return new Box(); }
+                }
+                declare const b: Box<Dog, string>;
+                declare const w: Wrap<Cat>;
+                declare const p: Pair<Dog, Cat>;
+                declare const s: Sub;
+                export function use() {
+                  b.held.bark();
+                  b.inner().get().bark();
+                  w.value.meow();
+                  w.get().meow();
+                  p.first.bark();
+                  p.second.meow();
+                  s.get().bark();
+                  Make.of().held.bark();
+                }
+                """
+            },
+        )
+        bark, meow = "FILE:a.ts::Dog::bark", "FILE:a.ts::Cat::meow"
+        calls = _calls(builder, "FILE:a.ts::use")
+        assert calls.count(bark) == 5 and calls.count(meow) == 3
+        assert _calls(builder, "FILE:a.ts::Inside::run") == [meow]
+
     def test_go_generic_struct_fields_and_named_arrays(self, tmp_path):
         """A generic struct's fields are read after its type parameters, not
         as an array's elements, and `type A [5]T` is an array of `T`, its

@@ -341,7 +341,12 @@ Python SDK v2, and a full-tree review's findings are fixed.
   the `Fn(...)` of a signature is no call. A Python module path more
   than one directory gives, `pkg.models` below `src/` and `lib/`, is the
   one below the importing file's own, not the first found, and one below
-  two others is unresolved; calls in comments, string
+  two others is unresolved. A TypeScript generic type, a class, an
+  interface or an object type, holds its type arguments: `Box<Dog>`'s
+  `T` is a dog through a field, a method's return, `this` and a subclass
+  that writes its base's arguments, and inside the type a parameter is its
+  bound, where each was untyped; overloads that return one type with
+  other arguments return that type, where they returned none; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a
