@@ -270,6 +270,36 @@ End Class
 
 
 class TestDeclarationsAndStrings:
+    def test_code_in_an_interpolated_string_is_read(self, builder):
+        """The `{...}` of `$"..."`, `$@"..."` and a raw string after `$`
+        are code, a string in one is a string, `{{` is text and so is any
+        `{...}` of another string or of a character literal."""
+        src = '''
+public class Foo
+{
+    public string Bar(char value)
+    {
+        Log($"a {Name()} b {(true ? "x}" : "y")} c", value == '$');
+        Log($@"p {{q()}} {Path()} ""r}"" s", "plain {Not()}");
+        return $$"""raw {Text()} {{Raw()}} t""";
+    }
+
+    public void Baz()
+    {
+        Done();
+    }
+}
+'''.strip()
+        _parse(builder, src)
+        assert _calls(builder) == [
+            ("Foo::Bar", "Log"),
+            ("Foo::Bar", "Name"),
+            ("Foo::Bar", "Log"),
+            ("Foo::Bar", "Path"),
+            ("Foo::Bar", "Raw"),
+            ("Foo::Baz", "Done"),
+        ]
+
     def test_declaration_is_not_a_call(self, builder):
         """Declaring a method does not call it."""
         src = """

@@ -6204,14 +6204,15 @@ _NON_CODE_RE = re.compile(
 
 
 _LITERAL_RE = re.compile(
-    r"""//|/\*|(?<![A-Za-z0-9_])[bc]?r(#*)"|\"{3}|"|`|'(?:[^'\\]|\\.)'|'"""
+    r"""//|/\*|(?<![A-Za-z0-9_])[bc]?r(#*)"(?!"")|\"{3}|"|`|'(?:[^'\\]|\\.)'|'"""
 )
 _STRING_END_RE = {
     quote: re.compile(rf"(?:[^{quote}\\]|\\.)*{quote}") for quote in ('"', "'")
 }
+_WORD_BEFORE_RE = re.compile(r"\w")
 
 
-def blank_strings(line, inside, spanning):
+def blank_strings(line, inside, spanning, holes=None):
     """Return ``line`` without its comments and with its string and
     character literals turned to spaces, so that text in one is not read as
     code, and what it ends inside of, if anything.
@@ -6221,18 +6222,47 @@ def blank_strings(line, inside, spanning):
     that can continue on the next line: a backquote for a raw string, `"` for
     an ordinary one, `r` for `r#"..."#` and three quotes for a text block. A
     `'` in it also makes a single-quoted string of any length a literal;
-    without one only a single character between quotes is.
+    without one only a single character between quotes is. ``holes`` maps
+    the opener of a literal whose text can hold code to the pattern that
+    opens that code, Dart's `${`: the code is kept up to the `}` that
+    closes it, which is blanked with the pattern, and a raw literal, one
+    right after `r`, holds none. A line that ends in that code ends inside
+    ``(opener, braces open in the code)``.
     """
+    code, _, inside = _blank_from(line, 0, inside, spanning, holes or {})
+    return code, inside
+
+
+def _blank_from(line, position, inside, spanning, holes, depth=None):
+    """``blank_strings`` of ``line`` from ``position``: ``(code, len(line),
+    what the line ends inside of)``. With ``depth``, the braces open in a
+    literal's code it starts in, it stops at the `}` that closes that code,
+    ``(code, the position after it, None)``, or ends the line with
+    ``(code, len(line), the braces open)``."""
     code = []
-    position = 0
+    if isinstance(inside, tuple):
+        held, position, braces = _blank_from(
+            line, position, None, spanning, holes, inside[1]
+        )
+        code.append(held.ljust(position))
+        if braces is not None:
+            return "".join(code), len(line), (inside[0], braces)
+        inside = inside[0]
     spans = True
+    raw = False
     while True:
         start = position
         if inside is None:
             match = _LITERAL_RE.search(line, position)
+            stop = match.start() if match else len(line)
+            for at in range(position, stop) if depth is not None else ():
+                depth += (line[at] == "{") - (line[at] == "}")
+                if depth < 0:
+                    code.append(line[position:at])
+                    return "".join(code), at + 1, None
             if not match or match.group() == "//":
-                code.append(line[position : match.start() if match else None])
-                return "".join(code), None
+                code.append(line[position:stop])
+                return "".join(code), len(line), depth
             opener = match.group()
             start = match.start()
             code.append(line[position:start])
@@ -6254,6 +6284,9 @@ def blank_strings(line, inside, spanning):
                 code.append(line[start:quote])
                 start, position, inside = quote, quote + 1, '"'
             spans = inside == "/*" or inside[0] in spanning or inside in spanning
+            raw = line[start - 1 : start] == "r" and not _WORD_BEFORE_RE.match(
+                line[max(start - 2, 0) : start - 1]
+            )
         if inside in _STRING_END_RE:
             end = _STRING_END_RE[inside].match(line, position)
             end = end.end() if end else -1
@@ -6261,9 +6294,32 @@ def blank_strings(line, inside, spanning):
             closer = {"/*": "*/"}.get(inside, inside.replace("r", '"', 1))
             end = line.find(closer, position)
             end = end + len(closer) if end >= 0 else -1
+        opens = None if raw else holes.get(inside)
+        limit = end if end >= 0 else len(line)
+        found = next(
+            (
+                found
+                for found in (opens.finditer(line, position, limit) if opens else ())
+                if (found.start() - len(line[: found.start()].rstrip("\\"))) % 2 == 0
+            ),
+            None,
+        )
+        if found:
+            code.append(" " * (found.end() - start))
+            held, position, braces = _blank_from(
+                line, found.end(), None, spanning, holes, 0
+            )
+            code.append(held.ljust(position - found.end()))
+            if braces is not None:
+                # The code goes on to the next line; in a literal that is in
+                # code itself it is not followed there.
+                left = depth if depth is not None else (inside, braces)
+                return "".join(code), len(line), left
+            continue
         if end < 0:
             code.append(" " * (len(line) - start))
-            return "".join(code), inside if spans else None
+            left = depth if depth is not None else inside if spans else None
+            return "".join(code), len(line), left
         code.append(" " * (end - start))
         position, inside = end, None
 

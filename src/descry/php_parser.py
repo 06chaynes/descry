@@ -215,6 +215,8 @@ _SCALAR_TYPES = frozenset(
 _UNTYPED = frozenset({"mixed", "object", "callable", "parent"})
 
 _STRINGS = ('"', "'")
+# What opens code in a "..." string or a heredoc's text: `{$`
+_HOLES = dict.fromkeys(('"', "<<<"), re.compile(r"\{(?=\$)"))
 _RE_HASH_COMMENT = re.compile(r"#(?!\[)")
 _RE_ATTRIBUTE = re.compile(r"#\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\]")
 _RE_HEREDOC = re.compile(r"<<<[ \t]*(['\"]?)(\w+)\1")
@@ -239,25 +241,33 @@ _RE_DEFINITION_HEAD = re.compile(
 def _code_lines(lines: list[str]) -> list[str]:
     """``lines`` without their comments and attributes, and with the text
     of every string, heredoc and nowdoc turned to spaces or left out, so
-    that none of it is read as code. Columns are kept."""
+    that none of it is read as code, but for the `{$...}` code of a "..."
+    string or a heredoc. Columns are kept."""
     codes = []
-    inside = heredoc = None
+    inside = heredoc = held = None
     for line in lines:
         if heredoc:
             closed = re.match(rf"\s*{heredoc}\b", line)
             if not closed:
-                codes.append("")
+                # A heredoc's text holds code as a "..." string does.
+                code, held = (
+                    blank_strings(line, held, (), _HOLES) if held else ("", None)
+                )
+                codes.append(code)
                 continue
             line = " " * closed.end() + line[closed.end() :]
             heredoc = None
-        code, ends_inside = blank_strings(line, inside, _STRINGS)
+        code, ends_inside = blank_strings(line, inside, _STRINGS, _HOLES)
         comment = _RE_HASH_COMMENT.search(code)
         if comment:
-            code, ends_inside = blank_strings(line[: comment.start()], inside, _STRINGS)
+            code, ends_inside = blank_strings(
+                line[: comment.start()], inside, _STRINGS, _HOLES
+            )
         inside = ends_inside
         opened = code.find("<<<")
         if opened >= 0 and (opener := _RE_HEREDOC.match(line, opened)):
             heredoc = opener[2]
+            held = "<<<" if opener[1] != "'" else None
             code = code[:opened]
         codes.append(_RE_ATTRIBUTE.sub(lambda found: " " * len(found.group()), code))
     return codes

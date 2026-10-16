@@ -401,6 +401,10 @@ def _code_lines(lines):
                 code.append(line[position : match.start()])
                 start, position = match.span()
                 opener = match.group()
+                if _interpolated(line, match):
+                    blanked, position, closer = _interpolation(line, match)
+                    code.append(blanked)
+                    continue
                 if opener == "/*":
                     closer = "*/"
                 elif opener.startswith('"""'):
@@ -424,6 +428,78 @@ def _code_lines(lines):
         # `@name` is the identifier `name`.
         code_lines.append(re.sub(r"@(?=[A-Za-z_])", " ", "".join(code)))
     return code_lines, guarded
+
+
+def _interpolated(line, match):
+    """Whether the literal ``match`` finds in ``line`` is an interpolated
+    string: `$"`, `$@"`, `@$"`, or a raw string after `$`."""
+    return match.group() in ('$@"', '@$"') or (
+        match.group()[0] == '"' and line[match.start() - 1 : match.start()] == "$"
+    )
+
+
+def _interpolation(line, match):
+    """``(text, end, closer)`` of the interpolated string ``match`` finds in
+    ``line``: the string turned to spaces but for the code of each `{...}`,
+    whose own literals are blanked, the position after it, and what closes
+    it on a later line where it goes on past this one. A raw string's code
+    opens with as many braces as `$` it is written after; in any other `{{`
+    is text."""
+    opener = match.group()
+    verbatim = opener in ('$@"', '@$"')
+    quotes = opener if opener.startswith('"""') else '"'
+    braces = len(line[: match.start()]) - len(line[: match.start()].rstrip("$"))
+    braces = max(braces, 1)
+    text = [" " * len(opener)] if quotes != '"' or verbatim else [" "]
+    i = match.start() + len(text[0])
+    while i < len(line):
+        if quotes == '"' and not verbatim and line[i] == "\\":
+            text.append(" " * len(line[i : i + 2]))
+            i += 2
+        elif verbatim and line.startswith('""', i):
+            text.append("  ")
+            i += 2
+        elif line.startswith(quotes, i):
+            text.append(" " * len(quotes))
+            return "".join(text), i + len(quotes), None
+        elif quotes == '"' and line.startswith("{{", i):
+            text.append("  ")
+            i += 2
+        elif line.startswith("{" * braces, i):
+            held, i = _hole(line, i + braces)
+            text.append(" " * braces + held)
+            closed = line[i : i + braces]
+            text.append(" " * len(closed))
+            i += len(closed)
+        else:
+            text.append(" ")
+            i += 1
+    return "".join(text), len(line), None if quotes == '"' and not verbatim else quotes
+
+
+def _hole(line, position):
+    """The code of a string's `{...}` from ``position`` up to the `}` that
+    closes it, its literals blanked, and that brace's position, the end of
+    ``line`` where it comes first."""
+    held, depth, i = [], 0, position
+    while i < len(line):
+        match = _RE_LITERAL.search(line, i)
+        stop = match.start() if match else len(line)
+        for at in range(i, stop):
+            depth += (line[at] == "{") - (line[at] == "}")
+            if depth < 0:
+                held.append(line[i:at])
+                return "".join(held), at
+        held.append(line[i:stop])
+        if not match:
+            break
+        if _interpolated(line, match):
+            blanked, i, _ = _interpolation(line, match)
+        else:
+            i = match.end()
+            blanked = " " * (i - match.start())
+        held.append(blanked)
+    return "".join(held), len(line)
 
 
 def _plain(code):

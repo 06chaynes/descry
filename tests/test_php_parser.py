@@ -229,6 +229,33 @@ class Svc {
 
 
 class TestDeclarationsAndComments:
+    def test_code_in_a_double_quoted_string_is_read(self, builder):
+        """The `{$...}` of a "..." string and of a heredoc is code; '...'
+        and a nowdoc hold none."""
+        src = """
+<?php
+class Svc {
+    public function sync($x) {
+        $a = <<<EOT
+        at {$this->clock()}
+        EOT;
+        $b = <<<'NOW'
+        {$this->not()}
+        NOW;
+        return "a {$this->stamp()} b" . 'c {$this->not()}';
+    }
+    public function next() {
+        done();
+    }
+}
+""".strip()
+        _parse(builder, src)
+        assert [c[:2] for c in _calls(builder)] == [
+            ("Svc::sync", "$this->clock"),
+            ("Svc::sync", "$this->stamp"),
+            ("Svc::next", "done"),
+        ]
+
     def test_declaration_is_not_a_call(self, builder):
         """Declaring a method or function does not call it."""
         src = """

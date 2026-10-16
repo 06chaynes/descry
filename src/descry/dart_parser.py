@@ -264,16 +264,18 @@ _RE_DEFINITION_HEAD = re.compile(
 )
 
 
+# What opens code in a string: `${`
+_HOLES = dict.fromkeys(("'", '"', '"""'), re.compile(r"\$\{"))
+
+
 def _code_lines(lines):
     """Each of ``lines`` without its comments and with its string literals
-    blanked, in turn; `a!.b` reads as `a?.b`."""
+    blanked but for the code in them, in turn; `a!.b` reads as `a?.b`."""
     codes = []
     inside = None
     for line in lines:
         code, inside = blank_strings(
-            line.replace("'''", '"""').replace('r"""', ' """'),
-            inside,
-            ('"""', "'"),
+            line.replace("'''", '"""'), inside, ('"""', "'"), _HOLES
         )
         # Only a triple-quoted string goes on over the next line.
         inside = None if inside == "'" else inside

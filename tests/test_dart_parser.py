@@ -263,6 +263,38 @@ class Foo {
 
 
 class TestDeclarationsAndInlineComments:
+    def test_code_in_a_string_is_read(self, builder):
+        """The `${...}` of a string is code, over lines too, and a brace in
+        a string in it is text; an escaped `\\$` and a raw string hold
+        none."""
+        src = """
+class Foo {
+  String show() {
+    final a = 'x ${name()} \\${not()} ${true ? "}" : 'y'}';
+    final b = r'${raw()}' + r\"\"\"${raw()}\"\"\";
+    return \"\"\"
+${switch (a) {
+      _ => fallback(),
+    }}\"\"\";
+  }
+
+  void after() {
+    done();
+  }
+}
+""".strip()
+        _parse(builder, src)
+        calls = sorted(
+            (e["source"].partition("::")[2], e["target"])
+            for e in builder.edges
+            if e["relation"] == "CALLS"
+        )
+        assert calls == [
+            ("Foo::after", "REF:done"),
+            ("Foo::show", "REF:fallback"),
+            ("Foo::show", "REF:name"),
+        ]
+
     def test_declaration_is_not_a_call(self, builder):
         """Declaring a function, method or constructor does not call it."""
         src = """
