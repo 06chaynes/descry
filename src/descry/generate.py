@@ -8022,6 +8022,13 @@ def _rust_declarations():
     )
 
 
+# A TypeScript alias written on one line: its name, its type parameters
+# and the type it stands for
+_TS_ALIAS_RE = re.compile(
+    r"^[ \t]*(?:export\s+)?(?:declare\s+)?type\s+([\w$]+)\s*(?:<(.*?)>)?\s*=\s*"
+    r"([^;\n]+?);?[ \t]*$",
+    re.MULTILINE,
+)
 # `type Name = ...` in Rust or TypeScript, behind any visibility or `export`
 _TYPE_ALIAS_RE = re.compile(r"^[ \t]*(?:[\w()]+\s+)*type\s+(\w+)[^=;{]*=", re.MULTILINE)
 
@@ -10646,10 +10653,11 @@ def _opens_body(signature: str, start: int = 0) -> bool:
 
 # What a class's `extends` gives as its base, up to the body or `implements`
 _TS_EXTENDS_RE = re.compile(r"\bextends\s+(.+?)\s*(?:\bimplements\b[^{]*)?\{?\s*$")
-# What a class's body, or that of an object a declaration, `export default`
-# or a property gives, opens after
+# What a class's or an interface's body, or that of an object a
+# declaration, `export default` or a property gives, opens after
 _TS_BODY_HEAD_RE = re.compile(
-    r"\s*(?:(?P<type>(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?class\b[^{]*"
+    r"\s*(?:(?P<type>(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?"
+    r"(?:class|interface)\b[^{]*"
     r"|(?:extends|implements)\b[^{]*)"
     r"|(?:export\s+default|(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*(?::[^=]*)?=\s*\[?"
     rf"|(?P<nested>{_TS_WRITTEN_MEMBER_NAME})\s*:)\s*\Z)"
@@ -11189,6 +11197,9 @@ class TSParser(BaseParser):
         re_held = re.compile(r"^\s*(\.\.\.)?(?:([\w$]+)\s*:\s*)?([\w$]+)\s*,?\s*$")
         self.scan_declarations(lines, _TS_DECLARATIONS)
         self.builder.type_aliases.update(_TYPE_ALIAS_RE.findall(content))
+        for name, generics, text in _TS_ALIAS_RE.findall(content):
+            params = tuple(part.split()[0] for part in _bracketed_parts(f"{generics}>"))
+            self.builder.ts_aliases[file_id, name] = params, text.strip()
         for star, namespace, clause, specifier in _TS_REEXPORT_RE.findall(content):
             # `export * as ns` exports the module itself, under a name.
             names = [(namespace or "*", "*" if namespace else "")] if star else []
@@ -14074,6 +14085,20 @@ class CallResolver:
         renamed = self.builder.import_names.get(scope_id.split("::")[0], {})
         return renamed.get(name, name)
 
+    def _ts_alias(self, name, scope_id):
+        """``(type parameters, text)`` of the TypeScript type alias ``name``
+        written in ``scope_id`` stands for: one its file declares, else one
+        a module it imports the name from does. None for none."""
+        file_id = scope_id.split("::")[0]
+        found = self.builder.ts_aliases.get((file_id, name))
+        imported = None if found else self._imported(name, scope_id)
+        for module in imported if isinstance(imported, list) else ():
+            exported = self._exported_as(name, scope_id)
+            found = found or self.builder.ts_aliases.get(
+                (module.split("::")[0], exported)
+            )
+        return found
+
     def _imported(self, name, scope_id):
         """What an import in the file of ``scope_id`` binds ``name`` to: the
         IDs of the project definitions or files it names (none when they
@@ -14638,7 +14663,22 @@ class CallResolver:
         type declares: the single abstract method of the project
         functional interface a Java writing names, or the parameters a
         TypeScript function type writes — ``(kind, node ID)`` values stand
-        for an interface of that name. ``()`` where the writing is neither."""
+        for an interface of that name — the last ``("rest", value)`` where
+        that and every later parameter has the element type of a rest one.
+        ``()`` where the writing is neither."""
+        named = isinstance(written, str) and _ts_type_parts(written)
+        if named and named[0] and self.lang(scope_id) == "typescript":
+            # An alias stands for the type it names, its type arguments in
+            # place of its parameters.
+            alias = self._ts_alias(named[0], scope_id)
+            if alias and alias[1] != written:
+                given = dict(zip(alias[0], named[1]))
+                text = re.sub(
+                    r"(?<![\w$.])[\w$]+(?![\w$])",
+                    lambda found: given.get(found[0], found[0]),
+                    alias[1],
+                )
+                return self._functional_params(text, scope_id)
         if (
             isinstance(written, str)
             and written.startswith(("(", "<"))
@@ -14677,14 +14717,23 @@ class CallResolver:
             # the list's, not that of a parameter it takes in.
             values = []
             for param in _bracketed_parts(written[1:close] + ")"):
+                # An origin path writes a rest parameter's `...` as `::::::`.
+                rest = param.startswith(("...", "::::::"))
+                param = param.removeprefix("...").removeprefix("::::::")
                 name = (_bracketed_parts(param + ")", ":") or [""])[0]
                 typed = param[len(name) :].lstrip()
-                if param.startswith(("...", ":")) or not typed.startswith(":"):
+                if param.startswith(":") or not typed.startswith(":"):
                     typed = ":"
+                typed = typed[1:].strip() or "any"
+                if rest:
+                    # A rest parameter takes in each later argument, as an
+                    # element of its array.
+                    element = _ts_type_parts(typed)
+                    held = element[1][:1] if element[0] == "Array" else ()
+                    value = self._returned_type(held[0], scope_id) if held else None
+                    return (*values, ("rest", value))
                 if name != "this":
-                    values.append(
-                        self._returned_type(typed[1:].strip() or "any", scope_id)
-                    )
+                    values.append(self._returned_type(typed, scope_id))
             return tuple(values)
         if self.lang(scope_id) != "java":
             return ()
@@ -14834,12 +14883,15 @@ class CallResolver:
                     else:
                         held = self.nodes[value[1]]["metadata"].get("value_type")
                         params = self._functional_params(held, source_id)
-                number = step[1:]
-                value = (
-                    params[int(number)]
-                    if number.isdigit() and int(number) < len(params)
-                    else None
+                number = int(step[1:]) if step[1:].isdigit() else None
+                rest = (
+                    params and isinstance(params[-1], tuple) and params[-1][0] == "rest"
                 )
+                value = None
+                if number is not None and number < len(params) - bool(rest):
+                    value = params[number]
+                elif number is not None and rest:
+                    value = params[-1][1]
                 continue
             if isinstance(value, tuple) and value[0] == "literal":
                 verdict = self._each(value[1], steps[index:], source_id)
@@ -17433,8 +17485,11 @@ class CodeGraphBuilder:
         # path of the value the fixture returns or yields, if it has one,
         # whether it yields it)
         self.fixtures = {}
-        # Names declared as type aliases, which are not graph nodes.
+        # Names declared as type aliases, which are not graph nodes, and for
+        # TypeScript ``(file ID, name) -> (type parameters, text)`` of each
+        # written on one line
         self.type_aliases = set()
+        self.ts_aliases = {}
         # C/C++ file ID -> the function names a prototype in it declares:
         # the definition may sit in any file linked in.
         self.declares = {}

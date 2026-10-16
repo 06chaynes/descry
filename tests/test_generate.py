@@ -4873,14 +4873,15 @@ class TestTypeScriptCallResolution:
 
     def test_arrow_assigned_a_function_type_reads_its_params(self, tmp_path):
         """`const f: (x: Dog) => Dog = (y) => y.fetch()` types `y`; the call
-        is the arrow's, on its own line. A type named for the function, one
-        declared inside the arrow under its name, a Java interface of that
-        name, a variable of no known type, a union of function types, a
-        parameter of a function type, or a pattern typed where it is
-        written, leaves the call unresolved, as does a union a module's
-        type is in, one of whose alternatives may be an intersection. A
-        `this` parameter is none, a type a module names is read, and a
-        parameter list of no names is no file's end."""
+        is the arrow's, on its own line. An alias of a function type types
+        it as the function type does, whatever one declared inside the arrow
+        under its name or a Java interface of that name. A variable of no
+        known type, a union of function types, a parameter of a function
+        type, or a pattern typed where it is written, leaves the call
+        unresolved, as does a union a module's type is in, one of whose
+        alternatives may be an intersection. A `this` parameter is none, a
+        type a module names is read, and a parameter list of no names is no
+        file's end."""
         builder = _index(
             tmp_path,
             {
@@ -4957,14 +4958,11 @@ class TestTypeScriptCallResolution:
                 """,
             },
         )
-        for name in ("typed", "bound"):
+        for name in ("typed", "bound", "aliased", "shadowed", "returned"):
             assert _calls(builder, f"FILE:a.ts::{name}") == ["FILE:a.ts::Dog::fetch"]
         assert _calls(builder, "FILE:a.ts::qualified") == ["FILE:pets.ts::Pup::fetch"]
         assert _calls(builder, "FILE:broken.ts::unnamed") == ["REF:y.fetch"]
         for name in (
-            "aliased",
-            "shadowed",
-            "returned",
             "either",
             "curried",
             "later",
@@ -8347,6 +8345,29 @@ class TestTypeScriptCallResolution:
             },
         )
         assert _calls(builder, "FILE:a.ts::check") == ["REF:suite.test"]
+
+    def test_an_alias_and_a_rest_parameter_type_an_arrows_parameters(self, tmp_path):
+        """An alias of a function type, generic or not, types the arrow it
+        annotates by its parameters, its type arguments in place; a rest
+        parameter types every later one by its array's element. A one-line
+        interface has its fields."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Dog { bark() {} }
+                interface Props { dog: Dog }
+                type View<T> = (props: T) => void;
+                export const show: View<Props> = (props) => props.dog.bark();
+                export const each: (...dogs: Dog[]) => void = (first, second) => {
+                  second.bark();
+                };
+                """
+            },
+        )
+        bark = "FILE:a.ts::Dog::bark"
+        assert _calls(builder, "FILE:a.ts::show") == [bark]
+        assert _calls(builder, "FILE:a.ts::each") == [bark]
 
     def test_a_string_literal_type_holds_no_mark(self, tmp_path):
         """`"a|b"` is a string, whatever its text holds: a method called on
