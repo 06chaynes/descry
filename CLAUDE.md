@@ -23,7 +23,7 @@ just test tests/test_handlers.py::test_index     # one test
 just test -k "cross_lang and not slow"           # by expression
 ```
 
-Python 3.11+ required (enforced by `pyproject.toml`). Pre-commit gate: `just lint && just fmt && just test` all pass (2351 tests currently — a drop is a regression signal).
+Python 3.11+ required (enforced by `pyproject.toml`). Pre-commit gate: `just lint && just fmt && just test` all pass (2343 tests currently — a drop is a regression signal).
 
 Invoke the tool while developing:
 
@@ -43,7 +43,7 @@ Packaging: `pyproject.toml` defines four console scripts — `descry`, `descry-m
 
 **Two graph phases:**
 
-1. **Generate** (`generate.py`, invoked via `descry index` or `descry-generate`) — walks the project, parses source files with regex + AST + optional ast-grep, resolves calls (`CallResolver`) from imports, declared and returned types, scope and the class hierarchy, optionally runs SCIP indexers (rust-analyzer, scip-typescript) for type-aware call resolution, optionally builds embeddings. Writes `.descry_cache/codebase_graph.json`. A call is resolved, left unresolved with the definitions that fit recorded as `candidates`, or dropped as external. Never resolve by name alone when more than one definition fits, never by file path, and never guess the type of a receiver: an unknown receiver stays unresolved.
+1. **Generate** (`generate.py`, invoked via `descry index` or `descry-generate`) — walks the project, parses source files with regex + AST, resolves calls (`CallResolver`) from imports, declared and returned types, scope and the class hierarchy, optionally runs SCIP indexers (rust-analyzer, scip-typescript) for type-aware call resolution, optionally builds embeddings. Writes `.descry_cache/codebase_graph.json`. A call is resolved, left unresolved with the definitions that fit recorded as `candidates`, or dropped as external. Never resolve by name alone when more than one definition fits, never by file path, and never guess the type of a receiver: an unknown receiver stays unresolved.
 2. **Query** (`query.py` → `GraphQuerier`) — loads the cached graph and answers callers/callees/flow/path/context queries. All service methods lazy-load the querier; freshness is tracked by graph file mtime.
 
 **Graph schema is versioned.** `src/descry/_graph.py` exports `CURRENT_SCHEMA` (currently `2`) and `load_graph_with_schema()`. Every graph-consuming code path must load via this helper — it raises `GraphSchemaError` on mismatch so stale graphs are rejected rather than silently producing wrong results. If you change the graph shape in a breaking way, bump `CURRENT_SCHEMA`.

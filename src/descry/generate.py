@@ -72,21 +72,6 @@ _INDEXED_EXTENSIONS = (
     *_JSTS_EXTENSIONS,
 )
 
-# Try to import ast-grep integration for improved CALLS detection
-try:
-    from descry.ast_grep import (
-        ast_grep_available,
-        extract_calls_rust,
-        extract_calls_typescript,
-        extract_imports_typescript,
-    )
-
-    USE_AST_GREP = ast_grep_available()
-except ImportError:
-    USE_AST_GREP = False
-    extract_imports_typescript = None
-    logger.debug("ast-grep not available, using regex fallback for CALLS detection")
-
 # Try to import SCIP support for type-aware call resolution
 try:
     from descry.scip.cache import ScipCacheManager
@@ -5952,45 +5937,6 @@ _LIBRARY_PREFIXES = (
 STDLIB_PREFIXES = _STDLIB_PREFIXES + _LIBRARY_PREFIXES
 
 
-def build_line_to_context_map(nodes: list, file_id: str) -> dict:
-    """Build a mapping from line numbers to containing function/method context.
-
-    Uses span-size ordering to ensure innermost (most specific) context wins.
-    For nested functions, the inner function should be the context for its lines,
-    not the outer function.
-
-    Args:
-        nodes: List of graph nodes
-        file_id: File ID prefix (e.g., "FILE:path/to/file.rs")
-
-    Returns:
-        Dict mapping line number -> node ID of containing function/method
-    """
-    # Collect all function/method spans in this file
-    spans = []
-    for node in nodes:
-        if node["id"].startswith(file_id + "::") and node["type"] in (
-            "Function",
-            "Method",
-        ):
-            start = node["metadata"].get("lineno", 0)
-            end = node["metadata"].get("end_lineno", start + 100)
-            span_size = end - start
-            spans.append((span_size, start, end, node["id"]))
-
-    # Sort by span size DESCENDING (largest first)
-    # This way, smaller (inner) spans override larger (outer) spans
-    spans.sort(key=lambda x: -x[0])
-
-    # Build the mapping - last write wins, so inner functions override
-    line_to_context = {}
-    for _, start, end, node_id in spans:
-        for ln in range(start, end + 1):
-            line_to_context[ln] = node_id
-
-    return line_to_context
-
-
 _GENERATED_MARKERS = (
     # Go convention (https://pkg.go.dev/cmd/go#hdr-Generate_Go_files_by_processing_source)
     "// Code generated ",
@@ -6139,51 +6085,6 @@ class SymbolTable:
                 return f"{resolved_root}.{'.'.join(parts[1:])}"
             return resolved_root
         return name
-
-
-class TypeScriptSymbolTable:
-    """Symbol table for TypeScript files with import tracking.
-
-    Tracks imports to:
-    - Skip type-only imports (they don't generate runtime calls)
-    - Identify namespace imports for better SCIP matching
-
-    Resolution is primarily handled by SCIP for accuracy.
-    This table provides supplementary information.
-    """
-
-    def __init__(self, file_path: str, project_root: str):
-        """Initialize the symbol table for a TypeScript file.
-
-        Args:
-            file_path: Absolute or relative path to the TypeScript file
-            project_root: Root directory of the project
-        """
-        self.file_path = file_path
-        self.project_root = project_root
-
-        # local_name -> (module_path, import_type)
-        # import_type: "named", "default", "namespace", "type"
-        self.imports: dict = {}
-
-    def load_imports(self, import_data: dict):
-        """Load import data from ast-grep extraction.
-
-        Args:
-            import_data: Dict with 'imports' and 'namespaces' keys
-        """
-        self.imports = import_data.get("imports", {})
-
-    def is_type_import(self, name: str) -> bool:
-        """Check if a name was imported with 'import type'.
-
-        Type-only imports don't generate runtime calls.
-        """
-        root = name.split(".")[0]
-        if root in self.imports:
-            _, import_type = self.imports[root]
-            return import_type == "type"
-        return False
 
 
 _LICENSE_HEADER_RE = re.compile(r"copyright|licen[cs]e|spdx-", re.IGNORECASE)
@@ -9087,8 +8988,8 @@ class RustParser(BaseParser):
                 path = match.group(1).replace("::", ".")
                 self.builder.add_edge(file_id, f"MODULE:{path}", "IMPORTS")
 
-            # 6. Calls (regex fallback - only used if ast-grep unavailable)
-            if not self.builder.use_ast_grep and parent_id != file_id:
+            # 6. Calls
+            if parent_id != file_id:
                 code = codes[lineno - 1][0]
                 self.begin_line(code, lineno, parent_id, lines[lineno - 1])
                 self._bind_arm(code, i, lines)
@@ -9148,213 +9049,7 @@ class RustParser(BaseParser):
                 )
                 self.builder.add_edge(file_id, struct_id, "DEFINES")
 
-        # Use ast-grep for more accurate CALLS detection
-        if self.builder.use_ast_grep:
-            self._extract_calls_with_ast_grep(str(file_path), file_id, lines)
         self.restore_source_lines()
-
-    def _extract_calls_with_ast_grep(self, file_path: str, file_id: str, lines: list):
-        """Extract calls using ast-grep for higher accuracy."""
-        # Build a line-to-context map from our parsed structure
-        # Uses span-size ordering to ensure innermost context wins for nested functions
-        line_to_context = build_line_to_context_map(self.builder.nodes, file_id)
-
-        for call in extract_calls_rust(file_path):
-            lineno = self.read_line(call["lineno"])
-            callee = call["callee"]
-
-            # Find the containing function for this line
-            context_id = line_to_context.get(lineno)
-            if not context_id:
-                # Try nearby lines
-                for offset in range(1, 10):
-                    context_id = line_to_context.get(
-                        lineno - offset
-                    ) or line_to_context.get(lineno + offset)
-                    if context_id:
-                        break
-
-            # Fall back to file_id if no function context found (file-level calls)
-            source_id = context_id if context_id else file_id
-            self.builder.edges.append(
-                {
-                    "source": source_id,
-                    "target": f"REF:{callee}",
-                    "relation": "CALLS",
-                    "metadata": {"lineno": lineno},
-                }
-            )
-
-            # Track struct instantiation patterns
-            # Expanded pattern list covers common Rust constructors
-            constructor_patterns = (
-                "new",
-                "default",
-                "builder",
-                "from",
-                "try_from",
-                "from_str",
-                "from_bytes",
-                "from_slice",
-                "open",
-                "create",
-                "connect",
-                "with_capacity",
-                "with_config",
-                "with_options",
-                "init",
-                "initialize",
-            )
-            if "::" in callee and not is_non_project_call(callee):
-                parts = callee.split("::")
-                if len(parts) >= 2:
-                    method_name = parts[-1]
-                    struct_name = parts[-2]
-                    # Match constructor patterns (exact or prefix for with_*)
-                    is_constructor = (
-                        method_name in constructor_patterns
-                        or method_name.startswith(("with_", "from_"))
-                    )
-                    # Skip if it's a module path like std::collections::HashMap::new
-                    if is_constructor and struct_name[0].isupper():
-                        self.builder.edges.append(
-                            {
-                                "source": source_id,
-                                "target": f"REF:{struct_name}",
-                                "relation": "INSTANTIATES",
-                                "metadata": {"lineno": lineno, "via": callee},
-                            }
-                        )
-
-        # Also extract struct literal instantiations
-        self._extract_struct_literals(file_id, lines, line_to_context)
-
-        # Extract calls from macro bodies (tokio::select!, etc.)
-        self._extract_macro_body_calls(file_id, lines, line_to_context)
-
-    def _extract_struct_literals(
-        self, file_id: str, lines: list, line_to_context: dict
-    ):
-        """Extract struct literal instantiations like `MyStruct { field: value }`.
-
-        Uses regex to find patterns that look like struct literals.
-        """
-        re_struct_literal = re.compile(r"\b([A-Z][a-zA-Z0-9_]*)\s*\{")
-
-        for lineno, line in enumerate(lines, 1):
-            # Skip struct/enum/trait definitions
-            if re.match(rf"^\s*{_RUST_VIS}(?:struct|enum|trait)\s+", line):
-                continue
-            # Skip impl blocks
-            if re.match(r"^\s*impl", line):
-                continue
-
-            for match in re_struct_literal.finditer(line):
-                struct_name = match.group(1)
-                # Skip common non-struct patterns
-                if struct_name in ("Some", "None", "Ok", "Err", "Self"):
-                    continue
-
-                context_id = line_to_context.get(lineno)
-                if not context_id:
-                    for offset in range(1, 10):
-                        context_id = line_to_context.get(
-                            lineno - offset
-                        ) or line_to_context.get(lineno + offset)
-                        if context_id:
-                            break
-
-                source_id = context_id if context_id else file_id
-                self.builder.edges.append(
-                    {
-                        "source": source_id,
-                        "target": f"REF:{struct_name}",
-                        "relation": "INSTANTIATES",
-                        "metadata": {"lineno": lineno, "via": "literal"},
-                    }
-                )
-
-    def _extract_macro_body_calls(
-        self, file_id: str, lines: list, line_to_context: dict
-    ):
-        """Extract function/method calls from inside macro bodies.
-
-        Macro bodies like tokio::select! aren't parsed by ast-grep because
-        they're not valid syntax until macro expansion. This uses regex
-        to find common call patterns inside macro invocations.
-
-        Patterns detected:
-        - self.method() and self.method().await
-        - receiver.method() where receiver is a variable
-        - function() calls
-        """
-        # Patterns for calls inside macro bodies
-        # Method call: word.method() or word.method().await
-        re_method_call = re.compile(
-            r"\b([a-z_][a-z0-9_]*)\s*\.\s*([a-z_][a-z0-9_]*)\s*\(\s*\)"
-        )
-        # Method call with args: word.method(args)
-        re_method_call_args = re.compile(
-            r"\b([a-z_][a-z0-9_]*)\s*\.\s*([a-z_][a-z0-9_]*)\s*\([^)]*\)"
-        )
-        # Chained await: .method().await
-        re_await_method = re.compile(r"\.([a-z_][a-z0-9_]*)\s*\(\s*\)\s*\.await")
-
-        # Track which lines are inside macro bodies
-        in_macro = False
-        macro_depth = 0
-
-        for lineno, line in enumerate(lines, 1):
-            # Detect macro start (common async macros)
-            if re.search(r"\b(tokio::select|tokio::spawn|async_std::task)", line):
-                in_macro = True
-                macro_depth = line.count("{") - line.count("}")
-
-            if in_macro:
-                macro_depth += line.count("{") - line.count("}")
-                if macro_depth <= 0:
-                    in_macro = False
-                    continue
-
-                # Find method calls in this line
-                for pattern in [re_method_call, re_method_call_args, re_await_method]:
-                    for match in pattern.finditer(line):
-                        if pattern == re_await_method:
-                            method_name = match.group(1)
-                            receiver = None
-                        else:
-                            receiver = match.group(1)
-                            method_name = match.group(2)
-
-                        # Skip if receiver is a common variable pattern
-                        if receiver in ("e", "err", "error", "_"):
-                            continue
-
-                        context_id = line_to_context.get(lineno)
-                        if not context_id:
-                            for offset in range(1, 20):
-                                context_id = line_to_context.get(
-                                    lineno - offset
-                                ) or line_to_context.get(lineno + offset)
-                                if context_id:
-                                    break
-
-                        source_id = context_id if context_id else file_id
-
-                        # Create qualified name if receiver is self
-                        if receiver == "self":
-                            callee = f"self.{method_name}"
-                        else:
-                            callee = method_name
-
-                        self.builder.edges.append(
-                            {
-                                "source": source_id,
-                                "target": f"REF:{callee}",
-                                "relation": "CALLS",
-                                "metadata": {"lineno": lineno, "via": "macro"},
-                            }
-                        )
 
     def _consume_until_body(self, lines, start_idx):
         sig_lines = [lines[start_idx]]
@@ -11428,23 +11123,6 @@ class TSParser(BaseParser):
         self._margin = min((len(l) - len(l.lstrip()) for l in written), default=0)
         self.enter_context(file_id, 0, len(lines))
 
-        # Initialize TypeScript symbol table for import tracking
-        self.symbol_table = TypeScriptSymbolTable(
-            str(file_path), str(self.builder.root_dir)
-        )
-
-        # Extract imports using ast-grep if available
-        if self.builder.use_ast_grep and extract_imports_typescript is not None:
-            try:
-                import_data = extract_imports_typescript(str(file_path))
-                self.symbol_table.load_imports(import_data)
-            except Exception as e:  # noqa: BLE001 — boundary over the external ast-grep binary; falls back to unqualified calls
-                # Fall back to unqualified calls — debug-level so it's
-                # traceable without spamming INFO on every parser failure.
-                logger.debug(
-                    f"ast-grep TS import extraction failed for {file_path}: {e}"
-                )
-
         # A class at a line's margin, or a class expression: `const C =
         # class`, as `let` or `var`, `member = class`, and inside brackets
         # `new (class` or `call(a, class`, where `class` is no property's
@@ -12651,508 +12329,501 @@ class TSParser(BaseParser):
                     event=event_name,
                 )
 
-            # Calls (regex fallback - only used if ast-grep unavailable)
-            # Module-level calls are sourced at the file, as with ast-grep.
-            if not self.builder.use_ast_grep:
-                code = code_lines[lineno - 1]
-                # The type arguments of a call are no part of its chain.
-                code = _JS_TYPE_ARGUMENTS_RE.sub(lambda m: " " * len(m[0]), code)
-                if _TS_VARIABLE_RE.match(code):
-                    # `const name = value as Type` casts nothing: the value
-                    # the line gives the name is the one written.
-                    code = _JS_AS_TYPE_RE.sub(lambda m: " " * len(m[0]), code)
-                # A module's top level takes in the bodies of callbacks, whose
-                # variables are not the module's.
-                scope = None if parent_id == file_id else parent_id
-                self.begin_line(code, lineno, scope, line)
-                # A variable has what the line that declared it gave it:
-                # nothing where that gave it no type, whatever an earlier
-                # declaration of its name did.
-                if name := untyped[0]:
-                    entries = self.declared.get(name, [])
-                    kept = [e for e in entries if e[0] != untyped[1] or e[1]]
-                    if not any(e[0] == untyped[1] for e in kept):
-                        kept.append((untyped[1], None, False))
-                    self.declared[name] = kept
-                untyped = ("", 0)
-                if literal := _JS_LITERAL_RE.search(code):
-                    builtin = _JS_LITERAL_TYPES.get(literal["literal"][0], "string")
-                    if builtin == "Array":
-                        # Its elements are read once its calls are.
-                        array = f"[{len(self.builder.literals)}]", 0
-                        self.builder.literals[array[0]] = []
-                        builtin = f"Array<{array[0]}>"
-                    self.declared.setdefault(literal["name"], []).append(
-                        (lineno, f"{builtin}()", not line[:1].isspace())
-                    )
-                elif binding := self.binding_re.search(code):
-                    untyped = (binding["name"], lineno)
-                since = self.context_at(lineno)[1]
-                # The definition the line is in, before it enters those the
-                # line opens
-                scope = reaching(lineno)[0]
-                owner = parent_id.split("::")[-2] if parent_id.count("::") > 1 else None
-                self._closures = [
-                    (
-                        found.start("closure"),
-                        found["params"] or found["param"] or "",
-                        found.end(),
-                    )
-                    for found in _JS_CLOSURE_RE.finditer(code)
-                    # A function with a name is an expression where it is a
-                    # value, else a declaration.
-                    if not found["named"]
-                    or _JS_VALUE_START_RE.search(
-                        code, max(_run_start(code, found.start()) - 7, 0), found.start()
-                    )
+            # Calls. Module-level calls are sourced at the file.
+            code = code_lines[lineno - 1]
+            # The type arguments of a call are no part of its chain.
+            code = _JS_TYPE_ARGUMENTS_RE.sub(lambda m: " " * len(m[0]), code)
+            if _TS_VARIABLE_RE.match(code):
+                # `const name = value as Type` casts nothing: the value
+                # the line gives the name is the one written.
+                code = _JS_AS_TYPE_RE.sub(lambda m: " " * len(m[0]), code)
+            # A module's top level takes in the bodies of callbacks, whose
+            # variables are not the module's.
+            scope = None if parent_id == file_id else parent_id
+            self.begin_line(code, lineno, scope, line)
+            # A variable has what the line that declared it gave it:
+            # nothing where that gave it no type, whatever an earlier
+            # declaration of its name did.
+            if name := untyped[0]:
+                entries = self.declared.get(name, [])
+                kept = [e for e in entries if e[0] != untyped[1] or e[1]]
+                if not any(e[0] == untyped[1] for e in kept):
+                    kept.append((untyped[1], None, False))
+                self.declared[name] = kept
+            untyped = ("", 0)
+            if literal := _JS_LITERAL_RE.search(code):
+                builtin = _JS_LITERAL_TYPES.get(literal["literal"][0], "string")
+                if builtin == "Array":
+                    # Its elements are read once its calls are.
+                    array = f"[{len(self.builder.literals)}]", 0
+                    self.builder.literals[array[0]] = []
+                    builtin = f"Array<{array[0]}>"
+                self.declared.setdefault(literal["name"], []).append(
+                    (lineno, f"{builtin}()", not line[:1].isspace())
+                )
+            elif binding := self.binding_re.search(code):
+                untyped = (binding["name"], lineno)
+            since = self.context_at(lineno)[1]
+            # The definition the line is in, before it enters those the
+            # line opens
+            scope = reaching(lineno)[0]
+            owner = parent_id.split("::")[-2] if parent_id.count("::") > 1 else None
+            self._closures = [
+                (
+                    found.start("closure"),
+                    found["params"] or found["param"] or "",
+                    found.end(),
+                )
+                for found in _JS_CLOSURE_RE.finditer(code)
+                # A function with a name is an expression where it is a
+                # value, else a declaration.
+                if not found["named"]
+                or _JS_VALUE_START_RE.search(
+                    code, max(_run_start(code, found.start()) - 7, 0), found.start()
+                )
+            ]
+            self._held_closures = [
+                (found.start("closure"), found["params"] or found["param"] or "")
+                for found in _JS_PROPERTY_CLOSURE_RE.finditer(code)
+            ]
+            self._bodies = []
+            # A nameless function passed as an argument, whose block body
+            # opens here and goes on over later lines, is a scope of its
+            # own: the locals it declares are its, not the enclosing
+            # definition's, and each such function its own. One that
+            # opens after another on the line is written inside it.
+            within = parent_id
+            # The definitions the line declares, by their own columns
+            own_spans = [
+                (node_id, span)
+                for node_id, name_end in own_defs
+                if (span := _own_line_span(code, name_end))
+            ]
+            for bar, _params, end in self._closures:
+                # The innermost of those that holds it holds it.
+                holding = [
+                    node_id
+                    for node_id, (start, stop) in own_spans
+                    if start <= bar < stop
                 ]
-                self._held_closures = [
-                    (found.start("closure"), found["params"] or found["param"] or "")
-                    for found in _JS_PROPERTY_CLOSURE_RE.finditer(code)
-                ]
-                self._bodies = []
-                # A nameless function passed as an argument, whose block body
-                # opens here and goes on over later lines, is a scope of its
-                # own: the locals it declares are its, not the enclosing
-                # definition's, and each such function its own. One that
-                # opens after another on the line is written inside it.
-                within = parent_id
-                # The definitions the line declares, by their own columns
-                own_spans = [
-                    (node_id, span)
-                    for node_id, name_end in own_defs
-                    if (span := _own_line_span(code, name_end))
-                ]
-                for bar, _params, end in self._closures:
-                    # The innermost of those that holds it holds it.
-                    holding = [
-                        node_id
-                        for node_id, (start, stop) in own_spans
-                        if start <= bar < stop
-                    ]
-                    if holding and not within.startswith(f"{holding[-1]}::"):
-                        within = holding[-1]
-                    text = code[bar:end].rstrip()
-                    if text.endswith("{"):
-                        opened = end - 1
-                    elif text.endswith("=>") and code[end:].lstrip().startswith("{"):
-                        opened = end + len(code[end:]) - len(code[end:].lstrip())
-                    else:
-                        continue  # an expression body, or one over later lines
-                    if _block_close(code, opened) is not None:
-                        continue  # the block closes on this line
-                    while callbacks and callbacks[-1][0] < lineno:
-                        callbacks.pop()
-                    outer = callbacks[-1][1] if callbacks else 0
-                    block_end = self._find_block_end(code_lines, i, opened)
-                    if block_end <= lineno:
-                        continue
-                    if (
-                        self.paren_around(bar) is None
-                        and len(self._open_calls) <= outer
-                    ):
-                        # Not an argument: the lines of its body are those
-                        # of the definition around it, or of the constant
-                        # whose value holds it, and read its parameters too.
-                        context = (*reaching(block_end)[0][:2], block_end - 1)
-                        if holder and ";" not in code[holder[1] : bar]:
-                            context = (holder[0], lineno, block_end - 1)
-                        self.enter_context(*context, _ts_params(code[bar : opened + 1]))
-                    else:
-                        callback_id = within = self._nameless_owner(
-                            within,
-                            f"callback@{self.source_line(lineno)}",
-                            lineno,
-                            block_end,
-                            "callback",
-                        )
-                        callbacks.append(
-                            (block_end - 1, len(self._open_calls) + len(self._opens))
-                        )
-                        callback_ids.add(callback_id)
-                        context = (callback_id, since, block_end - 1)
-                        span = (
-                            (i, opened),
-                            close_at.get((i, opened), (block_end - 1, None)),
-                        )
-                        enter(*context, code[bar : opened + 1], span)
-                    closed_after.add(context)
-                    # A function expression's own name is a variable of its
-                    # body.
-                    if named := re.match(r"function\b\s*\*?\s*([\w$]+)", code[bar:]):
-                        declared_names.setdefault(context, {}).setdefault(
-                            named[1], []
-                        ).append((lineno, block_end))
-                # The declarators of a statement after its first, on this line
-                # or one the statement goes on to, are definitions of their
-                # own, as its first is and where it is: a `const` a constant,
-                # a `let` or `var` one holding a function that function. One
-                # holding a function takes its calls.
-                if not continuing and (
-                    head := _TS_DECLARATION_HEAD_RE.match(code_lines[i])
+                if holding and not within.startswith(f"{holding[-1]}::"):
+                    within = holding[-1]
+                text = code[bar:end].rstrip()
+                if text.endswith("{"):
+                    opened = end - 1
+                elif text.endswith("=>") and code[end:].lstrip().startswith("{"):
+                    opened = end + len(code[end:]) - len(code[end:].lstrip())
+                else:
+                    continue  # an expression body, or one over later lines
+                if _block_close(code, opened) is not None:
+                    continue  # the block closes on this line
+                while callbacks and callbacks[-1][0] < lineno:
+                    callbacks.pop()
+                outer = callbacks[-1][1] if callbacks else 0
+                block_end = self._find_block_end(code_lines, i, opened)
+                if block_end <= lineno:
+                    continue
+                if self.paren_around(bar) is None and len(self._open_calls) <= outer:
+                    # Not an argument: the lines of its body are those
+                    # of the definition around it, or of the constant
+                    # whose value holds it, and read its parameters too.
+                    context = (*reaching(block_end)[0][:2], block_end - 1)
+                    if holder and ";" not in code[holder[1] : bar]:
+                        context = (holder[0], lineno, block_end - 1)
+                    self.enter_context(*context, _ts_params(code[bar : opened + 1]))
+                else:
+                    callback_id = within = self._nameless_owner(
+                        within,
+                        f"callback@{self.source_line(lineno)}",
+                        lineno,
+                        block_end,
+                        "callback",
+                    )
+                    callbacks.append(
+                        (block_end - 1, len(self._open_calls) + len(self._opens))
+                    )
+                    callback_ids.add(callback_id)
+                    context = (callback_id, since, block_end - 1)
+                    span = (
+                        (i, opened),
+                        close_at.get((i, opened), (block_end - 1, None)),
+                    )
+                    enter(*context, code[bar : opened + 1], span)
+                closed_after.add(context)
+                # A function expression's own name is a variable of its
+                # body.
+                if named := re.match(r"function\b\s*\*?\s*([\w$]+)", code[bar:]):
+                    declared_names.setdefault(context, {}).setdefault(
+                        named[1], []
+                    ).append((lineno, block_end))
+            # The declarators of a statement after its first, on this line
+            # or one the statement goes on to, are definitions of their
+            # own, as its first is and where it is: a `const` a constant,
+            # a `let` or `var` one holding a function that function. One
+            # holding a function takes its calls.
+            if not continuing and (
+                head := _TS_DECLARATION_HEAD_RE.match(code_lines[i])
+            ):
+                for at, *declarator in _declarators(code_lines, i, head.end()):
+                    later_declarators.setdefault(at, []).append(
+                        (parent_id, head[1], *declarator)
+                    )
+            # The variables the line declares, each with the last line
+            # it is in scope on: a `var` to the end of the function it
+            # is in, any other to the end of its block, the binding of a
+            # `for` or a `catch` to the end of the body. The name of a
+            # function or class expression is in scope only inside it.
+            bindings = []
+            for found in _JS_BINDING_HEAD_RE.finditer(code):
+                if _js_member_name(code_lines, i, found.start()):
+                    continue
+                head = None
+                if not found[1] or _JS_FOR_HEAD_RE.search(
+                    code,
+                    _run_start(code, found.start(), "(forawaitcatch"),
+                    found.start(),
                 ):
-                    for at, *declarator in _declarators(code_lines, i, head.end()):
-                        later_declarators.setdefault(at, []).append(
-                            (parent_id, head[1], *declarator)
-                        )
-                # The variables the line declares, each with the last line
-                # it is in scope on: a `var` to the end of the function it
-                # is in, any other to the end of its block, the binding of a
-                # `for` or a `catch` to the end of the body. The name of a
-                # function or class expression is in scope only inside it.
-                bindings = []
-                for found in _JS_BINDING_HEAD_RE.finditer(code):
-                    if _js_member_name(code_lines, i, found.start()):
-                        continue
-                    head = None
-                    if not found[1] or _JS_FOR_HEAD_RE.search(
+                    head = (i, code.rindex("(", 0, found.end()))
+                elif held_open and not _run_start(code, found.start()):
+                    head = held_open[:2]
+                bindings.append((found[1] or "catch", found.end(), head))
+            written = code.lstrip()
+            if held_open and held_open[2] and re.match(r"[\w$\[{]", written):
+                bindings.append(("catch", len(code) - len(written), held_open[:2]))
+            names = []
+            for kind, at, head in bindings:
+                last = in_scope(i, at, kind, head)
+                written = code[at:]
+                bound = (
+                    [name for name, _ in _js_bindings(written)]
+                    if written[0] in "[{"
+                    else [re.match(r"[\w$]+", written)[0]]
+                )
+                names.extend((name, last) for name in bound)
+            declared_here = later_declarators.pop(i, ())
+            for scope_id, kind, later, name_end, value_at in declared_here:
+                # A later declarator is typed by its value as the first is.
+                value_end = _value_end(code_lines[i], value_at)
+                typed_as = self._expression_origin(
+                    code, value_at, value_end, lineno, since, owner
+                )
+                if typed_as:
+                    self.declared.setdefault(later, []).append(
+                        (lineno, typed_as, self._binds_file(later))
+                    )
+                held = _function_value(line[value_at:])
+                constant = kind == "const"
+                if not (constant or held):
+                    names.append((later, in_scope(i, name_end, kind)))
+                    continue
+                lid = f"{scope_id}::{later}"
+                claim(lid)
+                held_typed = held and self._arrow_typed(held, line)
+                value = line[value_at : _value_end(code_lines[i], value_at)]
+                self.builder.add_node(
+                    lid,
+                    "Constant" if constant else "Function",
+                    name=later,
+                    value=value.strip(),
+                    value_type=None,
+                    lineno=lineno,
+                    docstring="",
+                    signatures=held_typed and self._overloads(lid, held_typed),
+                )
+                self.builder.add_edge(scope_id, lid, "DEFINES")
+                if held:
+                    own_defs.append((lid, name_end))
+            if closed := {name for name, last in names if last == lineno}:
+                self._closed_names[lineno] = closed
+            # A name a function's body declares is the function's own:
+            # a call of it calls the value the name holds. A line that
+            # defines a function may declare the names in that, and one
+            # a `require` binds is the module's.
+            if scope[0] not in (file_id, *class_ids) and not (
+                continuing or own_defs or i in required
+            ):
+                for name, last in names:
+                    declared_names.setdefault(scope[:3], {}).setdefault(
+                        name, []
+                    ).append((lineno, last))
+            typed = _TS_TYPED_VALUE_RE.search(code)
+            calls = []  # (edge index, column of its `(`) of each on the line
+            # A definition on this line takes the calls its parameters
+            # and the first line of its body enclose, which run when it
+            # is called, where the node is its own: one that an earlier
+            # definition of the name already holds is not. A decorator
+            # or computed key leading the line runs where the class or
+            # object is defined, not in the member it leads.
+            added = {node["id"] for node in self.builder.nodes[nodes_before:]}
+            spans = field_spans + [
+                (*span, node_id)
+                for node_id, name_end in own_defs
+                if node_id in added and (span := _own_line_span(code, name_end))
+            ]
+            if (parent_id in class_ids or parent_id in object_ids) and (
+                region := _definition_time_region(code)
+            ):
+                spans.append((*region, self.enclosing_scope(parent_id)))
+            for match in re_call_candidate.finditer(code):
+                if match.start(1) == declared_at:
+                    continue
+                # An optional call (`a?.b?.()`) is a call; only its
+                # receiver may be nullish.
+                callee = match.group(1).replace("?.", ".")
+                # `function name(` names the function it defines.
+                if _JS_FUNCTION_HEAD_RE.search(
+                    code,
+                    max(_run_start(code, match.start(1), "*") - 8, 0),
+                    match.start(1),
+                ):
+                    continue
+                # `name(params) {` at the start of a line defines a
+                # method of an object literal.
+                if (
+                    _TS_METHOD_MODIFIERS_RE.fullmatch(code, 0, match.start(1))
+                    and "." not in callee
+                    and _opens_body(code[match.start(1) :])
+                ):
+                    continue
+                # JS/TS control-flow keywords look like calls (`if(x)`,
+                # `while (y)`). Reject them by name — language general,
+                # not codebase specific. After a `.` one names a member.
+                member = _js_member_name(code_lines, i, match.start(1))
+                if callee in _JSTS_CONTROL_KEYWORDS and not member:
+                    continue
+                paren = match.end()
+                if code[paren] == "<":
+                    # Generic arguments: `name<T, U>(`
+                    depth = 0
+                    for offset, char in enumerate(code[paren:]):
+                        depth += (char == "<") - (char == ">")
+                        if depth == 0:
+                            rest = code[paren + offset + 1 :]
+                            paren += offset + 1 + len(rest) - len(rest.lstrip())
+                            break
+                if code[paren : paren + 1] == "(":
+                    # A call of a value a parameter or a variable holds,
+                    # unless the name is a member of an expression.
+                    origin = None
+                    if not member:
+                        origin = value_of(callee, lineno, since, owner)
+                    # A literal is a value of its built-in type.
+                    quote = _JS_LITERAL_RECEIVER_RE.search(
                         code,
-                        _run_start(code, found.start(), "(forawaitcatch"),
-                        found.start(),
-                    ):
-                        head = (i, code.rindex("(", 0, found.end()))
-                    elif held_open and not _run_start(code, found.start()):
-                        head = held_open[:2]
-                    bindings.append((found[1] or "catch", found.end(), head))
-                written = code.lstrip()
-                if held_open and held_open[2] and re.match(r"[\w$\[{]", written):
-                    bindings.append(("catch", len(code) - len(written), held_open[:2]))
-                names = []
-                for kind, at, head in bindings:
-                    last = in_scope(i, at, kind, head)
-                    written = code[at:]
-                    bound = (
-                        [name for name, _ in _js_bindings(written)]
-                        if written[0] in "[{"
-                        else [re.match(r"[\w$]+", written)[0]]
-                    )
-                    names.extend((name, last) for name in bound)
-                declared_here = later_declarators.pop(i, ())
-                for scope_id, kind, later, name_end, value_at in declared_here:
-                    # A later declarator is typed by its value as the first is.
-                    value_end = _value_end(code_lines[i], value_at)
-                    typed_as = self._expression_origin(
-                        code, value_at, value_end, lineno, since, owner
-                    )
-                    if typed_as:
-                        self.declared.setdefault(later, []).append(
-                            (lineno, typed_as, self._binds_file(later))
-                        )
-                    held = _function_value(line[value_at:])
-                    constant = kind == "const"
-                    if not (constant or held):
-                        names.append((later, in_scope(i, name_end, kind)))
-                        continue
-                    lid = f"{scope_id}::{later}"
-                    claim(lid)
-                    held_typed = held and self._arrow_typed(held, line)
-                    value = line[value_at : _value_end(code_lines[i], value_at)]
-                    self.builder.add_node(
-                        lid,
-                        "Constant" if constant else "Function",
-                        name=later,
-                        value=value.strip(),
-                        value_type=None,
-                        lineno=lineno,
-                        docstring="",
-                        signatures=held_typed and self._overloads(lid, held_typed),
-                    )
-                    self.builder.add_edge(scope_id, lid, "DEFINES")
-                    if held:
-                        own_defs.append((lid, name_end))
-                if closed := {name for name, last in names if last == lineno}:
-                    self._closed_names[lineno] = closed
-                # A name a function's body declares is the function's own:
-                # a call of it calls the value the name holds. A line that
-                # defines a function may declare the names in that, and one
-                # a `require` binds is the module's.
-                if scope[0] not in (file_id, *class_ids) and not (
-                    continuing or own_defs or i in required
-                ):
-                    for name, last in names:
-                        declared_names.setdefault(scope[:3], {}).setdefault(
-                            name, []
-                        ).append((lineno, last))
-                typed = _TS_TYPED_VALUE_RE.search(code)
-                calls = []  # (edge index, column of its `(`) of each on the line
-                # A definition on this line takes the calls its parameters
-                # and the first line of its body enclose, which run when it
-                # is called, where the node is its own: one that an earlier
-                # definition of the name already holds is not. A decorator
-                # or computed key leading the line runs where the class or
-                # object is defined, not in the member it leads.
-                added = {node["id"] for node in self.builder.nodes[nodes_before:]}
-                spans = field_spans + [
-                    (*span, node_id)
-                    for node_id, name_end in own_defs
-                    if node_id in added and (span := _own_line_span(code, name_end))
-                ]
-                if (parent_id in class_ids or parent_id in object_ids) and (
-                    region := _definition_time_region(code)
-                ):
-                    spans.append((*region, self.enclosing_scope(parent_id)))
-                for match in re_call_candidate.finditer(code):
-                    if match.start(1) == declared_at:
-                        continue
-                    # An optional call (`a?.b?.()`) is a call; only its
-                    # receiver may be nullish.
-                    callee = match.group(1).replace("?.", ".")
-                    # `function name(` names the function it defines.
-                    if _JS_FUNCTION_HEAD_RE.search(
-                        code,
-                        max(_run_start(code, match.start(1), "*") - 8, 0),
+                        max(_run_start(code, match.start(1), ".") - 1, 0),
                         match.start(1),
+                    )
+                    if quote:
+                        builtin = _JS_LITERAL_TYPES.get(quote[1], "string")
+                        origin = f"{builtin}().{callee}"
+                    self._bind_closures(code, i, lines, match.start(1))
+                    # `a.b.name()` is called on the property `b` of `a`.
+                    receiver, _, called = callee.rpartition(".")
+                    start = match.start(1)
+                    if "." in receiver and not member:
+                        span = (start, start + len(receiver))
+                        held = self._expression_origin(
+                            code, *span, lineno, since, owner
+                        )
+                        origin = origin or (held and f"{held}.{called}")
+                    if callee.startswith("this."):
+                        # `this` in an object literal that is the
+                        # argument of a call is the `ThisType` of the
+                        # parameter that holds it.
+                        held = self._this_in_object(code, match.start(1))
+                        if held:
+                            origin = f"{held}.{called}"
+                    source = owner_at(i, match.start(1)) or parent_id
+                    for span_start, span_end, node_id in spans:
+                        if span_start <= match.start(1) < span_end:
+                            source = node_id
+                    self.add_call(
+                        source,
+                        callee,
+                        lineno,
+                        since,
+                        match.start(1),
+                        paren,
+                        origin,
+                    )
+                    # `new Type<arguments>(` constructs the type it names.
+                    made = self.builder.edges[-1]["metadata"]
+                    written = line[start + len(callee) : paren].strip()
+                    if "origin" not in made and _JS_NEW_RE.search(
+                        code, max(_run_start(code, start) - 3, 0), start
                     ):
-                        continue
-                    # `name(params) {` at the start of a line defines a
-                    # method of an object literal.
-                    if (
-                        _TS_METHOD_MODIFIERS_RE.fullmatch(code, 0, match.start(1))
-                        and "." not in callee
-                        and _opens_body(code[match.start(1) :])
-                    ):
-                        continue
-                    # JS/TS control-flow keywords look like calls (`if(x)`,
-                    # `while (y)`). Reject them by name — language general,
-                    # not codebase specific. After a `.` one names a member.
-                    member = _js_member_name(code_lines, i, match.start(1))
-                    if callee in _JSTS_CONTROL_KEYWORDS and not member:
-                        continue
-                    paren = match.end()
-                    if code[paren] == "<":
-                        # Generic arguments: `name<T, U>(`
-                        depth = 0
-                        for offset, char in enumerate(code[paren:]):
-                            depth += (char == "<") - (char == ">")
-                            if depth == 0:
-                                rest = code[paren + offset + 1 :]
-                                paren += offset + 1 + len(rest) - len(rest.lstrip())
-                                break
-                    if code[paren : paren + 1] == "(":
-                        # A call of a value a parameter or a variable holds,
-                        # unless the name is a member of an expression.
-                        origin = None
-                        if not member:
-                            origin = value_of(callee, lineno, since, owner)
-                        # A literal is a value of its built-in type.
-                        quote = _JS_LITERAL_RECEIVER_RE.search(
-                            code,
-                            max(_run_start(code, match.start(1), ".") - 1, 0),
-                            match.start(1),
-                        )
-                        if quote:
-                            builtin = _JS_LITERAL_TYPES.get(quote[1], "string")
-                            origin = f"{builtin}().{callee}"
-                        self._bind_closures(code, i, lines, match.start(1))
-                        # `a.b.name()` is called on the property `b` of `a`.
-                        receiver, _, called = callee.rpartition(".")
-                        start = match.start(1)
-                        if "." in receiver and not member:
-                            span = (start, start + len(receiver))
-                            held = self._expression_origin(
-                                code, *span, lineno, since, owner
-                            )
-                            origin = origin or (held and f"{held}.{called}")
-                        if callee.startswith("this."):
-                            # `this` in an object literal that is the
-                            # argument of a call is the `ThisType` of the
-                            # parameter that holds it.
-                            held = self._this_in_object(code, match.start(1))
-                            if held:
-                                origin = f"{held}.{called}"
-                        source = owner_at(i, match.start(1)) or parent_id
-                        for span_start, span_end, node_id in spans:
-                            if span_start <= match.start(1) < span_end:
-                                source = node_id
-                        self.add_call(
-                            source,
-                            callee,
-                            lineno,
-                            since,
-                            match.start(1),
-                            paren,
-                            origin,
-                        )
-                        # `new Type<arguments>(` constructs the type it names.
-                        made = self.builder.edges[-1]["metadata"]
-                        written = line[start + len(callee) : paren].strip()
-                        if "origin" not in made and _JS_NEW_RE.search(
-                            code, max(_run_start(code, start) - 3, 0), start
-                        ):
-                            made["origin"] = f"new {callee}{written}"
-                        elif written:
-                            made["site"] = {"types": written}
-                        calls.append((len(self.builder.edges) - 1, paren, start))
-                        if typed and start == typed.end():
-                            initialises = (calls[-1][0], typed["type"])
-                if initialises:
-                    # The type is that of the call's result where the value
-                    # ends with the call.
-                    ended = self._ends_value(code, initialises[0])
-                    if ended:
-                        site = self.builder.edges[initialises[0]]["metadata"]
-                        site.setdefault("site", {})["declared"] = initialises[1]
-                    if ended is not None:
-                        initialises = None
-                if returning and self._ends_value(code, returning[0]) is not None:
-                    if not self._ends_value(code, returning[0]):
-                        returning[1][returning[2]] = None
-                    returning = None
-                # What a function declared without a return type returns:
-                # the value of each `return` of its body, or of an arrow
-                # function the expression it is.
-                returned = (self._signatures.get(parent_id) or [{}])[-1].get("returned")
-                returns = (
-                    not continuing
-                    and lineno > nameless.get(parent_id, 0)
-                    and len(re.findall(r"\breturn\b", code))
+                        made["origin"] = f"new {callee}{written}"
+                    elif written:
+                        made["site"] = {"types": written}
+                    calls.append((len(self.builder.edges) - 1, paren, start))
+                    if typed and start == typed.end():
+                        initialises = (calls[-1][0], typed["type"])
+            if initialises:
+                # The type is that of the call's result where the value
+                # ends with the call.
+                ended = self._ends_value(code, initialises[0])
+                if ended:
+                    site = self.builder.edges[initialises[0]]["metadata"]
+                    site.setdefault("site", {})["declared"] = initialises[1]
+                if ended is not None:
+                    initialises = None
+            if returning and self._ends_value(code, returning[0]) is not None:
+                if not self._ends_value(code, returning[0]):
+                    returning[1][returning[2]] = None
+                returning = None
+            # What a function declared without a return type returns:
+            # the value of each `return` of its body, or of an arrow
+            # function the expression it is.
+            returned = (self._signatures.get(parent_id) or [{}])[-1].get("returned")
+            returns = (
+                not continuing
+                and lineno > nameless.get(parent_id, 0)
+                and len(re.findall(r"\breturn\b", code))
+            )
+            found = None
+            # Whether the value the line gives is an expression: an
+            # arrow's `{` opens a block unless its body is parenthesised,
+            # which an object expression must be.
+            expression = returns == 1
+            if valued and code.count("=>") == 1:
+                returned = valued["returned"]
+                found = re.search(r"=>\s*(?P<new>new\s+)?", code)
+                expression = bool(found) and code[found.end() :].lstrip().startswith(
+                    "("
                 )
-                found = None
-                # Whether the value the line gives is an expression: an
-                # arrow's `{` opens a block unless its body is parenthesised,
-                # which an object expression must be.
-                expression = returns == 1
-                if valued and code.count("=>") == 1:
-                    returned = valued["returned"]
-                    found = re.search(r"=>\s*(?P<new>new\s+)?", code)
-                    expression = bool(found) and code[
-                        found.end() :
-                    ].lstrip().startswith("(")
-                elif returns == 1:
-                    found = _JS_RETURN_RE.match(code)
-                if returned is not None and (found or returns):
-                    value = code[found.end() :].strip(" ;") if found else ""
-                    first = [
-                        index
-                        for index, _, start in calls
-                        if found and start == found.end()
-                    ]
-                    record = None
-                    if value == "this" and not found["new"]:
-                        record = "", "self"
-                    elif first:
-                        made = self.builder.edges[first[0]]
-                        origin = made["metadata"].get("origin")
-                        ended = self._ends_value(code, first[0])
-                        # One call, whose receiver is no other call's result.
-                        read = self._read_as(origin) if origin else origin
-                        if "#" not in (read or "") and ended is not False:
-                            record = made["target"][4:], read
-                        if record and ended is None:
-                            returning = first[0], returned, len(returned)
-                    elif re.fullmatch(r"[\w$]+", value):
-                        held = self._read_as(
-                            self.call_origin(f"{value}.x", lineno, since, owner)
-                        )
-                        if held and "#" not in held:
-                            record = "", held[:-2]
-                    elif value.lstrip("(").startswith("{") and expression:
-                        # An object: its properties are read where the
-                        # function is written, and the functions among them
-                        # are members of the object itself.
-                        opened = code.index("{", found.end())
-                        key = f"[{len(self.builder.literals)}]"
-                        # An arrow's own node holds the object its body is,
-                        # which the arrow may declare on this line.
-                        holder = arrow_id or parent_id
-                        held, object_end = self._object_held(
-                            code_lines, i, opened, since, owner
-                        )
-                        self.builder.literals[key] = [held]
-                        self.builder.literal_scopes[key] = holder
-                        record = "", key
-                        # An object that holds a function written in it owns
-                        # that function; one that holds none is no owner.
-                        if any(str(value).startswith("=") for value in held.values()):
-                            object_id = self._nameless_owner(
-                                holder,
-                                f"object@{self.source_line(lineno)}",
-                                lineno,
-                                object_end,
-                                "object",
-                            )
-                            self.builder.literal_scopes[key] = object_id
-                            returned_objects.append(
-                                (holder, lineno, object_end, object_id, since)
-                            )
-                        # A `return` on a line of the object is one of a
-                        # function written in it.
-                        nameless[holder] = max(nameless.get(holder, 0), object_end)
-                    returned.append(record)
-                # An object literal a call is passed, that its line leaves
-                # open over later lines and that holds a function, owns the
-                # functions written in it, a name no source can write. Its
-                # properties are read as the ones of the object a function
-                # returns are. One that opens after another on the line is
-                # written inside it.
-                passed, before = _passed_objects(
-                    code, brackets, before, {paren for _, paren, _ in calls}
-                )
-                for opened in passed:
+            elif returns == 1:
+                found = _JS_RETURN_RE.match(code)
+            if returned is not None and (found or returns):
+                value = code[found.end() :].strip(" ;") if found else ""
+                first = [
+                    index for index, _, start in calls if found and start == found.end()
+                ]
+                record = None
+                if value == "this" and not found["new"]:
+                    record = "", "self"
+                elif first:
+                    made = self.builder.edges[first[0]]
+                    origin = made["metadata"].get("origin")
+                    ended = self._ends_value(code, first[0])
+                    # One call, whose receiver is no other call's result.
+                    read = self._read_as(origin) if origin else origin
+                    if "#" not in (read or "") and ended is not False:
+                        record = made["target"][4:], read
+                    if record and ended is None:
+                        returning = first[0], returned, len(returned)
+                elif re.fullmatch(r"[\w$]+", value):
+                    held = self._read_as(
+                        self.call_origin(f"{value}.x", lineno, since, owner)
+                    )
+                    if held and "#" not in held:
+                        record = "", held[:-2]
+                elif value.lstrip("(").startswith("{") and expression:
+                    # An object: its properties are read where the
+                    # function is written, and the functions among them
+                    # are members of the object itself.
+                    opened = code.index("{", found.end())
+                    key = f"[{len(self.builder.literals)}]"
+                    # An arrow's own node holds the object its body is,
+                    # which the arrow may declare on this line.
+                    holder = arrow_id or parent_id
                     held, object_end = self._object_held(
                         code_lines, i, opened, since, owner
                     )
-                    if not any(str(value).startswith("=") for value in held.values()):
-                        continue
-                    opened_here = returned_objects and returned_objects[-1][1] == lineno
-                    # Its lines are those of the definition the next line is
-                    # in: one the line opens, or the one around one it closes.
-                    scope_id = self.context_at(lineno + 1)[0]
-                    returned_objects.append(
-                        (
-                            scope_id,
+                    self.builder.literals[key] = [held]
+                    self.builder.literal_scopes[key] = holder
+                    record = "", key
+                    # An object that holds a function written in it owns
+                    # that function; one that holds none is no owner.
+                    if any(str(value).startswith("=") for value in held.values()):
+                        object_id = self._nameless_owner(
+                            holder,
+                            f"object@{self.source_line(lineno)}",
                             lineno,
                             object_end,
-                            self._nameless_owner(
-                                returned_objects[-1][3] if opened_here else scope_id,
-                                f"object@{self.source_line(lineno)}",
-                                lineno,
-                                object_end,
-                                "object",
-                            ),
-                            since,
+                            "object",
                         )
-                    )
-                if (
-                    not continuing
-                    and lineno > nameless.get(parent_id, 0)
-                    and _JS_BLOCK_FUNCTION_RE.search(code)
-                    and self.context_at(lineno + 1)[0] == parent_id
-                ):
-                    nameless[parent_id] = self._find_block_end(code_lines, i)
-                for held, name, start, end in self._held_later.pop(i, ()):
-                    # A property an object read on an earlier line is given
-                    # on this one holds what this line's calls give it.
-                    held[name] = self._expression_origin(
-                        code, start, end, lineno, since, owner
-                    )
-                self._bind_closures(code, i, code_lines, len(code))
-                self._name_results(code, lineno, since, owner)
-                self._bind_patterns(code, i, code_lines, since, owner)
-                for index, paren, _ in calls:
-                    # What a call closed on its line is passed, unless it
-                    # spreads a value over several arguments.
-                    closed = self._pairs.get(paren)
-                    if closed and "..." not in code[paren:closed]:
-                        site = self.builder.edges[index]["metadata"]
-                        site.setdefault("site", {})["arguments"] = self._elements(
-                            code, paren + 1, lineno, since, owner
+                        self.builder.literal_scopes[key] = object_id
+                        returned_objects.append(
+                            (holder, lineno, object_end, object_id, since)
                         )
-                if array:
-                    # One element to a line, or all on the line of the `[`;
-                    # one that goes on over lines leaves them unknown.
-                    start = literal.end("name") if literal and not array[1] else 0
-                    opened = code.index("[", start) + 1 if start else 0
-                    held = self.builder.literals[array[0]]
-                    if held is not None:
-                        held += self._elements(code, opened, lineno, since, owner)
-                    depth = array[1] + sum(
-                        (char in "([{") - (char in ")]}")
-                        for char in code[max(opened - 1, 0) :]
+                    # A `return` on a line of the object is one of a
+                    # function written in it.
+                    nameless[holder] = max(nameless.get(holder, 0), object_end)
+                returned.append(record)
+            # An object literal a call is passed, that its line leaves
+            # open over later lines and that holds a function, owns the
+            # functions written in it, a name no source can write. Its
+            # properties are read as the ones of the object a function
+            # returns are. One that opens after another on the line is
+            # written inside it.
+            passed, before = _passed_objects(
+                code, brackets, before, {paren for _, paren, _ in calls}
+            )
+            for opened in passed:
+                held, object_end = self._object_held(
+                    code_lines, i, opened, since, owner
+                )
+                if not any(str(value).startswith("=") for value in held.values()):
+                    continue
+                opened_here = returned_objects and returned_objects[-1][1] == lineno
+                # Its lines are those of the definition the next line is
+                # in: one the line opens, or the one around one it closes.
+                scope_id = self.context_at(lineno + 1)[0]
+                returned_objects.append(
+                    (
+                        scope_id,
+                        lineno,
+                        object_end,
+                        self._nameless_owner(
+                            returned_objects[-1][3] if opened_here else scope_id,
+                            f"object@{self.source_line(lineno)}",
+                            lineno,
+                            object_end,
+                            "object",
+                        ),
+                        since,
                     )
-                    if depth > 1:
-                        self.builder.literals[array[0]] = None
-                    array = (array[0], depth) if depth > 0 else None
+                )
+            if (
+                not continuing
+                and lineno > nameless.get(parent_id, 0)
+                and _JS_BLOCK_FUNCTION_RE.search(code)
+                and self.context_at(lineno + 1)[0] == parent_id
+            ):
+                nameless[parent_id] = self._find_block_end(code_lines, i)
+            for held, name, start, end in self._held_later.pop(i, ()):
+                # A property an object read on an earlier line is given
+                # on this one holds what this line's calls give it.
+                held[name] = self._expression_origin(
+                    code, start, end, lineno, since, owner
+                )
+            self._bind_closures(code, i, code_lines, len(code))
+            self._name_results(code, lineno, since, owner)
+            self._bind_patterns(code, i, code_lines, since, owner)
+            for index, paren, _ in calls:
+                # What a call closed on its line is passed, unless it
+                # spreads a value over several arguments.
+                closed = self._pairs.get(paren)
+                if closed and "..." not in code[paren:closed]:
+                    site = self.builder.edges[index]["metadata"]
+                    site.setdefault("site", {})["arguments"] = self._elements(
+                        code, paren + 1, lineno, since, owner
+                    )
+            if array:
+                # One element to a line, or all on the line of the `[`;
+                # one that goes on over lines leaves them unknown.
+                start = literal.end("name") if literal and not array[1] else 0
+                opened = code.index("[", start) + 1 if start else 0
+                held = self.builder.literals[array[0]]
+                if held is not None:
+                    held += self._elements(code, opened, lineno, since, owner)
+                depth = array[1] + sum(
+                    (char in "([{") - (char in ")]}")
+                    for char in code[max(opened - 1, 0) :]
+                )
+                if depth > 1:
+                    self.builder.literals[array[0]] = None
+                array = (array[0], depth) if depth > 0 else None
             i += 1
 
         # What the resolver reads by the ID a node ends up with: its
@@ -13166,9 +12837,6 @@ class TSParser(BaseParser):
                     fields = self.builder.fields.setdefault(node["id"], {})
                     fields.setdefault(field, next(iter(held))[:-2])
 
-        # Use ast-grep for more accurate CALLS detection
-        if self.builder.use_ast_grep:
-            self._extract_calls_with_ast_grep(str(file_path), file_id)
         self.restore_source_lines()
 
     def _extract_ts_types(self, full_sig: str) -> tuple:
@@ -13327,55 +12995,6 @@ class TSParser(BaseParser):
                 return node["type"] == "Class"
         return False
 
-    def _extract_calls_with_ast_grep(self, file_path: str, file_id: str):
-        """Extract calls using ast-grep for higher accuracy.
-
-        Uses the TypeScriptSymbolTable to filter type-only imports.
-        SCIP handles actual symbol resolution for both Rust and TypeScript.
-        """
-        # Build a line-to-context map from our parsed structure
-        # Uses span-size ordering to ensure innermost context wins for nested functions
-        # Only the nodes of the text being parsed: those of an earlier
-        # `<script>` block carry line numbers of the whole file.
-        line_to_context = build_line_to_context_map(
-            self.builder.nodes[self._first_node :], file_id
-        )
-
-        for call in extract_calls_typescript(file_path):
-            # ast-grep numbers the lines of the file on disk; keep only the
-            # calls inside the parsed text, renumbered relative to it.
-            lineno = call["lineno"] - self.line_offset
-            if not 1 <= lineno <= self.line_count:
-                continue
-            lineno = self.read_line(lineno)
-            callee = call["callee"]
-
-            # Skip type-only imports (they don't generate runtime calls)
-            if hasattr(self, "symbol_table") and self.symbol_table.is_type_import(
-                callee
-            ):
-                continue
-
-            context_id = line_to_context.get(lineno)
-            if not context_id:
-                for offset in range(1, 10):
-                    context_id = line_to_context.get(
-                        lineno - offset
-                    ) or line_to_context.get(lineno + offset)
-                    if context_id:
-                        break
-
-            # Fall back to file_id if no function context found (file-level calls)
-            source_id = context_id if context_id else file_id
-            self.builder.edges.append(
-                {
-                    "source": source_id,
-                    "target": f"REF:{callee}",
-                    "relation": "CALLS",
-                    "metadata": {"lineno": lineno},
-                }
-            )
-
 
 # Languages whose methods are reachable only through an explicit receiver:
 # a bare `name(...)` there never calls a method of the enclosing class.
@@ -13533,8 +13152,8 @@ def _split_callee(callee: str) -> tuple[list[str], str]:
     """Split a callee into its qualifier segments and its name."""
     bare = _strip_generics(callee)
     if "(" in bare:
-        # ast-grep hands over whole chains: `Type::new(&arg).unwrap` is read
-        # as `Type::new`, `make(x).run` as `run`.
+        # A callee written as a whole chain: `Type::new(&arg).unwrap` is
+        # read as `Type::new`, `make(x).run` as `run`.
         head = re.match(r"(?:[A-Za-z_]\w*::)+[A-Za-z_]\w*", bare)
         bare = head.group(0) if head else bare[bare.rfind(")") + 1 :]
     parts = [part for part in re.split(r"::|->|\.|\\", bare) if part]
@@ -18017,15 +17636,6 @@ def _time_limit(seconds):
 
 
 class CodeGraphBuilder:
-    # ast-grep is invoked as a subprocess **per file** for TS/JS parsing
-    # (imports + calls). On macOS each `fork+exec` costs ~10ms, so a
-    # 20k-file monorepo (next.js, TypeScript compiler) spends 10+
-    # minutes in fork overhead alone before any real work happens. On
-    # corpora above this threshold we fall back to the regex parser
-    # only — accuracy is slightly lower for TS imports but the index
-    # actually completes. Overridable via ``DESCRY_AST_GREP_MAX_FILES``.
-    _AST_GREP_MAX_FILES_DEFAULT = 5000
-
     def __init__(
         self,
         root_dir,
@@ -18121,35 +17731,6 @@ class CodeGraphBuilder:
         # Directory -> the `global using` directives of its C# files, which
         # hold for every file below it, as ``imports`` has a file's own
         self.dotnet_global_usings = {}
-        # Per-run ast-grep enablement. Checked by parsers instead of
-        # the module-level USE_AST_GREP so project size can gate it.
-        self.use_ast_grep = USE_AST_GREP
-
-    def _decide_ast_grep(self, ts_js_file_count: int) -> None:
-        """Disable per-file ast-grep on very large corpora.
-
-        Exposed as a method (not done in __init__) so callers can
-        decide after they know the file count. Respects
-        ``DESCRY_AST_GREP_MAX_FILES`` env override.
-        """
-        if not self.use_ast_grep:
-            return
-        try:
-            threshold = int(
-                os.environ.get(
-                    "DESCRY_AST_GREP_MAX_FILES",
-                    self._AST_GREP_MAX_FILES_DEFAULT,
-                )
-            )
-        except ValueError:
-            threshold = self._AST_GREP_MAX_FILES_DEFAULT
-        if threshold > 0 and ts_js_file_count > threshold:
-            logger.info(
-                f"ast-grep disabled: {ts_js_file_count} TS/JS files exceeds "
-                f"threshold of {threshold} (per-file subprocess overhead "
-                f"would dominate). Override with DESCRY_AST_GREP_MAX_FILES."
-            )
-            self.use_ast_grep = False
 
     def add_node(self, node_id, node_type, **metadata):
         if node_id not in self.node_registry:
@@ -18193,21 +17774,6 @@ class CodeGraphBuilder:
             """``names`` in directory ``root`` without those git ignores."""
             under = Path(root).relative_to(self.root_dir)
             return [name for name in names if (under / name).as_posix() not in ignored]
-
-        # First pass: count TS/JS files to decide ast-grep opt-out for
-        # large corpora. Cheap walk — stats filenames only.
-        if self.use_ast_grep:
-            ts_js_count = 0
-            for _r, _d, _f in os.walk(self.root_dir, followlinks=False):
-                _d[:] = [
-                    d
-                    for d in kept(_r, _d)
-                    if not d.startswith(".") and d not in self.excluded_dirs
-                ]
-                for fn in kept(_r, _f):
-                    if fn.endswith(_JSTS_EXTENSIONS):
-                        ts_js_count += 1
-            self._decide_ast_grep(ts_js_count)
 
         for root, dirs, files in os.walk(self.root_dir, followlinks=False):
             dirs.sort()
@@ -18303,7 +17869,7 @@ class CodeGraphBuilder:
                         rel_path,
                         self.max_parse_seconds,
                     )
-                except Exception as e:  # noqa: BLE001 — boundary over every parser and the external ast-grep binary
+                except Exception as e:  # noqa: BLE001 — boundary over every parser
                     logger.warning(f"Failed to parse {rel_path}: {e!r}")
 
     def _parse(self, file, file_path, rel_path, content):

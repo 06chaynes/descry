@@ -560,8 +560,13 @@ Python SDK v2, and a full-tree review's findings are fixed.
 ### Removed
 
 - The `ast` extra and the unwired `tree_sitter_parser` module.
-- Subprocess environment filtering (`safe_env`). Git, ast-grep, the SCIP
-  indexers and the indexing child inherit the environment as it is.
+- The ast-grep call extraction and `DESCRY_AST_GREP_MAX_FILES`. With `sg`
+  on `PATH`, ast-grep replaced the Rust, TypeScript and JavaScript
+  readers' calls with ones that carry no receiver's type and are filed by
+  line alone: commander resolved 30% of its calls with it and 86%
+  without, ripgrep 57% and 84%. The readers' own calls are used always.
+- Subprocess environment filtering (`safe_env`). Git, the SCIP indexers
+  and the indexing child inherit the environment as it is.
 - The credential-filename blocklist on `/api/source`. Reads stay confined
   to regular text files inside the project root.
 - `[cross_lang] frontend_api_patterns`, which had no effect.

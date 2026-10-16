@@ -637,9 +637,7 @@ class JavaParser(BaseParser):
                         last = self._find_block_end(lines, i + (opened != "{"))
                         self._anonymous(constant_id, context_id, lineno, last)
 
-            # 4. Calls. ast-grep has no Java backend today, so we always
-            #    run the regex extractor (rather than gating on
-            #    ``not USE_AST_GREP`` like RustParser/TSParser do).
+            # 4. Calls.
             if not skip_calls and context_id != file_id:
                 # The innermost of the enclosing type and the open method.
                 parent_id = context_id

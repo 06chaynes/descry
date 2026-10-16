@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from descry import ast_grep, generate
+from descry import generate
 from descry._graph import load_graph_with_schema
 from descry.generate import (
     BaseParser,
@@ -294,7 +294,6 @@ impl Server {
 
     def _parse(self, content):
         builder = CodeGraphBuilder(".")
-        builder.use_ast_grep = False
         RustParser(builder).parse(Path("test.rs"), "test.rs", content)
         return builder
 
@@ -401,7 +400,7 @@ fn two() {
         assert two["type"] == "Function"
 
     def test_regex_fallback_skips_declarations(self):
-        """Without ast-grep, declared names and `pub(...)` are not calls."""
+        """Declared names and `pub(...)` are not calls."""
         builder = self._parse("""
 impl Server {
     pub(crate) fn start(&self) {
@@ -578,7 +577,7 @@ export class Counter {
             assert m["metadata"].get("signature") is not None
 
     def test_regex_fallback_skips_declarations(self):
-        """Without ast-grep, declaring a method or function is not a call."""
+        """Declaring a method or function is not a call."""
         content = """
 export class Service {
     constructor(private port: number) {
@@ -594,7 +593,6 @@ function outer() {
 }
 """
         builder = CodeGraphBuilder(".")
-        builder.use_ast_grep = False
         TSParser(builder).parse(Path("test.ts"), "test.ts", content)
 
         calls = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
@@ -611,7 +609,6 @@ export class Shape {
 }
 """
         builder = CodeGraphBuilder(".")
-        builder.use_ast_grep = False
         TSParser(builder).parse(Path("shape.ts"), "shape.ts", content)
 
         members = {
@@ -647,7 +644,6 @@ export interface Schema {
 }
 """
         builder = CodeGraphBuilder(".")
-        builder.use_ast_grep = False
         TSParser(builder).parse(Path("hash.ts"), "hash.ts", content)
 
         nodes = {
@@ -719,7 +715,6 @@ def _index(root, files):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(textwrap.dedent(source))
     builder = CodeGraphBuilder(root)
-    builder.use_ast_grep = False
     builder.process_directory()
     builder.resolve_references()
     return builder
@@ -1065,7 +1060,6 @@ class TestScipCallResolution:
     def _resolve(self, tmp_path, definition):
         (tmp_path / "lib.rs").write_text(textwrap.dedent(self.SOURCE))
         builder = CodeGraphBuilder(tmp_path)
-        builder.use_ast_grep = False
         builder.process_directory()
         builder.resolve_references(_ScipStub({("lib.rs", 9): definition}))
         return [e for e in builder.edges if e["source"] == "FILE:lib.rs::run"]
@@ -1082,7 +1076,6 @@ class TestScipCallResolution:
         recorded it as a call of code outside the project."""
         (tmp_path / "lib.rs").write_text(textwrap.dedent(self.SOURCE))
         builder = CodeGraphBuilder(tmp_path)
-        builder.use_ast_grep = False
         builder.process_directory()
         builder.resolve_references(_ScipStub({}, outside={("lib.rs", 9)}))
         assert not [e for e in builder.edges if e["source"] == "FILE:lib.rs::run"]
@@ -1111,7 +1104,6 @@ class TestScipCallResolution:
         """
         (tmp_path / "lib.rs").write_text(textwrap.dedent(source))
         builder = CodeGraphBuilder(tmp_path)
-        builder.use_ast_grep = False
         builder.process_directory()
         stub = _ScipStub(
             {
@@ -17018,12 +17010,10 @@ class TestProcessDirectory:
     @pytest.fixture
     def regex_builder(self, tmp_path):
         builder = CodeGraphBuilder(tmp_path)
-        builder.use_ast_grep = False
         return builder
 
     @staticmethod
     def _files(builder):
-        builder.use_ast_grep = False
         builder.process_directory()
         return {node["id"] for node in builder.nodes if node["type"] == "File"}
 
@@ -17132,23 +17122,6 @@ class TestProcessDirectory:
 
         assert "FILE:b_good.py::fine" in {n["id"] for n in regex_builder.nodes}
 
-    def test_ast_grep_threshold_above_ten_times_default(self, tmp_path, monkeypatch):
-        """A DESCRY_AST_GREP_MAX_FILES above 10x the default applies: every
-        TS/JS file is counted."""
-        monkeypatch.setattr(CodeGraphBuilder, "_AST_GREP_MAX_FILES_DEFAULT", 1)
-        monkeypatch.setenv("DESCRY_AST_GREP_MAX_FILES", "12")
-        monkeypatch.setattr(generate, "extract_calls_typescript", lambda path: [])
-        monkeypatch.setattr(
-            generate, "extract_imports_typescript", lambda path: {}, raising=False
-        )
-        for i in range(13):
-            (tmp_path / f"m{i}.ts").write_text("")
-        builder = CodeGraphBuilder(tmp_path)
-        builder.use_ast_grep = True
-        builder.process_directory()
-
-        assert builder.use_ast_grep is False
-
     def test_walk_outside_the_id_base_is_refused(self, tmp_path):
         """Node IDs are relative to the project root; a file outside it gets
         none rather than an absolute one."""
@@ -17204,73 +17177,6 @@ function second() {
             if e["relation"] == "CALLS"
         }
         assert linenos == {"REF:alpha": 4, "REF:beta": 10}
-
-    def test_svelte_ast_grep_calls_attributed_per_block(self, tmp_path, monkeypatch):
-        """ast-grep's whole-file line numbers map onto each <script> block."""
-        (tmp_path / "App.svelte").write_text(self.SVELTE)
-        monkeypatch.setattr(
-            generate,
-            "extract_calls_typescript",
-            lambda path: [
-                {"callee": "alpha", "lineno": 4},
-                {"callee": "beta", "lineno": 10},
-            ],
-        )
-        monkeypatch.setattr(
-            generate, "extract_imports_typescript", lambda path: {}, raising=False
-        )
-        builder = CodeGraphBuilder(tmp_path)
-        builder.use_ast_grep = True
-        builder.process_directory()
-
-        calls = [
-            (e["source"], e["target"], e["metadata"]["lineno"])
-            for e in builder.edges
-            if e["relation"] == "CALLS"
-        ]
-        assert calls == [
-            ("FILE:App.svelte::first", "REF:alpha", 4),
-            ("FILE:App.svelte::second", "REF:beta", 10),
-        ]
-
-    def test_svelte_ast_grep_call_stays_in_its_own_block(self, tmp_path, monkeypatch):
-        """A call in a later block is not given to an earlier block's
-        function whose line in the file equals the call's line in its block."""
-        (tmp_path / "App.svelte").write_text(
-            '<script context="module">\n'
-            "function unused() {}\n"
-            "function first() { alpha(); }\n"
-            "</script>\n"
-            "<script>\n"
-            "function second() {\n"
-            "    beta();\n"
-            "}\n"
-            "</script>\n"
-        )
-        monkeypatch.setattr(
-            generate,
-            "extract_calls_typescript",
-            lambda path: [
-                {"callee": "alpha", "lineno": 3},
-                {"callee": "beta", "lineno": 7},
-            ],
-        )
-        monkeypatch.setattr(
-            generate, "extract_imports_typescript", lambda path: {}, raising=False
-        )
-        builder = CodeGraphBuilder(tmp_path)
-        builder.use_ast_grep = True
-        builder.process_directory()
-
-        calls = [
-            (e["source"], e["target"], e["metadata"]["lineno"])
-            for e in builder.edges
-            if e["relation"] == "CALLS"
-        ]
-        assert calls == [
-            ("FILE:App.svelte::first", "REF:alpha", 3),
-            ("FILE:App.svelte::second", "REF:beta", 7),
-        ]
 
 
 def _run_indexer(*args, cwd, **env):
@@ -17375,59 +17281,6 @@ class TestCommandLine:
         assert result.returncode == 0, result.stderr
         assert ("FILE:app.py::hello" in self._ids(cache)) is indexed
         assert ("exceeds [code_files] max_file_mb" in result.stderr) is not indexed
-
-
-class _SgResult:
-    returncode = 0
-
-    def __init__(self, stdout):
-        self.stdout = stdout
-
-
-class TestAstGrep:
-    """Tests for the ast-grep subprocess wrappers."""
-
-    def test_non_array_payload_yields_nothing(self, monkeypatch):
-        """A JSON object where the match array should be is no matches."""
-        monkeypatch.setattr(
-            ast_grep.subprocess,
-            "run",
-            lambda *a, **kw: _SgResult('{"error": "unsupported language"}'),
-        )
-        assert list(ast_grep.extract_calls_rust("x.rs")) == []
-        assert list(ast_grep.extract_calls_typescript("x.ts")) == []
-        assert ast_grep.extract_imports_typescript("x.ts") == {
-            "imports": {},
-            "namespaces": {},
-        }
-
-    def test_array_elements_that_are_not_objects_are_skipped(self, monkeypatch):
-        match = {
-            "metaVariables": {"single": {"FUNC": {"text": "run"}}},
-            "range": {"start": {"line": 2}},
-        }
-        monkeypatch.setattr(
-            ast_grep.subprocess,
-            "run",
-            lambda *a, **kw: _SgResult(json.dumps([None, "text", 7, match])),
-        )
-        assert [c["callee"] for c in ast_grep.extract_calls_rust("x.rs")] == ["run"]
-        assert [c["callee"] for c in ast_grep.extract_calls_typescript("x.ts")] == [
-            "run"
-        ]
-        assert ast_grep.extract_imports_typescript("x.ts")["imports"] == {}
-
-    def test_unexecutable_binary_is_unavailable(self, monkeypatch):
-        """An `sg` that exists but cannot be executed counts as absent."""
-
-        def denied(*args, **kwargs):
-            raise PermissionError(13, "Permission denied")
-
-        monkeypatch.setattr(ast_grep.subprocess, "run", denied)
-        assert ast_grep.is_ast_grep_available() is False
-        assert list(ast_grep.extract_calls_rust("x.rs")) == []
-        assert list(ast_grep.extract_calls_typescript("x.ts")) == []
-        assert ast_grep.extract_imports_typescript("x.ts")["imports"] == {}
 
 
 class TestTypeScriptConfigurationNodes:

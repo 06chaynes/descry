@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from descry.generate import TypeScriptSymbolTable
 from descry.scip.adapters.typescript import parse_backtick_descriptors
 from descry.scip.cache import ADAPTERS, ScipCacheManager
 from descry.scip.parser import ScipIndex
@@ -55,28 +54,6 @@ class TestTypescriptScipParsing:
         descriptors = "src/lib/`utils.ts`/formatDate()."
         result = parse_backtick_descriptors(descriptors)
         assert result == ["formatDate"], f"Expected ['formatDate'], got {result}"
-
-
-class TestTypescriptImportResolution:
-    """Tests for TypeScript import resolution."""
-
-    def test_type_import_skipped(self):
-        """Should identify type-only imports."""
-        table = TypeScriptSymbolTable("/project/web/src/test.ts", "/project")
-        table.imports = {
-            "MyType": ("./types", "type"),
-            "myFunc": ("./utils", "named"),
-        }
-
-        assert table.is_type_import("MyType") is True
-        assert table.is_type_import("myFunc") is False
-
-    def test_unknown_import(self):
-        """Should return None for unknown imports."""
-        table = TypeScriptSymbolTable("/project/web/src/test.ts", "/project")
-        table.imports = {}
-
-        assert table.is_type_import("unknownFunc") is False
 
 
 class TestScipCachePerformance:

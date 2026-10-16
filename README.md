@@ -291,7 +291,6 @@ api_prefixes = ["/api/v1", "/api/v2", "/api"]      # stripped when matching spec
 | `DESCRY_SCIP_WORKERS` | auto | Max parallel SCIP indexer workers (overrides the memory-based default) |
 | `DESCRY_SCIP_TIMEOUT` | auto | Per-project SCIP indexer timeout in minutes (`0` / `none` disables) |
 | `DESCRY_PRIME_THREADS` | auto | Threads used when pre-warming `rust-analyzer` cache |
-| `DESCRY_AST_GREP_MAX_FILES` | `5000` | Skip ast-grep per-file invocation on repos larger than this many target-language files |
 
 Configuration precedence: defaults < `.descry.toml` < environment variables.
 
@@ -299,9 +298,9 @@ Configuration precedence: defaults < `.descry.toml` < environment variables.
 
 | Language | Parsing | SCIP (Type-Aware) | Requirements |
 |----------|---------|-------------------|--------------|
-| Rust | Regex (+ ast-grep when `sg` on PATH) | Yes | `rust-analyzer` via rustup |
-| TypeScript | Regex (+ ast-grep when `sg` on PATH) | Yes | `scip-typescript` via npm |
-| JavaScript | Regex (+ ast-grep when `sg` on PATH) | Yes (via `scip-typescript`) | `scip-typescript` via npm |
+| Rust | Regex | Yes | `rust-analyzer` via rustup |
+| TypeScript | Regex | Yes | `scip-typescript` via npm |
+| JavaScript | Regex | Yes (via `scip-typescript`) | `scip-typescript` via npm |
 | Svelte | Regex | Yes (via `scip-typescript`) | `scip-typescript` via npm |
 | Python | Regex + Python `ast` module | Yes | `scip-python` via npm; writes no index without a `pip` in the project's environment (a `uv venv` has none) |
 | Java / Kotlin / Scala | Regex (Java only — `.kt` / `.scala` produce no nodes when scip-java doesn't run) | Yes | `scip-java` 0.12.3 (`coursier bootstrap --standalone -o scip-java com.sourcegraph:scip-java_2.13:0.12.3 --main com.sourcegraph.scip_java.ScipJava`), with a JDK and Maven or Gradle on `PATH`; see [CHANGELOG](CHANGELOG.md#020--2026-04-20) for the Kotlin-DSL Gradle limitation |
@@ -312,7 +311,7 @@ Configuration precedence: defaults < `.descry.toml` < environment variables.
 | C / C++ | Regex | Yes | `scip-clang` binary + `compile_commands.json` (CMake `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, Meson+Ninja, or `bear -- make`) |
 | Dart / Flutter | Regex | Yes | `scip-dart` via `dart pub global activate scip_dart`; requires `dart pub get` at project root |
 
-`ast-grep` is the `sg` Rust binary (install via Homebrew or `cargo install ast-grep`) — when present on `PATH`, descry uses it for higher-fidelity call extraction in Rust, TypeScript, and JavaScript files. It's auto-disabled on TS/JS corpora over `DESCRY_AST_GREP_MAX_FILES` (default 5,000) where per-file subprocess overhead would dominate. JavaScript and TypeScript cover `.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.mts` and `.cts`.
+JavaScript and TypeScript cover `.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.mts` and `.cts`.
 
 Each call is resolved from evidence: imports (including `go.mod`, `Cargo.toml`, `package.json` and `tsconfig.json`), declared and returned types, lexical scope, the class hierarchy and the language's visibility rules. Names bound by loops, patterns, destructuring and closure parameters are typed from declarations, and each language's standard library is described by generated data (`src/descry/stdlib/`), so a chain through library types keeps its type. A call ends as *resolved* to one definition, *unresolved* when nothing in the source decides — the definitions that fit are kept on the edge as `candidates` — or *external* when it leaves the project; the index summary reports all three. Nothing is matched by name alone when more than one definition fits, nothing by file path, and a receiver whose type is not known is never guessed. SCIP adds type-aware resolution through traits and generics, and is verified for Rust workspaces; the other indexers' output is used only where it names a node in the graph.
 

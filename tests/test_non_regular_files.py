@@ -36,7 +36,6 @@ def test_walk_skips_a_fifo_source_file(tmp_path):
     (tmp_path / "ok.py").write_text("def f():\n    return 1\n")
     _fifo(tmp_path / "bad.py")
     builder = CodeGraphBuilder(tmp_path)
-    builder.use_ast_grep = False
 
     builder.process_directory()
 
