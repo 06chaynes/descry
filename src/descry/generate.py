@@ -6315,17 +6315,24 @@ def _is_call_chain(expression: str) -> bool:
     )
 
 
-def _scip_columns(prefix: str):
-    """Column a SCIP index gives the character after ``prefix`` on its line:
-    one number, or ``(UTF-8, UTF-16, UTF-32)`` code-unit offsets where those
-    differ, in the order of SCIP's position encodings."""
-    if prefix.isascii():
-        return len(prefix)
+def _code_units(text: str, before=(0, 0, 0)):
+    """The UTF-8, UTF-16 and UTF-32 code units of ``text``, added to
+    ``before``."""
+    if text.isascii():
+        return tuple(count + len(text) for count in before)
     return (
-        len(prefix.encode()),
-        len(prefix.encode("utf-16-le")) // 2,
-        len(prefix),
+        before[0] + len(text.encode()),
+        before[1] + len(text.encode("utf-16-le")) // 2,
+        before[2] + len(text),
     )
+
+
+def _scip_columns(units):
+    """Column a SCIP index gives the character after text of ``units``
+    code units on its line: one number, or ``(UTF-8, UTF-16, UTF-32)``
+    code-unit offsets where those differ, in the order of SCIP's position
+    encodings."""
+    return units[2] if units[0] == units[2] else units
 
 
 class BaseParser:
@@ -6367,6 +6374,7 @@ class BaseParser:
         self._tail_dot = False  # whether the previous line ends with a member's `.`
         self._scope = None  # definition the line being read belongs to
         self._raw = ""  # the line being read, as written
+        self._units = 0, (0, 0, 0)  # a column of it and the code units before
         self._locals = set()  # (definition ID, name of a parameter or variable)
         self._first_node = 0  # where the nodes and edges of the file being
         self._first_edge = 0  # parsed start in the builder's lists
@@ -6546,6 +6554,7 @@ class BaseParser:
         self._end_line()
         self._line, self._code = lineno, code
         self._scope, self._raw = scope, raw or code
+        self._units = 0, (0, 0, 0)
         self._pairs, self._closes = {}, {}
         self._parens, self._innermost = [], [None]
         if code[:1].strip() and code[0] not in ")}]":
@@ -6853,21 +6862,20 @@ class BaseParser:
         lookup."""
         name_start = start + len(callee) - len(_split_callee(callee)[1])
         if origin is None:
-            before = self._code[:start].rstrip()
-            if not before and self._tail_dot:
-                before = "."
-            if before.strip() == "." and self._tail is None and self._tail_name:
+            # The code before the callee ends at ``end``, and the code before
+            # a `.` there at ``receiver``, or without its `?` at ``called``.
+            end = _run_start(self._code, start)
+            dot = self._code[end - 1 : end] == "." if end else self._tail_dot
+            receiver = _run_start(self._code, end - 1) if end else 0
+            if dot and not receiver and self._tail is None and self._tail_name:
                 # The receiver is the name the line before ends with.
                 callee = f"{self._tail_name}.{callee}"
-            elif before.endswith(".") and not before.endswith(".."):
-                receiver = before[:-1].rstrip()
-                edge = (
-                    self._closes.get(len(receiver.rstrip("?")) - 1)
-                    if receiver
-                    else self._tail
-                )
-                unwraps = len(receiver) - len(receiver.rstrip("?"))
-                unwrap = ".?" * (unwraps if receiver else self._tail_unwraps)
+            elif dot and self._code[max(end - 2, 0) : end] != "..":
+                called = receiver
+                while called and self._code[called - 1] == "?":
+                    called -= 1
+                edge = self._closes.get(called - 1) if receiver else self._tail
+                unwrap = ".?" * (receiver - called if receiver else self._tail_unwraps)
                 origin = (
                     f"#{edge}{unwrap}.{callee}" if edge is not None else f"?.{callee}"
                 )
@@ -6878,7 +6886,9 @@ class BaseParser:
         metadata = {"lineno": lineno}
         if origin:
             metadata["origin"] = origin
-        metadata["col"] = _scip_columns(self._raw[:name_start])
+        at, units = self._units if name_start >= self._units[0] else (0, (0, 0, 0))
+        self._units = name_start, _code_units(self._raw[at:name_start], units)
+        metadata["col"] = _scip_columns(self._units[1])
         index = len(self.builder.edges)
         self.builder.edges.append(
             {
@@ -7485,7 +7495,7 @@ class PythonParser(BaseParser):
                 line = self.source_lines[lineno - 1].encode()
                 written = line[: func_node.end_col_offset].decode()
                 name = re.search(r"\w*$", written)
-                metadata["col"] = _scip_columns(written[: name.start()])
+                metadata["col"] = _scip_columns(_code_units(written[: name.start()]))
             self.builder.edges.append(
                 {
                     "source": parent_func_id,
@@ -9278,6 +9288,7 @@ _JS_BLOCK_RE = re.compile(r"\b(?:if|for|while|switch|catch|with)\s*$")
 def _run_start(code, at, marks=""):
     """Where the run of whitespace and of ``marks`` that ends at column
     ``at`` of ``code`` begins."""
+    at = min(at, len(code))
     while at and (code[at - 1].isspace() or code[at - 1] in marks):
         at -= 1
     return at
@@ -9287,15 +9298,18 @@ def _js_member_name(lines, row, column):
     """Whether the word at column ``column`` of line ``row`` of ``lines`` is
     a member's name: written after a `.` or a `#`, on its line or one
     above, where the `.` ends no number."""
-    before = lines[row][:column]
-    while not before.strip() and row > 0:
+    line = lines[row]
+    end = _run_start(line, column)
+    while not end and row > 0:
         row -= 1
-        before = lines[row]
-    before = before.rstrip()
-    digits = len(before) - 1
-    while digits > 0 and (before[digits - 1].isdecimal() or before[digits - 1] == "_"):
+        line = lines[row]
+        end = _run_start(line, len(line))
+    digits = end - 1
+    while digits > 0 and (line[digits - 1].isdecimal() or line[digits - 1] == "_"):
         digits -= 1
-    return before.endswith((".", "#")) and not _NUMBER_DOT_END_RE.match(before, digits)
+    return line[end - 1 : end] in (".", "#") and not _NUMBER_DOT_END_RE.match(
+        line, digits, end
+    )
 
 
 def _js_bound(content):
@@ -9958,7 +9972,8 @@ def _ts_params(signature: str) -> set[str]:
 _TS_ARROW_HEAD_RE = re.compile(
     r"\s*(?:async\s+)?(?:\([^()]*\)\s*(?::[^=(){]+)?|[\w$]+\s*)=>"
 )
-_TS_METHOD_MODIFIERS = ("", "async", "static", "get", "set", "*", "async *")
+# What a line may hold before the name of an object literal's method
+_TS_METHOD_MODIFIERS_RE = re.compile(r"\s*(?:async \*|async|static|get|set|\*)?\s*")
 # Modifiers a class member is declared behind, in any order
 _TS_MEMBER_MODIFIERS = r"(?:(?:private|public|protected|static|abstract|override|declare|readonly|async)\s+)*"
 # A method or accessor a class declares: `name(`, `get name(`, `async *name<T>(`
@@ -10123,6 +10138,8 @@ _JS_BLOCK_FUNCTION_RE = re.compile(
 # The `new` a constructed type is named after
 _JS_NEW_RE = re.compile(r"\bnew\s+$")
 _JS_FUNCTION_HEAD_RE = re.compile(r"\bfunction\s*\*?\s*$")
+# What a function expression follows where it is a value
+_JS_VALUE_START_RE = re.compile(r"(?:[(,=]|\breturn)\s*$")
 # A parameter that is passed a function, with that function's parameters
 _TS_CALLABLE_RE = re.compile(r"[\w$]+\??\s*:\s*\(?\((?P<params>[^()]*)\)\s*=>")
 # A variable whose value is one blanked literal, or an array
@@ -10132,13 +10149,13 @@ _JS_LITERAL_RE = re.compile(
 )
 # The type of a literal, by the character it opens with: any other is a string
 _JS_LITERAL_TYPES = {"/": "RegExp", "[": "Array"}
-# `for (const pattern of value)` and `for (const name in value)`. The end is
-# looked for first, so the parts are not tried on a line that cannot end so.
+# `for (const pattern of value)` and `for (const name in value)`
 _JS_FOR_RE = re.compile(
-    r"\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+"
-    r"(?=(?s:.*)\)\s*\{?\s*$)(?P<pattern>.+?)\s+"
+    r"\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+(?P<pattern>.+?)\s+"
     r"(?P<kind>of|in)\s+(?P<value>.+?)\)\s*\{?\s*$"
 )
+# How a line `_JS_FOR_RE` matches ends, looked for once before it is tried
+_JS_HEAD_END_RE = re.compile(r"\)\s*\{?\s*$")
 # A declaration that takes a value apart: `const { a, b } = value`
 _JS_PATTERN_RE = re.compile(
     r"\b(?:const|let|var)\s+(?P<pattern>[\[{].*[\]}])\s*=(?!=)\s*(?P<value>.+?);?\s*$"
@@ -10509,7 +10526,9 @@ class TSParser(BaseParser):
         """Type the names that a `for` or a declaration with a pattern
         binds on line ``index``, from the value iterated or taken apart. A
         `for...in` gives the names of properties."""
-        found = _JS_FOR_RE.search(code) or _JS_PATTERN_RE.search(code)
+        found = (
+            _JS_HEAD_END_RE.search(code) and _JS_FOR_RE.search(code)
+        ) or _JS_PATTERN_RE.search(code)
         if not found:
             return
         lineno = index + 1
@@ -11786,7 +11805,9 @@ class TSParser(BaseParser):
                     # A function with a name is an expression where it is a
                     # value, else a declaration.
                     if not found["named"]
-                    or re.search(r"(?:[(,=]|\breturn)\s*$", code[: found.start()])
+                    or _JS_VALUE_START_RE.search(
+                        code, max(_run_start(code, found.start()) - 6, 0), found.start()
+                    )
                 ]
                 self._bodies = []
                 # A nameless function passed as an argument, whose block body
@@ -11865,7 +11886,7 @@ class TSParser(BaseParser):
                         found.start(),
                     ):
                         head = (i, code.rindex("(", 0, found.end()))
-                    elif held_open and not code[: found.start()].strip():
+                    elif held_open and not _run_start(code, found.start()):
                         head = held_open[:2]
                     bindings.append((found[1] or "catch", found.end(), head))
                 written = code.lstrip()
@@ -11952,7 +11973,7 @@ class TSParser(BaseParser):
                     # `name(params) {` at the start of a line defines a
                     # method of an object literal.
                     if (
-                        code[: match.start(1)].strip() in _TS_METHOD_MODIFIERS
+                        _TS_METHOD_MODIFIERS_RE.fullmatch(code, 0, match.start(1))
                         and "." not in callee
                         and _opens_body(code[match.start(1) :])
                     ):
