@@ -8410,6 +8410,44 @@ class TestTypeScriptCallResolution:
         ]
         assert go in _calls(builder, "FILE:a.ts::typed")
 
+    def test_a_closure_inside_an_argument_is_not_one(self, tmp_path):
+        """A closure in the body of a function, or in an object, that is
+        passed to a call is no argument of it: the callee's parameter does
+        not type it, on the call's line or below it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Dog { bark() {} }
+                function withDog(run: (d: Dog) => void) {}
+
+                function inBody() {
+                  withDog(function () { const g = (c) => c.bark(); });
+                }
+
+                function below() {
+                  withDog(function () {
+                    const g = (c) => c.bark();
+                  });
+                  withDog({
+                    run: (c) => c.bark(),
+                  } as any);
+                }
+
+                function passed() {
+                  withDog((c) => c.bark());
+                  withDog(
+                    (c) => c.bark(),
+                  );
+                }
+                """
+            },
+        )
+        bark = "FILE:a.ts::Dog::bark"
+        assert bark not in _calls(builder, "FILE:a.ts::inBody")
+        assert bark not in _calls(builder, "FILE:a.ts::below")
+        assert _calls(builder, "FILE:a.ts::passed").count(bark) == 2
+
 
 class TestGoCallResolution:
     def test_bare_call_is_the_function_not_a_method_of_that_name(self, tmp_path):

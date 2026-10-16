@@ -6367,6 +6367,11 @@ class BaseParser:
         # a `(` and that of a `)`, and the innermost `(` open from there; None
         # first, for the start of the line
         self._parens, self._innermost = [], [None]
+        # The same for each bracket, and the innermost bracket open from
+        # there: its column and character, the column None for one an
+        # earlier line left open and the character "" for none
+        self._brackets, self._inside = [], [(None, "")]
+        self._carried = ""  # the brackets open across lines, outermost first
         self._open_calls = []  # edge index of each call open across lines
         self._tail = None  # edge index of the call the previous line ends with
         self._tail_unwraps = 0  # `?` operators that follow that call
@@ -6561,7 +6566,9 @@ class BaseParser:
             # An unindented line starts a top-level item, unless it opens
             # with what closes the one before.
             self._open_calls.clear()
-        stack = []
+            self._carried = ""
+        self._brackets, self._inside = [], [(None, self._carried[-1:])]
+        stack, brackets = [], []
         depth = self._pending[2] if self._pending else None
         for column, char in enumerate(code):
             if char == "(":
@@ -6575,6 +6582,21 @@ class BaseParser:
             if char in "()":
                 self._parens.append(column + (char == "("))
                 self._innermost.append(stack[-1] if stack else None)
+            if char in "([{":
+                brackets.append(column)
+            elif char not in ")]}":
+                continue
+            elif brackets:
+                brackets.pop()
+            else:
+                self._carried = self._carried[:-1]
+            self._brackets.append(column + (char in "([{"))
+            self._inside.append(
+                (brackets[-1], code[brackets[-1]])
+                if brackets
+                else (None, self._carried[-1:])
+            )
+        self._carried += "".join(code[column] for column in brackets)
         self._opens = dict.fromkeys(stack)
 
     def _end_line(self):
@@ -6693,6 +6715,12 @@ class BaseParser:
         """The column of the innermost `(` of the line being read that is
         open at ``column``, else None."""
         return self._innermost[bisect_right(self._parens, column)]
+
+    def bracket_around(self, column):
+        """The innermost bracket open at ``column`` of the line being read:
+        its column, None for one an earlier line left open, and its
+        character, "" for none."""
+        return self._inside[bisect_right(self._brackets, column)]
 
     def call_closed_at(self, column):
         """The call whose `)` is at ``column`` of the line being read, as
@@ -6813,8 +6841,10 @@ class BaseParser:
         parameters as written and the column its body starts at."""
         while self._closures and self._closures[0][0] < before:
             bar, params, end = self._closures.pop(0)
-            opened = self.paren_around(bar)
+            opened, bracket = self.bracket_around(bar)
             edge, position, closed = None, "?", None
+            if bracket != "(":
+                continue
             if opened is not None:
                 closed = self._pairs.get(opened)
                 edge = self._closes.get(closed, self._opens.get(opened))
@@ -10066,7 +10096,6 @@ _JSX_EXTENSIONS = (".tsx", ".js", ".jsx", ".mjs", ".cjs")
 _JS_REGEX_RE = re.compile(
     r"/(?:[^/\\\[*]|\\.|\[(?:[^\]\\]|\\.)*\])(?:[^/\\\[]|\\.|\[(?:[^\]\\]|\\.)*\])*/[a-z]*(?=\s*(?:[.,;:)\]}|&?/]|$))"
 )
-_JS_OPERAND_WORD_RE = re.compile(r"[\w$]+$")
 # A keyword that expects an operand where it ends the text before a `/`, so
 # the `/` opens a regular expression (ECMAScript reads `/` for a literal
 # where an operand is expected and for a division where a value just
@@ -10098,39 +10127,52 @@ _JS_LABEL_RE = re.compile(r"(?<![\w$.])(?:break|continue)[^\S\r\n\u2028\u2029]+[
 _JS_STATEMENT_HEAD_RE = re.compile(r"(?<![\w$])(?:if|for(?:\s+await)?|while|with)\s*$")
 
 
-def _js_regex_position(text):
-    """Whether a ``/`` after ``text`` can open a regular expression: true
-    where no value precedes it, so at a line's start or after an operator,
-    a bracket that opens, a spread's `...`, the `)` of an `if`, `for`,
-    `while` or `with` head, a keyword that expects an operand, or the label
-    of a `break` or `continue`. False after what ends a value: a word, a
-    member's name, any other `)`, `]`, `}`, `.`, a postfix `++`/`--`, and a
-    quote a blanked literal leaves."""
-    tail = text.rstrip()
-
-    def member(word):
-        return _js_member_name([tail], 0, word.start())
-
-    if not tail:
+def _js_regex_position(code, before=""):
+    """Whether a ``/`` after ``code``, on a line that follows the code
+    ``before``, can open a regular expression: true where no value precedes
+    it, so at a line's start or after an operator, a bracket that opens, a
+    spread's `...`, the `)` of an `if`, `for`, `while` or `with` head, a
+    keyword that expects an operand, or the label of a `break` or
+    `continue`. False after what ends a value: a word, a member's name, any
+    other `)`, `]`, `}`, `.`, a postfix `++`/`--`, and a quote a blanked
+    literal leaves."""
+    lines, row = [before, code], 1
+    end = _run_start(code, len(code))
+    if not end:
+        row, end = 0, _run_start(before, len(before))
+    text = lines[row]
+    if not end:
         return True
-    if tail.endswith(("++", "--")):
+    if text.endswith(("++", "--"), 0, end):
         return False
-    if tail.endswith("..."):
+    if text.endswith("...", 0, end):
         return True
-    word = _JS_OPERAND_WORD_RE.search(tail)
-    if word:
-        if _JS_LABEL_RE.search(tail):
+    start = end
+    while start and (text[start - 1].isalnum() or text[start - 1] in "_$"):
+        start -= 1
+    if start < end:
+        if _JS_LABEL_RE.search(text, max(_run_start(text, start) - 8, 0), end):
             return True
-        return word.group() in _JS_OPERAND_WORDS and not member(word)
-    if tail[-1] == ")":
-        depth = 0
-        for at in range(len(tail) - 1, -1, -1):
-            depth += {")": 1, "(": -1}.get(tail[at], 0)
-            if not depth:
-                head = _JS_STATEMENT_HEAD_RE.search(tail, 0, at)
-                return bool(head) and not member(head)
+        word = text[start:end]
+        return word in _JS_OPERAND_WORDS and not _js_member_name(lines, row, start)
+    if text[end - 1] == ")":
+        depth, rows = 0, range(row, -1, -1)
+        for row in rows:
+            text = lines[row]
+            for at in range(end - 1, -1, -1):
+                depth += {")": 1, "(": -1}.get(text[at], 0)
+                if not depth:
+                    end = _run_start(text, at)
+                    if not end and row:
+                        row, text = 0, before
+                        end = _run_start(text, len(text))
+                    # The keyword ends at `end`: `for await` is the longest.
+                    start = max(_run_start(text, max(end - 5, 0)) - 3, 0)
+                    head = _JS_STATEMENT_HEAD_RE.search(text, start, end)
+                    return bool(head) and not _js_member_name(lines, row, head.start())
+            end = len(before)
         return False
-    return tail[-1] not in "]}.`'\""
+    return text[end - 1] not in "]}.`'\""
 
 
 # The end of a blanked /.../, "...", '...' or `...` literal a member is read of
@@ -10267,14 +10309,14 @@ def _blank_js_strings(
     turned to spaces too, and its tags and `{...}` expressions are kept;
     ``before`` is the code the line follows, which no line break ends
     before a `<` or a `/`."""
-    out = []
+    out = ""
     # open literals and comments: a quote character, a `${`'s brace depth,
     # `/*` for a comment still open, `<` or `</` for a JSX tag and `>` for
     # an element's text
     stack = [] if stack is None else stack
     carried = len(stack)
     ended = None  # how much of `out` there was where a /.../ literal ended
-    # What ``keep`` shows at a place of `out`, which holds the blanked line
+    # What ``keep`` shows at a column of `out`, which holds the blanked line
     # either way, so that what is code is read alike with ``keep`` and without
     kept_at = {}
     i = 0
@@ -10284,12 +10326,12 @@ def _blank_js_strings(
         if top == "/*":
             end = line.find("*/", i)
             if end == -1:
-                out.append(" " * (len(line) - i))
+                out += " " * (len(line) - i)
                 break
             stack.pop()
             # A comment carried over has ended.
             carried = min(carried, len(stack))
-            out.append(" " * (end + 2 - i))
+            out += " " * (end + 2 - i)
             i = end + 2
             continue
         elif top == ">":
@@ -10300,10 +10342,10 @@ def _blank_js_strings(
                 stack.append("</")
             elif tag := _JSX_TAG_RE.match(line, i):
                 stack.append("<")
-                out.append(tag.group())
+                out += tag.group()
                 i = tag.end()
                 continue
-            out.append(ch if ch in "{<" else " ")
+            out += ch if ch in "{<" else " "
         elif top in ("<", "</"):
             # A tag: its name, its attributes, their "..." and {...} values
             if ch in "\"'":
@@ -10314,7 +10356,7 @@ def _blank_js_strings(
                 break
             elif ch == "/" and line[i + 1 : i + 2] == "*":
                 stack.append("/*")
-                out.append("  ")
+                out += "  "
                 i += 2
                 continue
             elif ch == ">" and top == "<":
@@ -10324,22 +10366,22 @@ def _blank_js_strings(
                 del stack[-2 if top == "</" else -1 :]
                 carried = min(carried, len(stack))
                 if ch == "/":
-                    out.append("/")
+                    out += "/"
                     i += 1
                 ch = ">"
-            out.append(ch)
+            out += ch
         elif isinstance(top, str):
             # The text of a literal that opened on this line.
             kept = keep and len(stack) > carried
             if ch == "\\":
                 if kept:
                     kept_at[len(out)] = line[i : i + 2]
-                out.append("  ")
+                out += "  "
                 i += 2
                 continue
             if top == "`" and line.startswith("${", i):
                 stack.append(0)
-                out.append("${")
+                out += "${"
                 i += 2
                 continue
             if ch == top:
@@ -10350,7 +10392,7 @@ def _blank_js_strings(
                 ch = " "
             if kept:
                 kept_at[len(out)] = ch
-            out.append(ch if ch == top else " ")
+            out += ch if ch == top else " "
         else:
             if ch in ('"', "`") or (ch == "'" and _JS_SINGLE_QUOTED_RE.match(line, i)):
                 stack.append(ch)
@@ -10360,22 +10402,22 @@ def _blank_js_strings(
                 and (tag := _JSX_TAG_RE.match(line, i))
                 and not _TS_TYPE_PARAMETERS_RE.match(line, i)
                 # An element starts where a value can.
-                and _js_regex_position(before + "\n" + "".join(out))
+                and _js_regex_position(out, before)
             ):
                 stack.append("<")
-                out.append(tag.group())
+                out += tag.group()
                 i = tag.end()
                 continue
             elif (
                 ch == "/"
                 and (regex := _JS_REGEX_RE.match(line, i))
                 # Straight after a /.../ literal a `/` divides.
-                and (ended is None or "".join(out[ended:]).strip())
-                and _js_regex_position(before + "\n" + "".join(out))
+                and (ended is None or _run_start(out, len(out)) > ended)
+                and _js_regex_position(out, before)
             ):
                 if keep:
                     kept_at[len(out)] = regex.group()
-                out.append(f"/{' ' * (len(regex.group()) - 1)}")
+                out += f"/{' ' * (len(regex.group()) - 1)}"
                 ended = len(out)
                 i = regex.end()
                 continue
@@ -10383,7 +10425,7 @@ def _blank_js_strings(
                 break
             elif ch == "/" and line[i + 1 : i + 2] == "*":
                 stack.append("/*")
-                out.append("  ")
+                out += "  "
                 i += 2
                 continue
             elif ch == "{" and top is not None:
@@ -10395,13 +10437,17 @@ def _blank_js_strings(
                     stack[-1] -= 1
             elif ch == "\ufeff":
                 ch = " "
-            out.append(ch)
+            out += ch
         i += 1
     # Only a template literal, a block comment, a JSX element and the value of
     # one of its tag's attributes go on over the next line.
     while stack[-1:] in (['"'], ["'"]) and stack[-2:-1] != ["<"]:
         stack.pop()
-    return "".join(kept_at.get(at, piece) for at, piece in enumerate(out))[: len(line)]
+    shown, at = [], 0
+    for column, kept in kept_at.items():
+        shown += out[at:column], kept
+        at = column + len(kept)
+    return ("".join(shown) + out[at:])[: len(line)]
 
 
 def _blank_js_lines(lines, jsx=False, code=None):
@@ -10487,7 +10533,7 @@ class TSParser(BaseParser):
         arguments of calls go on to the shared path."""
         while self._closures and self._closures[0][0] < before:
             bar, params, _end = self._closures[0]
-            if self.paren_around(bar) is not None or self._open_calls:
+            if self.bracket_around(bar)[1] == "(":
                 break
             head = code[:bar]
             origin = None
@@ -10745,7 +10791,8 @@ class TSParser(BaseParser):
         an object literal those of its properties by name, None where it
         has none."""
         elements = []
-        for part in _bracketed_parts(code[start:], expression=True):
+        closed = self._pairs.get(start - 1)
+        for part in _bracketed_parts(code[start:closed], expression=True):
             start = code.index(part, start)
             end = start + len(part)
             if part[0] + part[-1] != "{}":
