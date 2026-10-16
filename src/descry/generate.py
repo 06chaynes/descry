@@ -10938,11 +10938,11 @@ class TSParser(BaseParser):
         re_class = re.compile(
             r"(?P<expression>"
             r"(?:const|let|var)\s+(?P<declarator>[\w$]+)\s*(?::[^=,;]*)?=\s*"
-            r"|[\w$][\w$.]*\s*=\s*"
-            r"|(?P<enclosed>[(,]\s*)"
+            r"|^\s*[\w$][\w$.]*\s*=\s*"
+            r"|(?P<enclosed>[(,]\s*|[\w$]\s*=\s*|\breturn\s+|=>\s*|[:?]\s*)"
             r"(?=class\s*(?:[\w$]+\s*)?(?:[{<]|(?:extends|implements)\b)))"
             r"class\b"
-            r"|^\s*(?:export\s+)?(?:abstract\s+)?class\b"
+            r"|^\s*(?:export\s+(?:default\s+)?)?(?:declare\s+)?(?:abstract\s+)?class\b(?!\s*=)"
             r"(?:\s+(?!extends\b|implements\b)(?P<plain>[a-zA-Z0-9_$]+))?"
         )
         re_interface = re.compile(r"^\s*(?:export\s+)?interface\s+([a-zA-Z0-9_$]+)")
@@ -11488,12 +11488,6 @@ class TSParser(BaseParser):
             # unless it is written inside brackets, where the line declares
             # what it does without it.
             cx = None if continuing else re_class.search(code_lines[i])
-            if (
-                cx
-                and cx.group("expression") is not None
-                and self._find_block_end(code_lines, i, cx.end()) <= lineno
-            ):
-                cx = None
             if continuing or held_open or (cx and cx.group("enclosed") is None):
                 pass
             elif (match := re_const.search(line)) and (
@@ -11840,6 +11834,10 @@ class TSParser(BaseParser):
                 # the line declares, not one it closes.
                 holders = reaching(end_lineno)
                 held_by = holders[0][0]
+                for node_id, name_end in own_defs:
+                    span = _own_line_span(code_lines[i], name_end)
+                    if span and span[0] <= cx.start() < span[1]:
+                        held_by = node_id
                 cid = f"{held_by}::{name}"
                 token_count = (end_lineno - lineno + 1) * 10
                 self.builder.add_node(

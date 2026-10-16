@@ -284,7 +284,11 @@ Python SDK v2, and a full-tree review's findings are fixed.
   typed arrow constants, file-level calls, a definition after the `}` or
   `;` that ends another on its line, which had no node, and a call on the
   line a scope opens or closes on, filed by the line instead of the
-  column; calls in comments, string
+  column, a class written as a value (returned, an arrow's body, a
+  property's value, a default) or as `export default class` or
+  `declare class`, which had no node or left its methods to the
+  function around it, and a JSX `class` attribute that starts a line,
+  read as a class; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a

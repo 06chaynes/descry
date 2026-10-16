@@ -18481,6 +18481,50 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, "FILE:f.ts::outer::callback@9") == [x, x]
         assert _calls(builder, "FILE:f.ts::outer") == ["FILE:f.ts::b"]
 
+    def test_a_class_expression_is_a_class_wherever_it_is_written(self, tmp_path):
+        """A class written as a value, returned, an arrow's body, a
+        property's value, a default or exported as the default, is a class
+        with its members, held by the definition around it on its line or
+        over lines. A JSX `class` attribute is none."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.tsx": """
+                function a() {}
+                const C = class { m() { a(); } };
+                function mk() { return class { m() { a(); } }; }
+                function mk2() {
+                  return class {
+                    m() { a(); }
+                  };
+                }
+                const arrow = () => class { m() { a(); } };
+                function f(Base = class { m() { a(); } }) {}
+                export default class { m() { a(); } }
+                declare class D { m(): void }
+                function view() {
+                  return <div
+                    class={a()}
+                  />;
+                }
+                """
+            },
+        )
+        ids = {n["id"] for n in builder.nodes}
+        for owner in (
+            "C::m",
+            "mk::class@4::m",
+            "mk2::class@6::m",
+            "arrow::class@10::m",
+            "f::class@11::m",
+            "class@12::m",
+        ):
+            assert _calls(builder, f"FILE:a.tsx::{owner}") == ["FILE:a.tsx::a"]
+        assert "FILE:a.tsx::mk2::m" not in ids
+        assert "FILE:a.tsx::D::m" in ids
+        assert not any("class@16" in node_id for node_id in ids)
+        assert _calls(builder, "FILE:a.tsx::view") == ["FILE:a.tsx::a"]
+
     def test_a_definition_after_the_end_of_another_on_its_line(self, tmp_path):
         """What a line goes on to after the `}` or `;` that ends a
         definition is read as a line of its own: a function, a class, a
