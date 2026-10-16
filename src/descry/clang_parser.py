@@ -177,7 +177,7 @@ _TYPE_NAME = (
     r"|template|friend|operator|sizeof|auto|do|co_return|co_yield|co_await"
     r"|virtual|explicit|const|static|struct|class|enum|union|typename"
     r"|unsigned|signed|inline|extern|volatile|mutable|constexpr|register"
-    r"|thread_local)\b)[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*"
+    r"|thread_local)\b)[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*"
 )
 # A type name with its template arguments: in `type` the name, and with it
 # the member that the arguments are followed by, `Outer<Args>::Inner`. A
@@ -200,7 +200,7 @@ _RE_POINTER = re.compile(
     r"((?:std::)?(?:unique_ptr|shared_ptr|optional|expected))\s*<"
     r"\s*(?:(?:const|typename)\s+)*+([\w:]+)"
 )
-_DECLARATOR = r"(?:\s*[*&]+\s*(?:const\s+)?|\s+)(?P<name>[A-Za-z_]\w*)"
+_DECLARATOR = r"(?:\s+(?:const|volatile)\b)*(?:\s*[*&]+\s*(?:const\s+)?|\s+)(?P<name>[A-Za-z_]\w*)"
 
 _DECLARATIONS = (
     # `std::unique_ptr<Type> name`, a local, a field or a parameter
@@ -248,6 +248,10 @@ _RE_DECLARES = re.compile(
     r"(?:\s*\*+\s*|\s*&\s*|\s+)$"
 )
 # `Type name`, `const Type& name`, `Type* const name`, `Type name[n]`
+# A lambda up to its body's `{`: its captures, its parameters, its return type
+_RE_LAMBDA = re.compile(
+    r"\[[^\[\]]*\]\s*\((?P<params>[^()]*)\)\s*(?:mutable\s*)?(?:->[^{;]*)?\{"
+)
 _RE_PARAMETER = re.compile(
     _SPECIFIERS
     + r"(?:::)?(?P<type>"
@@ -264,7 +268,7 @@ _RE_FIELD = re.compile(
     + r"(?:::)?(?P<type>"
     + _TYPE_NAME
     + r"(?:\s*<.*>)?)"
-    + r"(?:\s*[*&]+\s*(?:const\s+)?|\s+)(?P<name>[A-Za-z_]\w*)"
+    + _DECLARATOR
     + r"\s*(?:\[[^\]]*\]\s*)*(?::\s*\w+\s*)?"
     + r"(?:[A-Z_][A-Z0-9_]*\s*(?:\(\s*\))?\s*)*(?:\{.*\}\s*)?",
     re.DOTALL,
@@ -1230,6 +1234,15 @@ class ClangParser(BaseParser):
         `^callee^position` of that one: a macro may qualify it."""
         code = code.replace("->", "?.")
         self.begin_line(code, index + 1, source_id, self._source[index])
+        for lambda_ in _RE_LAMBDA.finditer(code):
+            # A lambda's parameters are what they are declared as, in its body.
+            until = self._find_block_end(self._lines, index, lambda_.end() - 1) + 1
+            for part in _bracketed_parts(lambda_["params"] + ")"):
+                declared = _RE_PARAMETER.fullmatch(part.partition("=")[0].strip())
+                if declared:
+                    name, held = declared["name"], f"{_held(declared['type'])}()"
+                    outer = self._declared(name, index + 1, since)
+                    self._rebind(name, index + 1, held, until, outer)
         matches = {match.start(1): match for match in _RE_CALL.finditer(code)}
         ends = [found.start() for found in re.finditer(r"[;{}]", code)]
         parens = {match.end() - 1: match[1] for match in matches.values()}
@@ -1315,6 +1328,41 @@ class ClangParser(BaseParser):
                 )
                 self.add_local(source_id, binding["name"])
 
+    def _iterated(self, name, lineno, since):
+        """Origin path of what iterating the variable or the field ``name``
+        gives, as a range-based `for` reads it: of the first argument of the
+        container type a variable is declared as, of what a field of the
+        member function's type holds; `?` for any other."""
+        field = name.removeprefix("this->").removeprefix("this.")
+        held = self._declared(field, lineno, since)
+        if held and held.endswith("[]"):
+            return held[:-2]
+        if held:
+            return f"={held[:-2]}.?" if held.endswith("()") and "<" in held else "?"
+        return f"self.{field}.?" if self._member else "?"
+
+    def _element_origin(self, end, callee, lineno, since, source_id):
+        """Origin path of a call on an element, `items[i].callee()`: of what
+        the subscript operator of what `items` holds returns, or of the
+        element type of a C array."""
+        code = self._code
+        if code[end - 1 : end] != "]":
+            return None
+        depth = 0
+        for at in range(end - 1, -1, -1):
+            depth += (code[at] == "]") - (code[at] == "[")
+            if not depth:
+                break
+        path = not depth and re.search(
+            r"(?<![\w.>])[A-Za-z_]\w*(?:(?:\.|->)\w+)*$", code[:at]
+        )
+        owner = source_id.split("::")[-2] if source_id.count("::") > 1 else None
+        held = path and self.call_origin(f"{path[0]}.x", lineno, since, owner)
+        if path and (self._declared(path[0], lineno, since) or "").endswith("[]"):
+            # An element of a C array is of the type it is declared with.
+            return held and f"{held[:-2]}.{callee}"
+        return held and f"{held[:-2]}.[].{callee}"
+
     def call_origin(self, callee, lineno, since, owner=None):
         # `value.member`, `value->member` and longer paths. A value that
         # nothing declares is, in a member function, a field of its type;
@@ -1324,6 +1372,10 @@ class ClangParser(BaseParser):
         if not steps or "::" in root:
             return None
         held = None if root == "this" else self._declared(root, lineno, since)
+        if held and held.startswith("*"):
+            held = self._iterated(held[1:], lineno, since)
+        # A C array is read as its element, which `->` reaches as well.
+        held = held and held.removesuffix("[]")
         if held and self._dependent(held):
             return None
         held = held and self._opaque(held)
@@ -1344,7 +1396,8 @@ class ClangParser(BaseParser):
                 else f"{pointer[1]}<{pointer[2]}>()"
             )
         else:
-            origin = held if held[0] in "#=" else f"{_held(held[:-2])}()"
+            iterated = held[0] in "#=" or held.startswith("self.")
+            origin = held if iterated else f"{_held(held[:-2])}()"
         for arrow, name in zip(steps[::2], steps[1::2]):
             name = name.split("<")[0]
             origin += f".?.{name}" if arrow == "->" else f".{name}"

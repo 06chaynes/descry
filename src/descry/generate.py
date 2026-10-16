@@ -6512,7 +6512,7 @@ class BaseParser:
                 for match in pattern.finditer(line):
                     groups = match.groupdict()
                     # A qualified type is one step of an origin path.
-                    declared_type = groups["type"].replace(".", "::")
+                    declared_type = re.sub(r"\s*::\s*|\.", "::", groups["type"])
                     # Unindented and not in a parameter list.
                     file_level = (
                         not line[:1].isspace() and "(" not in line[: match.start()]
@@ -6525,37 +6525,24 @@ class BaseParser:
                         )
                     if groups.get("name"):
                         key, value = groups["name"], f"{declared_type}()"
+                        if self.language == "clang" and line[match.end() :].startswith(
+                            "["
+                        ):
+                            # A C array: `T()[]`, of elements of the type.
+                            value += "[]"
                         if self.language == "clang" and declared_type == "auto":
                             # `for (auto& name : expr)` — `name` holds what
-                            # iterating `expr` gives: the first argument of
-                            # a container type `expr` is declared as, or of
-                            # what a call it is returns; unknown otherwise.
+                            # iterating `expr` gives: what a call it is
+                            # returns, or `*expr`, what the variable or the
+                            # field `expr` holds where the call is read.
                             iterated = re.match(
                                 r"\s*([\w.:>-]+(?:\(\))?)", line[match.end() :]
                             )
                             if iterated:
                                 name = iterated[1]
-                                if name.endswith("()"):
-                                    value = f"={name}.?"
-                                else:
-                                    field = name.removeprefix("this->").removeprefix(
-                                        "this."
-                                    )
-                                    held = self._declared(field, lineno, 0)
-                                    if not held:
-                                        field_types = self.fields.get(
-                                            (owner, field), ()
-                                        )
-                                        held = (
-                                            next(iter(field_types), None)
-                                            if len(field_types) == 1
-                                            else None
-                                        )
-                                    value = (
-                                        f"={held[:-2]}.?"
-                                        if held and held.endswith("()") and "<" in held
-                                        else "?"
-                                    )
+                                value = (
+                                    f"={name}.?" if name.endswith("()") else f"*{name}"
+                                )
                     else:
                         key, value = f"<{groups['param']}>", declared_type
                     # What is declared `typeof x` holds `x` itself.
@@ -6914,10 +6901,11 @@ class BaseParser:
         head, size = (head[:-2], size) if head else ("self", 1)
         return ".".join([head, *names[size:]]) + unwraps
 
-    def _rebind(self, name, lineno, origin, until=None):
+    def _rebind(self, name, lineno, origin, until=None, after=None):
         """Give ``name``, which a pattern binds on line ``lineno`` and which
         was read as of no declared type, the origin path ``origin``, up to
-        line ``until`` where the pattern's block ends there."""
+        line ``until`` where the pattern's block ends there, from where it
+        is ``after`` again."""
         entries = self.declared.setdefault(name, [])
         # What a block binds, as a `for` does, is the block's.
         top = not until and self._binds_file(name)
@@ -6931,7 +6919,7 @@ class BaseParser:
             # The binding is in scope up to the line before.
             self._binding_ends[lineno, name] = until - 1
         elif until:
-            entries.append((until, None, False))
+            entries.append((until, after, False))
 
     def _bind(self, bindings, index, lines, block):
         """Give each name of ``bindings`` that a pattern on line ``index``
@@ -6958,7 +6946,13 @@ class BaseParser:
                 closed = self._pairs.get(opened)
                 edge = self._closes.get(closed, self._opens.get(opened))
                 position = (
-                    len(_bracketed_parts(code[opened + 1 : bar] + "x", expression=True))
+                    len(
+                        _bracketed_parts(
+                            code[opened + 1 : bar] + "x",
+                            expression=True,
+                            turbofish=self.language == "rust",
+                        )
+                    )
                     - 1
                 )
             elif self._open_calls:
@@ -8138,13 +8132,16 @@ _TYPE_ARGUMENTS_END_RE = re.compile(
 )
 
 
-def _bracketed_parts(text, separator=",", expression=False):
+def _bracketed_parts(text, separator=",", expression=False, turbofish=False):
     """The ``separator``-separated parts of ``text``, which follows an
     opening bracket, up to the bracket that closes it. A `<` is a bracket
     unless the bracket it is in closes first; in an ``expression`` it is
-    one only where a `>` closes it that type arguments can end with."""
+    one only where a `>` closes it that type arguments can end with, and
+    with ``turbofish``, Rust's, only after `::`."""
     angles, opened, end = set(), [], len(text)
     for column, char in enumerate(text):
+        if char == "<" and turbofish and text[column - 2 : column] != "::":
+            continue
         if char in "<([{":
             opened.append(column)
         elif char == ">" and text[column - 1] not in "-=":
@@ -8524,6 +8521,10 @@ _RUST_USE_RE = re.compile(rf"^\s*{_RUST_VIS}use\s+([^;]+);", re.MULTILINE)
 
 
 # A parameter name in a `fn` signature
+# A type parameter bound by a closure trait: `F: Fn(A) -> R`
+# A closure trait a parameter is declared with: `impl Fn(A, B)`, `&dyn FnMut(A)`
+_RUST_FN_TYPE_RE = re.compile(r"\b(?:impl|dyn)\s+(?:Fn|FnMut|FnOnce)\s*\(([^()]*)\)")
+_RUST_FN_BOUND_RE = re.compile(r"\b(\w+)\s*:\s*((?:Fn|FnMut|FnOnce)\s*\([^()]*\))")
 _RUST_PARAMETER_RE = re.compile(r"[(,]\s*(?:mut\s+)?([a-z_]\w*)\s*:")
 # A `fn` with its body on the line of the `impl` block it is in
 _RUST_INLINE_FN_RE = re.compile(
@@ -8627,6 +8628,7 @@ _RUST_DEFINITION_HEAD_RE = re.compile(
 
 
 class RustParser(BaseParser):
+    language = "rust"
     binding_re = re.compile(r"\blet\s+(?:mut\s+)?(?P<name>\w+)\s*=(?!=)")
     bindings = staticmethod(_rust_bindings)
 
@@ -8861,7 +8863,9 @@ class RustParser(BaseParser):
             # 1. Functions
             if match := re_fn_start.search(line):
                 name = match.group(1)
-                call_scan_start = match.end()
+                # A signature holds no call: the line's calls start in its body.
+                body = line.find("{", match.end())
+                call_scan_start = body + 1 if body >= 0 else len(line)
                 fn_start = lineno
                 j, full_sig = self._consume_until_body(lines, i)
 
@@ -9379,8 +9383,25 @@ class RustParser(BaseParser):
         """
         param_types = []
         try:
-            # Extract content between first ( and matching )
+            # The parameter list is the first `(` after the type parameters,
+            # whose `Fn(...)` bounds type the parameters they name.
             paren_start = full_sig.find("(")
+            angle = re.match(
+                r"\s*(?:pub(?:\([^)]*\))?\s+)?[\w\s]*?fn\s+\w+\s*<", full_sig
+            )
+            bounds, generics = {}, ""
+            if angle:
+                depth = 0
+                for at in range(angle.end() - 1, len(full_sig)):
+                    depth += (full_sig[at] == "<") - (
+                        full_sig[at] == ">" and full_sig[at - 1] != "-"
+                    )
+                    if not depth:
+                        paren_start = full_sig.find("(", at)
+                        generics = full_sig[angle.end() : at]
+                        break
+                bounds = dict(_RUST_FN_BOUND_RE.findall(generics))
+            bounds.update(_RUST_FN_BOUND_RE.findall(full_sig.partition(" where ")[2]))
             if paren_start == -1:
                 return []
 
@@ -9420,6 +9441,7 @@ class RustParser(BaseParser):
             if current:
                 params.append("".join(current).strip())
 
+            named = {"Self", *re.findall(r"(?:^|,)\s*(?:const\s+)?(\w+)", generics)}
             for param in params:
                 param = param.strip()
                 if not param:
@@ -9435,6 +9457,22 @@ class RustParser(BaseParser):
                     parts = param.split(":", 1)
                     if len(parts) == 2:
                         type_part = parts[1].strip()
+                        if type_part in bounds:
+                            type_part = f"impl {bounds[type_part]}"
+                        # A closure parameter of a type the function's type
+                        # parameters or `Self` name is of no known type.
+                        type_part = _RUST_FN_TYPE_RE.sub(
+                            lambda found: found[0].replace(
+                                found[1],
+                                ", ".join(
+                                    "_"
+                                    if named & set(re.findall(r"\w+", part))
+                                    else part
+                                    for part in _bracketed_parts(found[1] + ")")
+                                ),
+                            ),
+                            type_part,
+                        )
                         # Simplify complex types for readability
                         if len(type_part) > 50:
                             type_part = type_part[:47] + "..."
@@ -14012,6 +14050,19 @@ class CallResolver:
             calls = (re.match(r"#(\d+)", origin) for origin in passed)
             if any(call and int(call[1]) > index for call in calls):
                 self.late[index] = (target, site, edge["source"], self._receiver)
+        elif target and self.lang(edge["source"]) == "rust":
+            # A closure an argument takes has the parameters of the `Fn`
+            # trait the parameter is declared with.
+            declared = self.nodes[target]["metadata"].get("param_types") or ()
+            declared = [t for t in declared if not t.endswith("self")]
+            self._callables = {
+                str(position): [
+                    None if p == "_" else self._returned_type(p, target) for p in params
+                ]
+                for position, written in enumerate(declared)
+                if (found := _RUST_FN_TYPE_RE.search(written))
+                and (params := _bracketed_parts(found[1] + ")"))
+            }
         elif target and self.lang(edge["source"]) == "java":
             # A lambda an argument position of the method is typed by the
             # functional interface that position declares.
@@ -15281,6 +15332,17 @@ class CallResolver:
                 # A call's opaque or outside-typed result: its members are
                 # not known.
                 break
+            if step == "[]" and isinstance(value, tuple):
+                # A subscript gives what the type's `operator[]` returns: by
+                # the data for a standard type, its member's for one of the
+                # project.
+                if value[0] == "outside":
+                    known, held = library.member(value, "operator[]")
+                    value = held if known else None
+                else:
+                    member = self._attr(value, "operator[]", called=True)
+                    value = member and self._called(member, value[1])
+                continue
             if python and step == "__getitem__" and self._is_class_value(value):
                 # A class written with type arguments is that class.
                 value = ("returned", value)

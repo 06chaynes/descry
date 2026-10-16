@@ -8602,6 +8602,88 @@ class TestTypeScriptCallResolution:
             "FILE:a.ts::ns::inner",
         ]
 
+    def test_cpp_elements_fields_and_lambda_parameters_have_their_types(self, tmp_path):
+        """`items[i]` is what the container's `operator[]` returns, a C
+        array's element its declared type, a range-based `for` over a
+        parameter, a field or an array gives its element; `T const x` and
+        `NS ::Name` are declared types, and a lambda's parameters have
+        theirs in its body only."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cpp": """
+                #include <vector>
+                namespace NS { struct Uq { void go() {} }; }
+                struct Dog { void bark() {} };
+                struct Hen { void bark() {} };
+                struct Grid { Dog cells[2]; Dog& operator[](int i) { return cells[i]; } };
+                struct Holder { Dog const d1; std::vector<Dog> all; void each(); };
+                template <typename F> void apply(F f) {}
+                void containers(std::vector<Dog> dogs, Holder h) {
+                  dogs[0].bark();
+                  for (auto& d : dogs) d.bark();
+                  Dog herd[3];
+                  herd[1].bark();
+                  Grid g;
+                  g[2].bark();
+                  h.d1.bark();
+                  NS ::Uq u;
+                  u.go();
+                  Dog x;
+                  apply([](Hen x) { x.bark(); });
+                  x.bark();
+                }
+                void Holder::each() {
+                  for (auto& d : all) d.bark();
+                }
+                """
+            },
+        )
+        dog = "FILE:a.cpp::Dog::bark"
+        assert _calls(builder, "FILE:a.cpp::containers") == [dog] * 6 + [
+            "FILE:a.cpp::Hen::bark",
+            "FILE:a.cpp::NS::Uq::go",
+            "FILE:a.cpp::apply",
+        ]
+        assert _calls(builder, "FILE:a.cpp::Holder::each") == [dog]
+
+    def test_rust_closures_take_the_parameters_of_the_fn_bound(self, tmp_path):
+        """A closure passed where `impl Fn(A)`, `F: Fn(A)` or a `where`
+        bound is declared has its parameters, a type the function's type
+        parameters name none known; in a Rust expression `a < b, c > (d)`
+        is two comparisons, and a signature holds no call."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.rs": """
+                struct Dog;
+                struct Cat;
+                impl Dog { fn act(&self) {} }
+                impl Cat { fn act(&self) {} }
+                fn apply(p: bool, q: bool, f: impl Fn(Cat), h: impl Fn(Dog)) {}
+                fn bound<F: Fn(Dog)>(f: F) {}
+                fn later<M, F>(m: M, f: F) where F: Fn(Cat, M::Item) {}
+                fn compare(a: i32, b: i32, c: i32, d: i32) {
+                    apply(a < b, c > (d), |x| x.act(), |y| y.act());
+                    bound(|z| z.act());
+                    later(1, |w, v| { w.act(); v.act(); });
+                }
+                """
+            },
+        )
+        dog, cat = "FILE:a.rs::Dog::act", "FILE:a.rs::Cat::act"
+        assert _calls(builder, "FILE:a.rs::compare") == [
+            cat,
+            cat,
+            dog,
+            dog,
+            "FILE:a.rs::apply",
+            "FILE:a.rs::bound",
+            "FILE:a.rs::later",
+            "REF:v.act",
+        ]
+        assert not [e for e in builder.edges if e["target"] in ("REF:Fn", "REF:>")]
+
     def test_a_property_of_a_function_type_is_a_member(self, tmp_path):
         """An interface's or an object type's property of a function type is
         a method it declares, and an object type, `type T = {...}`, owns its

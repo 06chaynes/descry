@@ -328,8 +328,15 @@ Python SDK v2, and a full-tree review's findings are fixed.
   call's line or a later one, takes the parameters that property's type
   declares in the call's parameter; `items[i]` is an element of the
   array `items` is, and a rest parameter, declared or gathering those of
-  a function type, is an array of its type, where each was untyped;
-  calls in comments, string
+  a function type, is an array of its type, where each was untyped.
+  In C++, `items[i]` is what the container's `operator[]` returns and a
+  C array's element is of its declared type, a range-based `for` over a
+  parameter or a field gives the element, `T const x` and `NS ::Name`
+  declare their types, and a lambda's parameters have theirs in its body;
+  in Rust, a closure takes the parameters of the `Fn` bound the callee
+  declares, `impl Fn(A)`, `F: Fn(A)` or in a `where` clause, `a < b,
+  c > (d)` is two comparisons where it was read as type arguments, and
+  the `Fn(...)` of a signature is no call; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a
