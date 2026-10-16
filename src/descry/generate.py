@@ -6754,8 +6754,13 @@ class BaseParser:
     def _nameless_owner(self, parent_id, name, lineno, last, kind="class"):
         """Make the definition ``name`` that source cannot write, held by
         ``parent_id`` and spanning lines ``lineno`` to ``last``: the members
-        of a block for no type source can name are its own. Returns its ID."""
-        owner_id = f"{parent_id}::{name}"
+        of a block for no type source can name are its own. Another of the
+        name in ``parent_id``, one opened on the same line, is `name#2` and
+        so on. Returns its ID."""
+        owner_id, count = f"{parent_id}::{name}", 1
+        while owner_id in self.builder.node_registry:
+            count += 1
+            owner_id = f"{parent_id}::{name}#{count}"
         self.builder.add_node(
             owner_id,
             "Class",
@@ -10668,13 +10673,16 @@ _TS_OBJECT_OPENS_RE = re.compile(
     rf"\s*(?:(?P<default>export\s+default\s*)|(?P<key>{_TS_WRITTEN_MEMBER_NAME})\s*:\s*)?"
     r"\{\s*$"
 )
-# What starts a statement after a block's `}`: a word that goes on with no
-# statement before it, nor a template's `${`
+# What starts a statement after a block's `}` or a statement's `;`: not a
+# word that goes on with the statement before it, nor a template's `${`
 _TS_STATEMENT_START_RE = re.compile(
     r"(?!(?:else|catch|finally|while|as|satisfies|instanceof|in|of|extends|implements"
     r"|from|is)"
     r"(?![\w$]))(?!\$\{)[A-Za-z_$]"
 )
+# A keyword whose block a `{` after it opens, as a head's `)`, an arrow's
+# `>` and the start of a statement are
+_BLOCK_KEYWORD_RE = re.compile(r"(?<![\w$])(?:else|try|finally|do)\Z")
 # What may follow the `}` or `;` that ends a statement before the next
 _TS_SEPARATORS_RE = re.compile(r"[ \t,;]*")
 _TS_SPACE_RE = re.compile(r"[ \t]*")
@@ -10700,8 +10708,8 @@ def _split_lines(
     and its group `nested` one that opens an object only in an object. Each
     part after the first is indented as its line is and once more for each
     such body it is in; a member ends with its `}` or a character of
-    ``ends``. Where ``statement`` matches what follows a block's `}`, the
-    line is split there too.
+    ``ends``. Where ``statement`` matches what follows a block's `}` or a
+    statement's `;`, the line is split there too.
     Returns the lines, for each the index in ``lines`` of the one it is
     part of, and the code units (see `_code_units`) its columns are right
     of its own there. ``code_lines`` are ``lines`` blanked."""
@@ -10710,6 +10718,9 @@ def _split_lines(
         indent = line[: len(line) - len(line.lstrip())]
         cuts = []  # the column each part starts at, and the bodies it is in
         depth, bodies, begun, values = 0, [], 0, []
+        # Whether each bracket opened on the line and still open is a
+        # block's `{`: a statement starts only in the innermost one's
+        opened_here = []
         for column, char in enumerate(code):
             head = char == "{" and type_head and type_head.match(code, begun, column)
             # A head that opens a body only inside the body of an object.
@@ -10731,7 +10742,18 @@ def _split_lines(
                 values.pop()
             if char in "([{":
                 depth += 1
+                lead = _run_start(code, column)
+                opened_here.append(
+                    char == "{"
+                    and (
+                        not lead
+                        or code[lead - 1] in ")>{};"
+                        or bool(_BLOCK_KEYWORD_RE.search(code, max(lead - 7, 0), lead))
+                    )
+                )
             elif char in ")]}":
+                if opened_here:
+                    opened_here.pop()
                 if char == "}" and bodies and depth == bodies[-1][0]:
                     # A body that holds nothing is left as it is.
                     opened = bodies.pop()[1]
@@ -10746,7 +10768,7 @@ def _split_lines(
                 begun = column + 1
             if bodies and depth == bodies[-1][0] and (char == "}" or char in ends):
                 cuts.append((column + 1, len(bodies)))
-            elif char in "};" and not bodies and depth <= 0:
+            elif char in "};" and not bodies and opened_here[-1:] != [False]:
                 at = _TS_SEPARATORS_RE.match(code, column + 1).end()
                 head = definition_head.match(code, at)
                 member = head and head.groupdict().get("member")
@@ -10757,7 +10779,7 @@ def _split_lines(
                 after = _TS_SPACE_RE.match(code, column + 1).end()
                 if defines:
                     cuts.append((at, 0))
-                elif char == "}" and statement and statement.match(code, after):
+                elif statement and statement.match(code, after):
                     cuts.append((after, 0))
         if not cuts:
             split.append(line)
@@ -12336,7 +12358,21 @@ class TSParser(BaseParser):
                 # definition's, and each such function its own. One that
                 # opens after another on the line is written inside it.
                 within = parent_id
+                # The definitions the line declares, by their own columns
+                own_spans = [
+                    (node_id, span)
+                    for node_id, name_end in own_defs
+                    if (span := _own_line_span(code, name_end))
+                ]
                 for bar, _params, end in self._closures:
+                    # The innermost of those that holds it holds it.
+                    holding = [
+                        node_id
+                        for node_id, (start, stop) in own_spans
+                        if start <= bar < stop
+                    ]
+                    if holding and not within.startswith(f"{holding[-1]}::"):
+                        within = holding[-1]
                     text = code[bar:end].rstrip()
                     if text.endswith("{"):
                         opened = end - 1
@@ -16618,7 +16654,11 @@ class CallResolver:
                     values.append(self.result(target))
                     self._result, self._receiver, self._deferred = state[:3]
                     self._callables, self._bound = state[3:]
-            if values[0] is not None and values.count(values[0]) == len(values):
+            if (
+                values
+                and values[0] is not None
+                and values.count(values[0]) == len(values)
+            ):
                 self.body_values[key] = values[0]
         return self.body_values.get(key)
 

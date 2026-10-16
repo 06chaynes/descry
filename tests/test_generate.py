@@ -10541,6 +10541,14 @@ class TestOwnersSourceCannotName:
     under an owner no source can name either, so no lookup of a type, a base
     or a qualified call lands on it."""
 
+    def test_two_nameless_owners_of_one_line_are_two(self, tmp_path):
+        """Two blocks of no type source can name, opened on one line, are
+        two owners, not one that takes in the members of both."""
+        parser = TSParser(CodeGraphBuilder(tmp_path))
+        first = parser._nameless_owner("FILE:a.js", "callback@2", 2, 5, "callback")
+        second = parser._nameless_owner("FILE:a.js", "callback@2", 2, 9, "callback")
+        assert (first, second) == ("FILE:a.js::callback@2", "FILE:a.js::callback@2#2")
+
     @pytest.mark.parametrize(
         ("path", "source", "named"),
         [
@@ -18740,6 +18748,36 @@ class TestOneLineDefinitionCalls:
         ):
             assert _calls(builder, f"FILE:a.ts::{owner}") == ["FILE:a.ts::a"]
         assert not any("typed::at" in n["id"] for n in builder.nodes)
+
+    def test_a_callback_on_its_definitions_line_and_an_expression_bodys_end(
+        self, tmp_path
+    ):
+        """A callback opened on the line of the definition around it is
+        that definition's; a statement after the `;` that ends an arrow's
+        expression body on its line is outside it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                const items = [1];
+                function inner(x?: number) {}
+                function other() {}
+                function outer() { items.forEach((x) => {
+                  inner();
+                }); }
+                class K { m() { items.forEach((x) => {
+                  inner();
+                }); } }
+                const expr = (x: number) =>
+                  inner(x); other();
+                """
+            },
+        )
+        ids = {n["id"] for n in builder.nodes}
+        assert "FILE:a.ts::outer::callback@5" in ids
+        assert "FILE:a.ts::K::m::callback@8" in ids
+        assert _calls(builder, "FILE:a.ts::expr") == ["FILE:a.ts::inner"]
+        assert _calls(builder, "FILE:a.ts") == ["FILE:a.ts::other"]
 
     def test_a_definition_after_the_end_of_another_on_its_line(self, tmp_path):
         """What a line goes on to after the `}` or `;` that ends a
