@@ -13301,7 +13301,10 @@ class CallResolver:
                 elif origin.startswith("="):
                     # A type parameter names no type.
                     base = written = ""
-                self.bases.setdefault(edge["source"], []).append(base)
+                # A base is looked up as written, its qualifier with it; a
+                # Dart one's is an import's prefix.
+                kept = base if lang == "dart" else written
+                self.bases.setdefault(edge["source"], []).append(kept)
                 self.base_names[index] = written
         # A Go struct has the methods of the types it embeds, listed under
         # None among its fields.
@@ -15352,7 +15355,7 @@ class CallResolver:
         whose every bound it may meet. A trait the project declares it meets
         only where the project implements that trait for it."""
         met = {
-            base
+            _split_callee(base)[1]
             for given in self.impl_types.get(name, ())
             for base in self.bases.get(given, ())
         }
@@ -16782,15 +16785,16 @@ class CallResolver:
                 reached = self._candidates_now
                 named = self._type_named(base, declaration)
                 self._candidates_now = reached
+                bare = _split_callee(base)[1]
                 if named == _EXTERNAL:
                     base_types = []
                 else:
                     base_types = (
-                        [named] if named else self._types_in(lang, base, declaration)
+                        [named] if named else self._types_in(lang, bare, declaration)
                     )
                 if not base_types:
                     # A standard trait gives only the members it has.
-                    trait = self._standard_type(base, declaration)
+                    trait = self._standard_type(bare, declaration)
                     given = (trait, declaration, name, owner_id)
                     complete = (
                         complete and bool(trait) and not self._std_given(*given)[0]
@@ -16851,7 +16855,10 @@ class CallResolver:
         ``owner_id`` has from a standard trait, where the data says."""
         for declaration in self._declarations(owner_id):
             bases = self.bases.get(declaration, ())
-            named = (self._standard_type(base, declaration) for base in bases)
+            named = (
+                self._standard_type(_split_callee(base)[1], declaration)
+                for base in bases
+            )
             derived = self.builder.derived.get(declaration, ())
             for trait in [*filter(None, named), *derived]:
                 known, value = self._std_given(trait, declaration, name, owner_id)
@@ -16875,7 +16882,7 @@ class CallResolver:
         """What bounds one split type: the scope that declares it in
         TypeScript, the package directory in Go, the crate in Rust, the
         enclosing namespace in Ruby, in C/C++ the file that defines the
-        type."""
+        type and its qualified name."""
         path = node_id.split("::")[0][5:]
         if lang == "ruby":
             # A scope without a name of its own is one file's.
@@ -16892,15 +16899,20 @@ class CallResolver:
             return node_id
         if lang == "clang":
             # The node that holds a type's out-of-class members stands for
-            # the one definition of its name that its file is compiled with.
+            # the one definition of its qualified name that its file is
+            # compiled with; one of another namespace is another type.
+            qualified = node_id.partition("::")[2]
             defined = [
                 t
                 for t in self._types(lang, self._name(node_id))
                 if "end_lineno" in self.nodes[t]["metadata"]
+                and t.partition("::")[2] == qualified
                 and self._in_reach(t, node_id)
             ]
             own = "end_lineno" in self.nodes[node_id]["metadata"]
-            return path if own or len(defined) != 1 else defined[0].split("::")[0][5:]
+            if not own and len(defined) == 1:
+                path = defined[0].split("::")[0][5:]
+            return path, qualified
         if lang == "go":
             return path.rpartition("/")[0]
         if lang == "rust":

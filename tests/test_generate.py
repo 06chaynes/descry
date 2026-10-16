@@ -14251,6 +14251,23 @@ class TestClangCallResolution:
         assert _calls(builder, "FILE:opcodes.h") == ["REF:OP", "REF:OP"]
         assert _calls(builder, "FILE:use.cc::Printer::format") == ["FILE:lib.h::format"]
 
+    def test_a_base_is_the_type_its_qualified_name_names(self, tmp_path):
+        """`: x::Base` is the `Base` of namespace `x`: its members are the
+        derived type's, not those of a `Base` of another namespace."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cc": """
+                namespace x { struct Base { void run() {} }; }
+                namespace y { struct Base { void run() {} void stop() {} }; }
+                struct A : x::Base {
+                  void m() { run(); stop(); }
+                };
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.cc::A::m") == ["FILE:a.cc::x::Base::run"]
+
     def test_call_in_a_macro_argument_is_qualified_as_the_macro_writes_it(
         self, tmp_path
     ):
