@@ -10496,12 +10496,14 @@ _TS_TYPE_CONTINUES = ("|", "&", "?", ":", "{")
 _JS_ASSIGNMENT_END_RE = re.compile(r"(?<![=<>!])=(?!=)\s*$")
 
 
-def _opens_body(signature: str) -> bool:
-    """True when ``signature`` reads `name(params) {` or `name(params): T {`:
-    its first brace outside parentheses directly follows a parameter list."""
+def _opens_body(signature: str, start: int = 0) -> bool:
+    """True when ``signature`` reads `name(params) {` or `name(params): T {`
+    from column ``start``: its first brace outside parentheses, before the
+    `;` that ends the statement, directly follows a parameter list."""
     depth = 0
     after_params = False
-    for char in signature:
+    for column in range(start, len(signature)):
+        char = signature[column]
         if char == "(":
             depth += 1
         elif char == ")":
@@ -10509,9 +10511,59 @@ def _opens_body(signature: str) -> bool:
             after_params = depth == 0
         elif depth == 0 and char == "{":
             return after_params
-        elif depth == 0 and char in "=;,.":
+        elif depth == 0 and char == ";":
+            return False
+        elif depth == 0 and char in "=,.":
             after_params = False
     return False
+
+
+# What may follow the `}` or `;` that ends a statement before the next
+_TS_SEPARATORS_RE = re.compile(r"[ \t,;]*")
+# What a line may go on to after the `}` or `;` that ends a definition:
+# another declaration, or a member of a class or an object with its body
+_TS_DEFINITION_HEAD_RE = re.compile(
+    r"(?:export\s+(?:default\s+)?)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?"
+    r"(?:function|class|interface|enum|const|let|var)\b"
+    rf"|{_TS_MEMBER_MODIFIERS}(?:\*\s*)?(?:[gs]et\s+)?(?P<member>{_TS_MEMBER_NAME})\s*[(<]"
+)
+
+
+def _ts_split_definitions(lines, code_lines):
+    """``lines`` with each that goes on to a definition after the `}` or
+    `;` that ends the one before it split there, the part after the split
+    indented as the line is, and for each line returned the index in
+    ``lines`` of the one it is part of and the code units (see
+    `_code_units`) its columns are right of its own there. ``code_lines``
+    are ``lines`` blanked."""
+    split, rows, shifts = [], [], []
+    for row, (line, code) in enumerate(zip(lines, code_lines)):
+        depth, start, units = 0, 0, (0, 0, 0)
+        indent = line[: len(line) - len(line.lstrip())]
+        for column, char in enumerate(code):
+            depth += (char in "([{") - (char in ")]}")
+            if char not in "};" or depth > 0:
+                continue
+            at = _TS_SEPARATORS_RE.match(code, column + 1).end()
+            head = _TS_DEFINITION_HEAD_RE.match(code, at)
+            member = head and head["member"]
+            if (
+                head
+                and at > start
+                and not (
+                    member
+                    and (member in _JSTS_CONTROL_KEYWORDS or not _opens_body(code, at))
+                )
+            ):
+                split.append((indent if start else "") + line[start:at])
+                rows.append(row)
+                shifts.append(tuple(unit - len(indent) * bool(start) for unit in units))
+                units = _code_units(line[start:at], units)
+                start = at
+        split.append((indent if start else "") + line[start:])
+        rows.append(row)
+        shifts.append(tuple(unit - len(indent) * bool(start) for unit in units))
+    return split, rows, shifts
 
 
 class TSParser(BaseParser):
@@ -10839,9 +10891,23 @@ class TSParser(BaseParser):
         numbers are relative to ``content``."""
         file_id = self.add_file_node(rel_path, content)
 
+        jsx = str(file_path).endswith(_JSX_EXTENSIONS)
         lines = source_lines(content)
         self.line_offset = line_offset
         self.line_count = len(lines)
+        # The lines read, a definition after another's end on a line on one
+        # of its own, and the source line each is part of
+        lines, rows, shifts = _ts_split_definitions(
+            lines, _blank_js_lines(lines, jsx=jsx)
+        )
+        first_rows = {row: index for index, row in reversed(list(enumerate(rows)))}
+
+        def source_line(lineno):
+            """The source line of line ``lineno`` read."""
+            if lineno < 1:
+                return lineno
+            return rows[min(lineno, len(rows)) - 1] + 1 + max(lineno - len(rows), 0)
+
         written = (line for line in lines if line.strip())
         self._margin = min((len(l) - len(l.lstrip()) for l in written), default=0)
         self.enter_context(file_id, 0, len(lines))
@@ -10936,7 +11002,7 @@ class TSParser(BaseParser):
         required = set()
         for found in _TS_REQUIRE_RE.finditer(content):
             clause, specifier = found.groups()
-            required.add(content.count("\n", 0, found.start()))
+            required.add(first_rows[content.count("\n", 0, found.start())])
             for part in re.split(r"[{},]", clause):
                 # `name`, or `name: local` in a destructuring pattern
                 local = part.rpartition(":")[2].strip()
@@ -10947,7 +11013,6 @@ class TSParser(BaseParser):
         # ``code_lines`` is a line without its comments and with the text of
         # its literals blanked, for the names it binds and the braces
         # counted on it.
-        jsx = str(file_path).endswith(_JSX_EXTENSIONS)
         code_lines = _blank_js_lines(lines, jsx=jsx)
         bound = _js_bound("\n".join(code_lines))
         self.builder.js_bound[file_id] = bound.union(imported)
@@ -11761,7 +11826,11 @@ class TSParser(BaseParser):
                 # The declarator names the class it is given. An
                 # expression's own name is visible only inside it: one given
                 # to anything else has no name that source can write.
-                name = cx.group("declarator") or cx.group("plain") or f"class@{lineno}"
+                name = (
+                    cx.group("declarator")
+                    or cx.group("plain")
+                    or f"class@{source_line(lineno)}"
+                )
                 docstring = self.get_leading_docstring(lines, i)
                 # The statement may start before the class and go on past it:
                 # its heritage and its body are read from its keyword.
@@ -11998,7 +12067,11 @@ class TSParser(BaseParser):
                         self.enter_context(*context, _ts_params(code[bar : opened + 1]))
                     else:
                         callback_id = within = self._nameless_owner(
-                            within, f"callback@{lineno}", lineno, block_end, "callback"
+                            within,
+                            f"callback@{source_line(lineno)}",
+                            lineno,
+                            block_end,
+                            "callback",
                         )
                         callbacks.append(
                             (block_end - 1, len(self._open_calls) + len(self._opens))
@@ -12290,7 +12363,11 @@ class TSParser(BaseParser):
                         # that function; one that holds none is no owner.
                         if any(str(value).startswith("=") for value in held.values()):
                             object_id = self._nameless_owner(
-                                holder, f"object@{lineno}", lineno, object_end, "object"
+                                holder,
+                                f"object@{source_line(lineno)}",
+                                lineno,
+                                object_end,
+                                "object",
                             )
                             self.builder.literal_scopes[key] = object_id
                             returned_objects.append(
@@ -12326,7 +12403,7 @@ class TSParser(BaseParser):
                             object_end,
                             self._nameless_owner(
                                 returned_objects[-1][3] if opened_here else scope_id,
-                                f"object@{lineno}",
+                                f"object@{source_line(lineno)}",
                                 lineno,
                                 object_end,
                                 "object",
@@ -12383,7 +12460,30 @@ class TSParser(BaseParser):
 
         # Use ast-grep for more accurate CALLS detection
         if self.builder.use_ast_grep:
-            self._extract_calls_with_ast_grep(str(file_path), file_id)
+            self._extract_calls_with_ast_grep(str(file_path), file_id, first_rows)
+        for item in self.builder.nodes[self._first_node :]:
+            meta = item["metadata"]
+            read = [meta.get(key) for key in ("lineno", "end_lineno")]
+            for key in ("lineno", "end_lineno"):
+                if isinstance(meta.get(key), int):
+                    meta[key] = source_line(meta[key])
+            # The size of a definition is told by the source lines it spans.
+            if (
+                all(isinstance(at, int) for at in read)
+                and meta.get("token_count") == (read[1] - read[0] + 1) * 10
+            ):
+                meta["token_count"] = (meta["end_lineno"] - meta["lineno"] + 1) * 10
+        for item in self.builder.edges[self._first_edge :]:
+            meta = item.get("metadata", {})
+            if isinstance(meta.get("lineno"), int):
+                shift = (
+                    1 <= meta["lineno"] <= len(shifts) and shifts[meta["lineno"] - 1]
+                )
+                if "col" in meta and shift and any(shift):
+                    col = meta["col"]
+                    units = (col,) * 3 if isinstance(col, int) else col
+                    meta["col"] = _scip_columns(tuple(map(sum, zip(units, shift))))
+                meta["lineno"] = source_line(meta["lineno"])
 
     def _extract_ts_types(self, full_sig: str) -> tuple:
         """Extract return type and parameter types from TypeScript function signature.
@@ -12541,8 +12641,9 @@ class TSParser(BaseParser):
                 return node["type"] == "Class"
         return False
 
-    def _extract_calls_with_ast_grep(self, file_path: str, file_id: str):
-        """Extract calls using ast-grep for higher accuracy.
+    def _extract_calls_with_ast_grep(self, file_path: str, file_id: str, first_rows):
+        """Extract calls using ast-grep for higher accuracy. ``first_rows``
+        has the first line read of each source line.
 
         Uses the TypeScriptSymbolTable to filter type-only imports.
         SCIP handles actual symbol resolution for both Rust and TypeScript.
@@ -12561,6 +12662,7 @@ class TSParser(BaseParser):
             lineno = call["lineno"] - self.line_offset
             if not 1 <= lineno <= self.line_count:
                 continue
+            lineno = first_rows[lineno - 1] + 1
             callee = call["callee"]
 
             # Skip type-only imports (they don't generate runtime calls)

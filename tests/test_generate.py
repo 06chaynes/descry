@@ -18481,6 +18481,52 @@ class TestOneLineDefinitionCalls:
         assert _calls(builder, "FILE:f.ts::outer::callback@9") == [x, x]
         assert _calls(builder, "FILE:f.ts::outer") == ["FILE:f.ts::b"]
 
+    def test_a_definition_after_the_end_of_another_on_its_line(self, tmp_path):
+        """What a line goes on to after the `}` or `;` that ends a
+        definition is read as a line of its own: a function, a class, a
+        member or an accessor there is a definition with its calls. A
+        `catch` or an `else` there is no member."""
+        builder = _index(
+            tmp_path,
+            {
+                "f.ts": """
+                function a() {}
+                function b() {}
+                function first() { a(); } function second() { b(); }
+                function one() {
+                  a();
+                } function two() {
+                  b();
+                }
+                class X { m() { a(); } } class Y { n() { b(); } }
+                ;class F { m() { a(); } }
+                const o = {
+                  p() { a(); }, q() { b(); },
+                };
+                class Z {
+                  get v() { return a(); } get w() { return b(); }
+                }
+                function t() {
+                  try { a(); } catch (e) { b(); }
+                }
+                """
+            },
+        )
+        a, b = "FILE:f.ts::a", "FILE:f.ts::b"
+        for owner, called in [
+            ("first", a),
+            ("second", b),
+            ("two", b),
+            ("X::m", a),
+            ("Y::n", b),
+            ("F::m", a),
+            ("o::q", b),
+            ("Z::get w", b),
+        ]:
+            assert _calls(builder, f"FILE:f.ts::{owner}") == [called]
+        assert _calls(builder, "FILE:f.ts::t") == [a, b]
+        assert "FILE:f.ts::catch" not in {n["id"] for n in builder.nodes}
+
     def test_a_block_body_after_an_arrow_in_the_signature(self, tmp_path):
         """A function or method with `=>` in its parameters or its return
         type has a block for a body: the line its `}` leads is read outside

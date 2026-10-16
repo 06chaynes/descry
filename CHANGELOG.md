@@ -281,7 +281,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   its constraint; Ruby one-line classes and modules,
   `#` docstrings; C# properties and verbatim strings; TypeScript and
   JavaScript `.jsx`/`.mjs`/`.cjs`/`.mts`/`.cts` files, `$` identifiers,
-  typed arrow constants, file-level calls; calls in comments, string
+  typed arrow constants, file-level calls, a definition after the `}` or
+  `;` that ends another on its line, which had no node, and a call on the
+  line a scope opens or closes on, filed by the line instead of the
+  column; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a
