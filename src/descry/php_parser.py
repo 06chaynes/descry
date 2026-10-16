@@ -226,6 +226,16 @@ _RE_OPERATOR = re.compile(r"\?->|->|[.?\\]")
 _CHAIN_OPERATORS = {"?->": "  .", "->": " .", ".": "+", "?": "|", "\\": ":"}
 
 
+# What a PHP type's body opens after, and a declaration a line may go on to
+# after the end of another
+_RE_TYPE_HEAD = re.compile(
+    r"\s*(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum)\b"
+)
+_RE_DEFINITION_HEAD = re.compile(
+    r"(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum|function)\b"
+)
+
+
 def _code_lines(lines: list[str]) -> list[str]:
     """``lines`` without their comments and attributes, and with the text
     of every string, heredoc and nowdoc turned to spaces or left out, so
@@ -467,6 +477,9 @@ class PhpParser(BaseParser):
         file_id = self.add_file_node(rel_path, content)
 
         lines = source_lines(content)
+        lines = self.split_source(
+            lines, _code_lines(lines), _RE_DEFINITION_HEAD, _RE_TYPE_HEAD
+        )
         skip_calls = is_generated_source(content)
         # Declarations and calls are read from `codes`; `lines` keeps the
         # doc comments.
@@ -847,3 +860,4 @@ class PhpParser(BaseParser):
                 self.builder.add_edge(
                     method_id.rpartition("::")[0], method_id, "DEFINES"
                 )
+        self.restore_source_lines()

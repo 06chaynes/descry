@@ -6966,11 +6966,71 @@ class BaseParser:
         )
         self.builder.add_edge(file_id, config_id, "DEFINES")
 
+    @staticmethod
+    def blank_lines(lines, spanning):
+        """Each of ``lines`` as `blank_strings` blanks it, in turn."""
+        inside, blanked = None, []
+        for line in lines:
+            code, inside = blank_strings(line, inside, spanning)
+            blanked.append(code)
+        return blanked
+
+    def split_source(self, lines, code_lines, definition_head, type_head=None):
+        """The lines to read ``lines`` as, split as `_split_lines` splits
+        them; `restore_source_lines` gives what is read their source lines."""
+        lines, self._rows, self._shifts = _split_lines(
+            lines, code_lines, definition_head, type_head
+        )
+        self._first_rows = {
+            row: at for at, row in reversed(list(enumerate(self._rows)))
+        }
+        return lines
+
+    def read_line(self, lineno):
+        """The first line read of source line ``lineno``."""
+        return self._first_rows[lineno - 1] + 1 if self._rows else lineno
+
+    def source_line(self, lineno):
+        """The source line of line ``lineno`` read."""
+        rows = self._rows
+        if not rows or lineno < 1:
+            return lineno
+        return rows[min(lineno, len(rows)) - 1] + 1 + max(lineno - len(rows), 0)
+
+    def restore_source_lines(self):
+        """Give the nodes and the edges of the file being parsed the source
+        lines and columns of the lines `split_source` read."""
+        if not self._rows:
+            return
+        for item in self.builder.nodes[self._first_node :]:
+            meta = item["metadata"]
+            read = [meta.get(key) for key in ("lineno", "end_lineno")]
+            for key in ("lineno", "end_lineno"):
+                if isinstance(meta.get(key), int):
+                    meta[key] = self.source_line(meta[key])
+            # A definition's size is ten tokens to a line, of the source's:
+            # a line split adds none.
+            if all(isinstance(at, int) and at > 0 for at in read) and read[1] > read[0]:
+                added = read[1] - read[0] - (meta["end_lineno"] - meta["lineno"])
+                if added and meta.get("token_count", 0) > 10 * added:
+                    meta["token_count"] -= 10 * added
+        for item in self.builder.edges[self._first_edge :]:
+            meta = item.get("metadata", {})
+            if isinstance(meta.get("lineno"), int):
+                lineno = meta["lineno"]
+                shift = 1 <= lineno <= len(self._shifts) and self._shifts[lineno - 1]
+                if "col" in meta and shift and any(shift):
+                    col = meta["col"]
+                    units = (col,) * 3 if isinstance(col, int) else col
+                    meta["col"] = _scip_columns(tuple(map(sum, zip(units, shift))))
+                meta["lineno"] = self.source_line(lineno)
+
     def add_file_node(self, rel_path, content):
         """Register the File node for a source file and return its id."""
         file_id = f"FILE:{rel_path}"
         self._first_node = len(self.builder.nodes)
         self._first_edge = len(self.builder.edges)
+        self._rows = self._shifts = None
         self.builder.add_node(
             file_id,
             "File",
@@ -8427,6 +8487,17 @@ def _rust_impl(text):
     return trait, owner, bounds
 
 
+# What a Rust item that holds others opens its body after, and an item a
+# line may go on to after the end of another
+_RUST_TYPE_HEAD_RE = re.compile(
+    rf"\s*(?:{_RUST_VIS}\s*)?(?:unsafe\s+)?(?:impl|trait|mod)\b"
+)
+_RUST_DEFINITION_HEAD_RE = re.compile(
+    rf"(?:{_RUST_VIS}\s*)?(?:(?:const|async|unsafe|extern(?:\s+\"[^\"]*\")?)\s+)*"
+    r"(?:fn|impl|struct|enum|union|trait|mod|type|static|const|macro_rules!)\b"
+)
+
+
 class RustParser(BaseParser):
     binding_re = re.compile(r"\blet\s+(?:mut\s+)?(?P<name>\w+)\s*=(?!=)")
     bindings = staticmethod(_rust_bindings)
@@ -8497,6 +8568,12 @@ class RustParser(BaseParser):
         file_id = self.add_file_node(rel_path, content)
 
         lines = source_lines(content)
+        lines = self.split_source(
+            lines,
+            self.blank_lines(lines, ('"', "r")),
+            _RUST_DEFINITION_HEAD_RE,
+            _RUST_TYPE_HEAD_RE,
+        )
         current_context = [file_id]  # Stack of IDs
         context_indent = [0]  # Stack of indentation levels
 
@@ -8942,6 +9019,7 @@ class RustParser(BaseParser):
         # Use ast-grep for more accurate CALLS detection
         if self.builder.use_ast_grep:
             self._extract_calls_with_ast_grep(str(file_path), file_id, lines)
+        self.restore_source_lines()
 
     def _extract_calls_with_ast_grep(self, file_path: str, file_id: str, lines: list):
         """Extract calls using ast-grep for higher accuracy."""
@@ -8950,7 +9028,7 @@ class RustParser(BaseParser):
         line_to_context = build_line_to_context_map(self.builder.nodes, file_id)
 
         for call in extract_calls_rust(file_path):
-            lineno = call["lineno"]
+            lineno = self.read_line(call["lineno"])
             callee = call["callee"]
 
             # Find the containing function for this line
@@ -10531,40 +10609,69 @@ _TS_DEFINITION_HEAD_RE = re.compile(
 )
 
 
-def _ts_split_definitions(lines, code_lines):
-    """``lines`` with each that goes on to a definition after the `}` or
-    `;` that ends the one before it split there, the part after the split
-    indented as the line is, and for each line returned the index in
-    ``lines`` of the one it is part of and the code units (see
-    `_code_units`) its columns are right of its own there. ``code_lines``
-    are ``lines`` blanked."""
+def _split_lines(lines, code_lines, definition_head, type_head=None):
+    """``lines`` with a line split where it goes on to a definition after
+    the `}` or `;` that ends the one before it, and where a type's body
+    that opens on it holds members: after the body's `{`, after each member
+    and before its `}`. ``definition_head`` matches where a definition
+    starts, its group `member`, where it has one, a member that needs a
+    body; ``type_head`` the start of a statement that a type body's `{`
+    ends. Each part
+    after the first is indented as its line is and once more for each such
+    body it is in. Returns the lines, for each the index in ``lines`` of the
+    one it is part of, and the code units (see `_code_units`) its columns
+    are right of its own there. ``code_lines`` are ``lines`` blanked."""
     split, rows, shifts = [], [], []
     for row, (line, code) in enumerate(zip(lines, code_lines)):
-        depth, start, units = 0, 0, (0, 0, 0)
         indent = line[: len(line) - len(line.lstrip())]
+        cuts = []  # the column each part starts at, and the bodies it is in
+        depth, bodies, statement = 0, [], 0
         for column, char in enumerate(code):
-            depth += (char in "([{") - (char in ")]}")
-            if char not in "};" or depth > 0:
+            if char == "{" and type_head and type_head.match(code, statement, column):
+                bodies.append((depth + 1, column))
+                cuts.append((column + 1, len(bodies)))
+            if char in "([{":
+                depth += 1
+            elif char in ")]}":
+                if char == "}" and bodies and depth == bodies[-1][0]:
+                    # A body that holds nothing is left as it is.
+                    opened = bodies.pop()[1]
+                    if code[opened + 1 : column].strip():
+                        cuts.append((column, len(bodies)))
+                    else:
+                        cuts.remove((opened + 1, len(bodies) + 1))
+                depth -= 1
+            if char in "{};":
+                statement = column + 1
+            if char not in "};":
                 continue
-            at = _TS_SEPARATORS_RE.match(code, column + 1).end()
-            head = _TS_DEFINITION_HEAD_RE.match(code, at)
-            member = head and head["member"]
-            if (
-                head
-                and at > start
-                and not (
+            if bodies and depth == bodies[-1][0]:
+                cuts.append((column + 1, len(bodies)))
+            elif not bodies and depth <= 0:
+                at = _TS_SEPARATORS_RE.match(code, column + 1).end()
+                head = definition_head.match(code, at)
+                member = head and head.groupdict().get("member")
+                if head and not (
                     member
                     and (member in _JSTS_CONTROL_KEYWORDS or not _opens_body(code, at))
-                )
-            ):
-                split.append((indent if start else "") + line[start:at])
+                ):
+                    cuts.append((at, 0))
+        if not cuts:
+            split.append(line)
+            rows.append(row)
+            shifts.append((0, 0, 0))
+            continue
+        start, level, units = 0, 0, (0, 0, 0)
+        for at, inside in [*cuts, (len(line), 0)]:
+            if at <= start:
+                continue
+            if not start or line[start:at].strip():
+                prefix = indent + "    " * level if start else ""
+                split.append(prefix + line[start:at])
                 rows.append(row)
-                shifts.append(tuple(unit - len(indent) * bool(start) for unit in units))
-                units = _code_units(line[start:at], units)
-                start = at
-        split.append((indent if start else "") + line[start:])
-        rows.append(row)
-        shifts.append(tuple(unit - len(indent) * bool(start) for unit in units))
+                shifts.append(tuple(unit - len(prefix) for unit in units))
+            units = _code_units(line[start:at], units)
+            start, level = at, inside
     return split, rows, shifts
 
 
@@ -10899,16 +11006,9 @@ class TSParser(BaseParser):
         self.line_count = len(lines)
         # The lines read, a definition after another's end on a line on one
         # of its own, and the source line each is part of
-        lines, rows, shifts = _ts_split_definitions(
-            lines, _blank_js_lines(lines, jsx=jsx)
+        lines = self.split_source(
+            lines, _blank_js_lines(lines, jsx=jsx), _TS_DEFINITION_HEAD_RE
         )
-        first_rows = {row: index for index, row in reversed(list(enumerate(rows)))}
-
-        def source_line(lineno):
-            """The source line of line ``lineno`` read."""
-            if lineno < 1:
-                return lineno
-            return rows[min(lineno, len(rows)) - 1] + 1 + max(lineno - len(rows), 0)
 
         written = (line for line in lines if line.strip())
         self._margin = min((len(l) - len(l.lstrip()) for l in written), default=0)
@@ -11010,7 +11110,7 @@ class TSParser(BaseParser):
         required = set()
         for found in _TS_REQUIRE_RE.finditer(content):
             clause, specifier = found.groups()
-            required.add(first_rows[content.count("\n", 0, found.start())])
+            required.add(self.read_line(content.count("\n", 0, found.start()) + 1) - 1)
             for part in re.split(r"[{},]", clause):
                 # `name`, or `name: local` in a destructuring pattern
                 exported, renamed, local = part.rpartition(":")
@@ -11836,7 +11936,7 @@ class TSParser(BaseParser):
                 name = (
                     cx.group("declarator")
                     or cx.group("plain")
-                    or f"class@{source_line(lineno)}"
+                    or f"class@{self.source_line(lineno)}"
                 )
                 docstring = self.get_leading_docstring(lines, i)
                 # The statement may start before the class and go on past it:
@@ -12076,7 +12176,7 @@ class TSParser(BaseParser):
                     else:
                         callback_id = within = self._nameless_owner(
                             within,
-                            f"callback@{source_line(lineno)}",
+                            f"callback@{self.source_line(lineno)}",
                             lineno,
                             block_end,
                             "callback",
@@ -12372,7 +12472,7 @@ class TSParser(BaseParser):
                         if any(str(value).startswith("=") for value in held.values()):
                             object_id = self._nameless_owner(
                                 holder,
-                                f"object@{source_line(lineno)}",
+                                f"object@{self.source_line(lineno)}",
                                 lineno,
                                 object_end,
                                 "object",
@@ -12411,7 +12511,7 @@ class TSParser(BaseParser):
                             object_end,
                             self._nameless_owner(
                                 returned_objects[-1][3] if opened_here else scope_id,
-                                f"object@{source_line(lineno)}",
+                                f"object@{self.source_line(lineno)}",
                                 lineno,
                                 object_end,
                                 "object",
@@ -12468,30 +12568,8 @@ class TSParser(BaseParser):
 
         # Use ast-grep for more accurate CALLS detection
         if self.builder.use_ast_grep:
-            self._extract_calls_with_ast_grep(str(file_path), file_id, first_rows)
-        for item in self.builder.nodes[self._first_node :]:
-            meta = item["metadata"]
-            read = [meta.get(key) for key in ("lineno", "end_lineno")]
-            for key in ("lineno", "end_lineno"):
-                if isinstance(meta.get(key), int):
-                    meta[key] = source_line(meta[key])
-            # The size of a definition is told by the source lines it spans.
-            if (
-                all(isinstance(at, int) for at in read)
-                and meta.get("token_count") == (read[1] - read[0] + 1) * 10
-            ):
-                meta["token_count"] = (meta["end_lineno"] - meta["lineno"] + 1) * 10
-        for item in self.builder.edges[self._first_edge :]:
-            meta = item.get("metadata", {})
-            if isinstance(meta.get("lineno"), int):
-                shift = (
-                    1 <= meta["lineno"] <= len(shifts) and shifts[meta["lineno"] - 1]
-                )
-                if "col" in meta and shift and any(shift):
-                    col = meta["col"]
-                    units = (col,) * 3 if isinstance(col, int) else col
-                    meta["col"] = _scip_columns(tuple(map(sum, zip(units, shift))))
-                meta["lineno"] = source_line(meta["lineno"])
+            self._extract_calls_with_ast_grep(str(file_path), file_id)
+        self.restore_source_lines()
 
     def _extract_ts_types(self, full_sig: str) -> tuple:
         """Extract return type and parameter types from TypeScript function signature.
@@ -12649,9 +12727,8 @@ class TSParser(BaseParser):
                 return node["type"] == "Class"
         return False
 
-    def _extract_calls_with_ast_grep(self, file_path: str, file_id: str, first_rows):
-        """Extract calls using ast-grep for higher accuracy. ``first_rows``
-        has the first line read of each source line.
+    def _extract_calls_with_ast_grep(self, file_path: str, file_id: str):
+        """Extract calls using ast-grep for higher accuracy.
 
         Uses the TypeScriptSymbolTable to filter type-only imports.
         SCIP handles actual symbol resolution for both Rust and TypeScript.
@@ -12670,7 +12747,7 @@ class TSParser(BaseParser):
             lineno = call["lineno"] - self.line_offset
             if not 1 <= lineno <= self.line_count:
                 continue
-            lineno = first_rows[lineno - 1] + 1
+            lineno = self.read_line(lineno)
             callee = call["callee"]
 
             # Skip type-only imports (they don't generate runtime calls)

@@ -252,6 +252,35 @@ _STATEMENT_KEYWORDS = frozenset(
 )
 
 
+# What a Dart type's body opens after, and a declaration a line may go on
+# to after the end of another
+_RE_TYPE_HEAD = re.compile(
+    r"\s*(?:(?:abstract|base|final|interface|sealed|mixin)\s+)*"
+    r"(?:class|mixin|enum|extension)\b"
+)
+_RE_DEFINITION_HEAD = re.compile(
+    r"(?:(?:abstract|base|final|interface|sealed)\s+)*"
+    r"(?:class|mixin|enum|extension|typedef)\b"
+)
+
+
+def _code_lines(lines):
+    """Each of ``lines`` without its comments and with its string literals
+    blanked, in turn; `a!.b` reads as `a?.b`."""
+    codes = []
+    inside = None
+    for line in lines:
+        code, inside = blank_strings(
+            line.replace("'''", '"""').replace('r"""', ' """'),
+            inside,
+            ('"""', "'"),
+        )
+        # Only a triple-quoted string goes on over the next line.
+        inside = None if inside == "'" else inside
+        codes.append(code.replace("!.", "?."))
+    return codes
+
+
 def _read_header(lines, index, column=0):
     """Read the declaration that starts at ``column`` of ``lines[index]``,
     lines without comments or literals, up to what ends its header: the `{`
@@ -452,21 +481,11 @@ class DartParser(BaseParser):
         file_id = self.add_file_node(rel_path, content)
 
         raw_lines = source_lines(content)
+        raw_lines = self.split_source(
+            raw_lines, _code_lines(raw_lines), _RE_DEFINITION_HEAD, _RE_TYPE_HEAD
+        )
         skip_calls = is_generated_source(content)
-
-        # Each line without its comments and with its string literals
-        # blanked; `a!.b` reads as `a?.b`.
-        lines = []
-        inside = None
-        for line in raw_lines:
-            code, inside = blank_strings(
-                line.replace("'''", '"""').replace('r"""', ' """'),
-                inside,
-                ('"""', "'"),
-            )
-            # Only a triple-quoted string goes on over the next line.
-            inside = None if inside == "'" else inside
-            lines.append(code.replace("!.", "?."))
+        lines = _code_lines(raw_lines)
 
         # A name is declared on its own line with the type the line before
         # ends with.
@@ -850,3 +869,4 @@ class DartParser(BaseParser):
                     )
                     origin = f"={held}" if held and held[0] != "?" else None
                 self.add_call(context_id, callee, lineno, since, start, paren, origin)
+        self.restore_source_lines()

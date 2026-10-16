@@ -19622,6 +19622,35 @@ class TestBaseTypes:
         assert _calls(builder, "FILE:b.js::later") == [dog, bark]
 
 
+def test_a_type_body_on_one_line_holds_its_members(tmp_path):
+    """A class, an impl or a Go declaration written on one line with its
+    members has each member, with the calls in it, as one over lines does;
+    a definition after it on the line is the file's."""
+    builder = _index(
+        tmp_path,
+        {
+            "A.java": "class A { void m() { n(); } void n() {} } class B {}\n",
+            "A.cs": "class A { void M() { N(); } void N() {} }\n",
+            "a.dart": "class A { void m() { n(); } void n() {} }\n",
+            "a.php": "<?php\nclass A { function m() { $this->n(); } function n() {} }\n",
+            "lib.rs": "struct A; impl A { fn m(&self) { self.n(); } fn n(&self) {} }\n",
+            "a.go": "package a\ntype A struct{}; func (a A) M() { a.N() }; func (a A) N() {}\n",
+        },
+    )
+    for path, m, n in [
+        ("A.java", "m", "n"),
+        ("A.cs", "M", "N"),
+        ("a.dart", "m", "n"),
+        ("a.php", "m", "n"),
+        ("lib.rs", "m", "n"),
+        ("a.go", "M", "N"),
+    ]:
+        assert _calls(builder, f"FILE:{path}::A::{m}") == [f"FILE:{path}::A::{n}"]
+    lines = {n["id"]: n["metadata"].get("lineno") for n in builder.nodes}
+    assert lines["FILE:A.java::B"] == 1
+    assert lines["FILE:a.go::A::N"] == 2
+
+
 def test_a_form_feed_ends_no_line(tmp_path):
     """A definition is on the line an editor shows it on, after a comment
     that holds a form feed, which `str.splitlines` would end a line at."""

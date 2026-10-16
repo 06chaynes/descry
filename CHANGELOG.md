@@ -306,7 +306,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   `while` or `with`, a spread's `...`, `default`, or a `break` or
   `continue` and its label, read as a comparison or a division; chained
   calls; declarations recorded as calls; braces and calls inside string
-  literals in C#, PHP, Dart and C/C++; a licence notice
+  literals in C#, PHP, Dart and C/C++; in Java, C#, Dart, PHP, Rust and
+  Go, the members of a type written on one line with it, which had no
+  node, and a definition after the end of another on its line; a licence notice
   inside a file read as the next symbol's docstring; inheritance from a
   project type named like a standard one; calls in a second Svelte
   `<script>` block; calls in a nested Python function's default arguments;

@@ -44,6 +44,14 @@ _RE_TYPE_DECL = re.compile(
     r"(class|interface|enum|record|@interface)\s+"
     r"([A-Za-z_$][A-Za-z0-9_$]*)"
 )
+# What a type's body opens after, and a type a line may go on to after the
+# end of another
+_TYPE_HEAD_RE = re.compile(
+    rf"\s*(?:@[\w.]+\s+)*(?:{_TYPE_MODIFIERS}\s+)*(?:class|interface|enum|record|@interface)\b"
+)
+_DEFINITION_HEAD_RE = re.compile(
+    rf"(?:{_TYPE_MODIFIERS}\s+)*(?:class|interface|enum|record|@interface)\b"
+)
 
 # Method declaration. Requires at least one visibility/modifier so we don't
 # match bare control-flow like `if (cond)`. Does NOT match constructors
@@ -362,6 +370,12 @@ class JavaParser(BaseParser):
         file_id = self.add_file_node(rel_path, content)
 
         lines = source_lines(content)
+        lines = self.split_source(
+            lines,
+            self.blank_lines(lines, ('"""',)),
+            _DEFINITION_HEAD_RE,
+            _TYPE_HEAD_RE,
+        )
         skip_calls = is_generated_source(content)
 
         # Package declaration (informational only; Java resolution is
@@ -742,3 +756,4 @@ class JavaParser(BaseParser):
                 bodies.append((context_id, lineno, self._find_block_end(lines, i)))
 
             i += 1
+        self.restore_source_lines()

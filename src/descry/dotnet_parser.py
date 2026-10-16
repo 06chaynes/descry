@@ -347,6 +347,21 @@ _DECLARATIONS = (
 _RE_ARRAY_TYPE = re.compile(rf"({_PATH})(?:{_GENERIC})?\??(?:\[[\s,]*\])+")
 
 
+# What a C# type's or namespace's body opens after, and a declaration a
+# line may go on to after the end of another
+_TYPE_KEYWORDS = r"(?:class|struct|interface|enum|record|namespace)\b"
+_DECLARATION_MODIFIERS = (
+    r"(?:(?:public|private|protected|internal|static|sealed|abstract|partial|"
+    r"readonly|unsafe|file|new|ref)\s+)*"
+)
+_RE_TYPE_HEAD = re.compile(
+    rf"\s*(?:\[[^\]]*\]\s*)*{_DECLARATION_MODIFIERS}{_TYPE_KEYWORDS}"
+)
+_RE_DEFINITION_HEAD = re.compile(
+    rf"{_DECLARATION_MODIFIERS}(?:{_TYPE_KEYWORDS}|delegate\b)"
+)
+
+
 def _code_lines(lines):
     """``(lines as code, guarded lines)``: comments, preprocessor directives
     and string and character literals turned to spaces, and the lines of
@@ -656,6 +671,9 @@ class DotnetParser(BaseParser):
             return
 
         lines = source_lines(content.removeprefix("\ufeff"))
+        lines = self.split_source(
+            lines, _code_lines(lines)[0], _RE_DEFINITION_HEAD, _RE_TYPE_HEAD
+        )
         skip_calls = is_generated_source(content)
         # Declarations and calls are read from `code_lines`, which hold no
         # comment and no text of a literal.
@@ -1086,3 +1104,4 @@ class DotnetParser(BaseParser):
             line = edge.get("metadata", {}).get("lineno")
             if line and (arms := guarded.get(line - 1)):
                 edge.setdefault("metadata", {})["guards"] = sorted(arms)
+        self.restore_source_lines()
