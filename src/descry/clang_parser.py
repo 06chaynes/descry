@@ -420,6 +420,14 @@ def _blank(match: re.Match) -> str:
     return " " * len(match.group())
 
 
+def _declares(code: str, ends: list[int], at: int) -> re.Match | None:
+    """`_RE_DECLARES`'s match of the statement of ``code`` that ``at`` is
+    in, up to ``at``. ``ends`` holds where each `;`, `{` and `}` of
+    ``code`` is."""
+    statement = bisect_left(ends, at)
+    return _RE_DECLARES.match(code, ends[statement - 1] if statement else 0, at)
+
+
 def _without_attributes(text: str, written) -> str:
     """``text`` with each `[[...]]` in it replaced as ``re.sub`` replaces
     with ``written``. No `[[` after the last `]]` closes, so the search
@@ -537,13 +545,14 @@ class ClangParser(BaseParser):
                 code = blank_strings(self._source[index], None, ())[0]
                 head = _RE_MACRO_NAME.match(code) if index == first else None
                 code = " " * head.end() + code[head.end() :] if head else code
+                ends = [found.start() for found in re.finditer(r"[;{}]", code)]
                 # What a parameter names is not a function of that name,
                 # nor is a definition's head a call.
                 named = {
                     call.start()
                     for call in _RE_CALL.finditer(code.replace("->", "?."))
                     if re.split(r"::|\.", call[1])[-1] in parameters
-                    or _RE_DECLARES.search(code[: call.start()])
+                    or _declares(code, ends, call.start())
                 }
                 self._line_calls(
                     macro_id, 0, index, code.rstrip("\\ "), nesting, named.__contains__
@@ -1250,10 +1259,7 @@ class ClangParser(BaseParser):
             if _RE_TYPE_KEYWORD.search(code, max(lead - 6, 0), at):
                 # `struct name (*values)[n];` declares too.
                 continue
-            statement = bisect_left(ends, at)
-            declared = name == callee and _RE_DECLARES.match(
-                code, ends[statement - 1] if statement else 0, at
-            )
+            declared = name == callee and _declares(code, ends, at)
             if declared:
                 # `Type name(args);` declares `name`.
                 self.declared.setdefault(name, []).append(

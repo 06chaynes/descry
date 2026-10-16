@@ -10,6 +10,7 @@ import re
 import signal
 import stat
 import threading
+from bisect import bisect_left, bisect_right
 from collections import deque
 from functools import cache
 from pathlib import Path
@@ -6355,6 +6356,10 @@ class BaseParser:
         self._pairs = {}  # column of a `(` on the line -> column of its `)`
         self._closes = {}  # column of a `)` -> edge index of the call it ends
         self._opens = {}  # column of a `(` left open on the line -> edge index
+        # Where each `(` and `)` of the line starts to count, the column after
+        # a `(` and that of a `)`, and the innermost `(` open from there; None
+        # first, for the start of the line
+        self._parens, self._innermost = [], [None]
         self._open_calls = []  # edge index of each call open across lines
         self._tail = None  # edge index of the call the previous line ends with
         self._tail_unwraps = 0  # `?` operators that follow that call
@@ -6542,6 +6547,7 @@ class BaseParser:
         self._line, self._code = lineno, code
         self._scope, self._raw = scope, raw or code
         self._pairs, self._closes = {}, {}
+        self._parens, self._innermost = [], [None]
         if code[:1].strip() and code[0] not in ")}]":
             # An unindented line starts a top-level item, unless it opens
             # with what closes the one before.
@@ -6557,6 +6563,9 @@ class BaseParser:
                 self._closes[column] = self._open_calls.pop()
                 if len(self._open_calls) == depth:
                     self._pending_closed = column
+            if char in "()":
+                self._parens.append(column + (char == "("))
+                self._innermost.append(stack[-1] if stack else None)
         self._opens = dict.fromkeys(stack)
 
     def _end_line(self):
@@ -6572,8 +6581,8 @@ class BaseParser:
         value = statement.rstrip("?")
         # A `.` a line ends with is a member's, where it is no range's,
         # spread's or number's: the next line goes on with that member.
-        dot = bool(re.search(r"(?<!\.)\.\Z", value)) and not re.search(
-            _NUMBER_DOT + r"\Z", value
+        dot = bool(re.search(r"(?<!\.)\.\Z", value)) and not _NUMBER_DOT_END_RE.search(
+            value
         )
         chain = value[:-1].rstrip() if dot else value
         called = chain.rstrip("?")
@@ -6670,6 +6679,11 @@ class BaseParser:
             if lineno == self._line and value and not value.startswith("#"):
                 return lineno
         return None
+
+    def paren_around(self, column):
+        """The column of the innermost `(` of the line being read that is
+        open at ``column``, else None."""
+        return self._innermost[bisect_right(self._parens, column)]
 
     def call_closed_at(self, column):
         """The call whose `)` is at ``column`` of the line being read, as
@@ -6790,13 +6804,12 @@ class BaseParser:
         parameters as written and the column its body starts at."""
         while self._closures and self._closures[0][0] < before:
             bar, params, end = self._closures.pop(0)
-            around = [o for o, c in self._pairs.items() if o < bar < c]
-            around += [o for o in self._opens if o < bar]
+            opened = self.paren_around(bar)
             edge, position, closed = None, "?", None
-            if around:
-                closed = self._pairs.get(max(around))
-                edge = self._closes.get(closed, self._opens.get(max(around)))
-                position = len(_bracketed_parts(code[max(around) + 1 : bar] + "x")) - 1
+            if opened is not None:
+                closed = self._pairs.get(opened)
+                edge = self._closes.get(closed, self._opens.get(opened))
+                position = len(_bracketed_parts(code[opened + 1 : bar] + "x")) - 1
             elif self._open_calls:
                 edge = self._open_calls[-1]
             if edge is None:
@@ -9243,6 +9256,7 @@ _TS_DECLARATIONS = (
 # suffix comes with (`1.5.`, `0x1.`, `3e5.` and `1n.` are read through a
 # member), in JavaScript and Rust alike
 _NUMBER_DOT = r"(?<![\w$.])\d[\d_]*\."
+_NUMBER_DOT_END_RE = re.compile(_NUMBER_DOT + r"\Z")
 # Where JavaScript declares names: a variable or what a pattern takes apart,
 # a function, a type, and what a `catch` is handed. A member's name, written
 # after a `.` or a `#`, is read as one and binds nothing.
@@ -9261,6 +9275,14 @@ _JS_PARAMETERS_RE = re.compile(
 _JS_BLOCK_RE = re.compile(r"\b(?:if|for|while|switch|catch|with)\s*$")
 
 
+def _run_start(code, at, marks=""):
+    """Where the run of whitespace and of ``marks`` that ends at column
+    ``at`` of ``code`` begins."""
+    while at and (code[at - 1].isspace() or code[at - 1] in marks):
+        at -= 1
+    return at
+
+
 def _js_member_name(lines, row, column):
     """Whether the word at column ``column`` of line ``row`` of ``lines`` is
     a member's name: written after a `.` or a `#`, on its line or one
@@ -9270,7 +9292,10 @@ def _js_member_name(lines, row, column):
         row -= 1
         before = lines[row]
     before = before.rstrip()
-    return before.endswith((".", "#")) and not re.search(_NUMBER_DOT + r"\Z", before)
+    digits = len(before) - 1
+    while digits > 0 and (before[digits - 1].isdecimal() or before[digits - 1] == "_"):
+        digits -= 1
+    return before.endswith((".", "#")) and not _NUMBER_DOT_END_RE.match(before, digits)
 
 
 def _js_bound(content):
@@ -10097,6 +10122,7 @@ _JS_BLOCK_FUNCTION_RE = re.compile(
 )
 # The `new` a constructed type is named after
 _JS_NEW_RE = re.compile(r"\bnew\s+$")
+_JS_FUNCTION_HEAD_RE = re.compile(r"\bfunction\s*\*?\s*$")
 # A parameter that is passed a function, with that function's parameters
 _TS_CALLABLE_RE = re.compile(r"[\w$]+\??\s*:\s*\(?\((?P<params>[^()]*)\)\s*=>")
 # A variable whose value is one blanked literal, or an array
@@ -10106,9 +10132,11 @@ _JS_LITERAL_RE = re.compile(
 )
 # The type of a literal, by the character it opens with: any other is a string
 _JS_LITERAL_TYPES = {"/": "RegExp", "[": "Array"}
-# `for (const pattern of value)` and `for (const name in value)`
+# `for (const pattern of value)` and `for (const name in value)`. The end is
+# looked for first, so the parts are not tried on a line that cannot end so.
 _JS_FOR_RE = re.compile(
-    r"\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+(?P<pattern>.+?)\s+"
+    r"\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+"
+    r"(?=(?s:.*)\)\s*\{?\s*$)(?P<pattern>.+?)\s+"
     r"(?P<kind>of|in)\s+(?P<value>.+?)\)\s*\{?\s*$"
 )
 # A declaration that takes a value apart: `const { a, b } = value`
@@ -10408,9 +10436,7 @@ class TSParser(BaseParser):
         arguments of calls go on to the shared path."""
         while self._closures and self._closures[0][0] < before:
             bar, params, _end = self._closures[0]
-            around = [o for o, c in self._pairs.items() if o < bar < c]
-            around += [o for o in self._opens if o < bar]
-            if around or self._open_calls:
+            if self.paren_around(bar) is not None or self._open_calls:
                 break
             head = code[:bar]
             origin = None
@@ -10461,11 +10487,9 @@ class TSParser(BaseParser):
         """``#edge|argument|this`` origin for a `this` at ``column`` that is
         inside an object literal given as an argument of a call on the
         line, else None."""
-        around = [o for o, c in self._pairs.items() if o < column < c]
-        around += [o for o in self._opens if o < column]
-        if not around:
+        opened = self.paren_around(column)
+        if opened is None:
             return None
-        opened = max(around)
         # The object literal holds the `this`: a `{` inside the call's
         # arguments that is still open at the `this`.
         if code[opened:column].count("{") <= code[opened:column].count("}"):
@@ -10982,32 +11006,40 @@ class TSParser(BaseParser):
             if head and kind != "var":
                 row, column = past_statement(*past(*head))
                 return row + (column > 0)
-            text = code_lines[row]
-            stack = list(open_at[row])
-            for at, char in enumerate(text[:column]):
-                if char == "{":
-                    stack.append((row, at))
-                elif char == "}" and stack:
-                    stack.pop()
-            for opened in reversed(stack):
-                head = code_lines[opened[0]][: opened[1] + 1]
-                if kind != "var" or _JS_BLOCK_FUNCTION_RE.search(head):
+            columns, innermost = braces_on[row]
+            opened = innermost[bisect_left(columns, column)]
+            while opened:
+                if kind != "var" or function_body(opened):
                     return closes_on.get(opened, len(lines))
+                opened = outer_brace[opened]
             return len(lines)
+
+        @cache
+        def function_body(opened):
+            """Whether the `{` at ``opened`` opens a function's body."""
+            row, column = opened
+            return bool(_JS_BLOCK_FUNCTION_RE.search(code_lines[row], 0, column + 1))
 
         # Each of ``text_lines`` keeps the text of the literals that open on
         # it, and is the line the loop below reads.
         text_lines = _blank_js_lines(lines, jsx=jsx, code=code_lines)
-        # The `{` open where each line starts, innermost last, and the line
-        # each `{` is closed on
-        open_at, closes_on, braces = [], {}, []
+        # The line each `{` is closed on and the `{` open where it opens,
+        # and for each line the columns of its braces with the innermost
+        # `{` open before the first and after each
+        braces_on, closes_on, outer_brace, braces = [], {}, {}, []
         for row, text in enumerate(code_lines):
-            open_at.append(tuple(braces))
+            columns, innermost = [], [braces[-1] if braces else None]
             for at, char in enumerate(text):
                 if char == "{":
+                    outer_brace[(row, at)] = innermost[-1]
                     braces.append((row, at))
                 elif char == "}" and braces:
                     closes_on[braces.pop()] = row + 1
+                else:
+                    continue
+                columns.append(at)
+                innermost.append(braces[-1] if braces else None)
+            braces_on.append((columns, innermost))
 
         i = 0
         signature_until = 0  # the last line of a definition's signature
@@ -11773,15 +11805,16 @@ class TSParser(BaseParser):
                         continue  # an expression body, or one over later lines
                     if _block_close(code, opened) is not None:
                         continue  # the block closes on this line
-                    around = [o for o, c in self._pairs.items() if o < bar < c]
-                    around += [o for o in self._opens if o < bar]
                     while callbacks and callbacks[-1][0] < lineno:
                         callbacks.pop()
                     outer = callbacks[-1][1] if callbacks else 0
                     block_end = self._find_block_end(code_lines, i, opened)
                     if block_end <= lineno:
                         continue
-                    if not around and len(self._open_calls) <= outer:
+                    if (
+                        self.paren_around(bar) is None
+                        and len(self._open_calls) <= outer
+                    ):
                         # Not an argument: the lines of its body are those
                         # of the definition around it, and read its
                         # parameters too.
@@ -11826,7 +11859,11 @@ class TSParser(BaseParser):
                     if _js_member_name(code_lines, i, found.start()):
                         continue
                     head = None
-                    if not found[1] or _JS_FOR_HEAD_RE.search(code, 0, found.start()):
+                    if not found[1] or _JS_FOR_HEAD_RE.search(
+                        code,
+                        _run_start(code, found.start(), "(forawaitcatch"),
+                        found.start(),
+                    ):
                         head = (i, code.rindex("(", 0, found.end()))
                     elif held_open and not code[: found.start()].strip():
                         head = held_open[:2]
@@ -11906,7 +11943,11 @@ class TSParser(BaseParser):
                     # receiver may be nullish.
                     callee = match.group(1).replace("?.", ".")
                     # `function name(` names the function it defines.
-                    if re.search(r"\bfunction\s*\*?\s*$", code[: match.start(1)]):
+                    if _JS_FUNCTION_HEAD_RE.search(
+                        code,
+                        max(_run_start(code, match.start(1), "*") - 8, 0),
+                        match.start(1),
+                    ):
                         continue
                     # `name(params) {` at the start of a line defines a
                     # method of an object literal.
@@ -11939,7 +11980,11 @@ class TSParser(BaseParser):
                         if not member:
                             origin = value_of(callee, lineno, since, owner)
                         # A literal is a value of its built-in type.
-                        quote = _JS_LITERAL_RECEIVER_RE.search(code[: match.start(1)])
+                        quote = _JS_LITERAL_RECEIVER_RE.search(
+                            code,
+                            max(_run_start(code, match.start(1), ".") - 1, 0),
+                            match.start(1),
+                        )
                         if quote:
                             builtin = _JS_LITERAL_TYPES.get(quote[1], "string")
                             origin = f"{builtin}().{callee}"
@@ -11976,7 +12021,9 @@ class TSParser(BaseParser):
                         # `new Type<arguments>(` constructs the type it names.
                         made = self.builder.edges[-1]["metadata"]
                         written = line[start + len(callee) : paren].strip()
-                        if "origin" not in made and _JS_NEW_RE.search(code[:start]):
+                        if "origin" not in made and _JS_NEW_RE.search(
+                            code, max(_run_start(code, start) - 3, 0), start
+                        ):
                             made["origin"] = f"new {callee}{written}"
                         elif written:
                             made["site"] = {"types": written}
