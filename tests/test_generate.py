@@ -8641,6 +8641,36 @@ class TestTypeScriptCallResolution:
         assert calls.count(bark) == 5 and calls.count(meow) == 3
         assert _calls(builder, "FILE:a.ts::Inside::run") == [meow]
 
+    def test_a_java_generic_type_holds_its_type_arguments(self, tmp_path):
+        """`Box<Cat>`'s `T` is a cat through a field, a method's return,
+        `this` and a subclass that writes its base's arguments; a bound is
+        its own class's, not another's of the parameter's name."""
+        builder = _index(
+            tmp_path,
+            {
+                "A.java": """
+                class Dog { void bark() {} }
+                class Cat { void meow() {} }
+                class Box<T> { T held; T get() { return held; } Box<T> self() { return this; } }
+                class Bounded<T extends Dog> { T held; void go() { held.bark(); } }
+                class Sub extends Box<Cat> {}
+                class Use {
+                  void run(Box<Cat> b, Sub s, Bounded<Dog> d) {
+                    b.held.meow();
+                    b.get().meow();
+                    b.self().get().meow();
+                    s.get().meow();
+                    d.held.bark();
+                  }
+                }
+                """
+            },
+        )
+        meow, bark = "FILE:A.java::Cat::meow", "FILE:A.java::Dog::bark"
+        calls = _calls(builder, "FILE:A.java::Use::run")
+        assert calls.count(meow) == 4 and calls.count(bark) == 1
+        assert _calls(builder, "FILE:A.java::Bounded::go") == [bark]
+
     def test_go_generic_struct_fields_and_named_arrays(self, tmp_path):
         """A generic struct's fields are read after its type parameters, not
         as an array's elements, and `type A [5]T` is an array of `T`, its

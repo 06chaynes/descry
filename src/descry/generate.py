@@ -9550,7 +9550,7 @@ def _ts_type_parameters(text: str) -> dict[str, str]:
     return found
 
 
-def _ts_generic(params: dict[str, str]) -> dict:
+def _generic_metadata(params: dict[str, str]) -> dict:
     """The metadata of a type that declares the type parameters ``params``:
     their names in order and the bounds of those that have one."""
     if not params:
@@ -11897,7 +11897,7 @@ class TSParser(BaseParser):
                     end_lineno=end_lineno,
                     token_count=token_count,
                     docstring=docstring,
-                    **_ts_generic(
+                    **_generic_metadata(
                         _ts_type_parameters(line[match.end(1 if match[1] else 2) :])
                     ),
                 )
@@ -12229,7 +12229,7 @@ class TSParser(BaseParser):
                     end_lineno=end_lineno,
                     token_count=token_count,
                     docstring=docstring,
-                    **_ts_generic(_ts_type_parameters(full_sig)),
+                    **_generic_metadata(_ts_type_parameters(full_sig)),
                 )
                 self.builder.add_edge(held_by, cid, "DEFINES")
                 class_ids.add(cid)
@@ -13445,6 +13445,8 @@ class CallResolver:
         self.bases = {}
         # index of an INHERITS edge -> the base as written, qualifier and all
         self.base_names = {}
+        # class ID -> its bases as written, with their type arguments
+        self.written_bases = {}
         self.requires = {}  # Ruby file ID -> the paths it requires
         for index, edge in enumerate(builder.edges):
             if edge["relation"] == "IMPORTS" and self.lang(edge["source"]) == "ruby":
@@ -13453,6 +13455,7 @@ class CallResolver:
             if edge["relation"] == "INHERITS":
                 # A base the parser gave as a node is known by its name too.
                 base = written = edge["target"].removeprefix("REF:")
+                self.written_bases.setdefault(edge["source"], []).append(written)
                 # A PHP base is written by its full name, which names one
                 # type; a Ruby constant is looked up by its whole path.
                 lang = self.lang(edge["source"])
@@ -16042,9 +16045,12 @@ class CallResolver:
             )
             self.java_fields[owner, root] = next(fields, None)
         if field := self.java_fields[owner, root]:
-            # Read without a receiver, it is of the type as written.
+            # Read without a receiver, it is of the type as written, a type
+            # parameter's bound for one.
             written = self.nodes[field]["metadata"]["value_type"]
-            held = self._name_value(written.replace(".", "::"), field, set())
+            held = self._type_argument(written, field, None)
+            if held is False:
+                held = self._name_value(written.replace(".", "::"), field, set())
             return held, names[1:]
         # A standard type, written with the types it is nested in.
         sizes = range(len(names) - 1, 0, -1)
@@ -16217,6 +16223,11 @@ class CallResolver:
                 return None
             return self._attr(held, name, seen, called)
         hit, complete = self._find_member(ref, name, inherited_only=kind == "super")
+        declared = hit and not called and len(value) > 2 and self.nodes[hit]["metadata"]
+        if declared and declared.get("value_type"):
+            # A field of a generic type's value is of its type with the
+            # value's arguments.
+            return self._returned_type(declared["value_type"], hit, value)
         python = self.lang(ref) == "python"
         if hit and not called and self.nodes[hit]["type"] == "Method":
             # Java keeps a field that shares a method's name under `field_`.
@@ -16958,31 +16969,7 @@ class CallResolver:
         if not match:
             return None
         owner = receiver or self._enclosing_class(function_id)
-        if self.lang(function_id) == "java":
-            # A method whose return names a parameter the class bounds by
-            # itself — `B extends AbstractBuilder<.., B, ..>` — returns the
-            # receiver's type: `builder.setCloser()` is a `Builder` again.
-            owner_id = function_id.rpartition("::")[0]
-            generics = (
-                self.nodes.get(owner_id, {}).get("metadata", {}).get("generics", ())
-            )
-            received_id = (
-                owner[1]
-                if isinstance(owner, tuple) and len(owner) > 1
-                else owner
-                if isinstance(owner, str)
-                else None
-            )
-            if match[1] in generics and received_id:
-                declared = self._declarations(received_id)
-                bases = {
-                    b.split("<")[0].rsplit(".", 1)[-1].rpartition("::")[2]
-                    for d in declared
-                    for b in self.bases.get(d, ())
-                }
-                if owner_id in declared or self._name(owner_id) in bases:
-                    return ("self", received_id)
-        held = self._type_argument(match[1], function_id, instance)
+        held = self._type_argument(match[1], function_id, instance or receiver)
         if held is not False:
             return held
         standard = None
@@ -17014,11 +17001,15 @@ class CallResolver:
                 return (kind, found)
         return standard
 
-    def _type_argument(self, name, scope_id, instance):
+    def _type_argument(self, name, scope_id, receiver):
         """What the type parameter ``name`` of a type around ``scope_id``
-        stands for: the argument ``instance``, a value of that type or of
-        one derived from it, gives it, else its bound, None for neither;
-        False where no type around declares the parameter."""
+        stands for: the argument ``receiver``, a value of that type or of
+        one derived from it or the ID of such a type, gives it, else its
+        bound, the receiver's own type for one bound by a type of itself
+        (`B extends Builder<B>`), None for none; False where no type around
+        declares the parameter."""
+        instance = receiver if isinstance(receiver, tuple) else None
+        instance = instance or (receiver and ("self", receiver))
         for scope in self._scopes(scope_id):
             metadata = self.nodes.get(scope, {}).get("metadata", {})
             generics = list(metadata.get("generics") or ())
@@ -17028,6 +17019,8 @@ class CallResolver:
                 if at < len(given) and given[at] is not None:
                     return given[at]
                 bound = (metadata.get("type_bounds") or {}).get(name)
+                if bound and re.search(rf"(?<![\w$]){re.escape(name)}(?![\w$])", bound):
+                    return instance and instance[:2]
                 return self._returned_type(bound, scope) if bound else None
         return False
 
@@ -17041,7 +17034,7 @@ class CallResolver:
         if type_id in self._declarations(own):
             return given
         reached = self._candidates_now
-        for base in self.bases.get(own, ()):
+        for base in self.written_bases.get(own, ()):
             name, opened, written = base.partition("<")
             if opened and self._type_named(name, own) == type_id:
                 self._candidates_now = reached

@@ -23,7 +23,7 @@ from descry.generate import (
     _JAVA_BOXES,
     BaseParser,
     _bracketed_parts,
-    _strip_generics,
+    _generic_metadata,
     blank_strings,
     is_generated_source,
     source_lines,
@@ -190,13 +190,41 @@ _RE_NEW_GENERIC = re.compile(r"(?:\bnew\s+[A-Za-z_$][A-Za-z0-9_$.]*|\.)\s*<")
 _RE_BODY_OPENS = re.compile(r"\)\s*\{\s*$")
 
 
+def _supertypes(head):
+    """The supertypes a class's head names after its name, each with its
+    type arguments: `<T extends B> extends C<T> implements D, E {` gives
+    `["C<T>", "D", "E"]`. The class's own type parameters, whose bounds
+    `extends` too, are none, nor is what a `permits` clause lists."""
+    head = head.lstrip()
+    if head.startswith("<"):
+        depth = 0
+        for at, char in enumerate(head):
+            depth += (char == "<") - (char == ">")
+            if not depth:
+                head = head[at + 1 :]
+                break
+    found, written, depth = [], "", 0
+    for word in re.split(r"(\b(?:extends|implements|permits)\b|[<>,{])", head):
+        depth += (word == "<") - (word == ">")
+        if not depth and word in ("{", "permits"):
+            break
+        if not depth and word in ("extends", "implements", ","):
+            found.append(written)
+            written = ""
+        else:
+            written += word
+    found.append(written)
+    return [" ".join(base.split()) for base in found[1:] if base.strip()]
+
+
 def _type_params(code, start=0):
-    """The type parameter names a declaration writes in `<...>` at
-    ``start``: `interface Function<F, T>` gives `("F", "T")`. A parameter's
-    bound may itself be generic — `B extends Pair<T, B>` still names `B`."""
+    """``{name: bound}`` of the type parameters a declaration writes in
+    `<...>` at ``start``: `interface Function<F, T extends Dog>` gives
+    `{"F": "", "T": "Dog"}`. A parameter's bound may itself be generic:
+    `B extends Pair<T, B>` still names `B`."""
     lead = re.match(r"\s*<", code[start:])
     if not lead:
-        return ()
+        return {}
     depth, end = 0, None
     for i, char in enumerate(code[start + lead.end() :], start + lead.end()):
         depth += char == "<"
@@ -205,13 +233,12 @@ def _type_params(code, start=0):
             end = i
             break
     if end is None:
-        return ()
-    inner = code[start + lead.end() : end]
-    return tuple(
-        part.strip().split(" extends ")[0].split()[-1]
-        for part in _bracketed_parts(inner)
-        if part.strip()
-    )
+        return {}
+    found = {}
+    for part in _bracketed_parts(code[start + lead.end() : end]):
+        name, _, bound = part.strip().partition(" extends ")
+        found[name.split()[-1]] = bound.strip()
+    return found
 
 
 def _param_writings(code, start):
@@ -308,19 +335,9 @@ class JavaParser(BaseParser):
         if max(bound, default=0) > max(typed, default=0):
             return f"?.{path}"
         if not typed:
-            return f"{self._bound(root)}.{path}"
+            return f"{root}.{path}"
         head = super().call_origin(f"{root}.x", lineno, since)
         return f"{head[:-2] if head else '?'}.{path}"
-
-    def _bound(self, written):
-        """The type ``written``, or where the file bounds a type parameter
-        of that name, its bound. A parameter bounded by its own bound's
-        arguments — `B extends Builder<B>` — is a self-type: it stays
-        written so the resolver can substitute the receiver's."""
-        bound = self._declared(f"<{written}>", 0, 0, True)
-        if bound and re.search(rf"<[^<>]*\b{written}\b", bound):
-            return written
-        return bound or written
 
     def _lambda_target(self, before):
         """The type a lambda at the end of ``before`` is assigned to or
@@ -486,17 +503,13 @@ class JavaParser(BaseParser):
                     end_lineno=end_lineno,
                     token_count=(end_lineno - lineno + 1) * 10,
                     docstring=docstring,
-                    generics=_type_params(line, m_type.end()),
+                    **_generic_metadata(_type_params(line, m_type.end())),
                 )
                 self.builder.add_edge(parent_id, type_id, "DEFINES")
                 header = [line, *lines[i + 1 : (brace_line_idx or i) + 1]]
-                header = _strip_generics(" ".join(header)).partition("{")[0]
-                for clause in re.split(r"\b(?:extends|implements)\b", header)[1:]:
-                    for base in clause.split(","):
-                        if base.split():
-                            self.builder.add_edge(
-                                type_id, f"REF:{base.split()[0]}", "INHERITS"
-                            )
+                header = " ".join(header)[m_type.end() :]
+                for base in _supertypes(header):
+                    self.builder.add_edge(type_id, f"REF:{base}", "INHERITS")
                 if kind == "enum":
                     enums.add(type_id)
                 if has_open_brace and end_lineno > brace_line_idx + 1:
@@ -528,7 +541,12 @@ class JavaParser(BaseParser):
                             self._find_block_end(lines, i) if has_body else lineno
                         )
                         docstring = self.get_leading_docstring(lines, i)
-                        returns = self._bound(m_method["returns"].strip())
+                        # A type parameter the method declares is its bound.
+                        head = line[: m_method.start("returns")]
+                        returns = m_method["returns"].strip()
+                        if (opened := head.find("<")) >= 0:
+                            own = _type_params(head, opened)
+                            returns = own.get(returns) or returns
                         declared = self._node(method_id)
                         # A field of the same name moves to `<type>::field_<name>`.
                         if declared and declared["type"] == "Constant":
@@ -612,7 +630,7 @@ class JavaParser(BaseParser):
                                 name=name,
                                 lineno=lineno,
                                 docstring="",
-                                value_type=self._bound(m_field["type"].strip()),
+                                value_type=m_field["type"].strip(),
                             )
                             self.builder.add_edge(parent_id, field_id, "DEFINES")
                 m_constant = context_id in enums and _RE_ENUM_CONSTANT.match(code)

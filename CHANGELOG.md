@@ -346,7 +346,11 @@ Python SDK v2, and a full-tree review's findings are fixed.
   `T` is a dog through a field, a method's return, `this` and a subclass
   that writes its base's arguments, and inside the type a parameter is its
   bound, where each was untyped; overloads that return one type with
-  other arguments return that type, where they returned none; calls in comments, string
+  other arguments return that type, where they returned none. So does a
+  Java generic type, whose type parameters were each read as the bound
+  any class of the file gave one of their name, so `Box<Cat>`'s `T` was
+  a `Dog` where `Bounded<T extends Dog>` was written beside it; a base is
+  kept with its type arguments; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a
