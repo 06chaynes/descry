@@ -49,8 +49,9 @@ _JAVA_DESCRIPTOR_PATTERN = re.compile(
 # The regular files by which scip-java 0.12.3 detects each build tool it
 # supports. sbt is also detected by a `project/build.properties` holding the
 # key `sbt.version`; `_SBT_VERSION_KEY` finds it where a line starts with it,
-# which is every form but an escaped key, a continued line or a malformed
-# `\u` escape (on which scip-java aborts). Text mode turns CR and CRLF into
+# which is every form but an escaped key or a continued line. A `\u` escape
+# not followed by four hex digits outside a comment, `_MALFORMED_ESCAPE`,
+# makes scip-java abort reading the file. Text mode turns CR and CRLF into
 # LF, the other line ends the properties format accepts.
 _BUILD_TOOL_MARKERS = {
     "SCIP": ("scip-java.json", "lsif-java.json"),
@@ -61,11 +62,14 @@ _BUILD_TOOL_MARKERS = {
     "Bazel": ("WORKSPACE",),
 }
 _SBT_VERSION_KEY = re.compile(r"^[ \t\f]*sbt\.version(?:[ \t\f=:]|$)", re.MULTILINE)
+_MALFORMED_ESCAPE = re.compile(
+    r"^(?![ \t\f]*[#!]).*?(?<!\\)(?:\\\\)*\\u(?![0-9a-fA-F]{4})", re.MULTILINE
+)
 
 
 def _build_tools(directory: Path) -> set[str] | None:
     """The build tools scip-java detects in `directory`, or None where it
-    aborts reading a `project/build.properties` it cannot read.
+    aborts reading a `project/build.properties` it cannot read or parse.
 
     Run there without ``--build-tool``, as descry runs it, scip-java builds
     with the one it detects and refuses a directory where it detects none
@@ -82,6 +86,8 @@ def _build_tools(directory: Path) -> set[str] | None:
         try:
             text = properties.read_text(encoding="utf-8", errors="replace")
         except OSError:
+            return None
+        if _MALFORMED_ESCAPE.search(text):
             return None
         if _SBT_VERSION_KEY.search(text):
             tools.add("sbt")

@@ -13848,7 +13848,9 @@ class CallResolver:
         self.java_scoped = {}  # (scope, type name) -> the type it names there
         self.java_fields = {}  # (class ID, name) -> the field read by it there
         self.c_files = {}  # path a C/C++ file can be included by -> file IDs
-        self.py_modules = {}  # dotted module name -> file ID
+        # dotted module name -> {directory its topmost package is in: file ID}
+        self.py_modules = {}
+        self.py_root_of = {}  # Python file ID -> that directory
         self.py_module_of = {}  # file ID -> dotted module name
         files = {nid for nid, node in self.nodes.items() if node["type"] == "File"}
         py_files = []
@@ -13900,10 +13902,17 @@ class CallResolver:
         # A module is importable by its path below its topmost package and,
         # through namespace packages, by any longer path no other module owns.
         for top, parts, file_id in py_files:
-            self.py_modules.setdefault(".".join(parts[top:]), file_id)
+            root = "/".join(parts[:top])
+            self.py_root_of[file_id] = root
+            self.py_modules.setdefault(".".join(parts[top:]), {}).setdefault(
+                root, file_id
+            )
+        owned = set(self.py_modules)
         for top, parts, file_id in py_files:
             for start in range(top):
-                self.py_modules.setdefault(".".join(parts[start:]), file_id)
+                if (name := ".".join(parts[start:])) not in owned:
+                    held = self.py_modules.setdefault(name, {})
+                    held.setdefault("/".join(parts[:start]), file_id)
         self.py_roots = {module.split(".")[0] for module in self.py_modules}
         # C/C++ file ID -> IDs of the project files it includes, of those
         # that include it, and of those it is compiled with
@@ -16446,6 +16455,16 @@ class CallResolver:
             return True, library.value(returns, bound)
         return library.function(callee, source_id)
 
+    def _py_root(self, module, file_id):
+        """The directory the module ``module`` imported in ``file_id`` is
+        below: the importer's own where the module is there, else the only
+        one it is below; None where it is below several others."""
+        roots = self.py_modules[module]
+        own = self.py_root_of.get(file_id)
+        if own in roots:
+            return own
+        return next(iter(roots)) if len(roots) == 1 else None
+
     def _import_value(self, steps, dots, file_id):
         """Split an imported dotted path into the project module it starts
         with and the steps left to take inside it."""
@@ -16459,7 +16478,10 @@ class CallResolver:
         for size in range(len(names), -1, -1):
             module = ".".join(package + names[:size])
             if module in self.py_modules:
-                return ("module", module), steps[size:]
+                root = self._py_root(module, file_id)
+                if root is None:
+                    return None, []
+                return ("module", module, root), steps[size:]
         if dots or names[0] in self.py_roots:
             return None, []
         if names[0] in _py_std_names():
@@ -16477,9 +16499,10 @@ class CallResolver:
             dotted = f"{ref}.{name}"
             return ("library", dotted) if dotted in _py_std_names() else _EXTERNAL
         if kind == "module":
-            if f"{ref}.{name}" in self.py_modules:
-                return ("module", f"{ref}.{name}")
-            file_id = self.py_modules[ref]
+            root = value[2]
+            if root in self.py_modules.get(f"{ref}.{name}", ()):
+                return ("module", f"{ref}.{name}", root)
+            file_id = self.py_modules[ref][root]
             hit = self.members.get(file_id, {}).get(name)
             if hit:
                 return ("def", hit)
@@ -17931,7 +17954,7 @@ class CallResolver:
             if owner_name and owner_name in imports:
                 return True
             return any(
-                self.py_modules.get(target) == c_file
+                c_file in self.py_modules.get(target, {}).values()
                 for target in imports.values()
                 if isinstance(target, str)
             )

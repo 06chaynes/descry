@@ -146,6 +146,25 @@ class TestJavaAdapterDiscovery:
 
         assert [p.root for p in projects] == [app]
 
+    def test_malformed_escape_in_build_properties_yields_the_subprojects(
+        self, tmp_path
+    ):
+        """scip-java aborts on a `\\u` escape not followed by four hex digits
+        outside a comment, so the root is not taken as one Gradle build; an
+        escaped backslash, a comment and a whole escape abort nothing."""
+        app = tmp_path / "app"
+        app.mkdir()
+        (tmp_path / "settings.gradle").write_text("include 'app'\n")
+        (tmp_path / "project").mkdir()
+        properties = tmp_path / "project" / "build.properties"
+        (app / "build.gradle").write_text("// app build\n")
+        (app / "Main.java").write_text("class Main {}")
+
+        properties.write_text("# \\uzz\nname=\\\\u12 \\u00e9\n")
+        assert [p.root for p in JavaAdapter().discover(tmp_path, set())] == [tmp_path]
+        properties.write_text("name=\\u12\n")
+        assert [p.root for p in JavaAdapter().discover(tmp_path, set())] == [app]
+
     def test_a_directory_is_a_project_where_scip_java_runs(self, tmp_path):
         """scip-java, given no `--build-tool`, builds with the one tool it
         detects and refuses none or more than one; discovery follows it."""

@@ -8602,6 +8602,29 @@ class TestTypeScriptCallResolution:
             "FILE:a.ts::ns::inner",
         ]
 
+    def test_a_python_import_is_of_the_importer_s_own_root(self, tmp_path):
+        """A module path more than one directory gives, `pkg.models` below
+        `src/` and `lib/`, is the one below the importing file's own; one
+        below two others than the importer's is neither."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/pkg/__init__.py": "",
+                "src/pkg/models.py": "def make():\n    pass\n",
+                "src/pkg/main.py": "from pkg.models import make\n\ndef run():\n    make()\n",
+                "lib/pkg/__init__.py": "",
+                "lib/pkg/models.py": "def make():\n    pass\n",
+                "tools/use.py": "from pkg.models import make\n\ndef go():\n    make()\n",
+            },
+        )
+        assert _calls(builder, "FILE:src/pkg/main.py::run") == [
+            "FILE:src/pkg/models.py::make"
+        ]
+        assert not {
+            "FILE:lib/pkg/models.py::make",
+            "FILE:src/pkg/models.py::make",
+        } & set(_calls(builder, "FILE:tools/use.py::go"))
+
     def test_cpp_elements_fields_and_lambda_parameters_have_their_types(self, tmp_path):
         """`items[i]` is what the container's `operator[]` returns, a C
         array's element its declared type, a range-based `for` over a

@@ -336,7 +336,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   in Rust, a closure takes the parameters of the `Fn` bound the callee
   declares, `impl Fn(A)`, `F: Fn(A)` or in a `where` clause, `a < b,
   c > (d)` is two comparisons where it was read as type arguments, and
-  the `Fn(...)` of a signature is no call; calls in comments, string
+  the `Fn(...)` of a signature is no call. A Python module path more
+  than one directory gives, `pkg.models` below `src/` and `lib/`, is the
+  one below the importing file's own, not the first found, and one below
+  two others is unresolved; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a
@@ -470,7 +473,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   Every JVM project is discovered on the same terms: a directory where
   scip-java detects exactly one build tool, by the regular files its own
   detectors read, so it is not run where it would answer "No build tool
-  detected" or "Multiple build tools detected". A Rust root package beside
+  detected" or "Multiple build tools detected", nor where a
+  `project/build.properties` holds a `\u` escape without four hex digits,
+  on which it aborts. A Rust root package beside
   its workspace members, or beside nested crates, is indexed too:
   `rust-analyzer scip` indexes only the crate at the path it is given, so
   the root package had no index; it is named `.` where a member holds the
