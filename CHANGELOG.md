@@ -299,7 +299,23 @@ Python SDK v2, and a full-tree review's findings are fixed.
   body opens on a later line with members on it, a namespace, `namespace
   A.B` or `declare namespace`, whose members had no owner, and a
   `declare const`, which was no constant, so a namespace that is a value
-  too had neither's members; calls in comments, string
+  too had neither's members, and a template literal that goes on to the
+  next line with another inside a `${...}`, which ended the block around
+  it. A JavaScript or TypeScript import binds what its module exports
+  under its kind: a default import the module's default (`export default
+  f`, a declaration or an object after it), whatever it is named, where
+  it was looked up by its own name and its calls were dropped; a named
+  import the export of its name, whose members were read from the module
+  itself, so `a.run()` reached the module's `run`; a namespace import or
+  a `require`, `import x = require(...)` too, which was read as a call of
+  `require`, the module whole; a module that assigns its exports,
+  `export =` or `module.exports =`, exports that value's members. An
+  object holds what `{ f }`, `{ key: f }` and `{ ...o }` name; a module
+  is located in a declaration file where no other is at its path, a
+  package's conditional export is the first that applies to a `require`
+  or an import, not to either, and `./index.d.cts` is that file, not
+  `index.d.ts`. What is declared `typeof x`, a variable, a parameter or
+  a field, holds `x`; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a

@@ -6348,6 +6348,8 @@ class BaseParser:
     # the steps of an origin path that lead from the value matched to it.
     bindings = None
     self_name = "self"  # what a method calls the instance it is called on
+    # What a count of braces skips in the lines it is given
+    _non_code = _NON_CODE_RE
     # Whether a value that goes on below its `name =`, on lines that start
     # with `.`, is followed through the calls those lines leave open.
     chained_values = False
@@ -6497,8 +6499,10 @@ class BaseParser:
                                     )
                     else:
                         key, value = f"<{groups['param']}>", declared_type
+                    # What is declared `typeof x` holds `x` itself.
+                    queried = _TS_TYPEOF_RE.fullmatch(groups["type"])
                     self.declared.setdefault(key, []).append(
-                        (lineno, value, file_level)
+                        (lineno, queried[1] if queried else value, file_level)
                     )
                     # A field is declared at the start of a line, behind
                     # modifiers at most, and not among parameters.
@@ -7160,7 +7164,9 @@ class BaseParser:
 
         for i in range(start_idx, len(lines)):
             line, in_comment = strip_block_comments(lines[i], in_comment)
-            line = _NON_CODE_RE.sub("", line[column:] if i == start_idx else line)
+            line = line[column:] if i == start_idx else line
+            if self._non_code:
+                line = self._non_code.sub("", line)
             for char in line:
                 if char == "{":
                     brace_depth += 1
@@ -9434,7 +9440,8 @@ _TS_DECLARATIONS = (
     re.compile(
         r"(?:^|[(,]|\b(?:const|let|var|private|public|protected|readonly)\s)\s*"
         r"(?P<name>[A-Za-z_$][\w$]*)\??\s*:\s*(?P<type>(?:(?:[a-z_$][\w$]*\.)*"
-        rf"[A-Z$][\w$.]*(?:{_TS_ARGUMENTS})?|string|number|boolean|bigint|symbol)"
+        rf"[A-Z$][\w$.]*(?:{_TS_ARGUMENTS})?|string|number|boolean|bigint|symbol"
+        r"|typeof\s+[\w$]+(?:\.[\w$]+)*)"
         r"(?:\[\])*)(?:\s*\|\s*(?:undefined|null))*(?=\s*(?:[,)=;]|$))"
     ),
     # `name = new Type(`
@@ -10206,11 +10213,12 @@ _TS_LINE_MEMBER_RE = re.compile(
     rf"\s*{_TS_MEMBER_MODIFIERS}(?:(get|set)\s+)?(?:\*\s*)?"
     rf"({_TS_WRITTEN_MEMBER_NAME})\s*(?:<[^>]*>)?\s*\("
 )
+_TS_TYPEOF_RE = re.compile(r"typeof\s+([\w$]+(?:(?:\.|::)[\w$]+)*)")
 # `const name = require("m")`, `const { a, b: c } = await import("m")`, a
 # `/* */` comment before the module too
 _TS_REQUIRE_RE = re.compile(
-    r"""\b(?:const|let|var)\s+([\w$]+|\{[^}]*\})\s*=\s*(?:await\s+)?"""
-    r"""(?:require|import)\(\s*(?:/\*(?:[^*]|\*(?!/))*\*/\s*)*['"]([^'"]+)['"]\s*\)"""
+    r"""\b(?:const|let|var|import)\s+([\w$]+|\{[^}]*\})\s*=\s*(?:await\s+)?"""
+    r"""(require|import)\(\s*(?:/\*(?:[^*]|\*(?!/))*\*/\s*)*['"]([^'"]+)['"]\s*\)"""
 )
 _TS_PARAM_MODIFIERS = ("...", "public", "private", "protected", "readonly")
 # `export * from "<specifier>"`, `export { <clause> } from "<specifier>"` and,
@@ -10219,6 +10227,16 @@ _TS_REEXPORT_RE = re.compile(
     r"""^\s*export\s+(?:type\s+)?"""
     r"""(?:(\*)(?:\s+as\s+([\w$]+))?\s+from\s+|\{([^}]*)\}(?:\s+from\s+)?)"""
     r"""(?:['"]([^'"]+)['"])?""",
+    re.MULTILINE,
+)
+# What a module exports as its default, `export default <name>` or a
+# declaration of a name after it, and whole, `export = <name>` or
+# `module.exports = <name>`
+_TS_DEFAULT_EXPORT_RE = re.compile(
+    r"^[ \t]*(?:export[ \t]+(default)[ \t]+(?:"
+    r"(?:(?:async[ \t]+)?function\b[ \t]*\*?|(?:abstract[ \t]+)?class\b|interface\b)"
+    r"[ \t]*(?!extends\b|implements\b)([\w$]+)|([\w$]+)(?=[ \t]*;?[ \t]*$))"
+    r"|(?:export|module\.exports)[ \t]*=[ \t]*([\w$]+)(?=[ \t]*;?[ \t]*$))",
     re.MULTILINE,
 )
 # `import <clause> from "<specifier>"`, the clause possibly over several lines
@@ -10812,6 +10830,8 @@ class TSParser(BaseParser):
     bindings = staticmethod(_js_bindings)
     self_name = "this"
     chained_values = True
+    # The lines braces are counted in have their literals blanked already.
+    _non_code = None
 
     def _typed_origin(self, origin, declared):
         """A name declared with a type and bound to a call is read as what
@@ -10972,10 +10992,10 @@ class TSParser(BaseParser):
     def call_origin(self, callee, lineno, since, owner=None):
         """As ``BaseParser.call_origin``, and for a bare callee that a
         pattern bound to a member of a value, `const { run } = make()`, the
-        origin path of that member."""
+        origin path of that member, and for one declared `typeof x`, `x`."""
         bound = "." not in callee and callee not in self._imported
         held = bound and self._declared(callee, lineno, since)
-        if held and re.search(r"\.[\w$]+$", held):
+        if held and re.search(r"(?:^|\.)[\w$]+$", held):
             return held
         return super().call_origin(callee, lineno, since, owner)
 
@@ -11240,36 +11260,44 @@ class TSParser(BaseParser):
             self.builder.reexports.setdefault(file_id, []).extend(
                 (exported, specifier, original) for exported, original in names
             )
-        modules = {}  # name a module is imported under whole -> its specifier
+        for default, *names in _TS_DEFAULT_EXPORT_RE.findall(content):
+            exported = "default" if default else "="
+            entry = (exported, "", "".join(names))
+            self.builder.reexports.setdefault(file_id, []).append(entry)
+        names = self.builder.import_names.setdefault(file_id, {})
         for clause, specifier in _TS_IMPORT_RE.findall(content):
-            for part in re.split(r"[{},]", clause):
-                # `name`, `type name`, `name as alias`, `* as alias`
-                original, renamed, alias = part.partition(" as ")
+            for part in re.finditer(r"[^{},]+", clause):
+                # `name`, `type name`, `name as alias`, `* as alias`; before
+                # a `{`, the module's default
+                original, renamed, alias = part[0].partition(" as ")
                 local = alias.split()[-1:] if renamed else original.split()[-1:]
                 if local:
                     self.builder.imports.setdefault(file_id, {})[local[0]] = specifier
-                    if part.split()[0] == "*":
-                        modules[local[0]] = specifier
+                    if original.split() == ["*"]:
+                        names[local[0]] = "="
+                    elif "{" not in clause[: part.start()]:
+                        names[local[0]] = "default"
                     elif renamed and original.split():
-                        exported = original.split()[-1]
-                        self.builder.import_names.setdefault(file_id, {})[local[0]] = (
-                            exported
-                        )
+                        names[local[0]] = original.split()[-1]
         # The lines a `require` or an `import()` binds names on
         required = set()
         for found in _TS_REQUIRE_RE.finditer(content):
-            clause, specifier = found.groups()
+            clause, call, specifier = found.groups()
             required.add(self.read_line(content.count("\n", 0, found.start()) + 1) - 1)
+            if "{" not in clause:
+                names[clause] = "="
             for part in re.split(r"[{},]", clause):
                 # `name`, or `name: local` in a destructuring pattern
                 exported, renamed, local = part.rpartition(":")
                 local = local.strip()
                 if local:
                     self.builder.imports.setdefault(file_id, {})[local] = specifier
-                    if renamed and exported.strip():
-                        self.builder.import_names.setdefault(file_id, {})[local] = (
-                            exported.strip()
+                    if call == "require":
+                        self.builder.required_names.setdefault(file_id, set()).add(
+                            local
                         )
+                    if renamed and exported.strip():
+                        names[local] = exported.strip()
         imported = self._imported = self.builder.imports.get(file_id, ())
         # Which characters are code is read once for the file. Each of
         # ``code_lines`` is a line without its comments and with the text of
@@ -11396,12 +11424,14 @@ class TSParser(BaseParser):
 
         def value_of(name, lineno, since, owner):
             """The origin of a call of ``name`` on line ``lineno`` that calls a
-            value: `?` for a parameter, and `=name` for a variable a function
-            declares, where no definition there defines the name and the
-            variable's origin is not known."""
+            value: `?` for a parameter, what one declared `typeof x` holds,
+            and `=name` for a variable a function declares, where no
+            definition there defines the name and the variable's origin is
+            not known."""
             for context in reaching(lineno):
                 if name in context[3]:
-                    return "?"
+                    held = self._declared(name, lineno, since)
+                    return held if held and not held.endswith("()") else "?"
                 if f"{context[0]}::{name}" in self.builder.node_registry:
                     return None
                 lines_in = declared_names.get(context[:3], {}).get(name, ())
@@ -11849,6 +11879,9 @@ class TSParser(BaseParser):
                         last,
                         "object",
                     )
+                    if opened["default"]:
+                        entry = ("default", "", oid.rpartition("::")[2])
+                        self.builder.reexports.setdefault(file_id, []).append(entry)
                 else:
                     oid = None
                 if oid:
@@ -11955,7 +11988,7 @@ class TSParser(BaseParser):
                 fid = f"{object_id or parent_id}::{name}"
                 # A block is left open where the statement stops; an
                 # expression body ends with the statement.
-                last = _NON_CODE_RE.sub("", code_lines[j])
+                last = code_lines[j]
                 end_lineno = (
                     self._find_block_end(code_lines, j)
                     if last.count("{") > last.count("}")
@@ -11994,17 +12027,11 @@ class TSParser(BaseParser):
                 )
                 arrow_id = fid
                 signature_until = j + 1  # its last line, as a line number
-            elif (
-                parent_id in object_ids
-                and (match := re_held.match(line))
-                and match[3] in modules
-            ):
-                # The object holds what the module exports, or with a key the
-                # module itself: what a file re-exports from one, it does.
+            elif parent_id in object_ids and (match := re_held.match(line)):
+                # The object holds by its key what the name is, and spread
+                # what that holds.
                 spread, key, name = match.groups()
-                held = ("*", modules[name], "")
-                if not spread:
-                    held = (key or name, modules[name], "*")
+                held = ("*" if spread else key or name, "", name)
                 self.builder.reexports.setdefault(parent_id, []).append(held)
             elif (
                 parent_id in class_ids
@@ -14023,11 +14050,16 @@ class CallResolver:
             # each further segment names what that scope holds in turn. The
             # scope may export the definition under another name.
             paths = [qualifier[1:]]
-            if lang in _NAMESPACE_RECEIVER_LANGS:
-                # A named import of a receiver is what the scope holds
-                # under the receiver's name.
-                head = qualifier[:1] and [self._exported_as(qualifier[0], source_id)]
-                paths.append(head + qualifier[1:])
+            bound = self.builder.imports.get(source_id.split("::")[0], {})
+            if (
+                lang in _NAMESPACE_RECEIVER_LANGS
+                and qualifier[:1]
+                and qualifier[0] in bound
+            ):
+                # A receiver an import binds to one export, not to the
+                # module whole, is what the module holds under its name.
+                head = self._exported_as(qualifier[0], source_id)
+                paths = [qualifier[1:] if head == "=" else [head, *qualifier[1:]]]
             looked_up = name if qualifier else self._exported_as(name, source_id)
             for path in paths:
                 scopes = imported
@@ -14184,7 +14216,8 @@ class CallResolver:
         if target is None or lang not in ("go", "java", "typescript", "rust"):
             return None
         if lang == "typescript":
-            return self._js_module(target, file_id)
+            required = name in self.builder.required_names.get(file_id, ())
+            return self._js_module(target, file_id, required)
         if lang == "rust":
             *path, leaf = target.split("::")
             modules = path[1:]
@@ -14242,11 +14275,11 @@ class CallResolver:
             return None
         return ()
 
-    def _js_module(self, specifier, file_id):
-        """Resolve a module specifier written in ``file_id``: ``[file ID]``
-        for a project module, ``[]`` for one of the project's that cannot be
-        located, ``"external"`` for a declared dependency, None for anything
-        else."""
+    def _js_module(self, specifier, file_id, required=False):
+        """Resolve a module specifier written in ``file_id``, by a `require`
+        if ``required``: ``[file ID]`` for a project module, ``[]`` for one
+        of the project's that cannot be located, ``"external"`` for a
+        declared dependency, None for anything else."""
         folder = posixpath.dirname(file_id[5:])
         if specifier.startswith("."):
             found = self._js_file(posixpath.join(folder, specifier))
@@ -14275,12 +14308,15 @@ class CallResolver:
                 matched = _star_match(key, subpath)
                 if matched is None:
                     continue
-                # A conditional target lists one path per condition.
+                # A conditional target lists one path per condition, the
+                # first that applies taken: `require` to a `require` only,
+                # `import` to an import.
+                skipped = "import" if required else "require"
                 pending = [target]
                 while pending:
                     target = pending.pop(0)
                     if isinstance(target, dict):
-                        pending.extend(target.values())
+                        pending[:0] = [v for k, v in target.items() if k != skipped]
                     elif isinstance(target, str):
                         path = target.replace("*", matched)
                         if found := self._js_file(posixpath.join(folder, path)):
@@ -14347,10 +14383,15 @@ class CallResolver:
 
     def _js_file(self, path):
         """File ID of the JS/TS module at ``path``, written with any or no
-        extension, or naming a directory with an index module."""
-        stem = re.sub(r"\.[cm]?[jt]sx?$", "", posixpath.normpath(path))
+        extension, or naming a directory with an index module; a
+        declaration file where no module is there."""
+        path = posixpath.normpath(path)
+        if re.search(r"\.[cm]?tsx?$", path) and f"FILE:{path}" in self.nodes:
+            # A TypeScript extension names the file itself.
+            return f"FILE:{path}"
+        stem = re.sub(r"\.[cm]?[jt]sx?$", "", path)
         for tail in ("", "/index"):
-            for extension in _JSTS_EXTENSIONS:
+            for extension in (*_JSTS_EXTENSIONS, ".d.ts", ".d.mts", ".d.cts"):
                 if f"FILE:{stem}{tail}{extension}" in self.nodes:
                     return f"FILE:{stem}{tail}{extension}"
         return None
@@ -14486,26 +14527,55 @@ class CallResolver:
         return ("def", hit), steps
 
     def _exported(self, file_id, name, seen):
-        """Definition a file makes available as ``name``: its own, one it
-        re-exports from another module, or a module it re-exports whole
-        under that name."""
+        """Definition a file or an object makes available as ``name``: its
+        own, one it re-exports from another module or holds by a name it is
+        written with, or a module it re-exports whole under that name. What
+        a file exports whole, `export = X`, is its default, ``=``, and holds
+        every other name it exports."""
+        entries = self.builder.reexports.get(file_id, ())
+        whole = [original for exported, _, original in entries if exported == "="]
+        if whole:
+            hit = self.members.get(file_id, {}).get(whole[-1])
+            if name in ("=", "default") or not hit:
+                return hit
+            return self._find_member(hit, name)[0]
         hit = self.members.get(file_id, {}).get(name)
         if hit or file_id in seen:
             return hit
         seen.add(file_id)
-        for exported, specifier, original in self.builder.reexports.get(file_id, ()):
-            if exported in ("*", name):
-                # Without a specifier the name is exported from the file itself.
-                modules = (
-                    self._js_module(specifier, file_id) if specifier else [file_id]
+        # `export *` passes on neither a default nor what is exported whole.
+        star = "*" if name not in ("default", "=") else None
+        for exported, specifier, original in entries:
+            if exported not in (star, name):
+                continue
+            if not specifier:
+                # `export { a }`, `export default a`, `{ a }` or `{ ...a }`
+                held = self._written(original, file_id, seen)
+                hit = (
+                    held
+                    if exported == name
+                    else held and self._find_member(held, name)[0]
                 )
-                for module in modules or ():
-                    if original == "*":
-                        return module
-                    hit = self._exported(module, original or name, seen)
-                    if hit:
-                        return hit
+            modules = specifier and self._js_module(specifier, file_id)
+            for module in modules if isinstance(modules, list) else ():
+                if original == "*":
+                    return module
+                hit = hit or self._exported(module, original or name, seen)
+            if hit:
+                return hit
         return None
+
+    def _written(self, name, scope_id, seen):
+        """What ``name`` written in the JS/TS ``scope_id`` stands for: the
+        definition in scope, else what an import binds it to, the module
+        itself for one bound whole."""
+        hit = self._lexical(name, scope_id, skip_classes=True)
+        imported = None if hit else self._imported(name, scope_id)
+        exported = self._exported_as(name, scope_id)
+        for module in imported if isinstance(imported, list) else ():
+            hit = hit or self._exported(module, exported, seen)
+            hit = hit or (module if exported == "=" else None)
+        return hit
 
     def _resolve_bare(self, name, candidates, source_id, lang, callee):
         file_id = source_id.split("::")[0]
@@ -15409,10 +15479,13 @@ class CallResolver:
 
     def _name_value(self, name, scope_id, seen):
         """Value of a name read inside ``scope_id``."""
-        hit = self._lexical(name, scope_id, skip_classes=True)
+        lang = self.lang(scope_id)
+        if lang == "typescript":
+            hit = self._written(name, scope_id, set())
+        else:
+            hit = self._lexical(name, scope_id, skip_classes=True)
         if hit:
             return ("def", hit)
-        lang = self.lang(scope_id)
         if lang != "python":
             # `Type<>` is a type written with type arguments, in Go `Type[]`.
             written = name
@@ -16030,8 +16103,12 @@ class CallResolver:
             found = self._starred(file_id, name, seen)[0]
             return found.pop() if len(found) == 1 else None
         if kind == "def" and self.nodes[ref]["type"] != "Class":
-            # A field read gives an instance of the type it is declared as.
+            # A field read gives an instance of the type it is declared as;
+            # one declared no type holds what it is written with.
             held = self._declared_type(ref)
+            hit = not held and self._exported(ref, name, set())
+            if hit:
+                return ("def", hit)
             if held == _EXTERNAL:
                 return _EXTERNAL
             if held and held[0] == "outside":
@@ -16744,6 +16821,16 @@ class CallResolver:
             return self._bound[1][returns]
         if self.builder.literals.get(returns):
             return ("literal", returns)
+        queried = self.lang(function_id) == "typescript" and _TS_TYPEOF_RE.fullmatch(
+            returns.strip()
+        )
+        if queried:
+            # `typeof x` is the type of the value `x`: a value of it is `x`.
+            root, *steps = re.split(r"\.|::", queried[1])
+            held = self._written(root, function_id, set())
+            for step in steps:
+                held = held and self._find_member(held, step)[0]
+            return ("def", held) if held else None
         compound = self.lang(function_id) == "typescript" and _ts_compound(returns)
         if compound:
             values = [
@@ -16998,11 +17085,14 @@ class CallResolver:
         )
         # A value of a namespace's name has the members of its type the
         # namespace has not.
-        valued = isinstance(held, tuple) and held[0] == "self"
-        if valued and not self.members.get(owner_id, {}).get(name):
-            return self._find_member(held[1], name, seen=seen)
-        if not self._is_class(owner_id):
-            # A variable has the members of the type it is declared as.
+        if isinstance(held, tuple) and held[0] == "self":
+            own = self.members.get(owner_id, {}).get(name)
+            return (own, True) if own else self._find_member(held[1], name, seen=seen)
+        if not self._is_class(owner_id) or (
+            self.nodes[owner_id]["metadata"].get("kind") == "object"
+        ):
+            # A variable has the members of the type it is declared as, an
+            # object those it is written with.
             held = self._declared_type(owner_id)
             if isinstance(held, tuple) and held[0] == "self":
                 return self._find_member(held[1], name, seen=seen)
@@ -17016,6 +17106,13 @@ class CallResolver:
         if not inherited_only:
             hits = [self.members.get(d, {}).get(name) for d in declarations]
             hits = [hit for hit in hits if hit]
+            for d in declarations if lang == "typescript" and not hits else ():
+                # A field typed `typeof f` holds `f`.
+                written = self.builder.fields.get(d, {}).get(name, "")
+                held = _TS_TYPEOF_RE.fullmatch(written) and self._returned_type(
+                    written, d
+                )
+                hits += [held[1]] if held else []
             # A pure virtual function that is defined as well is called as
             # its definition; any other two are alternatives of the build.
             defined = [h for h in hits if not self.nodes[h]["metadata"].get("pure")]
@@ -17452,9 +17549,10 @@ class CallResolver:
         if lang == "typescript":
             if owner_name and owner_name in imports:
                 return True
+            required = self.builder.required_names.get(s_file, ())
             return any(
-                c_file in (self._js_module(target, s_file) or ())
-                for target in imports.values()
+                c_file in (self._js_module(target, s_file, name in required) or ())
+                for name, target in imports.items()
                 if isinstance(target, str)
             )
         if lang == "dart":
@@ -17560,11 +17658,15 @@ class CodeGraphBuilder:
         self.js_dependencies = set()
         # tsconfig path -> (configs it extends, `baseUrl`, `paths`), as written
         self.ts_configs = {}
-        # JS/TS file ID -> [(exported name or "*", module specifier, name there)]
+        # JS/TS file or object ID -> [(name exported or held, "*" for each
+        # name of what it names or "=" for the file's whole, module specifier
+        # or "" for a name written in the file, the name there)]
         self.reexports = {}
         # JS/TS file ID -> {local name: the name its module exports it as},
-        # for an import that renames what it binds
+        # for an import that renames what it binds, ``default`` for one of
+        # the default and ``=`` for one of the module whole
         self.import_names = {}
+        self.required_names = {}  # JS/TS file ID -> the names a `require` binds
         # (defining file or class ID, fixture name) -> (function ID, origin
         # path of the value the fixture returns or yields, if it has one,
         # whether it yields it)

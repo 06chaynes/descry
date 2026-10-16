@@ -8408,6 +8408,218 @@ class TestTypeScriptCallResolution:
             "FILE:pkg/index.d.ts::lib::Client::get",
         ]
 
+    def test_an_import_binds_what_the_module_exports_under_its_kind(self, tmp_path):
+        """A default import is the module's default, whatever it is named;
+        a named one is the export of its name, not a name of the module
+        itself; a namespace import or a `require` is the module whole, and
+        a module that assigns its exports, `export =` or `module.exports =`,
+        exports that value's members and that value as its default."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.ts": """
+                export function run() {}
+                export const a = { go() {} };
+                const b = { run() {} };
+                export default b;
+                """,
+                "n.ts": """
+                export default function foo() {}
+                export function named() {}
+                """,
+                "k.ts": """
+                class K { run() {} }
+                export default K;
+                """,
+                "o.js": """
+                export default {
+                  hello() {}
+                };
+                """,
+                "c.js": """
+                function thing() {}
+                module.exports = thing;
+                """,
+                "pkg/index.d.ts": """
+                export = React;
+                declare namespace React {
+                  export function memo(c: any): void;
+                }
+                """,
+                "a.ts": """
+                import { a } from "./m";
+                import d from "./m";
+                import bar from "./n";
+                import Kay from "./k";
+                import * as N from "./n";
+                import obj from "./o.js";
+                import { memo } from "./pkg";
+                import * as R from "./pkg";
+                import Q = require("./pkg");
+                const t = require("./c.js");
+                export function use(k: Kay) {
+                  a.run();
+                  a.go();
+                  d.run();
+                  bar();
+                  N.named();
+                  k.run();
+                  obj.hello();
+                  t();
+                  memo(1);
+                  R.memo(2);
+                  Q.memo(3);
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::use") == [
+            "FILE:c.js::thing",
+            "FILE:k.ts::K::run",
+            "FILE:m.ts::a::go",
+            "FILE:m.ts::b::run",
+            "FILE:n.ts::foo",
+            "FILE:n.ts::named",
+            "FILE:o.js::object@2::hello",
+            "FILE:pkg/index.d.ts::React::memo",
+            "FILE:pkg/index.d.ts::React::memo",
+            "FILE:pkg/index.d.ts::React::memo",
+            "REF:a.run",
+        ]
+
+    def test_an_object_holds_what_its_properties_name(self, tmp_path):
+        """`{ f }`, `{ key: f }` and `{ ...o }` hold what `f` and `o` are
+        where the object is written: a definition of the file or what an
+        import binds."""
+        builder = _index(
+            tmp_path,
+            {
+                "more.js": """
+                export function helper() {}
+                export function extra() {}
+                """,
+                "u.js": """
+                import * as more from "./more.js";
+                import { helper } from "./more.js";
+                function isFunction() {}
+                const base = { fromBase() {} };
+                export default {
+                  isFunction,
+                  also: helper,
+                  ...base,
+                  ...more,
+                };
+                """,
+                "a.js": """
+                import utils from "./u.js";
+                export function use() {
+                  utils.isFunction();
+                  utils.also();
+                  utils.fromBase();
+                  utils.extra();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.js::use") == [
+            "FILE:more.js::extra",
+            "FILE:more.js::helper",
+            "FILE:u.js::base::fromBase",
+            "FILE:u.js::isFunction",
+        ]
+
+    def test_a_package_export_is_the_one_for_how_it_is_imported(self, tmp_path):
+        """Of a package's conditional exports the first that applies is
+        taken, `require` for a `require` and `import` for an import, and a
+        target with a TypeScript extension is that file."""
+        builder = _index(
+            tmp_path,
+            {
+                "package.json": """
+                {"name": "lib", "exports": {".": {"types": {
+                  "require": "./index.d.cts", "default": "./index.d.ts"}}}}
+                """,
+                "index.d.ts": "export declare function esm(): void;\n",
+                "index.d.cts": "export declare function cjs(): void;\n",
+                "a.ts": """
+                import { esm } from "lib";
+                import lib = require("lib");
+                export function use() {
+                  esm();
+                  lib.cjs();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::use") == [
+            "FILE:index.d.cts::cjs",
+            "FILE:index.d.ts::esm",
+        ]
+
+    def test_what_is_declared_typeof_a_value_is_that_value(self, tmp_path):
+        """A variable, a parameter or a field declared `typeof x` holds `x`:
+        calling it calls `x`, and its members are those of `x`. A namespace
+        that is a value too has its own members first."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                function helper() {}
+                const ns = { inner() {} };
+                class Local {}
+                declare namespace lib {
+                  class Cancelled {}
+                  interface Api { Cancelled: typeof Cancelled; h: typeof helper; }
+                }
+                declare const lib: lib.Api;
+                declare const f: typeof helper;
+                declare const g: typeof ns;
+                const make: typeof Local = Local;
+                export function use(p: typeof helper, q: typeof ns.inner) {
+                  f();
+                  p();
+                  q();
+                  g.inner();
+                  lib.h();
+                  new lib.Cancelled();
+                  new make();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::use") == [
+            "FILE:a.ts::Local",
+            "FILE:a.ts::helper",
+            "FILE:a.ts::helper",
+            "FILE:a.ts::helper",
+            "FILE:a.ts::lib::Cancelled",
+            "FILE:a.ts::ns::inner",
+            "FILE:a.ts::ns::inner",
+        ]
+
+    def test_a_template_over_lines_with_a_template_in_it_ends_no_block(self, tmp_path):
+        """A template literal that goes on to the next line, with another
+        inside one of its `${...}`, holds no brace of the code around it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                export class C {
+                  one(o) {
+                    throw new Error(`a ${o.n && ` to '${o.n}'`} due
+                -  ${o.f}`);
+                  }
+
+                  two() {
+                    run();
+                  }
+                }
+                function run() {}
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.js::C::two") == ["FILE:a.js::run"]
+
     def test_a_string_literal_type_holds_no_mark(self, tmp_path):
         """`"a|b"` is a string, whatever its text holds: a method called on
         what returns one is the standard library's, not a project's."""
