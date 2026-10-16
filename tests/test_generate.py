@@ -8348,6 +8348,33 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:a.ts::check") == ["REF:suite.test"]
 
+    def test_a_block_scoped_variable_is_read_in_its_block_only(self, tmp_path):
+        """A `const` a block declares hides one outside it in the block, to
+        its `}`: after it, on its line or below, the outer one is read."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Dog { bark() {} }
+                class Cat { bark() {} meow() {} }
+                export function below(d: Cat, x: boolean) {
+                  if (x) {
+                    const d = new Dog();
+                    d.bark();
+                  }
+                  d.meow();
+                }
+                export function after(d: Cat, x: boolean) {
+                  if (x) { const d = new Dog(); d.bark(); } d.meow();
+                }
+                """
+            },
+        )
+        for name in ("below", "after"):
+            calls = _calls(builder, f"FILE:a.ts::{name}")
+            assert "FILE:a.ts::Cat::meow" in calls
+            assert "FILE:a.ts::Dog::bark" in calls
+
     def test_variable_declared_again_has_no_type_from_before(self, tmp_path):
         """A name declared a second time without a type is of none, not of
         the type an earlier declaration or a field of that name has."""

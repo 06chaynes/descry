@@ -6382,6 +6382,11 @@ class BaseParser:
         self._raw = ""  # the line being read, as written
         self._units = 0, (0, 0, 0)  # a column of it and the code units before
         self._locals = set()  # (definition ID, name of a parameter or variable)
+        # The last line a declaration on a line is in scope on, where the
+        # reader tells: ``(line, name) -> line``, and that of each binding a
+        # pattern makes
+        self._scope_end = None
+        self._binding_ends = {}
         self._first_node = 0  # where the nodes and edges of the file being
         self._first_edge = 0  # parsed start in the builder's lists
         # (name, unwrap, depth) of a binding still being read. depth is how
@@ -6514,7 +6519,13 @@ class BaseParser:
         type parameter."""
         declarations = self.declared.get(name, ())
         if not anywhere:
-            local = [d for d in declarations if since <= d[0] <= lineno]
+            # A declaration counts in the block it is scoped to.
+            ends = self._scope_end
+            local = [
+                d
+                for d in declarations
+                if since <= d[0] <= lineno and (not ends or lineno <= ends(d[0], name))
+            ]
             if local:
                 return max(local, key=lambda d: d[0])[1]
         # What a call returned is bound to a variable, never to a field. A
@@ -6822,7 +6833,10 @@ class BaseParser:
             entries[entries.index(bound[0])] = (lineno, origin, top)
         else:
             entries.append((lineno, origin, top))
-        if until:
+        if until and self._scope_end:
+            # The binding is in scope up to the line before.
+            self._binding_ends[lineno, name] = until - 1
+        elif until:
             entries.append((until, None, False))
 
     def _bind(self, bindings, index, lines, block):
@@ -6976,12 +6990,18 @@ class BaseParser:
         return blanked
 
     def split_source(
-        self, lines, code_lines, definition_head, type_head=None, ends=";"
+        self,
+        lines,
+        code_lines,
+        definition_head,
+        type_head=None,
+        ends=";",
+        statement=None,
     ):
         """The lines to read ``lines`` as, split as `_split_lines` splits
         them; `restore_source_lines` gives what is read their source lines."""
         lines, self._rows, self._shifts = _split_lines(
-            lines, code_lines, definition_head, type_head, ends
+            lines, code_lines, definition_head, type_head, ends, statement
         )
         self._first_rows = {
             row: at for at, row in reversed(list(enumerate(self._rows)))
@@ -10615,8 +10635,16 @@ _TS_OBJECT_OPENS_RE = re.compile(
     rf"\s*(?:(?P<default>export\s+default\s*)|(?P<key>{_TS_WRITTEN_MEMBER_NAME})\s*:\s*)?"
     r"\{\s*$"
 )
+# What starts a statement after a block's `}`: a word that goes on with no
+# statement before it, nor a template's `${`
+_TS_STATEMENT_START_RE = re.compile(
+    r"(?!(?:else|catch|finally|while|as|satisfies|instanceof|in|of|extends|implements"
+    r"|from|is)"
+    r"(?![\w$]))(?!\$\{)[A-Za-z_$]"
+)
 # What may follow the `}` or `;` that ends a statement before the next
 _TS_SEPARATORS_RE = re.compile(r"[ \t,;]*")
+_TS_SPACE_RE = re.compile(r"[ \t]*")
 # What a line may go on to after the `}` or `;` that ends a definition:
 # another declaration, or a member of a class or an object with its body
 _TS_DEFINITION_HEAD_RE = re.compile(
@@ -10626,7 +10654,9 @@ _TS_DEFINITION_HEAD_RE = re.compile(
 )
 
 
-def _split_lines(lines, code_lines, definition_head, type_head=None, ends=";"):
+def _split_lines(
+    lines, code_lines, definition_head, type_head=None, ends=";", statement=None
+):
     """``lines`` with a line split where it goes on to a definition after
     the `}` or `;` that ends the one before it, and where a type's body
     that opens on it holds members: after the body's `{`, after each member
@@ -10635,9 +10665,10 @@ def _split_lines(lines, code_lines, definition_head, type_head=None, ends=";"):
     body; ``type_head`` the start of a statement that a type body's `{`
     ends, its group `type`, where it has one, a type's, else an object's,
     and its group `nested` one that opens an object only in an object. Each
-    part
-    after the first is indented as its line is and once more for each such
-    body it is in; a member ends with its `}` or a character of ``ends``.
+    part after the first is indented as its line is and once more for each
+    such body it is in; a member ends with its `}` or a character of
+    ``ends``. Where ``statement`` matches what follows a block's `}`, the
+    line is split there too.
     Returns the lines, for each the index in ``lines`` of the one it is
     part of, and the code units (see `_code_units`) its columns are right
     of its own there. ``code_lines`` are ``lines`` blanked."""
@@ -10645,16 +10676,26 @@ def _split_lines(lines, code_lines, definition_head, type_head=None, ends=";"):
     for row, (line, code) in enumerate(zip(lines, code_lines)):
         indent = line[: len(line) - len(line.lstrip())]
         cuts = []  # the column each part starts at, and the bodies it is in
-        depth, bodies, statement = 0, [], 0
+        depth, bodies, begun, values = 0, [], 0, []
         for column, char in enumerate(code):
-            head = (
-                char == "{" and type_head and type_head.match(code, statement, column)
-            )
+            head = char == "{" and type_head and type_head.match(code, begun, column)
             # A head that opens a body only inside the body of an object.
             nested = head and head.groupdict().get("nested")
             if head and (not nested or bodies and bodies[-1][2]):
                 bodies.append((depth + 1, column, not head.groupdict().get("type")))
                 cuts.append((column + 1, len(bodies)))
+            # A `{` that opens a value, a template's `${` or one after `=`
+            # as a JSX attribute's, closes no block.
+            before = char == "{" and _run_start(code, column)
+            if char == "{" and (
+                code[column - 1 : column] == "$"
+                or code[before - 1 : before] == "="
+                and code[before - 2 : before - 1] not in "=!<>"
+            ):
+                values.append(depth + 1)
+            closes_value = char == "}" and values and depth == values[-1]
+            if closes_value:
+                values.pop()
             if char in "([{":
                 depth += 1
             elif char in ")]}":
@@ -10666,19 +10707,25 @@ def _split_lines(lines, code_lines, definition_head, type_head=None, ends=";"):
                     else:
                         cuts.remove((opened + 1, len(bodies) + 1))
                 depth -= 1
+            if closes_value:
+                continue
             if char in "{};":
-                statement = column + 1
+                begun = column + 1
             if bodies and depth == bodies[-1][0] and (char == "}" or char in ends):
                 cuts.append((column + 1, len(bodies)))
             elif char in "};" and not bodies and depth <= 0:
                 at = _TS_SEPARATORS_RE.match(code, column + 1).end()
                 head = definition_head.match(code, at)
                 member = head and head.groupdict().get("member")
-                if head and not (
+                defines = head and not (
                     member
                     and (member in _JSTS_CONTROL_KEYWORDS or not _opens_body(code, at))
-                ):
+                )
+                after = _TS_SPACE_RE.match(code, column + 1).end()
+                if defines:
                     cuts.append((at, 0))
+                elif char == "}" and statement and statement.match(code, after):
+                    cuts.append((after, 0))
         if not cuts:
             split.append(line)
             rows.append(row)
@@ -11035,6 +11082,7 @@ class TSParser(BaseParser):
             _TS_DEFINITION_HEAD_RE,
             _TS_BODY_HEAD_RE,
             ";,",
+            _TS_STATEMENT_START_RE,
         )
 
         written = (line for line in lines if line.strip())
@@ -11420,6 +11468,24 @@ class TSParser(BaseParser):
                 columns.append(at)
                 innermost.append(braces[-1] if braces else None)
             braces_on.append((columns, innermost))
+
+        @cache
+        def declared_until(lineno, name):
+            """The last line a `const`, `let` or `var` of ``name`` declared
+            on line ``lineno`` is in scope on; the file's last for any other
+            declaration."""
+            found = re.search(
+                rf"\b(const|let|var)\b[^;=]*?(?<![\w$]){re.escape(name)}(?![\w$])",
+                code_lines[lineno - 1],
+            )
+            return (
+                in_scope(lineno - 1, found.start(), found[1]) if found else len(lines)
+            )
+
+        self._binding_ends = {}
+        self._scope_end = lambda lineno, name: (
+            self._binding_ends.get((lineno, name)) or declared_until(lineno, name)
+        )
 
         i = 0
         signature_until = 0  # the last line of a definition's signature
