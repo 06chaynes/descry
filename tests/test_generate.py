@@ -8365,6 +8365,51 @@ class TestTypeScriptCallResolution:
         assert run in _calls(builder, "FILE:app.ts::below")
         assert _calls(builder, "FILE:app.ts::typed") == [run, "FILE:lib.ts::make"]
 
+    def test_a_comparison_in_the_arguments_of_a_call_is_not_a_bracket(self, tmp_path):
+        """A `<` or `>` that compares neither ends the arguments of a call
+        nor joins two of them; one that type arguments end with does."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Alpha { run() {} }
+                class Beta { go() {} }
+                function pick<T>(x: T, n: number): T { return x; }
+                function second<T>(flag: boolean, x: T): T { return x; }
+                function over(x: number): Alpha;
+                function over(x: boolean, y: number): Beta;
+                function over(x: any, y?: any): any { return x; }
+                function wrap<T>(flag: boolean, run: (x: T) => void, value: T) {}
+
+                function compared(alpha: Alpha, other: Alpha, beta: Beta, n: number) {
+                  pick(alpha > other, 1).run();
+                  second(n < 2, beta).go();
+                  over(n > 2, 1).go();
+                  over(n < 2, n > 1).go();
+                  wrap(n < 2, (x) => x.run(), alpha);
+                }
+
+                function typed(n: number) {
+                  second(n < 2, new Map<string, Beta>()).get("a").go();
+                }
+                """
+            },
+        )
+        go, run = "FILE:a.ts::Beta::go", "FILE:a.ts::Alpha::run"
+        assert _calls(builder, "FILE:a.ts::compared") == [
+            run,
+            go,
+            go,
+            go,
+            "FILE:a.ts::over",
+            "FILE:a.ts::over",
+            "FILE:a.ts::pick",
+            "FILE:a.ts::second",
+            "FILE:a.ts::wrap",
+            "REF:run",
+        ]
+        assert go in _calls(builder, "FILE:a.ts::typed")
+
 
 class TestGoCallResolution:
     def test_bare_call_is_the_function_not_a_method_of_that_name(self, tmp_path):
@@ -14107,6 +14152,36 @@ class TestClangCallResolution:
             "FILE:os.cc::File::size",
             "FILE:os.h::CHECK",
             "FILE:os.h::POSIX",
+        ]
+
+    def test_an_operator_a_macro_passes_on_is_one_of_its_arguments(self, tmp_path):
+        """`SYS(>, call)` passes its parameter as the second argument: the
+        `<` or `>` before it is an argument, not a bracket."""
+        builder = _index(
+            tmp_path,
+            {
+                "os.h": """
+                #define SYS(operator, call) ::call
+                #define ABOVE(call) SYS(>, call)
+                #define BELOW(call) SYS(<, call)
+                class File {
+                 public:
+                  int close();
+                  int fd_;
+                };
+                """,
+                "os.cc": """
+                #include "os.h"
+                int File::close() {
+                  ABOVE(close(fd_));
+                  return BELOW(close(fd_));
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:os.cc::File::close") == [
+            "FILE:os.h::ABOVE",
+            "FILE:os.h::BELOW",
         ]
 
     def test_alias_is_the_type_it_names(self, tmp_path):

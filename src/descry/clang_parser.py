@@ -383,7 +383,9 @@ def _rewrites(text: str) -> list[list]:
         if re.search(rf"(?:->|\.|[\w>]\s*::)\s*{param}\b", body):
             found.append([index, "."])
         for call in re.finditer(r"([A-Za-z_]\w*)\s*\(", body):
-            for position, part in enumerate(_bracketed_parts(body[call.end() :])):
+            for position, part in enumerate(
+                _bracketed_parts(body[call.end() :], expression=True)
+            ):
                 if part == param:
                     found.append([index, f"{call[1]}({position})"])
     return found

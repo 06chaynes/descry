@@ -6818,7 +6818,10 @@ class BaseParser:
             if opened is not None:
                 closed = self._pairs.get(opened)
                 edge = self._closes.get(closed, self._opens.get(opened))
-                position = len(_bracketed_parts(code[opened + 1 : bar] + "x")) - 1
+                position = (
+                    len(_bracketed_parts(code[opened + 1 : bar] + "x", expression=True))
+                    - 1
+                )
             elif self._open_calls:
                 edge = self._open_calls[-1]
             if edge is None:
@@ -7890,20 +7893,50 @@ def _rust_declarations():
 # `type Name = ...` in Rust or TypeScript, behind any visibility or `export`
 _TYPE_ALIAS_RE = re.compile(r"^[ \t]*(?:[\w()]+\s+)*type\s+(\w+)[^=;{]*=", re.MULTILINE)
 
+# What can follow the `>` that ends type arguments in an expression: what
+# starts no operand, other than `<`, `>`, `+` and `-`
+_TYPE_ARGUMENTS_END_RE = re.compile(
+    r"""\s*+(?:[(`]|(?:as|in|instanceof|satisfies)\b|(?![\w$'"[{!~#@<>+-]|\.\d))"""
+)
 
-def _bracketed_parts(text, separator=","):
+
+def _bracketed_parts(text, separator=",", expression=False):
     """The ``separator``-separated parts of ``text``, which follows an
-    opening bracket, up to the bracket that closes it."""
-    parts, depth, start, end = [], 0, 0, len(text)
+    opening bracket, up to the bracket that closes it. A `<` is a bracket
+    unless the bracket it is in closes first; in an ``expression`` it is
+    one only where a `>` closes it that type arguments can end with."""
+    angles, opened, end = set(), [], len(text)
     for column, char in enumerate(text):
         if char in "<([{":
+            opened.append(column)
+        elif char == ">" and text[column - 1] not in "-=":
+            if opened and text[opened[-1]] == "<":
+                angle = opened.pop()
+                if (
+                    not expression
+                    or (opened and text[opened[-1]] == "<")
+                    or _TYPE_ARGUMENTS_END_RE.match(text, column + 1)
+                ):
+                    angles.update((angle, column))
+            elif not opened and not expression:
+                end = column
+                break
+        elif char in ")]}":
+            while opened and text[opened[-1]] == "<":
+                opened.pop()
+            if not opened:
+                end = column
+                break
+            opened.pop()
+    if not expression:
+        angles.update(column for column in opened if text[column] == "<")
+    parts, depth, start = [], 0, 0
+    for column, char in enumerate(text[:end]):
+        if char in "([{" or char == "<" and column in angles:
             depth += 1
-        elif char in ")]}" or (char == ">" and text[column - 1] not in "-="):
+        elif char in ")]}" or char == ">" and column in angles:
             depth -= 1
-        if depth < 0:
-            end = column
-            break
-        if char == separator and not depth:
+        elif char == separator and not depth:
             parts.append(text[start:column])
             start = column + 1
     parts.append(text[start:end])
@@ -10149,13 +10182,14 @@ _JS_LITERAL_RE = re.compile(
 )
 # The type of a literal, by the character it opens with: any other is a string
 _JS_LITERAL_TYPES = {"/": "RegExp", "[": "Array"}
+# How a line `_JS_FOR_RE` matches ends, looked for once before it is tried
+_JS_HEAD_END = r"\)\s*\{?\s*$"
+_JS_HEAD_END_RE = re.compile(_JS_HEAD_END)
 # `for (const pattern of value)` and `for (const name in value)`
 _JS_FOR_RE = re.compile(
     r"\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+(?P<pattern>.+?)\s+"
-    r"(?P<kind>of|in)\s+(?P<value>.+?)\)\s*\{?\s*$"
+    r"(?P<kind>of|in)\s+(?P<value>.+?)" + _JS_HEAD_END
 )
-# How a line `_JS_FOR_RE` matches ends, looked for once before it is tried
-_JS_HEAD_END_RE = re.compile(r"\)\s*\{?\s*$")
 # A declaration that takes a value apart: `const { a, b } = value`
 _JS_PATTERN_RE = re.compile(
     r"\b(?:const|let|var)\s+(?P<pattern>[\[{].*[\]}])\s*=(?!=)\s*(?P<value>.+?);?\s*$"
@@ -10515,7 +10549,9 @@ class TSParser(BaseParser):
         if edge is None:
             return None
         brace = code.index("{", opened)
-        position = len(_bracketed_parts(code[opened + 1 : brace] + "x")) - 1
+        position = (
+            len(_bracketed_parts(code[opened + 1 : brace] + "x", expression=True)) - 1
+        )
         return f"#{edge}|{position}|this"
 
     def _operand(self, text):
@@ -10709,7 +10745,7 @@ class TSParser(BaseParser):
         an object literal those of its properties by name, None where it
         has none."""
         elements = []
-        for part in _bracketed_parts(code[start:]):
+        for part in _bracketed_parts(code[start:], expression=True):
             start = code.index(part, start)
             end = start + len(part)
             if part[0] + part[-1] != "{}":
@@ -10718,7 +10754,7 @@ class TSParser(BaseParser):
                 start = end
                 continue
             held = {}
-            for item in _bracketed_parts(part[1:]):
+            for item in _bracketed_parts(part[1:], expression=True):
                 start = code.index(item, start)
                 name, colon, _ = item.partition(":")
                 span = start + len(name) * bool(colon) + bool(colon), start + len(item)
