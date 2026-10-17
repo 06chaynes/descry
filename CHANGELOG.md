@@ -394,7 +394,29 @@ Python SDK v2, and a full-tree review's findings are fixed.
   a function another returns, `() => () => {`, is a scope of its own; and
   a parameter written after a `(` on an unindented line was read as a
   name of the whole file. It is in scope in the definition and the
-  functions it holds; calls in comments, string
+  functions it holds, also where the definition is on one line, whose
+  parameters were read in the definitions after it, `g = (x: B) => ...`
+  beside `f = (x: A) => ...` taking `x` as an `A`; a one-line arrow's
+  calls after the first `;` of its body were the file's. A first
+  declarator, `let a = d, b = d`, is typed by its value as a later one is,
+  and `typeof d` by what `d` is declared as; a one-line `namespace` body
+  and an object whose `{` opens on the next line own their members; a
+  one-line `for (const x of y)` binds `x`; an arrow's own parameters read
+  its annotation over lines, and its rest parameter an array. `new
+  Box().open()` typed the name it was bound to as a `Box`. A field a
+  JavaScript class assigns, `this.cb = ...`, is its own, not a member of
+  an outside base, and `export default cond && function f` is `f`. A type
+  parameter whose bound only names it, `T extends Base<T>`, is its bound,
+  where it was read as the receiver's own type, so `b.get().self()`
+  reached `B::self`. A Dart raw string over lines held code on its later
+  lines. In C++ a spaced qualifier, `ns ::T`, of a parameter or field kept
+  the space; a qualified name is looked up as written where a namespace of
+  its name holds the definition, though a macro opens one of that name
+  elsewhere; a lambda with a return type binds its parameters; `typename
+  std::...` declared a type parameter `std`; a macro before
+  `::std::string` was read as its type; and `ns::Box<int>()` reached the
+  file's own specialization where the template is in a namespace a macro
+  opens; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a

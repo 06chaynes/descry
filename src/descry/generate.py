@@ -6134,6 +6134,10 @@ def blank_strings(line, inside, spanning, holes=None):
     return code, inside
 
 
+# Marks the opener of a raw literal a line ends inside of, which holds no code
+_RAW = "\0"
+
+
 def _blank_from(line, position, inside, spanning, holes, depth=None):
     """``blank_strings`` of ``line`` from ``position``: ``(code, len(line),
     what the line ends inside of)``. With ``depth``, the braces open in a
@@ -6150,7 +6154,8 @@ def _blank_from(line, position, inside, spanning, holes, depth=None):
             return "".join(code), len(line), (inside[0], braces)
         inside = inside[0]
     spans = True
-    raw = False
+    raw = isinstance(inside, str) and inside.startswith(_RAW)
+    inside = inside[1:] if raw else inside
     while True:
         start = position
         if inside is None:
@@ -6219,8 +6224,8 @@ def _blank_from(line, position, inside, spanning, holes, depth=None):
             continue
         if end < 0:
             code.append(" " * (len(line) - start))
-            left = depth if depth is not None else inside if spans else None
-            return "".join(code), len(line), left
+            left = _RAW * raw + inside if spans else None
+            return "".join(code), len(line), depth if depth is not None else left
         code.append(" " * (end - start))
         position, inside = end, None
 
@@ -6363,6 +6368,8 @@ class BaseParser:
         # pattern makes
         self._scope_end = None
         self._binding_ends = {}
+        self._declared_columns = {}
+        self._read_at = None  # column of the call whose receiver is read
         self._first_node = 0  # where the nodes and edges of the file being
         self._first_edge = 0  # parsed start in the builder's lists
         # (name, unwrap, depth) of a binding still being read. depth is how
@@ -6414,6 +6421,8 @@ class BaseParser:
         # name -> [(lineno, origin of its value, at file level)], and
         # <param> -> [(lineno, bound, at file level)]
         self.declared = {}
+        # (lineno, name) -> the column of each declaration of it there
+        self._declared_columns = {}
         self.fields = {}
         depth = 0  # parentheses open at the start of the line
         owner = None  # type whose body the line is in
@@ -6464,9 +6473,15 @@ class BaseParser:
                         key, value = f"<{groups['param']}>", declared_type
                     # What is declared `typeof x` holds `x` itself.
                     queried = _TS_TYPEOF_RE.fullmatch(groups["type"])
-                    self.declared.setdefault(key, []).append(
-                        (lineno, queried[1] if queried else value, file_level)
-                    )
+                    held = value
+                    if queried:
+                        # `x`, or what the file declares `x` as where it does
+                        top = self.declared.get(queried[1], ())
+                        known = [v for _, v, at_top in top if v and at_top]
+                        held = known[-1] if known else queried[1]
+                    self.declared.setdefault(key, []).append((lineno, held, file_level))
+                    columns = self._declared_columns.setdefault((lineno, key), [])
+                    columns.append(named)
                     # A field is declared at the start of a line, behind
                     # modifiers at most, and not among parameters.
                     if (
@@ -6497,16 +6512,24 @@ class BaseParser:
                 and (not ends or lineno <= ends(d[0], name))
             ]
             if local:
-                return max(local, key=lambda d: d[0])[1]
+                line = max(d[0] for d in local)
+                same = [d for d in local if d[0] == line]
+                columns = self._declared_columns.get((line, name), ())
+                if self._read_at is not None and len(columns) == len(same) > 1:
+                    # Of the declarations on the line, the last before the read
+                    before = [d for d, at in zip(same, columns) if at < self._read_at]
+                    same = before[-1:] or same
+                return same[0][1]
         # What a call returned is bound to a variable, never to a field. A
         # parameter or variable of the definition hides a file-level name.
         hidden = self._is_local(name)
         values = {
             v
-            for _, v, top in declarations
+            for line, v, top in declarations
             if (anywhere and v and not v.startswith("#"))
             or (top and not hidden)
             or not since
+            and line <= lineno <= self._binding_ends.get((line, name), lineno)
         }
         return values.pop() if len(values) == 1 else None
 
@@ -6849,7 +6872,10 @@ class BaseParser:
         binds its origin path there, up to the end of the block the line
         opens where ``block`` says it has one, else to the end of the line."""
         lineno = index + 1
+        # Where a reader splits lines, the one that closes the block can hold
+        # the block's code before its `}`.
         until = block and bindings and self._find_block_end(lines, index)
+        until = until and until + bool(self._scope_end)
         for name, origin in bindings.items():
             self._rebind(name, lineno, origin, until or lineno + 1)
 
@@ -6944,7 +6970,9 @@ class BaseParser:
         if origin is None and (source_id, callee) in self._locals:
             origin = f"={callee}"
         owner = source_id.split("::")[-2] if source_id.count("::") > 1 else None
+        self._read_at = start
         origin = origin or self.call_origin(callee, lineno, since, owner)
+        self._read_at = None
         metadata = {"lineno": lineno}
         if origin:
             metadata["origin"] = origin
@@ -8050,7 +8078,8 @@ def _rust_declarations():
 # and the type it stands for
 _TS_ALIAS_RE = re.compile(
     r"^[ \t]*(?:export\s+)?(?:declare\s+)?type\s+([\w$]+)\s*(?:<(.*?)>)?\s*=\s*"
-    r"([^;\n]+?);?[ \t]*$",
+    # A function type's parameter list may go on over lines.
+    r"(\([^;]*?\)\s*=>[^;\n]+?|[^;\n]+?);?[ \t]*$",
     re.MULTILINE,
 )
 # `type Name = ...` in Rust or TypeScript, behind any visibility or `export`
@@ -8470,11 +8499,11 @@ _RUST_VIS = r"(?:pub(?:\([^)]*\))?\s+)?"
 _RUST_USE_RE = re.compile(rf"^\s*{_RUST_VIS}use\s+([^;]+);", re.MULTILINE)
 
 
-# A parameter name in a `fn` signature
-# A type parameter bound by a closure trait: `F: Fn(A) -> R`
 # A closure trait a parameter is declared with: `impl Fn(A, B)`, `&dyn FnMut(A)`
 _RUST_FN_TYPE_RE = re.compile(r"\b(?:impl|dyn)\s+(?:Fn|FnMut|FnOnce)\s*\(([^()]*)\)")
+# A type parameter bound by a closure trait: `F: Fn(A) -> R`
 _RUST_FN_BOUND_RE = re.compile(r"\b(\w+)\s*:\s*((?:Fn|FnMut|FnOnce)\s*\([^()]*\))")
+# A parameter name in a `fn` signature
 _RUST_PARAMETER_RE = re.compile(r"[(,]\s*(?:mut\s+)?([a-z_]\w*)\s*:")
 # A `fn` with its body on the line of the `impl` block it is in
 _RUST_INLINE_FN_RE = re.compile(
@@ -9340,10 +9369,13 @@ _TS_DECLARATIONS = (
         r"|typeof\s+[\w$]+(?:\.[\w$]+)*)"
         r"(?:\[\])*)(?:\s*\|\s*(?:undefined|null))*(?=\s*(?:[,)=;]|$))"
     ),
-    # `name = new Type(`
+    # `name = new Type(...)`, the construction the whole value
     re.compile(
         r"\b(?P<name>[A-Za-z_$][\w$]*)\s*=\s*new\s+"
         rf"(?P<type>[A-Za-z_$][\w$.]*(?:{_TS_ARGUMENTS})?)"
+        r"(?=(?:\s*<[^;]*?>)?\s*\((?:[^()]|\([^()]*\))*\)\s*(?:[;,)]|$)"
+        # or what goes on over the next lines
+        r"|(?:\s*<[^;]*?>)?\s*\([^)]*$|\s*<[^;>]*$)"
     ),
     # `name = value as Type`, where the statement ends with the type and
     # no operator before it binds less tightly than `as`
@@ -9547,6 +9579,40 @@ def _ts_unquote(name: str) -> str:
     if len(name) > 1 and name[0] == name[-1] and name[0] in "\"'":
         return name[1:-1]
     return name
+
+
+def _gathered(params, number):
+    """The value of a rest parameter at position ``number`` of a list
+    whose types are ``params``: an array of those it gathers, where they
+    are of one type."""
+    gathered = list(params[number:])
+    if gathered and gathered[-1] and gathered[-1][0] == "rest":
+        gathered[-1] = gathered[-1][1]
+    one = gathered and all(held == gathered[0] for held in gathered)
+    return ("outside", "Array", (gathered[0],)) if one else None
+
+
+def _function_parameters(value: str) -> str:
+    """The parameter list, without its parentheses, of the function
+    ``value`` writes from its parameters on: `(a, b) => ...`, `a => ...` or
+    `function (a) {`."""
+    value = re.sub(
+        r"\s*(?:async\s+)?(?:function\b\s*\*?\s*[\w$]*\s*)?", "", value, count=1
+    )
+    if not value.startswith("("):
+        return value.partition("=>")[0].strip()
+    depth = 0
+    for at, char in enumerate(value):
+        depth += (char == "(") - (char == ")")
+        if not depth:
+            return value[1:at]
+    return value[1:]
+
+
+def _path_written(written: str) -> str:
+    """A TypeScript type as an origin path writes it: `(`/`)` as `<`/`>`,
+    `.` as `::`."""
+    return written.replace("(", "<").replace(")", ">").replace(".", "::")
 
 
 def _arrow_function(statement: str) -> tuple[str, str] | None:
@@ -10193,6 +10259,10 @@ _TS_MEMBER_MODIFIERS = r"(?:(?:private|public|protected|static|abstract|override
 # A method or accessor a class declares: `name(`, `get name(`, `async *name<T>(`
 # `const`, `let` or `var` and the first binding of its statement: a name, or
 # a destructuring pattern without nested brackets
+# The first declarator of a statement, without a type, up to its value
+_TS_FIRST_DECLARATOR_RE = re.compile(
+    r"(?:^|[;{}])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=(?![=>])\s*"
+)
 _TS_DECLARATION_HEAD_RE = re.compile(
     r"^\s*(?:export\s+)?(const|let|var)\s+"
     r"(?:[A-Za-z_$][\w$]*|\{[^{}]*\}|\[[^\[\]]*\])"
@@ -10227,6 +10297,8 @@ _TS_REEXPORT_RE = re.compile(
 # `module.exports = <name>`
 _TS_DEFAULT_EXPORT_RE = re.compile(
     r"^[ \t]*(?:export[ \t]+(default)[ \t]+(?:"
+    # `cond && function f`, called, is `f`: a function is never falsy.
+    r"(?:[\w$.]+\s*&&\s*)*"
     r"(?:(?:async[ \t]+)?function\b[ \t]*\*?|(?:abstract[ \t]+)?class\b|interface\b)"
     r"[ \t]*(?!extends\b|implements\b)([\w$]+)|([\w$]+)(?=[ \t]*;?[ \t]*$))"
     r"|(?:export|module\.exports)[ \t]*=[ \t]*([\w$]+)(?=[ \t]*;?[ \t]*$))",
@@ -10386,13 +10458,13 @@ _JS_LITERAL_RE = re.compile(
 )
 # The type of a literal, by the character it opens with: any other is a string
 _JS_LITERAL_TYPES = {"/": "RegExp", "[": "Array"}
-# How a line `_JS_FOR_RE` matches ends, looked for once before it is tried
-_JS_HEAD_END = r"\)\s*\{?\s*$"
-_JS_HEAD_END_RE = re.compile(_JS_HEAD_END)
-# `for (const pattern of value)` and `for (const name in value)`
-_JS_FOR_RE = re.compile(
-    r"\bfor\s*(?:await\s*)?\(\s*(?:const|let|var)\s+(?P<pattern>.+?)\s+"
-    r"(?P<kind>of|in)\s+(?P<value>.+?)" + _JS_HEAD_END
+# `this.name =`, an assignment to a field of the object a method is of
+_JS_THIS_FIELD_RE = re.compile(r"\bthis\.([\w$]+)\s*=(?![=>])")
+# What opens a `for` head, and `const pattern of value` or `const name in
+# value` in it
+_JS_FOR_START_RE = re.compile(r"\bfor\s*(?:await\s*)?\(")
+_JS_FOR_PARTS_RE = re.compile(
+    r"\s*(?:const|let|var)\s+(?P<pattern>.+?)\s+(?P<kind>of|in)\s+(?P<value>.+?)\s*"
 )
 # The line a declaration's pattern goes on over lines from, and the last
 # line of one, which closes it and gives the value
@@ -10684,7 +10756,8 @@ _TS_EXTENDS_RE = re.compile(r"\bextends\s+(.+?)\s*(?:\bimplements\b[^{]*)?\{?\s*
 # property gives, opens after
 _TS_BODY_HEAD_RE = re.compile(
     r"\s*(?:(?P<type>(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?"
-    r"(?:class|interface)\b[^{]*|type\s+[\w$]+\s*(?:<[^{]*>)?\s*="
+    r"(?:class|interface|(?:namespace|module)(?=\s+[\w$'\"]))\b[^{]*"
+    r"|type\s+[\w$]+\s*(?:<[^{]*>)?\s*="
     r"|(?:extends|implements)\b[^{]*)"
     r"|(?:export\s+default|return"
     r"|(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*(?::[^=]*)?=\s*"
@@ -10886,54 +10959,49 @@ class TSParser(BaseParser):
                 function_id = self.context_at(index + 1)[0]
                 written = (self._signatures.get(function_id) or [{}])[-1].get("returns")
                 if written:
-                    escaped = (
-                        written.replace("(", "<").replace(")", ">").replace(".", "::")
-                    )
-                    origin = f">{escaped}"
+                    origin = f">{_path_written(written)}"
             else:
                 declared = re.search(
                     r"\b(?:const|let|var)\s+([\w$]+)(?:\s*:\s*([^;]*?))?\s*=\s*$",
                     head,
                 )
                 assigned = re.search(r"(?<![\w$.])([\w$]+)\s*=(?![=>])\s*$", head)
+                if assigned and head[: assigned.start()].rstrip().endswith("=>"):
+                    # What follows `=>` is a function type's return, no target.
+                    assigned = None
                 if declared and declared[2]:
                     # The annotation is the closure's own type: read its
                     # parameters where they are written, not through the
                     # variable — a definition the value becomes does not
                     # hold it as a member. A declaration without a type
                     # gives the closure none.
-                    escaped = (
-                        declared[2]
-                        .strip()
-                        .replace("(", "<")
-                        .replace(")", ">")
-                        .replace(".", "::")
-                    )
-                    origin = f">{escaped}"
+                    origin = f">{_path_written(declared[2].strip())}"
                 elif assigned and not declared:
                     origin = f"={assigned[1]}"
             self._closures.pop(0)
             if origin is None:
                 # A function type an annotation writes outside parentheses
                 continue
-            bindings = {
-                name: _bound_origin(f"{origin}.^{number}", steps)
-                for number, param in enumerate(_bracketed_parts(params + ")"))
-                for name, steps in self.bindings(param)
-            }
-            self._bind(bindings, index, lines, code.rstrip().endswith("{"))
+            bindings = self._param_bindings(f"{origin}.^", params)
+            self._bind(bindings, index, lines, code.count("{") > code.count("}"))
         while self._held_closures and self._held_closures[0][0] < before:
             # A function given as a property of an object literal that a
             # call is passed takes what the call passes to that property.
             bar, params = self._held_closures.pop(0)
             if held := self._argument_label(code, bar):
-                bindings = {
-                    name: _bound_origin(f"{held}|{number}", steps)
-                    for number, param in enumerate(_bracketed_parts(params + ")"))
-                    for name, steps in self.bindings(param)
-                }
-                self._bind(bindings, index, lines, code.rstrip().endswith("{"))
+                bindings = self._param_bindings(f"{held}|", params)
+                self._bind(bindings, index, lines, code.count("{") > code.count("}"))
         super()._bind_closures(code, index, lines, before)
+
+    def _param_bindings(self, origin, params):
+        """``{name: origin path}`` of the names the parameter list ``params``
+        binds: ``origin`` and the position of the parameter, the steps into
+        it of a pattern after."""
+        return {
+            name: _bound_origin(f"{origin}{number}", steps)
+            for number, param in enumerate(_bracketed_parts(params + ")"))
+            for name, steps in self.bindings(param)
+        }
 
     def _held_label(self, code, column):
         return self._argument_label(code, column)
@@ -11015,8 +11083,10 @@ class TSParser(BaseParser):
         """Type the names that a `for` or a declaration with a pattern
         binds on line ``index``, from the value iterated or taken apart. A
         `for...in` gives the names of properties."""
+        head = _JS_FOR_START_RE.search(code)
+        close = head and self._pairs.get(head.end() - 1)
         found = (
-            _JS_HEAD_END_RE.search(code) and _JS_FOR_RE.search(code)
+            close and _JS_FOR_PARTS_RE.fullmatch(code, head.end(), close)
         ) or _JS_PATTERN_RE.search(code)
         pattern = found and found["pattern"]
         if not found and (ended := _JS_PATTERN_END_RE.match(code)):
@@ -11052,7 +11122,7 @@ class TSParser(BaseParser):
             name: _bound_origin(origin, steps) for name, steps in self.bindings(pattern)
         }
         if kind:
-            self._bind(bindings, index, lines, code.rstrip().endswith("{"))
+            self._bind(bindings, index, lines, code.count("{") > code.count("}"))
         else:
             for name, bound in bindings.items():
                 self._rebind(name, lineno, bound)
@@ -11450,13 +11520,13 @@ class TSParser(BaseParser):
             record its ``span``: by default from the line after ``lineno``
             to the `}` that closes its body on line ``end_lineno``, or that
             whole line where its body is an expression."""
+            params = _ts_params(signature)
+            # A parameter is in scope in the definition, the functions it
+            # holds too.
+            for param in params:
+                self._binding_ends.setdefault((lineno, param), end_lineno)
             if end_lineno > lineno:
-                params = _ts_params(signature)
                 self.enter_context(node_id, lineno, end_lineno, params)
-                # A parameter is in scope in the definition, the functions
-                # it holds too.
-                for param in params:
-                    self._binding_ends.setdefault((lineno, param), end_lineno)
                 # An arrow function's signature starts with its parameters.
                 arrow = re.match(r"\s*(?:\(|[\w$]+\s*=>)", signature)
                 if arrow and signature.rpartition("=>")[2].strip() != "{":
@@ -11732,8 +11802,8 @@ class TSParser(BaseParser):
                     # The value may start on the line after the `=`.
                     open_ended = code.endswith("=") or code.count("(") > code.count(")")
                     if arrow or not open_ended:
-                        return j, arrow
-                return idx, None
+                        return j, arrow, text
+                return idx, None, ""
 
             def consume_sig(idx, start=0):
                 """Read the declaration that starts at column ``start`` of
@@ -11904,6 +11974,7 @@ class TSParser(BaseParser):
                     valued = self._arrow_typed(held[1], line)
                     arrow_id = cid
                     own_defs.append((cid, match.end(1)))
+                    enter(cid, lineno, _statement_end(code_lines, i) + 1, held[1])
                 self.builder.add_node(
                     cid,
                     "Constant",
@@ -11918,8 +11989,16 @@ class TSParser(BaseParser):
                     signatures=valued and self._overloads(cid, valued),
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
-                if parent_id not in class_ids and re.search(r"=\s*\{\s*$", line):
-                    # The functions it holds are its members.
+                opens_below = (
+                    re.search(r"=\s*$", line)
+                    and i + 1 < len(code_lines)
+                    and code_lines[i + 1].strip() == "{"
+                )
+                if parent_id not in class_ids and (
+                    re.search(r"=\s*\{\s*$", line) or opens_below
+                ):
+                    # The functions it holds are its members, its `{` on its
+                    # line or alone on the next.
                     object_ids.add(cid)
                     enter(cid, lineno, self._find_block_end(code_lines, i))
                 elif parent_id not in class_ids and re.search(r"=\s*\[\s*$", line):
@@ -12110,6 +12189,17 @@ class TSParser(BaseParser):
                     end_lineno,
                     parameters,
                 )
+                head = statement[2][: len(statement[2]) - len(parameters)]
+                annotated = re.search(r":\s*(.*?)\s*=\s*$", head)
+                if j > i and annotated:
+                    # Over lines, the arrow's parameters read the function
+                    # type it is declared as where they close.
+                    params = _function_parameters(parameters)
+                    bindings = self._param_bindings(
+                        f">{_path_written(annotated[1])}.^", params
+                    )
+                    opens = code_lines[j].count("{") > code_lines[j].count("}")
+                    self._bind(bindings, j, code_lines, opens)
                 arrow_id = fid
                 signature_until = j + 1  # its last line, as a line number
             elif parent_id in object_ids and (match := re_held.match(line)):
@@ -12650,6 +12740,19 @@ class TSParser(BaseParser):
                 )
                 names.extend((name, last) for name in bound)
             declared_here = later_declarators.pop(i, ())
+            for first in _TS_FIRST_DECLARATOR_RE.finditer(code):
+                # The first is typed by its value as a later one is, where no
+                # call is it: what a call returns, the line's binding gives.
+                value_end = _value_end(code_lines[i], first.end())
+                if code[first.end() : value_end].rstrip().endswith(")"):
+                    continue
+                typed_as = self._expression_origin(
+                    code, first.end(), value_end, lineno, since, owner
+                )
+                # A member read it holds is read through the name itself: a
+                # call of a name a body declares calls what the name holds.
+                if typed_as and not re.search(r"(?:^|\.)[\w$]+$", typed_as):
+                    self._rebind(first[1], lineno, typed_as)
             for scope_id, kind, later, name_end, value_at in declared_here:
                 # A later declarator is typed by its value as the first is.
                 value_end = _value_end(code_lines[i], value_at)
@@ -12713,7 +12816,21 @@ class TSParser(BaseParser):
                 region := _definition_time_region(code)
             ):
                 spans.append((*region, self.enclosing_scope(parent_id)))
+            # A `for` head that closes on the line: the names it binds hold
+            # in a body written after it there.
+            # A field a class's code assigns, `this.name = value`, is the
+            # class's own.
+            assigner = parent_id
+            while assigner and assigner not in class_ids:
+                assigner = assigner.rpartition("::")[0]
+            for assigned in _JS_THIS_FIELD_RE.finditer(code) if assigner else ():
+                self.builder.js_assigned.setdefault(assigner, set()).add(assigned[1])
+            head = _JS_FOR_START_RE.search(code)
+            body = self._pairs.get(head.end() - 1, len(code)) if head else len(code)
             for match in re_call_candidate.finditer(code):
+                if match.start(1) > body:
+                    self._bind_patterns(code, i, code_lines, since, owner)
+                    body = len(code) + 1
                 if match.start(1) == declared_at:
                     continue
                 # An optional call (`a?.b?.()`) is a call; only its
@@ -12948,7 +13065,8 @@ class TSParser(BaseParser):
                 )
             self._bind_closures(code, i, code_lines, len(code))
             self._name_results(code, lineno, since, owner)
-            self._bind_patterns(code, i, code_lines, since, owner)
+            if body <= len(code):
+                self._bind_patterns(code, i, code_lines, since, owner)
             for index, paren, _ in calls:
                 # What a call closed on its line is passed, unless it
                 # spreads a value over several arguments.
@@ -14127,12 +14245,13 @@ class CallResolver:
                 return found, "regex"
         if lang == "clang" and origin is None and "::" in callee:
             # The global namespace and one a macro opens have no node: what
-            # they hold is at the top of the files.
-            qualifier = [q for q in qualifier if q not in self.c_spaces]
-            if not qualifier:
-                top = [c for c in candidates if c.count("::") == 1]
+            # they hold is at the top of the files, beside what a namespace
+            # of the name holds.
+            if all(q in self.c_spaces for q in qualifier):
+                fits = [c for c in candidates if self._c_path(c) == [name]]
                 file_id = source_id.split("::")[0]
-                return self._resolve_bare(name, top, file_id, lang, callee)
+                return self._resolve_bare(name, fits, file_id, lang, callee)
+            qualifier = self._c_written(qualifier, candidates)
         if origin is not None:
             verdict = self._resolve_origin(origin, scope_id)
             if verdict is None:
@@ -14265,10 +14384,12 @@ class CallResolver:
                 if hit and lang == "clang" and self._overloaded(hit, hits, source_id):
                     hit = None
                 return (hit, source) if hit else (None, _UNRESOLVED)
-            # A member a project type has from outside may return that type.
+            # A member a project type has from outside may return that type;
+            # a field it assigns itself is its own.
             self._result = _OPAQUE
             if len(owners) == 1:
                 self._result = self._std_inherited(owners[0], name) or _OPAQUE
+            complete = complete or any(self._assigns(o, name) for o in owners)
             return None, _UNRESOLVED if complete else _EXTERNAL
         aliased = lang == "clang" and receiver in self.builder.type_aliases
         if lang in ("rust", "clang") and "::" in callee and not aliased:
@@ -15222,10 +15343,15 @@ class CallResolver:
                     params and isinstance(params[-1], tuple) and params[-1][0] == "rest"
                 )
                 value = None
-                if number is not None and number < len(params) - bool(rest):
+                if number is not None and steps[index + 1 : index + 2] == ["&"]:
+                    value = _gathered(params, number)
+                elif number is not None and number < len(params) - bool(rest):
                     value = params[number]
                 elif number is not None and rest:
                     value = params[-1][1]
+                continue
+            if step == "&":
+                # What the `^N` before it gathered
                 continue
             if isinstance(value, tuple) and value[0] == "literal":
                 verdict = self._each(value[1], steps[index:], source_id)
@@ -15587,13 +15713,7 @@ class CallResolver:
                     params = self._property_params(int(call), argument)
                 value = params[int(parameter)] if int(parameter) < len(params) else None
                 if steps[:1] == ["&"]:
-                    # A rest parameter: an array of the parameters it gathers,
-                    # where they are of one type.
-                    gathered = list(params[int(parameter) :])
-                    if gathered and gathered[-1] and gathered[-1][0] == "rest":
-                        gathered[-1] = gathered[-1][1]
-                    one = gathered and all(held == gathered[0] for held in gathered)
-                    value = ("outside", "Array", (gathered[0],)) if one else None
+                    value = _gathered(params, int(parameter))
                     steps = steps[1:]
         elif root.startswith("#"):
             # `#N>Type`: what the call at edge index N returned, read for
@@ -16494,7 +16614,10 @@ class CallResolver:
             return _EXTERNAL
         # A method missing from a type with a base outside the project is
         # inherited from that base, and may return the type; a missing data
-        # attribute need not be inherited.
+        # attribute need not be inherited. A field the type assigns itself is
+        # its own, of what value is not known.
+        if called and not complete and self._assigns(ref, name):
+            return None
         if called and not complete:
             self._result = self._std_inherited(ref, name) or _OPAQUE
             return _EXTERNAL
@@ -16692,6 +16815,22 @@ class CallResolver:
             return hits[0]
         return None
 
+    def _c_written(self, qualifier, held):
+        """``qualifier`` as it names a definition: without the namespaces
+        macros open, which have no node, unless a namespace of its last name
+        holds one of ``held``."""
+        parents = {h.rpartition("::")[0] for h in held}
+        if qualifier and any(
+            p in self.nodes and self._name(p) == qualifier[-1] for p in parents
+        ):
+            return qualifier
+        return [q for q in qualifier if q not in self.c_spaces]
+
+    def _c_path(self, node_id):
+        """The qualified name of ``node_id`` without the namespaces macros
+        open, which have no node: the name it has however they are opened."""
+        return [p for p in node_id.split("::")[1:] if p not in self.c_spaces]
+
     def _c_type(self, qualifier, name, scope_id, full=False):
         """``_type_named`` for C and C++, which import no names: the type
         is the one of that name nearest in scope, else the one among the
@@ -16703,7 +16842,7 @@ class CallResolver:
             for t in self._types("clang", name)
             if self.nodes[t]["metadata"].get("kind") != "namespace"
         ]
-        qualifier = [q for q in qualifier if q not in self.c_spaces]
+        qualifier = self._c_written(qualifier, types)
         aliased = {name, *qualifier[-1:]} & self.builder.type_aliases
         aliases = self.builder.c_aliases.get(name, ())
         seen = self._sees(scope_id.split("::")[0])
@@ -16834,7 +16973,7 @@ class CallResolver:
         qualified name that ``scope_id`` is compiled with: an overload or a
         specialisation in another file is among ``candidates``. Definitions
         an `#if` arm alone builds are alternatives, not overloads."""
-        path = hit.split("::")[1:]
+        path = self._c_path(hit)
         seen = self._sees(scope_id.split("::")[0])
         defined = {c for c in candidates if "end_lineno" in self.nodes[c]["metadata"]}
         macro = self.nodes[hit]["metadata"].get("kind") == "macro"
@@ -16845,7 +16984,7 @@ class CallResolver:
             and any(
                 c != hit
                 and c in defined
-                and c.split("::")[1:] == path
+                and self._c_path(c) == path
                 and c.split("::")[0] in seen
                 and not self._guard_conflict(
                     guards, self._effective_guards(c, scope_id)
@@ -17255,7 +17394,15 @@ class CallResolver:
                     held = self.nodes.get(scope_id, {}).get("metadata", {})
                     bound, where = held.get("impl_bounds", {}).get(name), scope_id
                 if bound and re.search(rf"(?<![\w$]){re.escape(name)}(?![\w$])", bound):
-                    return instance and instance[:2]
+                    head = bound.partition("<")[0].strip()
+                    reached = self._candidates_now
+                    named = self._type_named(head, where)
+                    self._candidates_now = reached
+                    if named in self._declarations(scope):
+                        # A bound by its own type: the receiver's own type.
+                        return instance and instance[:2]
+                    # One whose arguments name the parameter: that type.
+                    bound = head
                 return self._returned_type(bound, where) if bound else None
         return False
 
@@ -17552,6 +17699,12 @@ class CallResolver:
             if given[0]:
                 return given
         return False, None
+
+    def _assigns(self, owner_id, name):
+        """Whether the JavaScript or TypeScript class ``owner_id`` assigns
+        the field ``name`` itself, `this.name = ...`."""
+        declarations = self._declarations(owner_id)
+        return any(name in self.builder.js_assigned.get(d, ()) for d in declarations)
 
     def _std_inherited(self, owner_id, name):
         """Value the member ``name`` returns that the project type
@@ -18041,6 +18194,7 @@ class CodeGraphBuilder:
         # C/C++ alias name -> [(ID of the scope that declares it, its type)]
         self.c_aliases = {}
         self.js_bound = {}  # JS/TS file ID -> the names its declarations bind
+        self.js_assigned = {}  # JS/TS class ID -> the fields its code assigns
         # Function ID -> its signatures as written, one for each overload:
         # the bound of each type parameter, the parameters, the return type
         # and, by argument position, the declared types of the parameters

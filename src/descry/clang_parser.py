@@ -103,7 +103,11 @@ _RE_OPERATOR = re.compile(
 )
 _RE_ATTRIBUTE = re.compile(r"\[\[.*?\]\]", re.DOTALL)
 _RE_TEMPLATE = re.compile(r"\s*(?:[A-Z_][A-Z0-9_]*\s+)*template\s*<")
-_RE_TYPE_PARAMETER = re.compile(r"\b(?:typename|class)\s*(?:\.\.\.\s*)?([A-Za-z_]\w*)")
+# A type parameter's name, not the `typename` of a dependent type,
+# `typename T::type`
+_RE_TYPE_PARAMETER = re.compile(
+    r"\b(?:typename|class)\s*(?:\.\.\.\s*)?([A-Za-z_]\w*)(?![\w$]|\s*::)"
+)
 # The name a template parameter declares, none for `typename` or `int` alone
 _RE_TEMPLATE_PARAMETER = re.compile(
     r"(?<![\w:])(?!(?:typename|class|int|long|short|char|bool|unsigned|signed"
@@ -254,11 +258,12 @@ _RE_DECLARES = re.compile(
     + r"(?:<[^;(){}=]*>(?:::[A-Za-z_]\w*)+)?(?:<[^;(){}=]*>)?)"
     r"(?:\s*(?P<pointer>\*+)\s*|\s*&\s*|\s+)$"
 )
-# `Type name`, `const Type& name`, `Type* const name`, `Type name[n]`
-# A lambda up to its body's `{`: its captures, its parameters, its return type
+# A lambda up to its body's `{`: its captures, its parameters, its return
+# type, after a `->` the code it is found in writes as `?.`
 _RE_LAMBDA = re.compile(
-    r"\[[^\[\]]*\]\s*\((?P<params>[^()]*)\)\s*(?:mutable\s*)?(?:->[^{;]*)?\{"
+    r"\[[^\[\]]*\]\s*\((?P<params>[^()]*)\)\s*(?:mutable\s*)?(?:\?\.[^{;]*)?\{"
 )
+# `Type name`, `const Type& name`, `Type* const name`, `Type name[n]`
 _RE_PARAMETER = re.compile(
     _SPECIFIERS
     + r"(?:::)?(?P<type>"
@@ -455,6 +460,7 @@ def _held(written: str) -> str:
     those of the project templates it is nested in. `typename` only says
     that a member of a type parameter is a type."""
     written = re.sub(r"\btypename\s+", "", written).strip().removeprefix("::")
+    written = re.sub(r"\s*::\s*", "::", written)
     pointer = _RE_POINTER.match(written)
     if pointer:
         return f"{pointer[1]}<{pointer[2]}>"
@@ -478,7 +484,7 @@ def _returned(written: str) -> str:
         " ",
         words,
     )
-    words = re.sub(r"\b[A-Z_][A-Z0-9_]*\s+(?=[A-Za-z_])", "", words)
+    words = re.sub(r"\b[A-Z_][A-Z0-9_]*\s+(?=[A-Za-z_]|::)", "", words)
     held = _held(" ".join(words.split()))
     return "" if held == "auto" else re.sub(r"\s+(?=[*&])", "", held)
 

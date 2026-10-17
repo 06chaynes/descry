@@ -45,8 +45,6 @@ _RE_IMPORT_BLOCK_LINE = re.compile(
     r'^\s*(?:([A-Za-z_][A-Za-z0-9_]*)\s+|\.\s+)?"([^"]+)"'
 )
 
-# What a declaration's name is followed by in brackets: its type parameters,
-# `[K comparable, V any]`, or for a type the length of the array it is
 # Type parameters, `[K comparable, V any]`: names, then a constraint, which
 # an array's length, `[5]`, is not
 _TYPE_PARAMS = (

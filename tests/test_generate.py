@@ -9009,6 +9009,111 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:a.ts::A::inner") == ["FILE:a.ts::AProps::run"]
         assert _calls(builder, "FILE:a.ts::B") == ["REF:props.run"]
 
+    def test_typescript_scopes_of_one_line_definitions(self, tmp_path):
+        """A parameter of a definition on one line is that definition's, the
+        siblings declared beside it read their own; the calls after a `;`
+        a one-line arrow's body holds are the arrow's, and a binding its
+        head makes holds there."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() { return 1; } helper() {} }
+                class B { run() { return 1; } }
+                type Pair = (a: A, b: A) => void;
+                function declared(x: A) {} function noParam() { x.use(); }
+                const p = (x: A) => x.use(); function later() { x.use(); }
+                const f = (x: A) => x.use(), g = (x: B) => x.run();
+                const k: Pair = (a, b) => { a.use(); b.use(); };
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::noParam") == ["REF:x.use"]
+        assert _calls(builder, "FILE:a.ts::later") == ["REF:x.use"]
+        assert _calls(builder, "FILE:a.ts::g") == ["FILE:a.ts::B::run"]
+        assert _calls(builder, "FILE:a.ts::k") == ["FILE:a.ts::A::use"] * 2
+
+    def test_typescript_declarators_bodies_and_heads(self, tmp_path):
+        """A first declarator is typed by its value as a later one is, and
+        `typeof x` by what `x` is declared as; a one-line namespace body
+        and an object whose `{` opens on the next line own their members;
+        a `for` head binds its names for a body on its line; an arrow's own
+        parameters read its annotation over lines and its rest parameter
+        an array; a construction followed by a call types no name."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() { return 1; } }
+                class Box { open(): Box | number { return this; } }
+                const single = new A();
+                const d = new A();
+                namespace N { export function m() { single.use(); } }
+                const o =
+                {
+                  m() { single.use(); }
+                };
+                type Fn = (
+                  a: A,
+                ) => void;
+                const h: Fn = e => { e.use(); };
+                const h2: (a: A) => void = (
+                  e,
+                ) => { e.use(); };
+                const each: (...dogs: A[]) => void = (...all) => {
+                  all[0].use();
+                };
+                export function caller(x: typeof d, items: A[]) {
+                  const alias = single;
+                  alias.use();
+                  x.use();
+                  for (const i of items) { i.use(); }
+                  o.m();
+                  const opened = new Box().open();
+                  opened.use();
+                }
+                """
+            },
+        )
+        use = "FILE:a.ts::A::use"
+        assert _calls(builder, "FILE:a.ts::caller").count(use) == 3
+        assert "FILE:a.ts::o::m" in _calls(builder, "FILE:a.ts::caller")
+        assert "REF:opened.use" in _calls(builder, "FILE:a.ts::caller")
+        assert _calls(builder, "FILE:a.ts::N::m") == [use]
+        for name in ("h", "h2", "each"):
+            assert _calls(builder, f"FILE:a.ts::{name}") == [use]
+
+    def test_javascript_default_export_and_assigned_fields(self, tmp_path):
+        """`export default cond && function f` is `f` where it is called; a
+        field a class assigns, `this.cb = ...`, is its own: a call of it is
+        no member of the outside base the class extends."""
+        builder = _index(
+            tmp_path,
+            {
+                "package.json": '{"name": "x"}',
+                "lib/http.js": """
+                const supported = true;
+                export default supported &&
+                  function httpAdapter(config) {
+                    return config;
+                  };
+                """,
+                "use.js": """
+                import { EventEmitter } from 'events';
+                import adapter from './lib/http.js';
+                export class Command extends EventEmitter {
+                  constructor() { super(); this._cb = null; }
+                  run() { adapter({}); this._cb(1); }
+                }
+                export class Other { _cb() {} }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:use.js::Command::run") == [
+            "FILE:lib/http.js::httpAdapter",
+            "REF:this._cb",
+        ]
+
     def test_go_generic_struct_fields_and_named_arrays(self, tmp_path):
         """A generic struct's fields are read after its type parameters, not
         as an array's elements, and `type A [5]T` is an array of `T`, its
@@ -13140,6 +13245,34 @@ class TestJavaCallResolution:
             "REF:x.get",
         ]
 
+    def test_a_bound_that_names_its_parameter_is_its_type(self, tmp_path):
+        """`T extends Base<T>` is a `Base`; only a bound by the declaring
+        type itself, `S extends Builder<S>`, is the receiver's type."""
+        builder = _index(
+            tmp_path,
+            {
+                "A.java": """
+                package p;
+                class Base<T> { void self() {} }
+                class B<T extends Base<T>> { T get() { return null; } void self() {} }
+                abstract class Builder<S extends Builder<S>> { S me() { return null; } }
+                class Car extends Builder<Car> { void drive() {} }
+                class Use {
+                  void run(B b, Car c) {
+                    b.get().self();
+                    c.me().drive();
+                  }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:A.java::Use::run") == [
+            "FILE:A.java::B::get",
+            "FILE:A.java::Base::self",
+            "FILE:A.java::Builder::me",
+            "FILE:A.java::Car::drive",
+        ]
+
 
 class TestPhpCallResolution:
     def test_constructed_type_picks_the_method(self, tmp_path):
@@ -15896,6 +16029,49 @@ class TestClangCallResolution:
         )
         assert "FILE:a.cc::Level" in builder.node_registry
 
+    def test_cpp_declarations_bases_and_lambdas(self, tmp_path):
+        """A spaced `ns ::T` parameter is `ns::T`; a base under a namespace a
+        macro also opens elsewhere is found by its written qualifier; a
+        lambda with a return type binds its parameters; `typename
+        std::...` declares no type parameter `std`, and a macro before
+        `::std::string` is no type."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cc": """
+                #include <string>
+                #define GTEST_API_
+                #define OPEN namespace internal {
+                namespace ns1 { class Uq { public: void q() {} }; }
+                namespace testing { namespace internal {
+                class Helper { protected: void Record() {} };
+                template <typename T, typename std::enable_if<true>::type = 0>
+                void Gen(T t) {}
+                GTEST_API_ ::std::string Where() { return ""; }
+                class Path { public: const char* c_str() const { return 0; } };
+                } }
+                struct Dog { void bark() {} };
+                class RecordTest : public testing::internal::Helper {
+                 public:
+                  void Run() { Record(); }
+                };
+                void run2(ns1 ::Uq u) { u.q(); }
+                void run3() {
+                  auto f = [](Dog d) -> int { d.bark(); return 0; };
+                  testing::internal::Where().c_str();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.cc::RecordTest::Run") == [
+            "FILE:a.cc::testing::internal::Helper::Record"
+        ]
+        assert _calls(builder, "FILE:a.cc::run2") == ["FILE:a.cc::ns1::Uq::q"]
+        assert _calls(builder, "FILE:a.cc::run3") == [
+            "FILE:a.cc::Dog::bark",
+            "FILE:a.cc::testing::internal::Where",
+        ]
+
 
 class TestRubyCallResolution:
     def test_constructed_receiver_resolves_to_its_class_s_method(self, tmp_path):
@@ -17412,6 +17588,28 @@ class TestDartCallResolution:
             },
         )
         assert "FILE:a.dart::Widget::spin" in _calls(builder, "FILE:a.dart::go")
+
+    def test_dart_raw_string_over_lines_holds_no_code(self, tmp_path):
+        """A raw string's text is no code on the lines it goes on to."""
+        builder = _index(
+            tmp_path,
+            {
+                "pubspec.yaml": "name: x\n",
+                "lib/a.dart": """
+                void code() {}
+                void real() {}
+                void run() {
+                  final a = r\"\"\"
+                  text ${code()} more
+                  \"\"\";
+                  final b = \"\"\"
+                  text ${real()} more
+                  \"\"\";
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/a.dart::run") == ["FILE:lib/a.dart::real"]
 
 
 class TestModuleAliases:
