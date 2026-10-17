@@ -352,7 +352,11 @@ Python SDK v2, and a full-tree review's findings are fixed.
   a `Dog` where `Bounded<T extends Dog>` was written beside it; a base is
   kept with its type arguments. So does a C# generic type, whose members
   of a type parameter's type had none, and a class's `where T : Dog`, read
-  as a base of the class, bounds `T` inside it; calls in comments, string
+  as a base of the class, bounds `T` inside it. So does a Dart generic
+  type, whose members of a type parameter's type had none, and one its
+  constructor is called with, `Box<Dog>(...)`; a method called through a
+  field declared a generic type, `Box<Cat> box`, reads the field's
+  arguments, where it read none; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a

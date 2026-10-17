@@ -21,6 +21,8 @@ import re
 from descry.generate import (
     _TRAILING_PATH_RE,
     BaseParser,
+    _bounded_parameters,
+    _generic_metadata,
     _strip_generics,
     _strip_parens,
     blank_strings,
@@ -328,6 +330,12 @@ def _locate(starts, offset):
     return line, offset - starts[line]
 
 
+# A clause of a type's heritage, or a base it lists with its type arguments
+_RE_BASE_WORD = re.compile(
+    r"\b(?P<clause>extends|with|implements|on)\b|(?P<base>[\w$.]+(?:<~*>)?)"
+)
+
+
 def _type_parameters(generics: str) -> list[str]:
     """Names of the type parameters in `<T, U extends V<T>>`."""
     declared = _strip_generics(generics[1:-1]).split(",")
@@ -351,6 +359,7 @@ def _parameter_names(parameters: str) -> list[str]:
 class DartParser(BaseParser):
     """Regex-driven Dart source parser."""
 
+    language = "dart"
     binding_re = re.compile(
         r"\b(?:final|var|const)\s++(?:[\w$.<>?, ]+\s++)?(?P<name>[\w$]+)\s*"
         r"=(?![=>])\s*(?P<unwrap>await\b)?"
@@ -530,27 +539,37 @@ class DartParser(BaseParser):
             ends at ``col`` of line ``at``. Returns the line index to go on
             from, None where the header declares none."""
             match = _RE_TYPEDEF.fullmatch(header, begin)
-            kind, heritage = "typedef", ""
+            kind, heritage, aligned = "typedef", "", None
             if not match:
                 match = _RE_TYPE_DECL.match(header, begin)
                 if not match:
                     return None
                 kind = " ".join(match["kind"].split())
-                heritage = re.sub(r"<~*>|\(~*\)", "", header[match.end() :])
+                # Read where brackets hide their commas, written from source.
+                heritage = re.sub(
+                    r"\(~*\)", lambda m: " " * len(m[0]), header[match.end() :]
+                )
+                aligned = source[match.end() :]
             opened = lines[at][col : col + 1]
             if opened == "=":
                 # `class Name = Base with Mixin;`, `typedef Name = Type;`
                 heritage = "extends " + re.sub(
                     r"<~*>", "", _read_header(lines, at, col + 1)[0]
                 )
+                aligned = None
             if kind == "typedef" and (opened != "=" or "Function" in heritage):
                 # A function type has the members of `Function`.
-                heritage = "extends Function"
-            clauses = re.split(r"\b(extends|with|implements|on)\b", heritage)
-            bases = {
-                clause: [base.strip(" ?") for base in listed.split(",")]
-                for clause, listed in zip(clauses[1::2], clauses[2::2])
-            }
+                heritage, aligned = "extends Function", None
+            bases, clause = {}, None
+            for word in _RE_BASE_WORD.finditer(heritage):
+                if word["clause"]:
+                    clause = word["clause"]
+                    bases.setdefault(clause, [])
+                elif clause:
+                    base = (
+                        aligned[slice(*word.span("base"))] if aligned else word["base"]
+                    )
+                    bases.setdefault(clause, []).append(base)
             if not match["name"] and "on" not in bases:
                 return None
             # An extension without a name is known by the type it is on.
@@ -564,11 +583,18 @@ class DartParser(BaseParser):
             named = match.start("name") if match["name"] else begin
             named_at, column = _locate(starts, named)
             named_at += index
-            define("Class", file_id, type_id, name, index, named_at, last, kind=kind)
-            if match["generics"]:
-                self._type_params.update(
-                    _type_parameters(source[slice(*match.span("generics"))])
-                )
+            written = match["generics"] and source[slice(*match.span("generics"))]
+            define(
+                "Class",
+                file_id,
+                type_id,
+                name,
+                index,
+                named_at,
+                last,
+                kind=kind,
+                **_generic_metadata(_bounded_parameters(written or "")),
+            )
             # A mixin overrides the superclass and the mixins before it.
             for base in (
                 *reversed(bases.get("with", ())),
@@ -576,8 +602,7 @@ class DartParser(BaseParser):
                 *bases.get("implements", ()),
                 *bases.get("on", ()),
             ):
-                if re.fullmatch(r"[\w$.]+", base):
-                    self.builder.add_edge(type_id, f"REF:{base}", "INHERITS")
+                self.builder.add_edge(type_id, f"REF:{base}", "INHERITS")
             if kind in ("typedef", "extension type") and match["name"]:
                 declared_at.setdefault(named_at, set()).add(column)
             if opened != "{":
@@ -809,6 +834,7 @@ class DartParser(BaseParser):
                     for node_id, first, *_ in self._contexts
                     if node_id != file_id and node_id not in types
                 )
+            written = code
             code = _RE_TYPE_ARGUMENTS.sub(lambda match: " " * len(match[0]), code)
             self.begin_line(code, lineno, scope, raw_lines[i])
             self._since = since
@@ -871,4 +897,8 @@ class DartParser(BaseParser):
                     )
                     origin = f"={held}" if held and held[0] != "?" else None
                 self.add_call(context_id, callee, lineno, since, start, paren, origin)
+                if given := written[start + len(callee) : paren].strip():
+                    # `Box<Dog>(`: the type arguments it is called with
+                    site = self.builder.edges[-1]["metadata"].setdefault("site", {})
+                    site["types"] = given
         self.restore_source_lines()

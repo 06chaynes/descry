@@ -258,7 +258,7 @@ class Foo {
         (edge,) = [e for e in builder.edges if e["relation"] == "CALLS"]
         assert (edge["target"], edge["metadata"]["origin"]) == (
             "REF:add",
-            "List<>().add",
+            "List<int>().add",
         )
 
 

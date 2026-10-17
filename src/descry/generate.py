@@ -6423,7 +6423,9 @@ class BaseParser:
                         # C# keeps what the type's arguments are: an
                         # array's element carries its `IEnumerable<T>`.
                         declared_type += (
-                            groups["generic"] if self.language == "dotnet" else "<>"
+                            groups["generic"]
+                            if self.language in ("dotnet", "dart")
+                            else "<>"
                         )
                     if groups.get("name"):
                         key, value = groups["name"], f"{declared_type}()"
@@ -9538,7 +9540,7 @@ def _function_value(text: str) -> str | None:
     return None
 
 
-def _ts_type_parameters(text: str) -> dict[str, str]:
+def _bounded_parameters(text: str) -> dict[str, str]:
     """``{name: bound}`` of the type parameters ``text`` opens with,
     `<const T extends Bound = Default, U>`, the bound "" for one of none."""
     text = text.lstrip()
@@ -11898,7 +11900,7 @@ class TSParser(BaseParser):
                     token_count=token_count,
                     docstring=docstring,
                     **_generic_metadata(
-                        _ts_type_parameters(line[match.end(1 if match[1] else 2) :])
+                        _bounded_parameters(line[match.end(1 if match[1] else 2) :])
                     ),
                 )
                 self.builder.add_edge(parent_id, cid, "DEFINES")
@@ -12229,7 +12231,7 @@ class TSParser(BaseParser):
                     end_lineno=end_lineno,
                     token_count=token_count,
                     docstring=docstring,
-                    **_generic_metadata(_ts_type_parameters(full_sig)),
+                    **_generic_metadata(_bounded_parameters(full_sig)),
                 )
                 self.builder.add_edge(held_by, cid, "DEFINES")
                 class_ids.add(cid)
@@ -12918,7 +12920,7 @@ class TSParser(BaseParser):
                 typed["returned"] = None
 
             if angle is not None and full_sig[:opened].rstrip().endswith(">"):
-                typed["generics"].update(_ts_type_parameters(full_sig[angle:opened]))
+                typed["generics"].update(_bounded_parameters(full_sig[angle:opened]))
 
             if opened is not None:
                 params_str = full_sig[opened + 1 : closing].strip()
@@ -13729,6 +13731,11 @@ class CallResolver:
                 if params
             }
         self.returned[index] = self.result(target)
+        if site.get("types") and target and self._is_class(target):
+            # A generic type called with its type arguments makes a value
+            # that holds them.
+            made = self._returned_type(f"{self._name(target)}{site['types']}", target)
+            self.returned[index] = made or self.returned[index]
         self.callables[index] = self._callables
         if self._this_args:
             self.this_args[index] = self._this_args
@@ -14480,7 +14487,15 @@ class CallResolver:
         has is from outside the project."""
         name, generic, _ = root.partition("<")
         if steps[:1] == ["()"]:
+            held = self._type_argument(name, scope_id, None)
+            if held is not False:
+                return held and ("returned", held), steps
             found = self._type_named(name, scope_id)
+            made = generic and found and found != _EXTERNAL
+            made = made and self._returned_type(root, scope_id)
+            if made and len(made) > 2:
+                # A generic type written with its arguments holds them.
+                return ("def", found, made[2]), steps
             name = name.rpartition("::")[2]
             if found == _EXTERNAL and (generic or name in self.impl_types):
                 # Its methods are its own or those of an extension on it;
@@ -15552,6 +15567,10 @@ class CallResolver:
                 held = [h for h in held if h and self.nodes[h]["type"] == "Constant"]
                 if held:
                     return self._declared_type(held[0])
+            # A type parameter is its bound, or of no type known.
+            held = self._type_argument(name, scope_id, None)
+            if held is not False:
+                return held and ("returned", held)
             given = generic and written.endswith(">")
             generic = generic and lang not in _OWN_METHOD_LANGS
             found = self._type_named(name, scope_id)
@@ -16221,6 +16240,10 @@ class CallResolver:
                 return _EXTERNAL
             if not held or held[0] != "self":
                 return None
+            if len(held) > 2:
+                # A member of a generic type is read on the instance the
+                # field holds, with its arguments.
+                self._receiver = held
             return self._attr(held, name, seen, called)
         hit, complete = self._find_member(ref, name, inherited_only=kind == "super")
         declared = hit and not called and len(value) > 2 and self.nodes[hit]["metadata"]
@@ -16987,16 +17010,16 @@ class CallResolver:
                 return _EXTERNAL if kind == "self" else standard
             generic = found and kind == "self" and match[2]
             if generic and self.nodes[found]["metadata"].get("generics"):
-                # A generic type written with its arguments holds them.
-                given = _bracketed_parts(returns[returns.index("<") + 1 :])
-                return (
-                    kind,
-                    found,
-                    tuple(
-                        self._returned_type(a, function_id, instance or receiver)
-                        for a in given
-                    ),
-                )
+                # A generic type written with its arguments holds them; one
+                # no import places outside, as a function's own type
+                # parameter, is not known.
+                held = []
+                for a in _bracketed_parts(returns[returns.index("<") + 1 :]):
+                    value = self._returned_type(a, function_id, instance or receiver)
+                    imported = self._imported(a.partition("<")[0].strip(), function_id)
+                    outside = value != _EXTERNAL or imported == _EXTERNAL
+                    held.append(value if outside else None)
+                return kind, found, tuple(held)
             if found:
                 return (kind, found)
         return standard

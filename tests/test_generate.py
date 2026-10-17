@@ -8701,6 +8701,40 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:a.cs::Coop::Go") == ["FILE:a.cs::Dog::Bark"]
         assert not _bases(builder, "FILE:a.cs::Coop")
 
+    def test_a_dart_generic_type_holds_its_type_arguments(self, tmp_path):
+        """`Box<Cat>`'s `T` is a cat through a field, a method's return,
+        `this`, a subclass that writes its base's arguments, a field
+        declared `Box<Cat>` and a constructor called with its arguments;
+        `T extends Dog` bounds `T` inside its class."""
+        builder = _index(
+            tmp_path,
+            {
+                "pubspec.yaml": "name: x\n",
+                "lib/a.dart": """
+                class Dog { void bark() {} }
+                class Cat { void meow() {} }
+                class Box<T> { T held; Box(this.held); T get() => held; Box<T> self() => this; }
+                class Coop<T extends Dog> { T held; Coop(this.held); void go() { held.bark(); } }
+                class Sub extends Box<Cat> { Sub(Cat c) : super(c); }
+                class Holder { Box<Cat> box; Holder(this.box); }
+                void run(Box<Cat> b, Sub s, Holder h) {
+                  b.held.meow();
+                  b.get().meow();
+                  b.self().get().meow();
+                  s.get().meow();
+                  h.box.get().meow();
+                  Box<Dog>(Dog()).get().bark();
+                }
+                """,
+            },
+        )
+        calls = _calls(builder, "FILE:lib/a.dart::run")
+        assert calls.count("FILE:lib/a.dart::Cat::meow") == 5
+        assert "FILE:lib/a.dart::Dog::bark" in calls
+        assert _calls(builder, "FILE:lib/a.dart::Coop::go") == [
+            "FILE:lib/a.dart::Dog::bark"
+        ]
+
     def test_go_generic_struct_fields_and_named_arrays(self, tmp_path):
         """A generic struct's fields are read after its type parameters, not
         as an array's elements, and `type A [5]T` is an array of `T`, its
