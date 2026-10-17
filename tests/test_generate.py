@@ -8960,6 +8960,55 @@ class TestTypeScriptCallResolution:
         assert calls.count("FILE:a.go::Dog::Bark") == 3
         assert _calls(builder, "FILE:a.go::Coop::Go") == ["FILE:a.go::Speaker::Speak"]
 
+    def test_typescript_arrow_annotations_and_scopes(self, tmp_path):
+        """An arrow typed by a union of function types, or by a generic one,
+        has parameters of no known type; by an intersection, those of its
+        one function type, its body its own on its line. A name a pattern
+        binds with a default is no global. A function another returns is a
+        scope of its own. A parameter is in scope in the
+        functions its definition holds, not in the file."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Dog { bark() {} }
+                export class Cat { meow() {} }
+                export interface AProps { run(): void }
+                export function curry(f: (d: Dog) => () => void) {}
+                export const u: ((x: Dog) => void) | ((x: Cat) => void) = (x) => { x.bark(); };
+                export const g: <T>(x: T) => void = (x) => { x.meow(); };
+                export const i: ((x: Dog) => void) & { n?: number } = (x) => { x.bark(); };
+                export function deflt() {
+                  const { status = new Dog() } = { status: new Dog() };
+                  status.bark();
+                }
+                export function run() {
+                  curry((d) => () => {
+                    d.bark();
+                  });
+                }
+                export const A = (props: AProps) => {
+                  const inner = () => {
+                    props.run();
+                  };
+                  inner();
+                };
+                export function B() {
+                  props.run();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::u") == ["REF:x.bark"]
+        assert _calls(builder, "FILE:a.ts::g") == ["REF:x.meow"]
+        assert _calls(builder, "FILE:a.ts::i") == ["FILE:a.ts::Dog::bark"]
+        assert "REF:status.bark" in _calls(builder, "FILE:a.ts::deflt")
+        assert _calls(builder, "FILE:a.ts::run::callback@14") == [
+            "FILE:a.ts::Dog::bark"
+        ]
+        assert _calls(builder, "FILE:a.ts::A::inner") == ["FILE:a.ts::AProps::run"]
+        assert _calls(builder, "FILE:a.ts::B") == ["REF:props.run"]
+
     def test_go_generic_struct_fields_and_named_arrays(self, tmp_path):
         """A generic struct's fields are read after its type parameters, not
         as an array's elements, and `type A [5]T` is an array of `T`, its

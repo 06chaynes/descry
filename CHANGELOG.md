@@ -383,8 +383,18 @@ Python SDK v2, and a full-tree review's findings are fixed.
   a generic function called with its type arguments, `NewBox[Dog](...)`,
   which was no call at all; a constraint bounds a parameter inside its
   type. A variable bound to a call chain with an index or type arguments
-  in it, `x := a[i].b()`, holds what its last call returns; calls in
-  comments, string
+  in it, `x := a[i].b()`, holds what its last call returns. A TypeScript
+  arrow a union of function types is declared as took the first
+  alternative's parameter types, `x` of `((x: Dog) => void) | ((x: Cat) =>
+  void)` being a `Dog`, and one a generic function type is declared as
+  took the type parameter's name for a type from outside; their
+  parameters are of no known type. One an intersection is declared as
+  takes its one function type's, and its body on its line is its own. A
+  name a pattern binds with a default, or a `catch` pattern, is no global;
+  a function another returns, `() => () => {`, is a scope of its own; and
+  a parameter written after a `(` on an unindented line was read as a
+  name of the whole file. It is in scope in the definition and the
+  functions it holds; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a

@@ -6429,9 +6429,8 @@ class BaseParser:
                     # A qualified type is one step of an origin path.
                     declared_type = re.sub(r"\s*::\s*|\.", "::", groups["type"])
                     # Unindented and not in a parameter list.
-                    file_level = (
-                        not line[:1].isspace() and "(" not in line[: match.start()]
-                    )
+                    named = match.start("name") if groups.get("name") else match.start()
+                    file_level = not line[:1].isspace() and "(" not in line[:named]
                     if groups.get("generic"):
                         # C# keeps what the type's arguments are: an
                         # array's element carries its `IEnumerable<T>`.
@@ -6487,12 +6486,15 @@ class BaseParser:
         type parameter."""
         declarations = self.declared.get(name, ())
         if not anywhere:
-            # A declaration counts in the block it is scoped to.
+            # A declaration counts in the block it is scoped to, and one whose
+            # scope is known in the functions that scope holds.
             ends = self._scope_end
             local = [
                 d
                 for d in declarations
-                if since <= d[0] <= lineno and (not ends or lineno <= ends(d[0], name))
+                if (since <= d[0] or lineno <= self._binding_ends.get((d[0], name), 0))
+                and d[0] <= lineno
+                and (not ends or lineno <= ends(d[0], name))
             ]
             if local:
                 return max(local, key=lambda d: d[0])[1]
@@ -6830,7 +6832,7 @@ class BaseParser:
         entries = self.declared.setdefault(name, [])
         # What a block binds, as a `for` does, is the block's.
         top = not until and self._binds_file(name)
-        bound = [entry for entry in entries if entry[0] == lineno and not entry[2]]
+        bound = [entry for entry in entries if entry[0] == lineno]
         if bound:
             # The first of a line is what the name is read as.
             entries[entries.index(bound[0])] = (lineno, origin, top)
@@ -9369,7 +9371,7 @@ _NUMBER_DOT_END_RE = re.compile(_NUMBER_DOT + r"\Z")
 _JS_DECLARED_RE = re.compile(
     _NUMBER_DOT + r"|[.#]\s*[\w$]+"
     r"|\b(?:const|let|var|function\*?|class|interface|type|enum|namespace)\s+"
-    r"([\w$]+|\{[^=;]*?\}|\[[^=;]*?\])|\bcatch\s*\(\s*([\w$]+)"
+    r"([\w$]+|\{[^;]*?\}|\[[^;]*?\])|\bcatch\s*\(\s*([\w$]+|\{[^)]*\}|\[[^)]*\])"
 )
 # A parameter list, as a function's is followed by its body or its `=>`,
 # and the one parameter written without a list
@@ -9411,7 +9413,11 @@ def _js_member_name(lines, row, column):
 def _js_bound(content):
     """The names the JavaScript source ``content`` declares or takes as
     parameters, in any of its scopes."""
-    held = ["".join(found) for found in _JS_DECLARED_RE.findall(content)]
+    held = [
+        name
+        for found in _JS_DECLARED_RE.findall(content)
+        for name, _ in _js_bindings("".join(found))
+    ]
     for found in _JS_PARAMETERS_RE.finditer(content):
         if not _JS_BLOCK_RE.search(content, max(0, found.start() - 8), found.start()):
             # A parameter's name or pattern stands before its type and default.
@@ -9785,6 +9791,15 @@ def _own_line_span(code: str, name_end: int) -> tuple[int, int] | None:
     (ECMA-262 2026 10.2.11 FunctionDeclarationInstantiation), so a call on
     its own line is its, not its enclosing scope's.
     """
+    if re.match(r"\s*:", code[name_end:]):
+        # `const f: Type = value`: the value follows the annotation's `=`.
+        depth = 0
+        for at in range(name_end, len(code)):
+            char, before = code[at], code[at - 1]
+            depth += (char in "([{<") - (char in ")]}" or char == ">" and before != "=")
+            if not depth and char == "=" and code[at + 1 : at + 2] not in ("=", ">"):
+                name_end = at + 1
+                break
     paren = code.find("(", name_end)
     arrow = code.find("=>", name_end)
     if arrow >= 0 and (paren < 0 or arrow < paren):
@@ -10392,7 +10407,7 @@ _JS_PATTERN_RE = re.compile(
 # A function passed to a call: its parameters, in a list or alone before the
 # `=>`, and where its body starts
 _JS_CLOSURE_RE = re.compile(
-    r"(?:(?<=[(,=?!|&])|(?<=[=?!|&]\s)|(?<=return\s)|(?<=default\s)|(?<=void\s)"
+    r"(?:(?<=[(,=?!|&>])|(?<=[=?!|&>]\s)|(?<=return\s)|(?<=default\s)|(?<=void\s)"
     r"|(?<=:)(?=\s*(?:async\s+)?function\b)|^)\s*(?:async\s+)?"
     r"(?P<closure>(?:function\s*\*?\s*(?P<named>[\w$]+\s*)?)?"
     r"\((?P<params>[^()]*)\)(?:\s*:[^=(){]+)?\s*(?:=>|\{)|(?P<param>[\w$]+)\s*=>)"
@@ -10854,8 +10869,15 @@ class TSParser(BaseParser):
         arguments of calls go on to the shared path."""
         while self._closures and self._closures[0][0] < before:
             bar, params, _end = self._closures[0]
+            if code[: _run_start(code, bar)].endswith("=>"):
+                # What another function returns: a call passes it nothing.
+                self._closures.pop(0)
+                continue
             if self.bracket_around(bar)[1] == "(":
-                break
+                # One in parentheses is a call's argument, or a function
+                # type an annotation writes, which binds nothing.
+                super()._bind_closures(code, index, lines, bar + 1)
+                continue
             head = code[:bar]
             origin = None
             if re.search(r"\breturn\s*$", head):
@@ -10890,9 +10912,10 @@ class TSParser(BaseParser):
                     origin = f">{escaped}"
                 elif assigned and not declared:
                     origin = f"={assigned[1]}"
-            if origin is None:
-                break
             self._closures.pop(0)
+            if origin is None:
+                # A function type an annotation writes outside parentheses
+                continue
             bindings = {
                 name: _bound_origin(f"{origin}.^{number}", steps)
                 for number, param in enumerate(_bracketed_parts(params + ")"))
@@ -11428,7 +11451,12 @@ class TSParser(BaseParser):
             to the `}` that closes its body on line ``end_lineno``, or that
             whole line where its body is an expression."""
             if end_lineno > lineno:
-                self.enter_context(node_id, lineno, end_lineno, _ts_params(signature))
+                params = _ts_params(signature)
+                self.enter_context(node_id, lineno, end_lineno, params)
+                # A parameter is in scope in the definition, the functions
+                # it holds too.
+                for param in params:
+                    self._binding_ends.setdefault((lineno, param), end_lineno)
                 # An arrow function's signature starts with its parameters.
                 arrow = re.match(r"\s*(?:\(|[\w$]+\s*=>)", signature)
                 if arrow and signature.rpartition("=>")[2].strip() != "{":
@@ -14971,10 +14999,16 @@ class CallResolver:
             # `(...) => ...` or, where an origin path carries the writing,
             # `<...>` in place of `(...)`: the parameter list the function
             # type takes, the parentheses a type is written in aside. A
-            # union or an intersection of function types, and a generic
-            # one, whose type parameters a parameter's type can name, take
-            # none known.
+            # union of function types, and a generic one, whose type
+            # parameters a parameter's type can name, take none known; an
+            # intersection is called as its one function type is.
             written = written.strip()
+            compound = _ts_compound(written)
+            if compound and compound[0] == "&":
+                functions = [part.strip() for part in compound[1] if "=>" in part]
+                if len(functions) != 1:
+                    return ()
+                return self._functional_params(functions[0], scope_id)
             while True:
                 left, right = written[0], ")" if written[0] == "(" else ">"
                 depth, close = 0, -1
