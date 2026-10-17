@@ -277,6 +277,16 @@ Python SDK v2, and a full-tree review's findings are fixed.
 
 ### Fixed
 
+- **JavaScript and TypeScript scopes are read from the source.** Each
+  name a declaration, a parameter list, a `catch` or `for` head, a named
+  function expression or an assignment binds is in scope where the
+  language puts it: a `var` in its function, a `let`, `const` or
+  assignment in its block, a parameter in its function. A name is read as
+  the innermost binding in scope declares it; a closure sees one written
+  after it, a parameter of no declared type hides those around it, an
+  assignment's value reads what the name held before it. A call after a
+  member's name, `new`, a conditional's `?` or `extends`, and a return
+  type before `=>`, bind no parameters.
 - **Overloads, mixins and `#if` arms.** A call that several overloads take
   by the number of arguments it passes is left open with them as
   candidates: C# took the first that took as many, and Java and C++ took

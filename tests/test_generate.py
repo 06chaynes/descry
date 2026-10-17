@@ -8238,6 +8238,36 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:a.ts::loops") == [run]
         assert _calls(builder, "FILE:a.ts::parts") == [run] * 4
 
+    def test_scopes_read_from_the_source(self, tmp_path):
+        """A function a later `const` holds is called from a closure before
+        it; a call after a member or a conditional, and a return type before
+        `=>`, bind no parameters; an assignment's value reads what the name
+        held before it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Box { check(): Box { return this; } }
+                export function format(x: any) { return x; }
+                export class Never { static create = (p: any): Never => new Never(); }
+                export function run(flag: boolean, box: Box) {
+                  const click = () => tree(1);
+                  const tree = (n: number) => n;
+                  const text = flag ? JSON.stringify(format(box)) : "";
+                  box = box.check();
+                  click();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::run") == [
+            "FILE:a.ts::Box::check",
+            "FILE:a.ts::format",
+            "FILE:a.ts::run::click",
+        ]
+        assert _calls(builder, "FILE:a.ts::run::click") == ["FILE:a.ts::run::tree"]
+        assert _calls(builder, "FILE:a.ts::Never::create") == ["FILE:a.ts::Never"]
+
     def test_assignment_tells_what_a_variable_holds_in_its_block(self, tmp_path):
         """What a statement assigns is what the variable holds to the end of
         the block it is in; past it, what the variable is declared as."""
