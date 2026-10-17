@@ -408,39 +408,47 @@ Python SDK v2, and a full-tree review's findings are fixed.
   over lines is a definition whose parameters it types; a method written
   in an object argument, `withH({ run(c) { ... } })`, takes its parameters
   from the property the call's parameter type declares, and a callback's
-  rest parameter an array of what the callback's type gathers. A
-  definition inside a function hides a parameter of its name an enclosing
-  function binds, a hoisted function declaration wherever it is. A first
-  declarator, `let a = d, b = d`, is typed by its value as a later one is,
-  and `typeof d` by what `d` is declared as; a one-line `namespace` body
-  and an object whose `{` opens on the next line own their members; a
-  one-line `for (const x of y)` binds `x`; an arrow's own parameters read
-  its annotation over lines, and its rest parameter an array. `typeof p`
-  of a parameter is what `p` is declared as, `new Box;` makes a `Box`, a
-  declarator on a line of its own is of the scope its statement starts in,
-  an object a `=` gives after a blank line, or with members on its `{`
-  line, owns them, a `for` head binds its names wherever its lines break,
-  a callback whose body starts on the line after its `=>` binds its
-  parameters there, and iterating a `Map` gives its key and value by
-  position, as a parameter of a tuple type gives its elements through a
-  pattern or a literal index. An alias's object type may open on the line
-  after its `=`, a later declarator's annotation types the arrow it holds,
-  and `typeof` follows names to a type. `new Box().open()` typed the name
-  it was bound to as a `Box`. A field a JavaScript class assigns, `this.cb
-  = ...`, is its own, not a member of an outside base, and `export default
-  cond && function f`, on one line or over two, is `f`. A type parameter
-  whose bound only names it, `T extends Base<T>`, is its bound, where it
-  was read as the receiver's own type, so `b.get().self()` reached
-  `B::self`. A Dart raw string over lines held code on its later lines. In
-  Java, C#, Dart and PHP a field declared after another on its line, `A a;
-  B b;`, was no field. In C++ a spaced qualifier, `ns ::T`, of a parameter
-  or field kept the space; a qualified name is looked up as written where
-  it names, from the call's scope or a namespace around it, a namespace
-  that holds the definition, though a macro opens one of that name
-  elsewhere, and finds the type it names in full there, where it found any
-  in a scope of its last name; a base list reads `ns ::Base` as
-  `ns::Base`; a name the project defines as a macro and as no namespace,
-  before the `::` a return type starts with, is no qualifier of it; a
+  rest parameter an array of what the callback's type gathers. A local is
+  read in its block only, where one of a function was read in every
+  function after it; a function, class or `catch` binding inside a
+  function, or a declaration read before it is written, hides a parameter
+  of its name an enclosing function binds. A first declarator, `let a = d,
+  b = d`, is typed by its value as a later one is, and `typeof d` by what
+  `d` is declared as; a one-line `namespace` body and an object whose `{`
+  opens on the next line own their members; a one-line `for (const x of
+  y)` binds `x`; an arrow's own parameters read its annotation over lines,
+  and its rest parameter an array. `typeof p` of a parameter is what `p`
+  is declared as, `new Box;` makes a `Box`, a declarator on a line of its
+  own is of the scope its statement starts in, an object a `=` gives after
+  a blank line, or with members on its `{` line, owns them, a `for` head
+  binds its names wherever its lines break, a callback whose body starts
+  on the line after its `=>` binds its parameters there, and iterating a
+  `Map` gives its key and value by position, as a parameter of a tuple
+  type gives its elements through a pattern or a literal index. An alias's
+  object type may open on the line after its `=`, a later declarator's
+  annotation types the arrow it holds, and `typeof` follows names to a
+  type. A `readonly` member, an intersection of object types, a cast in an
+  expression body, a method an object type declares, called, a `readonly`
+  or aliased tuple, and an indexed access type, `Type["key"]`, are read as
+  written. `new Box().open()` typed the name it was bound to as a `Box`. A
+  field a JavaScript class assigns, `this.cb = ...`, is its own, not a
+  member of an outside base, and `export default cond && function f`, on
+  one line or over two, is `f`. A type parameter whose bound only names
+  it, `T extends Base<T>`, is its bound, where it was read as the
+  receiver's own type, so `b.get().self()` reached `B::self`. A Dart raw
+  string over lines held code on its later lines. In Java, C#, Dart, PHP,
+  Rust and Go a field or statement after another on its line, `A a; B b;`,
+  was not read, and a Java field behind an annotation and the calls of a
+  PHP function on one line were not either. In C++ a spaced qualifier, `ns
+  ::T`, of a parameter or field kept the space; a qualified name is looked
+  up as written where it names, from the call's scope or a namespace
+  around it, a namespace that holds the definition, though a macro opens
+  one of that name elsewhere, and finds the type it names in full there,
+  where it found any in a scope of its last name; a base list reads `ns
+  ::Base` as `ns::Base`; a macro in a qualifier, in a return type, a
+  parameter, a local or a base, is read as it expands, a namespace it
+  stands for as that and one that stands for nothing or an attribute as
+  nothing; of two scopes a qualifier names the innermost is the one; a
   lambda with a return type binds its parameters; `typename std::...`
   declared a type parameter `std`; a macro before `::std::string` was read
   as its type; and `ns::Box<int>()` reached the file's own specialization

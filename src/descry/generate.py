@@ -6372,6 +6372,7 @@ class BaseParser:
         self._members = set()
         self._read_at = None  # column of the call whose receiver is read
         self._param_regions = {}  # see ``_js_param_regions``
+        self._block_scopes = {}  # see ``_js_scopes``
         self._first_node = 0  # where the nodes and edges of the file being
         self._first_edge = 0  # parsed start in the builder's lists
         # (name, unwrap, depth) of a binding still being read. depth is how
@@ -6509,7 +6510,7 @@ class BaseParser:
             for d in self.declared.get(name, ())
             if anywhere
             or (d[0], name) not in self._members
-            and not self._outside_function(d[0], name, lineno)
+            and not self._out_of_scope(d[0], name, lineno)
         ]
         if not anywhere:
             # A declaration counts in the block it is scoped to, and one whose
@@ -6525,6 +6526,17 @@ class BaseParser:
             if local:
                 line = max(d[0] for d in local)
                 same = [d for d in local if d[0] == line]
+                regions = self._param_regions.get(line, ())
+                if len(same) > 1 and regions:
+                    # A callback's parameter, where the read is in its function
+                    at = lineno, self._read_at or 0
+                    inside = any(name in r[2] and r[0] < at <= r[3] for r in regions)
+                    kept = [
+                        d
+                        for d in same
+                        if bool(_CALLBACK_RE.match(d[1] or "")) == inside
+                    ]
+                    same = kept or same
                 columns = self._declared_columns.get((line, name), ())
                 if self._read_at is not None and len(columns) == len(same) > 1:
                     # Of the declarations on the line, the last before the read
@@ -6550,20 +6562,27 @@ class BaseParser:
         name in scope."""
         return False
 
-    def _outside_function(self, line, name, lineno):
+    def _out_of_scope(self, line, name, lineno):
         """Whether ``name`` declared on line ``line`` is a parameter of
-        functions there that a read on line ``lineno``, at column
-        ``_read_at`` where known, is outside of."""
+        functions there, or a declaration in blocks there, that a read on
+        line ``lineno``, at column ``_read_at`` where known, is outside of."""
+        at = self._read_at
         regions = [r for r in self._param_regions.get(line, ()) if name in r[2]]
+        spans = [
+            span
+            for _, held, span in self._block_scopes.get(name, ())
+            if held[0] == line
+        ]
         columns = self._declared_columns.get((line, name), ())
-        if not regions or any(
+        if regions and not any(
             not any(r[0] < (line, column) < r[1] for r in regions) for column in columns
         ):
-            return False
-        at = self._read_at
-        return not any(
-            r[0][0] <= lineno <= r[3][0] if at is None else r[0] < (lineno, at) <= r[3]
-            for r in regions
+            spans += [(r[0], r[3]) for r in regions]
+        return bool(spans) and not any(
+            span[0][0] <= lineno <= span[1][0]
+            if at is None
+            else span[0] < (lineno, at) <= span[1]
+            for span in spans
         )
 
     def call_origin(self, callee, lineno, since, owner=None):
@@ -6760,6 +6779,9 @@ class BaseParser:
                 entries.append(
                     (self._line, origin, self._binds_file(name) and not typed)
                 )
+                # The declaration is in scope past the end of a callback's
+                # parameter of its name on its line.
+                self._binding_ends.pop((self._line, name), None)
 
     def _typed_line(self, name):
         """The line being read, where it declares ``name`` with a type, else
@@ -8733,6 +8755,7 @@ class RustParser(BaseParser):
             self.blank_lines(lines, ('"', "r")),
             _RUST_DEFINITION_HEAD_RE,
             _RUST_TYPE_HEAD_RE,
+            statement=_STATEMENT_START_RE,
         )
         current_context = [file_id]  # Stack of IDs
         context_indent = [0]  # Stack of indentation levels
@@ -8963,7 +8986,7 @@ class RustParser(BaseParser):
                     current_context.append(func_id)
                     context_indent.append(indent)
                     fn_ids.add(func_id)
-                elif j == i and "{" in line:
+                if j == i and "{" in line:
                     # A body on the signature's line: its calls are the function's.
                     parent_id = func_id
                 i = j
@@ -9531,6 +9554,17 @@ def _ts_unquoted(text):
 
 
 @cache
+def _ts_given(alias, arguments):
+    """The text of the TypeScript type ``alias``, ``(type parameters,
+    text)``, stands for with ``arguments`` in place of its parameters."""
+    given = dict(zip(alias[0], arguments))
+    return re.sub(
+        r"(?<![\w$.])[\w$]+(?![\w$])",
+        lambda found: given.get(found[0], found[0]),
+        alias[1],
+    )
+
+
 def _ts_type_parts(text):
     """``(name, type arguments, {})`` of a TypeScript type as written,
     whether or not it may be undefined or null instead. An array is an
@@ -9553,8 +9587,9 @@ def _ts_type_parts(text):
         return "boolean", (), {}
     if _TS_STRING_RE.fullmatch(text):
         return "string", (), {}
-    if text[:1] == "[" and text[-1:] == "]" and text[1:-1].strip():
-        return "[]", tuple(_bracketed_parts(text[1:])), {}
+    tuple_ = text.removeprefix("readonly ").strip()
+    if tuple_[:1] == "[" and tuple_[-1:] == "]" and tuple_[1:-1].strip():
+        return "[]", tuple(_bracketed_parts(tuple_[1:])), {}
     name = re.match(r"[\w$.]*", text)[0]
     arguments = ()
     if text.startswith("<", len(name)) and text.endswith(">"):
@@ -9908,28 +9943,44 @@ def _statement_end(lines: list[str], index: int, column: int = 0) -> int:
 # type it is declared, a named, an object or a tuple type: `{ a, b }: Pair`
 _TS_TYPED_PARAMETER_RE = re.compile(
     r"\s*([\[{].*[\]}]|[A-Za-z_$][\w$]*)\s*\??\s*:\s*"
-    r"((?:[a-z_$][\w$]*\.)*[A-Z$][\w$.]*(?:<.*>)?(?:\[\])*|\{.*\}|\[.*\])\s*(?:=.*)?",
+    r"((?:[a-z_$][\w$]*\.)*[A-Z$][\w$.]*(?:<.*>)?(?:\[\])*|\{.*\}|(?:readonly\s+)?\[.*\])"
+    r"\s*(?:=.*)?",
     re.DOTALL,
 )
+# A declaration a statement starts with, and the name it declares
+_JS_DECLARATION_RE = re.compile(
+    r"(?:^|(?<=[;{}]))[ \t]*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?"
+    r"(?P<kind>function|class|const|let|var)\b\s*\*?\s*(?P<name>[A-Za-z_$][\w$]*)",
+    re.MULTILINE,
+)
+# A `catch` and the name it binds, up to its `(`... `)`
+_JS_CATCH_RE = re.compile(r"\b(?P<kind>catch)\s*\(\s*(?P<name>[A-Za-z_$][\w$]*)\s*\)")
 # The keyword of a statement whose head is in parentheses, before its `(`
 _JS_CONTROL_HEAD_RE = re.compile(
     r"(?<![\w$.])(?:if|for(?:\s+await)?|while|switch|with|catch)\s*$"
 )
-# The type arguments of a call, from their `<` to the call's `(`
-_JS_TYPE_ARGUMENTS_RE = re.compile(
-    r"<[^<>;=(){}]*(?:<[^<>;=(){}]*>[^<>;=(){}]*)*>\s*\("
+# An indexed access type with a literal key: `Type["key"]`
+_TS_INDEXED_RE = re.compile(r"([\w$.]+)\s*\[\s*[\"']([\w$]+)[\"']\s*\]")
+# The origin path of a callback's parameter: `#edge|argument|position`
+_CALLBACK_RE = re.compile(r"#\d+\|")
+# What a C/C++ macro that marks a declaration expands to: nothing, an
+# attribute, a specifier or the opening of a namespace
+_C_MARK_RE = re.compile(
+    r"(?:\s*(?:__\w+\s*(?:\(.*\))?|\[\[.*\]\]|alignas\s*\(.*\)|namespace\s+[\w:]*\s*\{"
+    r"|extern(?:\s*\"C\")?|static|inline|constexpr|virtual|explicit))*\s*"
+)
+# The type an `as` or a `satisfies` casts to, with its type arguments
+_TS_CAST_TYPE_RE = re.compile(
+    r"(?<![\w$.])(?:as|satisfies)\s+[\w$.]+(?:<(?:[^<>()]|<(?:[^<>()]|<[^<>()]*>)*>)*>)?"
 )
 # The one parameter an arrow function writes without parentheses
 _JS_LONE_PARAM_RE = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=>")
 
 
-def _js_param_regions(lines: list[str]) -> dict:
-    """``{line: [(start, close, names, end, written)]}``: each parameter
-    list of a function or signature in the code lines ``lines`` on each
-    line it is written over, with the `(line, column)` it starts and ends
-    at, the names it binds, the `(line, column)` where what it is in scope
-    in ends, its function's body or the signature itself, and the list as
-    written."""
+def _js_brackets(lines):
+    """``(text, starts, closer)`` of the code lines ``lines``: them joined,
+    the offset each starts at and the offset of the bracket that closes
+    each one opened."""
     text = "\n".join(lines)
     starts = [0]
     for line in lines:
@@ -9940,6 +9991,71 @@ def _js_param_regions(lines: list[str]) -> dict:
             stack.append(at)
         elif char in ")]}" and stack:
             closer[stack.pop()] = at
+    return text, starts, closer
+
+
+def _js_scopes(lines, regions):
+    """``{name: [(kind, at, span)]}``: each name the code lines ``lines``
+    declare by a statement, `function`, `class`, `const`, `let` or `var`,
+    or by a `catch`, with the `(line, column)` it is at and the span it is
+    in scope in: the block around it, for a `var` the function ``regions``
+    say it is in, for a `catch` binding the catch's block."""
+    text, starts, closer = _js_brackets(lines)
+
+    def place(at):
+        row = bisect_right(starts, at) - 1
+        return row + 1, at - starts[row]
+
+    found = sorted(
+        [*_JS_DECLARATION_RE.finditer(text), *_JS_CATCH_RE.finditer(text)],
+        key=lambda match: match.start("name"),
+    )
+    blocks, stack, pending = [], [], iter(found)
+    match = next(pending, None)
+    for at, char in enumerate(text):
+        while match and match.start("name") == at:
+            blocks.append((match, stack[-1] if stack else None))
+            match = next(pending, None)
+        if char == "{":
+            stack.append(at)
+        elif char == "}" and stack:
+            stack.pop()
+    functions = {(r[0], r[3]) for held in regions.values() for r in held}
+    whole = (0, 0), place(len(text))
+    scopes = {}
+    for match, block in blocks:
+        kind, at = match["kind"], place(match.start("name"))
+        if kind == "catch":
+            opened = text.find("{", closer.get(match.end() - 1, match.end()))
+            span = (place(opened), place(closer[opened])) if opened in closer else whole
+        elif kind == "var":
+            around = [f for f in functions if f[0] < at <= f[1]]
+            span = max(around) if around else whole
+        else:
+            span = (
+                (place(block), place(closer.get(block, len(text)))) if block else whole
+            )
+        scopes.setdefault(match["name"], []).append((kind, at, span))
+    return scopes
+
+
+def _js_block_follows(lines, row, column):
+    """Whether a `{` follows column ``column`` of line ``row`` of the code
+    lines ``lines``: there, or first on the next line of code."""
+    rest = lines[row][column:].strip() or next(
+        (line.strip() for line in lines[row + 1 :] if line.strip()), ""
+    )
+    return rest[:1] == "{"
+
+
+def _js_param_regions(lines: list[str]) -> dict:
+    """``{line: [(start, close, names, end, written)]}``: each parameter
+    list of a function or signature in the code lines ``lines`` on each
+    line it is written over, with the `(line, column)` it starts and ends
+    at, the names it binds, the `(line, column)` where what it is in scope
+    in ends, its function's body or the signature itself, and the list as
+    written."""
+    text, starts, closer = _js_brackets(lines)
     lists = [
         (found.start(), closer.get(found.start()))
         for found in re.finditer(r"\(", text)
@@ -9954,7 +10070,10 @@ def _js_param_regions(lines: list[str]) -> dict:
             continue
         if text[opened] != "(":
             closed -= 1
-        named = re.search(r"(?:[\w$]|(?<!=)>)\s*$", text[max(opened - 40, 0) : opened])
+        # A name, a computed or quoted key, type parameters or a generator's `*`
+        named = re.search(
+            r"(?:[\w$\]'\"*]|(?<!=)>)\s*$", text[max(opened - 40, 0) : opened]
+        )
         end = _js_function_end(text, closed + 1, closer, lines, starts, named)
         if end is None:
             continue
@@ -9997,12 +10116,20 @@ def _js_body_end(text, head, closer, lines, starts):
         if body is None and not angles and text.startswith("=>", at):
             at = body = at + 2
             continue
-        generic = body is not None and _JS_TYPE_ARGUMENTS_RE.match(text, at)
-        if generic and re.match(r"[\w$]", text[at - 1 : at]):
-            # A call's type arguments, `h<A, B>(`, in an expression body
-            at = generic.end() - 1
+        # A call's type arguments, `h<A, B>(`, and the type of a cast in an
+        # expression body
+        skipped = body is not None and (
+            _JS_TYPE_ARGUMENTS_RE.match(text, at) or _TS_CAST_TYPE_RE.match(text, at)
+        )
+        if skipped:
+            at = skipped.end()
             continue
-        if body is not None and char == "?" and text[at + 1 : at + 2] not in ".?":
+        if (
+            body is not None
+            and char == "?"
+            and text[at + 1 : at + 2] not in ".?"
+            and text[at - 1 : at] != "?"
+        ):
             asked += 1
         elif body is not None and char == ":":
             # The `:` of a conditional the body holds, else of one the
@@ -10962,7 +11089,7 @@ _TS_OBJECT_OPENS_RE = re.compile(
 # What starts a statement after a block's `}` or a statement's `;` in the
 # other brace languages: not a word that goes on with the statement before
 _STATEMENT_START_RE = re.compile(
-    r"(?!(?:else|elseif|catch|finally|while|on)(?![\w$]))[A-Za-z_$@\\]"
+    r"(?!(?:else|elseif|catch|finally|while|on)(?![\w$]))[A-Za-z_$@\\[]"
 )
 # What starts a statement after a block's `}` or a statement's `;`: not a
 # word that goes on with the statement before it, nor a template's `${`
@@ -10980,7 +11107,8 @@ _TS_NAMESPACE_RE = re.compile(
 )
 # What may follow the `}` or `;` that ends a statement before the next
 _TS_SEPARATORS_RE = re.compile(r"[ \t,;]*")
-_TS_SPACE_RE = re.compile(r"[ \t]*")
+# and a statement: spaces and empty statements
+_STATEMENT_GAP_RE = re.compile(r"[ \t;]*")
 # What a line may go on to after the `}` or `;` that ends a definition:
 # another declaration, or a member of a class or an object with its body
 _TS_DEFINITION_HEAD_RE = re.compile(
@@ -11087,11 +11215,12 @@ def _split_lines(
                     member
                     and (member in _JSTS_CONTROL_KEYWORDS or not _opens_body(code, at))
                 )
-                after = _TS_SPACE_RE.match(code, column + 1).end()
+                after = _STATEMENT_GAP_RE.match(code, column + 1).end()
                 if defines:
                     cuts.append((at, 0))
                 elif statement and statement.match(code, after):
-                    cuts.append((after, 0))
+                    # Inside the blocks the line opens
+                    cuts.append((after, opened_here.count(True)))
         if not cuts:
             split.append(line)
             rows.append(row)
@@ -11118,7 +11247,7 @@ class TSParser(BaseParser):
         """`name: Type` that is no declarator of a `const`, `let` or `var`
         statement, outside the brackets of its declarators, and no parameter
         a list around it binds: a member of a type or a key of an object."""
-        head = line[:column]
+        head = self._code_lines[lineno - 1][:column]
         opened = sum(map(head.count, "([{")) - sum(map(head.count, ")]}"))
         statement = re.match(
             r"\s*(?:export\s+)?(?:declare\s+)?(?:const|let|var)\b", line
@@ -11326,10 +11455,11 @@ class TSParser(BaseParser):
         `for...in` gives the names of properties."""
         head = _JS_FOR_START_RE.search(code)
         close = head and self._pairs.get(head.end() - 1)
-        found = (
-            close and _JS_FOR_PARTS_RE.fullmatch(code, head.end(), close)
-        ) or _JS_PATTERN_RE.search(code)
-        block = code.count("{") > code.count("}")
+        found = close and _JS_FOR_PARTS_RE.fullmatch(code, head.end(), close)
+        block = found and _js_block_follows(lines, index, close + 1)
+        if not found:
+            found = _JS_PATTERN_RE.search(code)
+            block = code.count("{") > code.count("}")
         pattern = found and found["pattern"]
         kind = found and found.groupdict().get("kind")
         span = found and found.span("value")
@@ -11402,10 +11532,10 @@ class TSParser(BaseParser):
         shift = len(before) + 1
         if not parts or parts.start("value") < shift:
             return None
-        tail = lines[row][column + 1 :] if row < len(lines) else ""
         span = parts.start("value") - shift, parts.end("value") - shift
         close = column if row == index else None
-        return parts["pattern"], parts["kind"], span, tail.lstrip()[:1] == "{", close
+        block = row < len(lines) and _js_block_follows(lines, row, column + 1)
+        return parts["pattern"], parts["kind"], span, block, close
 
     def _binds_file(self, name):
         """A line outside every definition that starts at the margin, as
@@ -11424,30 +11554,34 @@ class TSParser(BaseParser):
         held = bound and self._declared(callee, lineno, since)
         if held and re.search(r"(?:^|\.)[\w$]+$", held):
             return None if self._hidden(callee, lineno) else held
-        if self._hidden(callee.partition(".")[0], lineno, hoisted=True):
+        if self._hidden(callee.partition(".")[0], lineno):
             return None
         return super().call_origin(callee, lineno, since, owner)
 
-    def _hidden(self, name, lineno, hoisted=False):
-        """Whether a definition of ``name`` in a function line ``lineno`` is
-        in, inside the one whose parameter ``name`` is, hides the parameter;
-        with ``hoisted``, a function declaration only."""
-        hidden = False
-        for context in reversed(self._contexts):
-            if lineno > context[2]:
-                continue
-            if name in context[3]:
-                return hidden
-            hidden = hidden or self._defines(context, name, hoisted)
-        return False
-
-    def _defines(self, context, name, hoisted=False):
-        """Whether the function of ``context`` defines ``name``: a function
-        declaration anywhere in it, or without ``hoisted`` any definition of
-        it read so far."""
-        node_id, first, last, _ = context
-        read = not hoisted and f"{node_id}::{name}" in self.builder.node_registry
-        return read or any(first <= at <= last for at in self._hoisted.get(name, ()))
+    def _hidden(self, name, lineno):
+        """Whether a declaration of ``name`` inside the innermost function
+        whose parameter ``name`` is, and in scope where it is read on line
+        ``lineno``, at column ``_read_at``, hides the parameter: a function,
+        a class or a `catch` binding, one written after the read, or one of
+        no value known."""
+        at = lineno, self._read_at or 0
+        held = [r for r in self._name_regions.get(name, ()) if r[0] < at <= r[3]]
+        if not held:
+            return False
+        param = max(held)
+        # A declaration read after it is written, and holding a value, is
+        # what the name is read as there.
+        typed = {line for line, value, _ in self.declared.get(name, ()) if value}
+        return any(
+            span[0] < at <= span[1]
+            and param[0] < declared <= param[3]
+            and (
+                kind in ("function", "class", "catch")
+                or declared > at
+                or declared[0] not in typed
+            )
+            for kind, declared, span in self._block_scopes.get(name, ())
+        )
 
     def _is_local(self, name):
         """As the base's; the parameters of the definition are read from its
@@ -11692,14 +11826,16 @@ class TSParser(BaseParser):
         # ``code_lines`` is a line without its comments and with the text of
         # its literals blanked, for the names it binds and the braces
         # counted on it.
-        code_lines = _blank_js_lines(lines, jsx=jsx)
+        code_lines = self._code_lines = _blank_js_lines(lines, jsx=jsx)
         self._param_regions = _js_param_regions(code_lines)
-        # Name -> the lines a function declaration of it is on, which is in
-        # scope in its whole block
-        self._hoisted = {}
-        for row, code in enumerate(code_lines, 1):
-            for found in re.finditer(r"\bfunction\b\s*\*?\s*([\w$]+)", code):
-                self._hoisted.setdefault(found[1], []).append(row)
+        self._block_scopes = _js_scopes(code_lines, self._param_regions)
+        # Name -> the parameter lists that bind it
+        self._name_regions = {}
+        for held in self._param_regions.values():
+            for region in held:
+                for name in region[2]:
+                    if region not in self._name_regions.setdefault(name, []):
+                        self._name_regions[name].append(region)
         self.scan_declarations(lines, _TS_DECLARATIONS)
         self.builder.type_aliases.update(_TYPE_ALIAS_RE.findall(content))
         for name, generics, text in _TS_ALIAS_RE.findall(content):
@@ -11768,14 +11904,20 @@ class TSParser(BaseParser):
         # and one of an object or a tuple type a value of that; the scan
         # reads a name of a named type.
         for row, regions in self._param_regions.items():
-            for start, *_, written in regions:
+            for start, close, *_, written in regions:
                 listed = written[0] == "(" and start[0] == row
-                for part in _bracketed_parts(written[1:]) if listed else ():
+                # As written, its literal types too
+                source = "\n".join(lines[start[0] - 1 : close[0]])
+                source = source[
+                    start[1] : len(source) - len(lines[close[0] - 1]) + close[1] + 1
+                ]
+                for part in _bracketed_parts(source[1:]) if listed else ():
                     typed = _TS_TYPED_PARAMETER_RE.fullmatch(part)
-                    if not typed or typed[1][0] not in "[{" and typed[2][0] not in "[{":
+                    written = typed and typed[2].removeprefix("readonly ").strip()
+                    if not typed or typed[1][0] not in "[{" and written[0] not in "[{":
                         continue
                     held = f"{typed[2]}()"
-                    if typed[2][0] in "[{":
+                    if written[0] in "[{":
                         held = f"{{{len(self.builder.parameter_types)}}}"
                         self.builder.parameter_types[held] = typed[2], file_id
                     for name, steps in _js_bindings(typed[1]):
@@ -11909,11 +12051,13 @@ class TSParser(BaseParser):
             and `=name` for a variable a function declares, where no
             definition there defines the name and the variable's origin is
             not known."""
+            if self._hidden(name, lineno):
+                return None
             for context in reaching(lineno):
                 if name in context[3]:
                     held = self._declared(name, lineno, since)
                     return held if held and not held.endswith("()") else "?"
-                if self._defines(context, name):
+                if f"{context[0]}::{name}" in self.builder.node_registry:
                     return None
                 lines_in = declared_names.get(context[:3], {}).get(name, ())
                 if any(first <= lineno <= last for first, last in lines_in):
@@ -14037,21 +14181,30 @@ class CallResolver:
                     # A type is looked up by the name it was declared under.
                     self.renamed_types.setdefault((lang, declared), []).append(node_id)
                     self.companions[f"{parent}::{declared}"] = node_id
-        # A name the project defines as a C/C++ macro and as no namespace,
-        # before the `::` a return type starts with, is an attribute or an
-        # export mark the macro stands for, not a qualifier.
-        kinds = {}
+        # Object-like C/C++ macro -> what every definition of it expands
+        # to, None where they disagree; and the names scopes are written by
+        self.c_macros, self.c_scopes = {}, set(self.c_spaces)
         for node_id, node in self.nodes.items():
-            kind = node["metadata"].get("kind")
-            if kind in ("macro", "namespace") and self.lang(node_id) == "clang":
-                kinds.setdefault(self._name(node_id), set()).add(kind)
-        marks = {name for name, held in kinds.items() if held == {"macro"}}
-        for node in self.nodes.values():
+            if self.lang(node_id) != "clang":
+                continue
+            self.c_scopes.update(node_id.split("::")[1:-1])
+            if "expands" in node["metadata"]:
+                held = node["metadata"]["expands"]
+                name = self._name(node_id)
+                self.c_macros[name] = (
+                    held if self.c_macros.get(name, held) == held else None
+                )
+            elif node["metadata"].get("kind") == "namespace":
+                self.c_scopes.add(self._name(node_id))
+        for node_id, node in self.nodes.items():
+            # A return type is read as its macros expand.
             head, sep, rest = (node["metadata"].get("return_type") or "").partition(
                 "::"
             )
-            if sep and head in marks - self.c_spaces:
-                node["metadata"]["return_type"] = rest
+            if sep and self.lang(node_id) == "clang":
+                unmacroed = self._c_unmacroed([head])
+                if unmacroed != [head]:
+                    node["metadata"]["return_type"] = "::".join([*unmacroed, rest])
         # Name -> the C# extension methods declared under it
         self.extensions = {}
         for node_id, node in self.nodes.items():
@@ -14259,6 +14412,7 @@ class CallResolver:
         # signature a call of it is of
         self.overloads = {}
         self._result = None  # value of the call being resolved, where known
+        self._shape_returns = None  # what a method an object type declares returns
         self._receiver = None  # type the method being resolved is called on
         self.arguments = None  # what that call passes, where its parser counted
         # Signed `#if` atoms the line of the call being resolved is under
@@ -14477,7 +14631,7 @@ class CallResolver:
     def resolve(self, callee, source_id, origin=None, arguments=None):
         """``arguments`` is how many arguments the call passes, where the
         parser counted them."""
-        self._result = self._receiver = self._deferred = None
+        self._result = self._receiver = self._deferred = self._shape_returns = None
         self._callables = {}
         self._this_args = {}
         self._candidates_now = None
@@ -14624,6 +14778,7 @@ class CallResolver:
             # The global namespace and one a macro opens have no node: what
             # they hold is at the top of the files, beside what a namespace
             # of the name holds.
+            qualifier = self._c_unmacroed(qualifier)
             if all(q in self.c_spaces for q in qualifier):
                 fits = [c for c in candidates if self._c_path(c) == [name]]
                 file_id = source_id.split("::")[0]
@@ -14641,7 +14796,7 @@ class CallResolver:
             # No project symbol carries the name, so the call is external;
             # what it returns is unknown unless its receiver is external too.
             if verdict[1] != _EXTERNAL:
-                self._result = _OPAQUE
+                self._result = self._shape_returns or _OPAQUE
             return None, _EXTERNAL
         if lang == "php":
             return self._php_function(callee, candidates, source_id)
@@ -15444,6 +15599,7 @@ class CallResolver:
         type it names, a method's as a function type; None for none."""
         if written.startswith("{") and written.endswith("}"):
             for part in _bracketed_parts(written[1:-1].replace(";", ",")):
+                part = re.sub(r"^\s*readonly\s+", "", part)
                 method = _ts_function_property(part) or (
                     re.match(r"\s*([\w$]+)\??\s*(\(.*\))\s*:\s*(.+)", part)
                 )
@@ -15454,8 +15610,7 @@ class CallResolver:
                 if method and not isinstance(method, tuple) and method[1] == key:
                     return f"{method[2]} => {method[3]}", scope_id
                 name, colon, held = part.partition(":")
-                name = name.strip().removeprefix("readonly ").strip().rstrip("?")
-                if colon and name == key:
+                if colon and name.strip().rstrip("?") == key:
                     return held.strip(), scope_id
             return None, scope_id
         type_id = self._type_named(written, scope_id)
@@ -15491,13 +15646,7 @@ class CallResolver:
             # place of its parameters.
             alias = self._ts_alias(named[0], scope_id)
             if alias and alias[1] != written:
-                given = dict(zip(alias[0], named[1]))
-                text = re.sub(
-                    r"(?<![\w$.])[\w$]+(?![\w$])",
-                    lambda found: given.get(found[0], found[0]),
-                    alias[1],
-                )
-                return self._functional_params(text, scope_id)
+                return self._functional_params(_ts_given(alias, named[1]), scope_id)
         if (
             isinstance(written, str)
             and written.startswith(("(", "<"))
@@ -16197,6 +16346,10 @@ class CallResolver:
         lang = self.lang(scope_id)
         if lang == "typescript":
             hit = self._written(name, scope_id, set())
+            alias = not hit and self._ts_alias(name, scope_id)
+            if alias and _ts_type_parts(alias[1])[0] == "[]":
+                # A tuple an alias stands for, a value of it once called
+                return ("returned", self._returned_type(name, scope_id))
         else:
             hit = self._lexical(name, scope_id, skip_classes=True)
         if hit:
@@ -16841,6 +16994,18 @@ class CallResolver:
             return None
         if kind == "shape":
             written, scope = self._property_type(ref, name, value[2])
+            if called and written and written[:1] in "(<":
+                # A method an object type declares has no definition; the
+                # call gives what its type returns.
+                depth = 0
+                for at, char in enumerate(written):
+                    depth += (char == "(") - (char == ")")
+                    if not depth:
+                        break
+                returned = written[at + 1 :].strip().removeprefix("=>").strip()
+                self._shape_returns = self._returned_type(returned, scope)
+                self._result = self._shape_returns or _OPAQUE
+                return None
             return written and self._returned_type(written, scope)
         if kind == "library":
             dotted = f"{ref}.{name}"
@@ -17209,26 +17374,45 @@ class CallResolver:
             return hits[0]
         return None
 
+    def _c_unmacroed(self, qualifier):
+        """``qualifier`` as the object-like macros among its names expand: a
+        macro that stands for a namespace as that namespace, one that stands
+        for nothing, an attribute or a specifier as nothing. A name that also
+        names a scope is the scope's."""
+        unmacroed = []
+        for name in qualifier:
+            held = None if name in self.c_scopes else self.c_macros.get(name)
+            if held is None:
+                unmacroed.append(name)
+            elif held.strip(":").split("::")[0] in self.c_scopes:
+                unmacroed += held.strip(":").split("::")
+            elif not _C_MARK_RE.fullmatch(held):
+                unmacroed.append(name)
+        return unmacroed
+
     def _c_written(self, qualifier, held, scope_id):
         """``qualifier``, written in ``scope_id``, as it names a definition:
         without the namespaces macros open, which have no node, unless it
         names, from ``scope_id`` or a namespace around it, one that holds
-        one of ``held``."""
+        one of ``held``. A macro among its names is read as it expands."""
+        qualifier = self._c_unmacroed(qualifier)
         parents = {h.rpartition("::")[0] for h in held} & self.nodes.keys()
         if any(self._c_names(p, qualifier, scope_id) for p in parents):
             return qualifier
         return [q for q in qualifier if q not in self.c_spaces]
 
     def _c_names(self, parent, qualifier, scope_id):
-        """Whether ``qualifier``, written in ``scope_id``, names the scope
-        ``parent``: from ``scope_id`` or a namespace around it."""
+        """How deep in ``scope_id`` the namespace is from which
+        ``qualifier``, written there, names the scope ``parent``, counting
+        the global one; 0 where it names it from none."""
         path, around = parent.split("::")[1:], scope_id.split("::")[1:]
         outer = path[: len(path) - len(qualifier)]
-        return (
-            bool(qualifier)
+        named = (
+            qualifier
             and path[len(outer) :] == qualifier
             and around[: len(outer)] == outer
         )
+        return len(outer) + 1 if named else 0
 
     def _c_path(self, node_id):
         """The qualified name of ``node_id`` without the namespaces macros
@@ -17253,10 +17437,13 @@ class CallResolver:
         if qualifier:
             # The types the qualifier names in full, else those in a scope
             # of its last name.
-            inside = [
-                t
+            # Of those it names in full, the ones from the innermost scope.
+            depths = {
+                t: self._c_names(t.rpartition("::")[0], qualifier, scope_id)
                 for t in types
-                if self._c_names(t.rpartition("::")[0], qualifier, scope_id)
+            }
+            inside = [
+                t for t in types if depths[t] and depths[t] == max(depths.values())
             ] or [
                 t for t in types if self._name(t.rpartition("::")[0]) == qualifier[-1]
             ]
@@ -17660,10 +17847,22 @@ class CallResolver:
                 held = held and self._find_member(held, step)[0]
             return ("def", held) if held else None
         compound = self.lang(function_id) == "typescript" and _ts_compound(returns)
+        indexed = compound is None and _TS_INDEXED_RE.fullmatch(returns.strip())
+        if indexed:
+            # `Type["key"]`: the member of the type under that key
+            held = self._type_named(indexed[1], function_id)
+            member = (
+                held not in (None, _EXTERNAL) and self._find_member(held, indexed[2])[0]
+            )
+            return ("def", member) if member else None
         if compound is None and returns[:1] == "{" and returns[-1:] == "}":
             # An object type: a value of it has the properties it writes.
             return ("shape", returns, function_id)
         name, parts, _ = _ts_type_parts(returns) if compound is None else ("", (), {})
+        alias = name and name != "[]" and self._ts_alias(name, function_id)
+        if alias and _ts_type_parts(alias[1])[0] == "[]":
+            # An alias of a tuple type is that tuple.
+            name, parts, _ = _ts_type_parts(_ts_given(alias, parts))
         if name == "[]" and returns not in self.builder.literals:
             # A tuple type holds the types it writes, by position.
             return (
@@ -17683,6 +17882,10 @@ class CallResolver:
             if compound[0] == "?":
                 # A conditional type is the type its branches agree on.
                 return values[0] if values.count(values[0]) == len(values) else None
+            if all(value and value[0] == "shape" for value in values):
+                # Object types together have the properties each writes.
+                held = "; ".join(value[1][1:-1].strip() for value in values)
+                return ("shape", f"{{ {held} }}", function_id)
             # An intersection is the operand derived from every other.
             known = [value for value in values if value is not None]
             for value in known:

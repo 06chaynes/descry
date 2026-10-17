@@ -145,12 +145,13 @@ _DECLARATIONS = (
 )
 
 # A line of a struct: `name Type`, `name, other Type`, or the embedded
-# `Type` / `*pkg.Type`, a field named as its type is
+# `Type` / `*pkg.Type`, a field named as its type is, ended by a `;` where
+# another follows on its line
 _RE_FIELD = re.compile(
     r"\s+(?:(?P<names>\w+(?:\s*,\s*\w+)*)\s+\*?"
     + _DECLARED_TYPE
     + r"|\*?(?P<embedded>(?:\w+\.)?(?P<name>[A-Za-z_]\w*)))"
-    r"\s*(?:`[^`]*`\s*)?(?://.*)?"
+    r"\s*(?:`[^`]*`\s*)?;?\s*(?://.*)?"
 )
 
 # `Name(` at the start of a line of an interface: a method it declares

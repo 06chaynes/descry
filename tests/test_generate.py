@@ -4827,6 +4827,30 @@ class TestRustCallResolution:
             "FILE:src/lib.rs::Product::label",
         ]
 
+    def test_statements_on_one_line_are_each_read(self, tmp_path):
+        """Each `let` of a line binds its name."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib.rs": """
+                struct A; impl A { fn use_it(&self) {} }
+                struct B; impl B { fn run(&self) {} }
+                fn mk_a() -> A { A }
+                fn mk_b() -> B { B }
+                fn f() {
+                    let a = mk_a(); let b = mk_b();
+                    a.use_it(); b.run();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:lib.rs::f") == [
+            "FILE:lib.rs::A::use_it",
+            "FILE:lib.rs::B::run",
+            "FILE:lib.rs::mk_a",
+            "FILE:lib.rs::mk_b",
+        ]
+
 
 class TestTypeScriptCallResolution:
     def test_this_in_an_object_literal_argument_reads_its_this_type(self, tmp_path):
@@ -9374,6 +9398,152 @@ class TestTypeScriptCallResolution:
         later = "FILE:a.ts::Outer::callback@17::later"
         assert _calls(builder, later) == ["REF:on.use"]
 
+    def test_typescript_declarations_are_in_scope_in_their_blocks(self, tmp_path):
+        """A local is read in its block only, also in a function on one
+        line. A function, class or `catch` binding, or a declaration read
+        before it is written, hides a parameter of its name an enclosing
+        function binds, where its block holds the read; a named function
+        expression, a method, or a declaration in a sibling function does
+        not."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() { return 1; } }
+                class O { other() { return 1; } }
+                declare function run(f: () => void): void;
+                function f(x: A) { const z = x; z.use(); }
+                function g() { z.use(); }
+                const Same = (on: A) => {
+                  const late = () => { on.use(); };
+                  function on() { return 1; }
+                };
+                const Later = ({ on }: { on: A }) => {
+                  run(() => {
+                    const early = () => { on.use(); };
+                    const on = new O();
+                  });
+                };
+                const Caught = ({ on }: { on: A }) => {
+                  run(() => { try { run(f); } catch (on) { on.use(); } });
+                };
+                const Named = ({ on }: { on: A }) => {
+                  run(() => {
+                    const h = function on() { return 1; };
+                    const late = () => { on.use(); };
+                  });
+                };
+                const Sibling = ({ on }: { on: A }) => {
+                  run(() => { function on() { return 1; } });
+                  run(() => {
+                    const late = () => { on.use(); };
+                  });
+                };
+                """
+            },
+        )
+        use = "FILE:a.ts::A::use"
+        assert _calls(builder, "FILE:a.ts::f") == [use]
+        assert _calls(builder, "FILE:a.ts::g") == ["REF:z.use"]
+        assert _calls(builder, "FILE:a.ts::Same::late") == ["REF:on.use"]
+        early = "FILE:a.ts::Later::callback@12::early"
+        assert _calls(builder, early) == ["REF:on.use"]
+        assert "REF:on.use" in _calls(builder, "FILE:a.ts::Caught")
+        assert _calls(builder, "FILE:a.ts::Named::callback@21::late") == [use]
+        assert _calls(builder, "FILE:a.ts::Sibling::callback@28::late") == [use]
+
+    def test_a_callback_parameter_beside_a_declaration_of_its_name(self, tmp_path):
+        """A declaration whose value passes a callback a parameter of its
+        name is that name after its line; the parameter is the callback's."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() { return 1; } }
+                class S { up() { return 1; } }
+                declare function mk(f: (s: S) => void): A;
+                function f() {
+                  const s = mk((s) => s.up());
+                  s.use();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::f") == [
+            "FILE:a.ts::A::use",
+            "FILE:a.ts::S::up",
+            "FILE:a.ts::mk",
+        ]
+
+    def test_typescript_indexed_types_and_untyped_inner_definitions(self, tmp_path):
+        """A parameter typed `Type["key"]` is that member, and calling it
+        calls the member; a definition of no known value inside the
+        function, written before the read, hides a parameter of its name an
+        enclosing function binds."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Manager { render(name: string) { return 1; } }
+                declare function run(f: () => void): void;
+                function log(c: string) {}
+                const Layers = ({ render }: { render: Manager["render"] }) => {
+                  render("x");
+                };
+                const Eye = ({ pick }: { pick: (c: string) => void }) => {
+                  run(() => {
+                    const pick = (c: string) => { log(c); };
+                    const up = () => { pick("x"); };
+                  });
+                };
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::Layers") == ["FILE:a.ts::Manager::render"]
+        up = "FILE:a.ts::Eye::callback@9::up"
+        assert _calls(builder, up) == ["FILE:a.ts::Eye::callback@9::pick"]
+
+    def test_typescript_members_shapes_and_tuples(self, tmp_path):
+        """A method with a computed or quoted key, or a generator, scopes its
+        parameters; `??` is no conditional; a `readonly` method or function
+        property of an object type is read and calling it gives what it
+        returns; object types intersected have each one's properties; a cast
+        in an expression body is part of it; a `readonly` tuple or an alias
+        of a tuple gives its elements by position; and a `for` body may open
+        on the line after its head."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() { return 1; } }
+                class B { run() { return 1; } }
+                type P = [A, B];
+                class C {
+                  [Symbol.iterator](x: A) { x.use(); }
+                  ['q'](y: A) { y.use(); }
+                }
+                const gen = function* (w: A) { w.use(); };
+                function shapes(p: { readonly m(): A }, q: { s: A } & { t: B }) {
+                  p.m().use(); q.s.use(); q.t.run();
+                }
+                const cast = (x: A) => x.use() as Map<A, B> && x.use();
+                function tuples(r: readonly [A, B], t: P) { r[1].run(); t[0].use(); }
+                declare function all(): A[];
+                function loops() {
+                  for (const v of all())
+                  { v.use(); }
+                }
+                """
+            },
+        )
+        use, run_ = "FILE:a.ts::A::use", "FILE:a.ts::B::run"
+        assert _calls(builder, "FILE:a.ts::C") == [use, use]
+        assert _calls(builder, "FILE:a.ts::gen") == [use]
+        assert _calls(builder, "FILE:a.ts::shapes") == [use, use, run_]
+        assert _calls(builder, "FILE:a.ts::cast") == [use, use]
+        assert _calls(builder, "FILE:a.ts::tuples") == [use, run_]
+        assert use in _calls(builder, "FILE:a.ts::loops")
+
     def test_go_generic_struct_fields_and_named_arrays(self, tmp_path):
         """A generic struct's fields are read after its type parameters, not
         as an array's elements, and `type A [5]T` is an array of `T`, its
@@ -11844,6 +12014,29 @@ class TestGoCallResolution:
             "FILE:pkg/on_linux.go::Impl"
         ]
 
+    def test_fields_of_a_struct_on_one_line(self, tmp_path):
+        """Fields a struct declares on one line, `;` between them, are
+        its fields."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module x\n",
+                "a.go": """
+                package x
+                type A struct{}
+                func (A) Use() {}
+                type B struct{}
+                func (B) Run() {}
+                type T struct { a A; b B }
+                func F(t T) { t.a.Use(); t.b.Run() }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.go::F") == [
+            "FILE:a.go::A::Use",
+            "FILE:a.go::B::Run",
+        ]
+
 
 class TestOwnersSourceCannotName:
     """Members of a block that is for no type source can name are filed
@@ -13579,6 +13772,27 @@ class TestJavaCallResolution:
             "FILE:C.java::B::run",
         ]
 
+    def test_an_annotated_field_and_an_empty_statement(self, tmp_path):
+        """A field behind an annotation is a field, and one after `;;` too."""
+        builder = _index(
+            tmp_path,
+            {
+                "C.java": """
+                class A { void use() {} }
+                class B { void run() {} }
+                class C {
+                  A a;; B b;
+                  @Deprecated A c;
+                  void f() { b.run(); c.use(); }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:C.java::C::f") == [
+            "FILE:C.java::A::use",
+            "FILE:C.java::B::run",
+        ]
+
 
 class TestPhpCallResolution:
     def test_constructed_type_picks_the_method(self, tmp_path):
@@ -14434,6 +14648,24 @@ class TestPhpCallResolution:
         )
         assert _calls(builder, "FILE:c.php::PC::f") == ["FILE:c.php::PA::use"] * 2
 
+    def test_calls_of_a_function_on_one_line(self, tmp_path):
+        """A function whose body is on its line makes every call there."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """
+                <?php
+                function mk1() {}
+                function mk2() {}
+                function top() { mk1(); mk2(); }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.php::top") == [
+            "FILE:a.php::mk1",
+            "FILE:a.php::mk2",
+        ]
+
 
 class TestDotnetCallResolution:
     def test_namesake_types_of_two_namespaces_of_a_file(self, tmp_path):
@@ -15271,6 +15503,24 @@ class TestDotnetCallResolution:
             "FILE:C.cs::A::Use",
             "FILE:C.cs::B::Run",
         ]
+
+    def test_an_attribute_led_field_after_another(self, tmp_path):
+        """A field behind an attribute after another on its line is a
+        field."""
+        builder = _index(
+            tmp_path,
+            {
+                "C.cs": """
+                class A { public void Use() {} }
+                class B { public void Run() {} }
+                class C {
+                  A a; [System.Obsolete] B b;
+                  void F() { b.Run(); }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:C.cs::C::F") == ["FILE:C.cs::B::Run"]
 
 
 class TestClangCallResolution:
@@ -16535,6 +16785,49 @@ class TestClangCallResolution:
         f = "FILE:a.h::a::b::internal::Foo::f"
         assert _calls(builder, "FILE:c.cc::a::b::inside") == [f]
         assert _calls(builder, "FILE:c.cc::a::outer") == [f]
+
+    def test_cpp_macros_in_qualifiers_read_as_they_expand(self, tmp_path):
+        """A macro in a qualifier is read as it expands: one that stands for
+        a namespace as the namespace, one that stands for nothing or opens a
+        namespace as nothing, in a return type, a parameter, a local and a
+        base; a name that is also a namespace stays. Of two scopes a
+        qualifier names, the innermost is the one."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cc": """
+                #define API_
+                #define MYNS ns1
+                #define OPEN_I namespace internal {
+                namespace ns1 { class T3 { public: void g() {} }; }
+                class T3 { public: void wrong() {} };
+                class T2 { public: void f() {} };
+                namespace a { namespace internal { class Foo { public: void outer() {} }; } }
+                namespace a { namespace b { namespace internal {
+                class Foo { public: void inner() {} };
+                } } }
+                MYNS ::T3 mk() { return {}; }
+                OPEN_I ::T2 mk2() { return {}; }
+                }
+                void takes(API_ ::T2 p) { p.f(); }
+                class D : API_ ::T2 {};
+                void run(D d) {
+                  mk().g(); mk().wrong(); internal::mk2().f(); d.f();
+                  API_ ::T2 x; x.f();
+                }
+                namespace a { namespace b {
+                void inside() { internal::Foo y; y.inner(); }
+                } }
+                """
+            },
+        )
+        f = "FILE:a.cc::T2::f"
+        assert _calls(builder, "FILE:a.cc::takes") == [f]
+        calls = _calls(builder, "FILE:a.cc::run")
+        assert "FILE:a.cc::ns1::T3::g" in calls and "FILE:a.cc::T3::wrong" not in calls
+        assert calls.count(f) == 3
+        inner = "FILE:a.cc::a::b::internal::Foo::inner"
+        assert _calls(builder, "FILE:a.cc::a::b::inside") == [inner]
 
 
 class TestRubyCallResolution:

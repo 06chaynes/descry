@@ -15,6 +15,7 @@ from bisect import bisect_left, bisect_right
 from itertools import accumulate
 
 from descry.generate import (
+    _C_MARK_RE,
     BaseParser,
     _bracketed_parts,
     _casts,
@@ -43,6 +44,18 @@ _RE_MACRO_FIELD = re.compile(
 )
 _RE_MACRO_NAME = re.compile(r"\s*#\s*define\s+\w+(?:\([^)]*\))?")
 _RE_MACRO_HEAD = re.compile(r"\s*#\s*define\s+\w+\(([^)]*)\)")
+
+
+def _expansion(text, name):
+    """``{"expands": replacement}`` of the object-like macro ``name`` that
+    the `#define` ``text`` writes, without its comments and line breaks,
+    where that is a name or what marks a declaration; None for any other."""
+    written = re.sub(r"/\*.*?\*/|//.*", "", text.partition(name)[2]).replace("\\", " ")
+    written = " ".join(written.split())
+    named = re.fullmatch(r"(?:::)?[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*", written)
+    return {"expands": written if named or _C_MARK_RE.fullmatch(written) else None}
+
+
 _RE_DIRECTIVE = re.compile(r"\s*#\s*(\w*)")
 _RE_IF_0 = re.compile(r"\s*#\s*if\s+0\s*$")
 _RE_IFDEF = re.compile(r"\s*#\s*(?:el)?if(?:n?def)?\s+")
@@ -667,6 +680,9 @@ class ClangParser(BaseParser):
                 if macro_id in self._macros:
                     # Another definition of the macro, for another build.
                     self._macros[macro_id].setdefault("rewrites", []).extend(rewrites)
+                    expands = {} if head else _expansion(text, name)
+                    if self._macros[macro_id].get("expands") != expands.get("expands"):
+                        self._macros[macro_id]["expands"] = None
                 elif macro_id not in self.builder.node_registry:
                     # The namespaces its replacement text opens, and the
                     # fields and field macros it declares for a struct.
@@ -680,6 +696,9 @@ class ClangParser(BaseParser):
                         end_lineno=last + 1,
                         docstring="",
                         kind="macro",
+                        # What an object-like macro stands for, where that is
+                        # a name or what marks a declaration
+                        **({} if head else _expansion(text, name)),
                         **({"opens": opens} if opens else {}),
                         **({"rewrites": rewrites} if rewrites else {}),
                         **({"fields": fields} if fields else {}),

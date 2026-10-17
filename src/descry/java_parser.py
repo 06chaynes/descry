@@ -115,7 +115,8 @@ _RE_FIELD = re.compile(
 )
 # Field declared without a modifier: `Type name;` or `Type name = value`.
 _RE_PACKAGE_FIELD = re.compile(
-    r"^\s*(?!(?:return|throws?|new|else|case|assert|yield|default|package|import)\b)"
+    rf"^\s*{_ANNOTATIONS}"
+    r"(?!(?:return|throws?|new|else|case|assert|yield|default|package|import)\b)"
     rf"(?P<type>[\w.]+(?:{_TYPE_ARGUMENTS})?(?:\[\])*)\s+"
     r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*(?:=(?!=)|;)"
 )

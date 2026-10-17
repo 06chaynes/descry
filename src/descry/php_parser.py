@@ -760,8 +760,9 @@ class PhpParser(BaseParser):
                         end = self._find_block_end(codes, i, code.rindex("{"))
                         entries.append((end, before, False))
 
-            # Calls (inside any context — methods, functions, etc.)
-            if not skip_calls and context_id != file_id:
+            # Calls (inside any definition — a method, a function, etc.,
+            # one on its line too)
+            if not skip_calls and source_id != file_id:
                 chained = _RE_OPERATOR.sub(
                     lambda found: _CHAIN_OPERATORS[found.group()], code
                 )
