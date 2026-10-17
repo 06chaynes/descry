@@ -8735,6 +8735,77 @@ class TestTypeScriptCallResolution:
             "FILE:lib/a.dart::Dog::bark"
         ]
 
+    def test_a_cpp_template_holds_its_type_arguments(self, tmp_path):
+        """`Box<Cat>`'s `T` is a cat through a field, a method's return,
+        `*this`, a subclass that writes its base's arguments, a field, a
+        pointer, a local and a construction; an unconstrained `T` is no
+        type. `->` on a raw pointer to a smart pointer reaches the smart
+        pointer's own members, and an alias of a pointer names the type it
+        points at."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cpp": """
+                #include <memory>
+                struct Dog { void bark() {} };
+                struct Cat { void meow() {} void reset() {} };
+                template <typename T>
+                class Box {
+                 public:
+                  T held;
+                  T get() { return held; }
+                  Box<T>& self() { return *this; }
+                };
+                template <class T> struct Coop { T held; void go() { held.bark(); } };
+                class Sub : public Box<Cat> {};
+                struct Holder { Box<Cat> box; };
+                typedef Box<Dog>* DogBox;
+                void run(Box<Cat> b, Sub s, Holder h, Box<Cat>* p, DogBox d) {
+                  b.held.meow();
+                  b.get().meow();
+                  b.self().get().meow();
+                  s.get().meow();
+                  h.box.get().meow();
+                  p->get().meow();
+                  Box<Dog> local;
+                  local.get().bark();
+                  auto made = Box<Dog>();
+                  made.get().bark();
+                  d->get().bark();
+                }
+                void reset(std::unique_ptr<Cat>* owned) { owned->reset(); }
+                """
+            },
+        )
+        calls = _calls(builder, "FILE:a.cpp::run")
+        assert calls.count("FILE:a.cpp::Cat::meow") == 6
+        assert calls.count("FILE:a.cpp::Dog::bark") == 3
+        assert _calls(builder, "FILE:a.cpp::Coop::go") == ["REF:held.bark"]
+        assert _calls(builder, "FILE:a.cpp::reset") == []
+
+    def test_a_cpp_member_declared_without_definition(self, tmp_path):
+        """A member a type declares but does not define, as a pure virtual
+        written through a macro, is defined by the types derived from it:
+        a call of it has their definitions as candidates."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cc": """
+                #define PURE_VIRTUAL = 0
+                class KeyShare {
+                 public:
+                  virtual bool Offer() PURE_VIRTUAL;
+                };
+                class EC : public KeyShare { public: bool Offer() override { return true; } };
+                class Other { public: bool Offer() { return true; } };
+                void use(KeyShare* ks) { ks->Offer(); }
+                """
+            },
+        )
+        assert _candidates(builder, "FILE:a.cc::use") == {
+            "REF:ks->Offer": ["FILE:a.cc::EC::Offer"]
+        }
+
     def test_go_generic_struct_fields_and_named_arrays(self, tmp_path):
         """A generic struct's fields are read after its type parameters, not
         as an array's elements, and `type A [5]T` is an array of `T`, its
@@ -19926,7 +19997,9 @@ class TestBaseTypes:
         assert _bases(builder, "FILE:db/model.cc::db::Model::Write::Handler") == [
             "FILE:include/batch.h::db::WriteBatch::Handler"
         ]
-        assert _bases(builder, "FILE:db/model.cc::db::formatter") == ["REF:formatter"]
+        assert _bases(builder, "FILE:db/model.cc::db::formatter") == [
+            "REF:formatter<long>"
+        ]
 
     def test_cpp_base_that_is_a_type_parameter_names_no_type(self, tmp_path):
         """A template's type parameter stands for its argument, not for a
@@ -20084,7 +20157,7 @@ class TestBaseTypes:
             "REF:f",
             "REF:run",
         ]
-        assert _bases(builder, "FILE:use.h::Rebound") == ["REF:Node::rebind"]
+        assert _bases(builder, "FILE:use.h::Rebound") == ["REF:Node::rebind<U>"]
         assert _calls(builder, "FILE:use.h::Rebound::m") == []
         assert _calls(builder, "FILE:use.h::Holder::m") == ["REF:p->run", "REF:y.f"]
         assert _calls(builder, "FILE:use.h::plain") == [

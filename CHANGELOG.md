@@ -356,7 +356,15 @@ Python SDK v2, and a full-tree review's findings are fixed.
   type, whose members of a type parameter's type had none, and one its
   constructor is called with, `Box<Dog>(...)`; a method called through a
   field declared a generic type, `Box<Cat> box`, reads the field's
-  arguments, where it read none; calls in comments, string
+  arguments, where it read none. So does a C++ class template, whose
+  members of a parameter's type had none, read through a field, a
+  pointer, a local, a construction and an alias; a variable of an alias
+  template's type is read as a field of it is, and a project template
+  that names several specializations wraps nothing. `->` on a raw pointer
+  to a smart pointer reached what the smart pointer holds: `p->reset()`
+  on a `std::unique_ptr<Cat>*` called `Cat::reset`. A call of a member a
+  C++ type declares without defining it has the definitions of the types
+  derived from it as candidates; calls in comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a

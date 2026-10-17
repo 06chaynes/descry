@@ -6428,7 +6428,8 @@ class BaseParser:
                             else "<>"
                         )
                     if groups.get("name"):
-                        key, value = groups["name"], f"{declared_type}()"
+                        held = _raw_pointer(declared_type, groups.get("pointer"))
+                        key, value = groups["name"], f"{held}()"
                         if self.language == "clang" and line[match.end() :].startswith(
                             "["
                         ):
@@ -9538,6 +9539,13 @@ def _function_value(text: str) -> str | None:
             is_arrow = rest.startswith("=>") or (rest.startswith(":") and "=>" in rest)
             return value if is_arrow else None
     return None
+
+
+def _raw_pointer(written: str, pointer: str | None) -> str:
+    """The C++ type ``written`` with a `*` where ``pointer``, the `*` and
+    `&` of its declarator, makes a raw pointer to a template's instance,
+    whose `->` reaches the instance's own members, not what it wraps."""
+    return f"{written}*" if "<" in written and "*" in (pointer or "") else written
 
 
 def _bounded_parameters(text: str) -> dict[str, str]:
@@ -15005,6 +15013,12 @@ class CallResolver:
                 # A call's opaque or outside-typed result: its members are
                 # not known.
                 break
+            if isinstance(value, tuple) and value[0] == "pointer":
+                # `->` and a subscript reach what a raw pointer points at, as
+                # does a member read after a `*` that the path does not write.
+                value = value[1]
+                if step in ("?", "[]"):
+                    continue
             if step == "[]" and isinstance(value, tuple):
                 # A subscript gives what the type's `operator[]` returns: by
                 # the data for a standard type, its member's for one of the
@@ -15312,9 +15326,10 @@ class CallResolver:
                 if last and step in unwraps:
                     self._result = unwrapped
                     return None, _EXTERNAL
-                if last and step != "?" and self.lang(source_id) == "dotnet":
-                    # A C# type from outside has its own members only; what
-                    # one returns may be the project type it wraps.
+                if last and step != "?" and self.lang(source_id) in ("dotnet", "clang"):
+                    # A C# type or a C++ smart pointer from outside has its
+                    # own members only; what one returns may be the project
+                    # type it wraps.
                     self._result = _OPAQUE
                     return None, _EXTERNAL
                 # A C++ smart pointer's own members are from outside.
@@ -15573,7 +15588,9 @@ class CallResolver:
                 return held and ("returned", held)
             given = generic and written.endswith(">")
             generic = generic and lang not in _OWN_METHOD_LANGS
-            found = self._type_named(name, scope_id)
+            found = self._type_named(name, scope_id, not generic)
+            if isinstance(found, tuple):
+                return ("returned", found)
             name = name.rpartition("::")[2]
             if given and found and found != _EXTERNAL:
                 # A generic type written with its arguments: an instance of
@@ -15596,7 +15613,11 @@ class CallResolver:
                 return None
             if found is None and not self._types(lang, name):
                 # An alias may stand for a project type, as may what a
-                # generic type wraps.
+                # generic type wraps; one written with its arguments is
+                # read as a declared type is.
+                held = given and self._returned_type(written, scope_id)
+                if held:
+                    return ("returned", held)
                 aliased = generic or name in self.builder.type_aliases
                 return None if aliased else _EXTERNAL
             return ("def", found) if found not in (None, _EXTERNAL) else found
@@ -16344,6 +16365,16 @@ class CallResolver:
             return _EXTERNAL
         if python and not complete:
             return ("returned", self._std_inherited(ref, name))
+        if called and self.lang(ref) == "clang":
+            # A member the type declares without a definition is defined by
+            # the types derived from it: the call reaches one of theirs.
+            mine = self._name(ref)
+            derived = (
+                hit
+                for hit in self.by_name.get(("clang", name), ())
+                if mine in self._ancestors(hit.rpartition("::")[0])
+            )
+            self._candidates_now = sorted(derived) or None
         if called or kind != "self":
             return None
         return self._part(value, f"{self._name(ref)}@{name}", ref)
@@ -16373,10 +16404,12 @@ class CallResolver:
             return self._called(value) if isinstance(value, tuple) else value
         return declared and self._returned_type(declared, node_id)
 
-    def _type_named(self, name, scope_id):
+    def _type_named(self, name, scope_id, full=False):
         """The project type a possibly qualified type name written in
         ``scope_id`` refers to, ``"external"`` for one an import places
-        outside the project, None when it cannot be told."""
+        outside the project, None when it cannot be told. With ``full`` a
+        C++ alias gives the value of the type it names, its template
+        arguments and pointer with it."""
         lang = self.lang(scope_id)
         if lang == "python":
             # A base class is written as its origin path.
@@ -16410,7 +16443,7 @@ class CallResolver:
         if lang == "ruby":
             return self._constant([*qualifier, name], scope_id)
         if lang == "clang":
-            return self._c_type(qualifier, name, scope_id)
+            return self._c_type(qualifier, name, scope_id, full)
         imported = self._imported(qualifier[0] if qualifier else name, scope_id)
         if imported == _EXTERNAL:
             return _EXTERNAL
@@ -16524,7 +16557,7 @@ class CallResolver:
             return hits[0]
         return None
 
-    def _c_type(self, qualifier, name, scope_id):
+    def _c_type(self, qualifier, name, scope_id, full=False):
         """``_type_named`` for C and C++, which import no names: the type
         is the one of that name nearest in scope, else the one among the
         files ``scope_id`` is compiled with, and a name that no type or
@@ -16573,12 +16606,18 @@ class CallResolver:
         known = bool(types)
         types = [t for t in types if self._in_reach(t, scope_id)]
         if not types:
-            named = {
-                self._returned_type(written, scope)
-                for scope, written in aliases
-                if scope.split("::")[0] in seen
-            }
+            # The aliases agree on the type, whatever its arguments; one of
+            # a pointer names the type it points at.
+            named, values = set(), set()
+            for scope, written in aliases:
+                if scope.split("::")[0] in seen:
+                    value = self._returned_type(written, scope)
+                    values.add(value)
+                    held = value[1] if value and value[0] == "pointer" else value
+                    named.add(held[:2] if isinstance(held, tuple) else held)
             held = named.pop() if len(named) == 1 else None
+            if full and len(values) == 1 and held and held[0] == "self":
+                return values.pop()
             if held == _EXTERNAL or (held and held[0] == "self"):
                 return held if held == _EXTERNAL else held[1]
             return None if aliased or known else _EXTERNAL
@@ -16972,6 +17011,12 @@ class CallResolver:
                     for part in parts
                 ),
             )
+        if self.lang(function_id) == "clang" and re.search(r">\s*\*$", returns):
+            # A raw pointer to a template's instance
+            held = self._returned_type(
+                returns.rstrip()[:-1], function_id, instance or receiver
+            )
+            return held and ("pointer", held)
         library = self.standard.get(self.lang(function_id))
         name = library and library.named(returns, function_id)
         if name:
@@ -17000,12 +17045,24 @@ class CallResolver:
             if name in ("Self", "this"):
                 found = owner
             else:
-                found = name and self._type_named(name, function_id)
+                plain = kind == "self" and not match[2]
+                found = name and self._type_named(name, function_id, plain)
+                if isinstance(found, tuple):
+                    # An alias is the type it names, written as it writes it.
+                    return found
             if found == _EXTERNAL and kind == "self" and match[2]:
                 # A type from outside written with a type argument: its
                 # methods are its own, unless it wraps a project type.
                 standard = ("outside", name)
                 continue
+            lang = self.lang(function_id)
+            if (
+                not found
+                and kind == "self"
+                and self._types(lang, re.split(r"::|\.", name)[-1])
+            ):
+                # A project type that cannot be told apart wraps nothing.
+                return None
             if found == _EXTERNAL:
                 return _EXTERNAL if kind == "self" else standard
             generic = found and kind == "self" and match[2]

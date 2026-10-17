@@ -530,7 +530,7 @@ class FMT_API Writer final : public Sink, private detail::Base<Writer> {
         _parse(builder, src)
         assert list(_spans(builder, "Class")) == ["Slice", "Header", "Writer"]
         bases = [e["target"] for e in builder.edges if e["relation"] == "INHERITS"]
-        assert bases == ["REF:Sink", "REF:detail::Base"]
+        assert bases == ["REF:Sink", "REF:detail::Base<Writer>"]
 
     def test_typedef_and_unnamed_types(self, builder):
         """A typedef names an unnamed struct; an unnamed union in a struct

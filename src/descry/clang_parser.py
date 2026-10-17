@@ -19,6 +19,8 @@ from descry.generate import (
     _bracketed_parts,
     _casts,
     _flip_sign,
+    _generic_metadata,
+    _raw_pointer,
     _strip_generics,
     blank_strings,
     is_generated_source,
@@ -102,6 +104,11 @@ _RE_OPERATOR = re.compile(
 _RE_ATTRIBUTE = re.compile(r"\[\[.*?\]\]", re.DOTALL)
 _RE_TEMPLATE = re.compile(r"\s*(?:[A-Z_][A-Z0-9_]*\s+)*template\s*<")
 _RE_TYPE_PARAMETER = re.compile(r"\b(?:typename|class)\s*(?:\.\.\.\s*)?([A-Za-z_]\w*)")
+# The name a template parameter declares, none for `typename` or `int` alone
+_RE_TEMPLATE_PARAMETER = re.compile(
+    r"(?<![\w:])(?!(?:typename|class|int|long|short|char|bool|unsigned|signed"
+    r"|auto)\b)([A-Za-z_]\w*)\s*$"
+)
 
 # namespace foo {  /  namespace a::b {  /  inline namespace v1 {  /  namespace {
 _RE_NAMESPACE = re.compile(
@@ -200,7 +207,7 @@ _RE_POINTER = re.compile(
     r"((?:std::)?(?:unique_ptr|shared_ptr|optional|expected))\s*<"
     r"\s*(?:(?:const|typename)\s+)*+([\w:]+)"
 )
-_DECLARATOR = r"(?:\s+(?:const|volatile)\b)*(?:\s*[*&]+\s*(?:const\s+)?|\s+)(?P<name>[A-Za-z_]\w*)"
+_DECLARATOR = r"(?:\s+(?:const|volatile)\b)*(?:\s*(?P<pointer>[*&]+)\s*(?:const\s+)?|\s+)(?P<name>[A-Za-z_]\w*)"
 
 _DECLARATIONS = (
     # `std::unique_ptr<Type> name`, a local, a field or a parameter
@@ -244,8 +251,8 @@ _RE_DECLARES = re.compile(
     + _SPECIFIER_WORDS
     + r"|[A-Z_][A-Z0-9_]*)\s+)*(?:::)?(?P<type>auto|"
     + _TYPE_NAME
-    + r"(?:<[^;(){}=]*>(?:::[A-Za-z_]\w*)+)?)(?:<[^;(){}=]*>)?"
-    r"(?:\s*\*+\s*|\s*&\s*|\s+)$"
+    + r"(?:<[^;(){}=]*>(?:::[A-Za-z_]\w*)+)?(?:<[^;(){}=]*>)?)"
+    r"(?:\s*(?P<pointer>\*+)\s*|\s*&\s*|\s+)$"
 )
 # `Type name`, `const Type& name`, `Type* const name`, `Type name[n]`
 # A lambda up to its body's `{`: its captures, its parameters, its return type
@@ -257,7 +264,7 @@ _RE_PARAMETER = re.compile(
     + r"(?:::)?(?P<type>"
     + _TYPE_NAME
     + r"(?:\s*<.*>)?)"
-    + r"(?:\s*[*&]+\s*(?:(?:const|restrict|__restrict)\s+)?|\s+)"
+    + r"(?:\s*(?P<pointer>[*&]+)\s*(?:(?:const|restrict|__restrict)\s+)?|\s+)"
     + r"(?P<name>[A-Za-z_]\w*)\s*(?:\[.*\])?",
     re.DOTALL,
 )
@@ -443,17 +450,22 @@ def _without_attributes(text: str, written) -> str:
 
 
 def _held(written: str) -> str:
-    """A written type as it is kept for a value: without its template
-    arguments, unless it is a standard type — a smart pointer's, and a
-    container's, name what the value's members return. `typename` only
-    says that a member of a type parameter is a type."""
+    """A written type as it is kept for a value, with its template
+    arguments, which name what the value's members return, but without
+    those of the project templates it is nested in. `typename` only says
+    that a member of a type parameter is a type."""
     written = re.sub(r"\btypename\s+", "", written).strip().removeprefix("::")
     pointer = _RE_POINTER.match(written)
     if pointer:
         return f"{pointer[1]}<{pointer[2]}>"
-    if written.strip().startswith("std::"):
-        return written.strip()
-    return _strip_generics(written).strip()
+    if written.startswith("std::"):
+        return written
+    depth = nested = 0
+    for at, char in enumerate(written):
+        depth += (char == "<") - (char == ">")
+        if not depth and written.startswith("::", at):
+            nested = at
+    return _strip_generics(written[:nested]) + written[nested:]
 
 
 def _returned(written: str) -> str:
@@ -529,6 +541,7 @@ class ClangParser(BaseParser):
         self._closers = _closers(self._text)
         self._kinds = {}  # ID of each namespace and type of the file -> kind
         self._generic = frozenset()  # type parameters in scope
+        self._own = frozenset()  # those of the enclosing class templates
         self._internal = 0  # unnamed namespaces open
         self._member = False  # the calls being read are a member function's
         self._kr = None  # offsets of a function head with K&R parameters
@@ -736,16 +749,20 @@ class ClangParser(BaseParser):
                     spans.append((opened, kept))
         flat.append(" " * (len(head) - opened - 1) if depth else head[kept:])
         flat = _without_attributes("".join(flat), _blank)
-        parameters = set()
+        parameters = []
         while prefix := _RE_TEMPLATE.match(flat):
             end, depth = prefix.end(), 1
             while end < len(flat) and depth:
                 depth += (flat[end] == "<") - (flat[end] == ">")
                 end += 1
-            parameters.update(_RE_TYPE_PARAMETER.findall(flat, prefix.end(), end))
+            for part in _bracketed_parts(flat[prefix.end() : end - 1]):
+                named = _RE_TEMPLATE_PARAMETER.search(part.partition("=")[0])
+                parameters.append(named[1] if named else "")
+            # What a type parameter stands for is not known.
+            self.builder.type_aliases.update(
+                _RE_TYPE_PARAMETER.findall(flat, prefix.end(), end)
+            )
             flat = " " * end + flat[end:]
-        # What a type parameter stands for is not known.
-        self.builder.type_aliases.update(parameters)
         return flat, spans, parameters
 
     def _body(self, start, end, parent_id, owner):
@@ -814,7 +831,10 @@ class ClangParser(BaseParser):
             return closer + 1
         found = _signature(flat)
         if found:
-            generic, self._generic = self._generic, self._generic | parameters
+            generic, self._generic = (
+                self._generic,
+                self._generic.union(filter(None, parameters)),
+            )
             function_id, since, member = self._function(
                 found, flat, head, spans, begin, closer, parent_id, owner
             )
@@ -872,6 +892,11 @@ class ClangParser(BaseParser):
         parent_id, _ = self._qualified(parent_id, owner, path, first + 1)
         type_id = f"{parent_id}::{name}"
         end_lineno = bisect_right(self._starts, closer)
+        # A specialization, `Box<T*>`, has its parameters at no position of
+        # the arguments of the template it specializes.
+        written = re.split(r"(?<!:):(?!:)", flat, maxsplit=1)[0]
+        if re.search(rf"\b{re.escape(name)}\s*<", written):
+            parameters = []
         if type_id not in self.builder.node_registry:
             self.builder.add_node(
                 type_id,
@@ -882,6 +907,12 @@ class ClangParser(BaseParser):
                 end_lineno=end_lineno,
                 token_count=(end_lineno - first) * 10,
                 docstring=self.get_leading_docstring(self._source, first),
+                **_generic_metadata(
+                    {
+                        param or f"<{index}>": ""
+                        for index, param in enumerate(parameters)
+                    }
+                ),
             )
             self.builder.add_edge(parent_id, type_id, "DEFINES")
         self._kinds[type_id] = kind
@@ -890,10 +921,18 @@ class ClangParser(BaseParser):
         if kind == "enum":
             self._enumerators(at + 1, closer, type_id, name)
         else:
-            generic, self._generic = self._generic, self._generic | parameters
-            for base in _bracketed_parts(declared["bases"] or ""):
+            generic, self._generic = (
+                self._generic,
+                self._generic.union(filter(None, parameters)),
+            )
+            # The bases as written, with their template arguments
+            listed = (
+                declared["bases"] and re.split(r"(?<!:):(?!:)", flat, maxsplit=1)[1]
+            )
+            for base in _bracketed_parts(listed or ""):
                 # `T::template rebind<U>` names a member template of `T`.
-                base = re.sub(r"::\s*template\s+", "::", base).split()[-1]
+                base = re.sub(r"::\s*template\s+", "::", base)
+                base = re.sub(r"^(?:\s*\w+\s+(?=\w))*", "", base).strip()
                 # A type parameter, or a member of one, names no type.
                 own = self._dependent(base)
                 self.builder.add_edge(
@@ -902,8 +941,9 @@ class ClangParser(BaseParser):
                     "INHERITS",
                     {"origin": f"={base}"} if own else None,
                 )
+            outer, self._own = self._own, self._own.union(filter(None, parameters))
             self._body(at + 1, closer, type_id, name)
-            self._generic = generic
+            self._generic, self._own = generic, outer
         return stop + 1
 
     def _dependent(self, written):
@@ -913,12 +953,16 @@ class ClangParser(BaseParser):
 
     def _opaque(self, written):
         """``written`` with `?` for each type parameter in scope, or member
-        of one, that is one of its template arguments: what it stands for is
-        not known."""
-        if not self._generic:
-            return written
-        names = "|".join(self._generic)
-        return re.sub(rf"(?<![\w:])(?:{names})\b(?:::\w+)*", "?", written)
+        of one, that it names: what it stands for is not known. A parameter
+        of an enclosing class template is kept, the argument an instance
+        holds for it."""
+        unknown = "|".join(self._generic - self._own) or "(?!)"
+        own = "|".join(self._own) or "(?!)"
+        return re.sub(
+            rf"(?<![\w:])(?:(?:{unknown})\b(?:::\w+)*|(?:{own})(?:::\w+)+)",
+            "?",
+            written,
+        )
 
     def _enumerators(self, start, end, parent_id, enum=None):
         """Add the enumerators between offsets ``start`` and ``end`` to
@@ -1045,8 +1089,9 @@ class ClangParser(BaseParser):
             extra = {}
             returns = _returned(flat.partition("->")[2] or prefix)
             # A type parameter's return is not known.
-            if returns and not self._dependent(returns):
-                extra["return_type"] = self._opaque(returns)
+            returns = returns and self._opaque(returns)
+            if returns and not returns.startswith("?"):
+                extra["return_type"] = returns
             if name == "<init>":
                 extra["is_constructor"] = True
             if found["body"] and "0" in found["body"]:
@@ -1078,7 +1123,7 @@ class ClangParser(BaseParser):
         for part in parameters:
             declared = _RE_PARAMETER.fullmatch(part.partition("=")[0].strip())
             if declared and declared["name"] not in _C_CONTROL_KEYWORDS:
-                held = f"{_held(declared['type'])}()"
+                held = f"{_raw_pointer(_held(declared['type']), declared['pointer'])}()"
                 self.declared.setdefault(declared["name"], []).append(
                     (first + 1, held, False)
                 )
@@ -1147,7 +1192,10 @@ class ClangParser(BaseParser):
                 # A prototype defines nothing; `= 0` and `= default` do.
                 defines = found["body"] and "delete" not in found["body"]
                 if defines and (owner or found["path"]):
-                    generic, self._generic = self._generic, self._generic | parameters
+                    generic, self._generic = (
+                        self._generic,
+                        self._generic.union(filter(None, parameters)),
+                    )
                     self._function(
                         found,
                         flat,
@@ -1185,17 +1233,17 @@ class ClangParser(BaseParser):
             assigned = _RE_ASSIGNMENT.search(flat)
             parts = _bracketed_parts(flat[: assigned.start()] if assigned else flat)
             field = _RE_FIELD.fullmatch(parts[0]) if parts else None
-            held = field and _held(field["type"])
+            held = field and self._opaque(_held(field["type"]))
+            kept = field and _raw_pointer(held, field["pointer"])
             # `(*name)(params)` is a field that holds a function.
             pointer = spans and re.match(r"\s*\*\s*(\w+)", head[spans[0][0] + 1 :])
             if pointer:
                 fields.setdefault(pointer[1], "")
-            if field and not self._dependent(held):
-                held = self._opaque(held)
-                fields.setdefault(field["name"], held)
+            if field and not held.startswith("?"):
+                fields.setdefault(field["name"], kept)
                 for part in parts[1:]:
-                    if more := re.match(r"[*&\s]*([A-Za-z_]\w*)", part):
-                        fields.setdefault(more[1], held)
+                    if more := re.match(r"([*&\s]*)([A-Za-z_]\w*)", part):
+                        fields.setdefault(more[2], _raw_pointer(held, more[1]))
         if assigned:
             self._calls(parent_id, 0, end - len(flat) + assigned.end(), end)
 
@@ -1240,7 +1288,9 @@ class ClangParser(BaseParser):
             for part in _bracketed_parts(lambda_["params"] + ")"):
                 declared = _RE_PARAMETER.fullmatch(part.partition("=")[0].strip())
                 if declared:
-                    name, held = declared["name"], f"{_held(declared['type'])}()"
+                    name = declared["name"]
+                    held = _raw_pointer(_held(declared["type"]), declared["pointer"])
+                    held = f"{held}()"
                     outer = self._declared(name, index + 1, since)
                     self._rebind(name, index + 1, held, until, outer)
         matches = {match.start(1): match for match in _RE_CALL.finditer(code)}
@@ -1259,7 +1309,8 @@ class ClangParser(BaseParser):
                 continue
             callee = match[1].replace("?.", "->")
             arguments = match[0][len(match[1]) : -1].strip()
-            if arguments.startswith("<"):
+            given = arguments.startswith("<") and arguments
+            if given:
                 # `f<T>`: what a template call returns may be written with
                 # its arguments, which the standard library's data reads as
                 # types.
@@ -1277,8 +1328,9 @@ class ClangParser(BaseParser):
             declared = name == callee and _declares(code, ends, at)
             if declared:
                 # `Type name(args);` declares `name`.
+                held = _raw_pointer(declared["type"], declared["pointer"])
                 self.declared.setdefault(name, []).append(
-                    (index + 1, f"{declared['type']}()", False)
+                    (index + 1, f"{held}()", False)
                 )
                 continue
             origin = None
@@ -1305,6 +1357,10 @@ class ClangParser(BaseParser):
                 match.end() - 1,
                 origin,
             )
+            if given and not std:
+                # `Box<Dog>(`: the template arguments it is called with
+                site = self.builder.edges[-1]["metadata"].setdefault("site", {})
+                site["types"] = given
             if index in self._guarded:
                 self.builder.edges[-1]["metadata"]["guards"] = sorted(
                     self._guarded[index]
@@ -1376,9 +1432,12 @@ class ClangParser(BaseParser):
             held = self._iterated(held[1:], lineno, since)
         # A C array is read as its element, which `->` reaches as well.
         held = held and held.removesuffix("[]")
-        if held and self._dependent(held):
-            return None
+        if held and held.endswith("*()") and steps[0] == "->":
+            # `->` on a raw pointer reaches what it points at itself.
+            held, steps[0] = f"{held[:-3]}()", "."
         held = held and self._opaque(held)
+        if held and held.startswith("?"):
+            return None
         pointer = held and _RE_POINTER.match(held)
         if held == "?":
             origin = held
