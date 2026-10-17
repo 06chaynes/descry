@@ -25,6 +25,7 @@ from descry.generate import (
     BaseParser,
     _bracketed_parts,
     _generic_metadata,
+    argument_count,
     blank_strings,
     is_generated_source,
     source_lines,
@@ -245,7 +246,7 @@ def _type_params(code, start=0):
 
 def _param_writings(code, start):
     """The type each parameter between the `(` at ``start`` and its `)`
-    declares, in order."""
+    declares, in order; None where ``code`` does not close the list."""
     depth = 0
     for end, char in enumerate(code[start:], start):
         depth += char == "("
@@ -253,7 +254,7 @@ def _param_writings(code, start):
         if not depth:
             break
     else:
-        return ()
+        return None
     writings = []
     for part in _bracketed_parts(code[start + 1 : end] + ")"):
         part = re.sub(r"@\w+(\([^)]*\))?\s+", "", part.strip())
@@ -550,6 +551,20 @@ class JavaParser(BaseParser):
                         if (opened := head.find("<")) >= 0:
                             own = _type_params(head, opened)
                             returns = own.get(returns) or returns
+                        written = _param_writings(
+                            m_method.string,
+                            m_method.string.index("(", m_method.end("name")),
+                        )
+                        # `[least, most, types]`: the arguments a call
+                        # passes, `most` None for varargs or a list not
+                        # read, and the parameter types, which tell an
+                        # override.
+                        varargs = bool(written) and written[-1].endswith("...")
+                        counts = [
+                            len(written or ()) - varargs,
+                            None if varargs or written is None else len(written),
+                            written and [" ".join(w.split()) for w in written],
+                        ]
                         declared = self._node(method_id)
                         # A field of the same name moves to `<type>::field_<name>`.
                         if declared and declared["type"] == "Constant":
@@ -566,6 +581,7 @@ class JavaParser(BaseParser):
                             elif returns not in (known, "void"):
                                 known = agreed.pop() if len(agreed) == 1 else None
                             declared["metadata"]["return_type"] = known
+                            declared["metadata"]["parameters"].append(counts)
                         head = m_method[0]
                         self.builder.add_node(
                             method_id,
@@ -576,11 +592,10 @@ class JavaParser(BaseParser):
                             token_count=(end_lineno - lineno + 1) * 10,
                             docstring=docstring,
                             return_type=returns,
-                            params=_param_writings(
-                                m_method.string,
-                                m_method.string.index("(", m_method.end("name")),
-                            ),
+                            params=written or (),
+                            parameters=[counts],
                             static=bool(re.search(r"\bstatic\b", head)),
+                            private=bool(re.search(r"\bprivate\b", head)),
                             default=bool(re.search(r"\bdefault\b", head)),
                             body=has_body,
                         )
@@ -743,6 +758,10 @@ class JavaParser(BaseParser):
                         paren,
                         origin,
                     )
+                    if close := self._pairs.get(paren):
+                        self.builder.edges[-1]["metadata"]["args"] = argument_count(
+                            code[paren + 1 : close + 1], raw_line[paren + 1 : close + 1]
+                        )
                 self._bind_closures(code, i, lines, len(code))
                 references = "::" in code and _RE_METHOD_REFERENCE.finditer(code)
                 for reference in references or ():

@@ -224,6 +224,21 @@ class TestJavaAdapterDiscovery:
 
         assert [p.root for p in projects] == [app]
 
+    def test_a_maven_root_with_modules_is_one_project(self, tmp_path):
+        """A root POM that lists modules builds them: the root is the one
+        project, not each module."""
+        (tmp_path / "pom.xml").write_text(
+            "<project><modules><module>core</module></modules></project>"
+        )
+        core = tmp_path / "core"
+        core.mkdir()
+        (core / "pom.xml").write_text("<project></project>")
+        (core / "Main.java").write_text("class Main {}")
+
+        projects = JavaAdapter().discover(tmp_path, set())
+
+        assert [p.root for p in projects] == [tmp_path]
+
     def test_wrapper_alone_marks_the_root(self, tmp_path):
         (tmp_path / "gradlew").write_text("#!/bin/sh\n")
         (tmp_path / "Main.java").write_text("class Main {}")

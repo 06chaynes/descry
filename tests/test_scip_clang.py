@@ -34,6 +34,21 @@ class TestClangAdapterDiscovery:
         projects = ClangAdapter().discover(tmp_path, set())
         assert sorted(p.name for p in projects) == ["alpha", "beta"]
 
+    def test_root_build_holds_its_subdirectories(self, tmp_path):
+        """A CMake root with a subdirectory of its own CMakeLists.txt, its
+        compile_commands.json in build/, is one project."""
+        (tmp_path / "CMakeLists.txt").write_text("project(top)\nadd_subdirectory(test)")
+        (tmp_path / "build").mkdir()
+        (tmp_path / "build" / "compile_commands.json").write_text("[]")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "lib.cc").write_text("int f(){return 0;}")
+        (tmp_path / "test").mkdir()
+        (tmp_path / "test" / "CMakeLists.txt").write_text("add_executable(t t.cc)")
+        (tmp_path / "test" / "t.cc").write_text("int main(){return 0;}")
+
+        projects = ClangAdapter().discover(tmp_path, set())
+        assert [p.root for p in projects] == [tmp_path]
+
 
 class TestClangAdapterBuildCommand:
     def test_compdb_auto_detected_at_root(self, tmp_path):

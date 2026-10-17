@@ -11,7 +11,7 @@ import signal
 import stat
 import threading
 from bisect import bisect_left, bisect_right
-from collections import deque
+from collections import Counter, deque
 from functools import cache
 from operator import itemgetter
 from pathlib import Path
@@ -8167,6 +8167,83 @@ _TYPE_ARGUMENTS_END_RE = re.compile(
 )
 
 
+def c_specialization(name, arguments):
+    """How a C++ specialization of the template ``name`` is named, by the
+    text of its template ``arguments`` after their `<`: as written, each
+    `::` in them written `.`, which no source writes, so its ID splits."""
+    listed = ", ".join(" ".join(a.split()) for a in _bracketed_parts(arguments))
+    listed = re.sub(r"\s*::\s*", ".", listed)
+    return f"{name}<{listed}>"
+
+
+def _member_split(node_id, name):
+    """``(owner ID, name)`` of the node ``node_id`` named ``name``, whose
+    name, a C++ conversion operator's, may hold `::` itself; no owner for a
+    file."""
+    if "::" in name and node_id.endswith(f"::{name}"):
+        return node_id[: -len(name) - 2], name
+    owner, _, last = node_id.rpartition("::")
+    return owner, last
+
+
+def definition_spans(nodes):
+    """(file, name) -> ``(first line, last line, node ID)`` of each
+    definition among ``nodes``."""
+    spans = {}
+    for node in nodes:
+        metadata = node["metadata"]
+        if first := metadata.get("lineno"):
+            key = (node["id"].split("::")[0][5:], metadata.get("name"))
+            last = metadata.get("end_lineno") or first
+            spans.setdefault(key, []).append((first, last, node["id"]))
+    return spans
+
+
+def defined_at(spans, path, line, name):
+    """The node of the innermost definition of ``name`` in the file ``path``
+    whose lines hold ``line``, where an indexer records it: a template,
+    decorator or annotation can start a definition lines before its name."""
+    held = [span for span in spans.get((path, name), ()) if span[0] <= line <= span[1]]
+    return max(held, key=lambda span: (span[0], -span[1]))[2] if held else None
+
+
+def _overridden(signature, overridden, params, primitives=()):
+    """Whether a method overload taking parameters of ``signature``, of a
+    type with the type parameters ``params``, is overridden by one of the
+    signatures ``overridden`` a subtype declares: one that takes as many,
+    of the same types where it does not take a type parameter's, which no
+    type of ``primitives`` stands for."""
+    return signature is not None and any(
+        len(other) == len(signature)
+        and all(
+            mine == theirs
+            or theirs not in primitives
+            and any(re.search(rf"\b{p}\b", mine) for p in params)
+            for mine, theirs in zip(signature, other)
+        )
+        for other in overridden
+    )
+
+
+def _admits(entry, passed):
+    """Whether a method overload whose `[least, most, types]` is ``entry``
+    takes ``passed`` arguments, any number where that is not known."""
+    least, most, _ = entry
+    return (
+        not isinstance(passed, int)
+        or least <= passed
+        and (most is None or passed <= most)
+    )
+
+
+def argument_count(code, raw):
+    """How many arguments a call passes: ``code`` is what follows its `(`
+    up to the `)` that closes it, with literals blank, and ``raw`` the same
+    text as written."""
+    held = "".join("x" if c == " " and r != " " else c for c, r in zip(code, raw))
+    return len(_bracketed_parts(held, expression=True))
+
+
 def _bracketed_parts(text, separator=",", expression=False, turbofish=False):
     """The ``separator``-separated parts of ``text``, which follows an
     opening bracket, up to the bracket that closes it. A `<` is a bracket
@@ -8787,7 +8864,8 @@ class RustParser(BaseParser):
         for tree in _RUST_USE_RE.findall(content):
             self.builder.imports.setdefault(file_id, {}).update(_use_leaves(tree))
 
-        current_impl_target = impl_bounds = None
+        # The owner of the open `impl` block's items, and its type's name
+        impl_id = current_impl_target = impl_bounds = None
         current_trait_impl = (
             None  # Track trait name when in "impl Trait for Struct" block
         )
@@ -8899,8 +8977,8 @@ class RustParser(BaseParser):
                     # Reset enum tracking when leaving enum scope
                     if current_enum_id and popped_id == current_enum_id:
                         current_enum_id = None
-                    if popped_id == f"{file_id}::{current_impl_target}":
-                        current_impl_target = None
+                    if popped_id == impl_id:
+                        impl_id = current_impl_target = None
                         current_trait_impl = None
 
             parent_id = current_context[-1]
@@ -8945,8 +9023,8 @@ class RustParser(BaseParser):
                 sig = f"fn {name}(...) -> {ret}"
                 docstring = self.get_leading_docstring(lines, i)
 
-                if current_impl_target and parent_id not in fn_ids:
-                    func_id = f"{file_id}::{current_impl_target}::{name}"
+                if impl_id and parent_id not in fn_ids:
+                    func_id = f"{impl_id}::{name}"
                     node_type = "Method"
                 else:
                     func_id = f"{parent_id}::{name}"
@@ -9077,7 +9155,11 @@ class RustParser(BaseParser):
                 # The trait is tracked for method metadata.
                 trait, current_impl_target, bounds, impl_bounds = named
                 current_trait_impl = _last_segment(trait)
-                struct_id = f"{file_id}::{current_impl_target}"
+                # The block is for the type of its name its module declares.
+                struct_id = f"{parent_id}::{current_impl_target}"
+                if struct_id not in self.builder.node_registry:
+                    struct_id = f"{file_id}::{current_impl_target}"
+                impl_id = struct_id
                 impl_targets.setdefault(
                     struct_id, (current_impl_target, lineno, bounds)
                 )
@@ -9126,7 +9208,7 @@ class RustParser(BaseParser):
                                     end - 1,
                                 )
                     call_scan_start = len(line)
-                    current_impl_target = None
+                    impl_id = current_impl_target = None
                     current_trait_impl = None
 
             # 4. Modules
@@ -9953,6 +10035,14 @@ _JS_DECLARATION_RE = re.compile(
     r"(?P<kind>function|class|const|let|var)\b\s*\*?\s*(?P<name>[A-Za-z_$][\w$]*)",
     re.MULTILINE,
 )
+# `name = value` that starts a statement: what it assigns is what the name
+# holds in the block the statement is in
+_JS_ASSIGNMENT_RE = re.compile(
+    r"(?:^|(?<=[;{}]))[ \t]*(?P<name>[A-Za-z_$][\w$]*)\s*(?P<kind>=)(?![=>])",
+    re.MULTILINE,
+)
+# A keyword a block's `{` follows without a `)`
+_JS_BLOCK_OPENER_RE = re.compile(r"(?<![\w$.])(?:else|try|finally|do)$")
 # A `catch` and the name it binds, up to its `(`... `)`
 _JS_CATCH_RE = re.compile(r"\b(?P<kind>catch)\s*\(\s*(?P<name>[A-Za-z_$][\w$]*)\s*\)")
 # The keyword of a statement whose head is in parentheses, before its `(`
@@ -9997,17 +10087,35 @@ def _js_brackets(lines):
 def _js_scopes(lines, regions):
     """``{name: [(kind, at, span)]}``: each name the code lines ``lines``
     declare by a statement, `function`, `class`, `const`, `let` or `var`,
-    or by a `catch`, with the `(line, column)` it is at and the span it is
-    in scope in: the block around it, for a `var` the function ``regions``
-    say it is in, for a `catch` binding the catch's block."""
+    or by a `catch`, or assign by a statement, `=`, with the `(line,
+    column)` it is at and the span it is in scope in: the block around it,
+    for a `var` the function ``regions`` say it is in, for a `catch`
+    binding the catch's block."""
     text, starts, closer = _js_brackets(lines)
 
     def place(at):
         row = bisect_right(starts, at) - 1
         return row + 1, at - starts[row]
 
+    def in_block(match):
+        # Whether a `{` the statement follows opens a block: no object
+        # or pattern, which a `(`, `,`, `=` or `const` is before.
+        before = text[: match.start()].rstrip()
+        head = before[:-1].rstrip()
+        return (
+            not before.endswith("{")
+            or not head
+            or head[-1] in ")};"
+            or head.endswith("=>")
+            or bool(_JS_BLOCK_OPENER_RE.search(head))
+        )
+
     found = sorted(
-        [*_JS_DECLARATION_RE.finditer(text), *_JS_CATCH_RE.finditer(text)],
+        [
+            *_JS_DECLARATION_RE.finditer(text),
+            *_JS_CATCH_RE.finditer(text),
+            *filter(in_block, _JS_ASSIGNMENT_RE.finditer(text)),
+        ],
         key=lambda match: match.start("name"),
     )
     blocks, stack, pending = [], [], iter(found)
@@ -11155,6 +11263,7 @@ def _split_lines(
         # Whether each bracket opened on the line and still open is a
         # block's `{`: a statement starts only in the innermost one's
         opened_here = []
+        split_at = []  # the column of each statement the line splits off
         for column, char in enumerate(code):
             head = char == "{" and type_head and type_head.match(code, begun, column)
             # A head that opens a body only inside the body of an object.
@@ -11182,17 +11291,17 @@ def _split_lines(
             if char in "([{":
                 depth += 1
                 lead = _run_start(code, column)
-                opened_here.append(
-                    char == "{"
-                    and (
-                        not lead
-                        or code[lead - 1] in ")>{};"
-                        or bool(_BLOCK_KEYWORD_RE.search(code, max(lead - 7, 0), lead))
-                    )
+                block = char == "{" and (
+                    not lead
+                    or code[lead - 1] in ")>{};"
+                    or bool(_BLOCK_KEYWORD_RE.search(code, max(lead - 7, 0), lead))
                 )
+                opened_here.append((block, column))
             elif char in ")]}":
-                if opened_here:
-                    opened_here.pop()
+                block, opened_at = opened_here.pop() if opened_here else (False, -1)
+                if block and any(at > opened_at for at in split_at):
+                    # A block the line splits statements of ends on its own.
+                    cuts.append((column, sum(b for b, _ in opened_here)))
                 if char == "}" and bodies and depth == bodies[-1][0]:
                     # A body that holds nothing is left as it is.
                     opened = bodies.pop()[1]
@@ -11207,7 +11316,9 @@ def _split_lines(
                 begun = column + 1
             if bodies and depth == bodies[-1][0] and (char == "}" or char in ends):
                 cuts.append((column + 1, len(bodies)))
-            elif char in "};" and not bodies and opened_here[-1:] != [False]:
+            elif (
+                char in "};" and not bodies and (not opened_here or opened_here[-1][0])
+            ):
                 at = _TS_SEPARATORS_RE.match(code, column + 1).end()
                 head = definition_head.match(code, at)
                 member = head and head.groupdict().get("member")
@@ -11220,7 +11331,8 @@ def _split_lines(
                     cuts.append((at, 0))
                 elif statement and statement.match(code, after):
                     # Inside the blocks the line opens
-                    cuts.append((after, opened_here.count(True)))
+                    cuts.append((after, sum(b for b, _ in opened_here)))
+                    split_at.append(after)
         if not cuts:
             split.append(line)
             rows.append(row)
@@ -11581,6 +11693,7 @@ class TSParser(BaseParser):
                 or declared[0] not in typed
             )
             for kind, declared, span in self._block_scopes.get(name, ())
+            if kind != "="
         )
 
     def _is_local(self, name):
@@ -14170,15 +14283,17 @@ class CallResolver:
         self.c_spaces = set()  # names of the C++ namespaces that macros open
         self._bounding = set()  # type parameters whose bounds are being read
         for node_id, node in self.nodes.items():
-            parent, sep, name = node_id.rpartition("::")
+            parent, name = _member_split(node_id, node["metadata"].get("name", ""))
             self.c_spaces.update(node["metadata"].get("opens", ()))
-            if sep:
+            if parent:
                 lang = self.lang(node_id)
                 self.by_name.setdefault((lang, name), []).append(node_id)
                 self.members.setdefault(parent, {})[name] = node_id
                 declared = self._name(node_id)
-                if declared != name and node["type"] == "Class":
-                    # A type is looked up by the name it was declared under.
+                special = name.startswith(f"{declared}<")
+                if declared != name and node["type"] == "Class" and not special:
+                    # A type is looked up by the name it was declared under;
+                    # a C++ specialization by the arguments it is named with.
                     self.renamed_types.setdefault((lang, declared), []).append(node_id)
                     self.companions[f"{parent}::{declared}"] = node_id
         # Object-like C/C++ macro -> what every definition of it expands
@@ -14210,8 +14325,12 @@ class CallResolver:
         for node_id, node in self.nodes.items():
             if "extends" in node["metadata"]:
                 self.extensions.setdefault(self._name(node_id), []).append(node_id)
-        # class ID -> base type names, in Python the origin path of each
+        # class ID -> base type names, in Python the origin path of each; a
+        # Ruby class's included modules, the last first, before its superclass
         self.bases = {}
+        # (Ruby class ID, `prepend` or `extend`) -> those modules, the last
+        # first; (Dart mixin ID, `on`) -> the types it is applied on
+        self.mixins = {}
         # index of an INHERITS edge -> the base as written, qualifier and all
         self.base_names = {}
         # class ID -> its bases as written, with their type arguments
@@ -14238,7 +14357,15 @@ class CallResolver:
                     # A type parameter names no type.
                     base = written = ""
                 # A base is looked up as written, its qualifier with it.
-                self.bases.setdefault(edge["source"], []).append(written)
+                mixin = edge.get("metadata", {}).get("mixin")
+                if mixin in ("prepend", "extend", "on"):
+                    self.mixins.setdefault((edge["source"], mixin), []).insert(
+                        0, written
+                    )
+                elif mixin:
+                    self.bases.setdefault(edge["source"], []).insert(0, written)
+                else:
+                    self.bases.setdefault(edge["source"], []).append(written)
                 self.base_names[index] = written
         # A Go struct has the methods of the types it embeds, listed under
         # None among its fields.
@@ -14415,6 +14542,8 @@ class CallResolver:
         self._shape_returns = None  # what a method an object type declares returns
         self._receiver = None  # type the method being resolved is called on
         self.arguments = None  # what that call passes, where its parser counted
+        self._arguments = None  # how many arguments it passes, where counted
+        self._typed_call = False  # whether it writes type arguments, `name<>`
         # Signed `#if` atoms the line of the call being resolved is under
         self.call_guards = None
         # Language -> the last name segments of the types and functions its
@@ -14637,6 +14766,7 @@ class CallResolver:
         self._candidates_now = None
         self._name_only = False
         self._arguments = arguments
+        self._typed_call = callee.endswith("<>")
         if self.lang(source_id) in _GLOBAL_OBJECT:
             callee = callee.removeprefix(_GLOBAL_OBJECT[self.lang(source_id)])
         # `new Type<arguments>`: the call constructs the type written,
@@ -14649,6 +14779,15 @@ class CallResolver:
             # A definition that cannot take what the call passes is not
             # the one called: the receiver is another object than it seems.
             verdict = None, _UNRESOLVED
+        if verdict[0] and (
+            self.lang(verdict[0]) == "java"
+            or self.lang(verdict[0]) == "clang"
+            and self.nodes[verdict[0]]["type"] == "Method"
+        ):
+            # A Java or C++ method of the name that a base declares may be
+            # the one that takes what the call passes.
+            hit = self._overload_by_arity(verdict[0])
+            verdict = (hit, verdict[1]) if hit else (None, _UNRESOLVED)
         if verdict[0] and self._candidate_only(verdict[0], source_id):
             # What resolved is a definition an `#if` arm alone builds, and
             # nothing about the call site selects that arm.
@@ -14784,6 +14923,25 @@ class CallResolver:
                 file_id = source_id.split("::")[0]
                 return self._resolve_bare(name, fits, file_id, lang, callee)
             qualifier = self._c_written(qualifier, candidates, source_id)
+            # A type written with template arguments is the specialization
+            # of them, else the template itself, never another one.
+            head = callee.rpartition("::")[0]
+            depth, cut = 0, 0
+            for at, char in enumerate(head):
+                depth += (char == "<") - (char == ">")
+                if not depth and head[at : at + 2] == "::":
+                    cut = at + 2
+            written, opened, arguments = head[cut:].partition("<")
+            if opened:
+                special = c_specialization(written.strip(), arguments)
+                owned = {
+                    c: self._member_owner(c).rpartition("::")[2] for c in candidates
+                }
+                candidates = [c for c in candidates if owned[c] == special] or [
+                    c for c in candidates if "<" not in owned[c]
+                ]
+                if qualifier and self._types(lang, special):
+                    qualifier = [*qualifier[:-1], special]
         if origin is not None:
             verdict = self._resolve_origin(origin, scope_id)
             if verdict is None:
@@ -14913,8 +15071,8 @@ class CallResolver:
                 hits = {h for h in hits if self._in_reach(h, source_id)} or hits
             if hits:
                 hit = self._decide(sorted(hits), source_id)
-                if hit and lang == "clang" and self._overloaded(hit, hits, source_id):
-                    hit = None
+                if hit and lang == "clang":
+                    hit = self._c_overload(hit, hits, source_id)
                 return (hit, source) if hit else (None, _UNRESOLVED)
             # A member a project type has from outside may return that type;
             # a field it assigns itself is its own.
@@ -15364,19 +15522,40 @@ class CallResolver:
             hit = self._inherited(name, source_id)
             hit = hit and self._overload_by_arity(hit)
             for target in self._dotnet_imports(file_id).values():
-                held = None if hit else self._type_named(target, file_id)
+                if hit or self._candidates_now:
+                    break
+                held = self._type_named(target, file_id)
                 if held not in (None, _EXTERNAL):
                     hit = self._find_member(held, name)[0]
                     hit = hit and self._overload_by_arity(hit, static=True)
             if not hit:
                 self._result = _OPAQUE
-            return (hit, "regex") if hit else (None, _EXTERNAL)
+                return None, _UNRESOLVED if self._candidates_now else _EXTERNAL
+            return hit, "regex"
         if lang in _IMPLICIT_SELF_LANGS:
             return self._resolve_self_call(name, candidates, source_id)
         explicit = lang in _EXPLICIT_RECEIVER_LANGS
         hit = self._lexical(name, source_id, skip_classes=explicit)
-        if hit and lang == "clang" and self._overloaded(hit, candidates, source_id):
-            return None, _UNRESOLVED
+        if hit and lang == "clang":
+            hit = self._c_overload(hit, candidates, source_id)
+            if not hit:
+                return None, _UNRESOLVED
+        guards = hit and lang == "clang" and self._effective_guards(hit, source_id)
+        caller = guards and (
+            self.call_guards or self.nodes[source_id]["metadata"].get("guards", ())
+        )
+        if guards and not set(guards) <= set(caller):
+            # A definition that an `#if` arm the call is not under alone
+            # builds is one of those of its name the call may reach.
+            path = self._c_path(hit)
+            fits = [
+                c
+                for c in self._fitting(candidates, source_id)
+                if self._c_path(c) == path
+            ]
+            if fits != [hit]:
+                self._candidates_now = sorted(fits) or None
+                return (fits[0], "regex") if len(fits) == 1 else (None, _UNRESOLVED)
         if hit:
             return hit, "regex"
         owner = None if explicit else self._enclosing_class(source_id)
@@ -15434,8 +15613,8 @@ class CallResolver:
                 return None, _EXTERNAL
         if free:
             hit = self._decide(free, source_id)
-            if hit and lang == "clang" and self._overloaded(hit, free, source_id):
-                hit = None
+            if hit and lang == "clang":
+                hit = self._c_overload(hit, free, source_id)
             return (hit, "regex") if hit else (None, _UNRESOLVED)
         if lang in _FREE_BARE_CALL_LANGS:
             self._result = _OPAQUE
@@ -15972,16 +16151,12 @@ class CallResolver:
                         if not hits and guarded:
                             self._candidates_now = sorted(guarded)
                             return None, _UNRESOLVED
-                    picks = {
-                        h.rpartition("::")[0]: self._overload_by_arity(h, static=True)
-                        or h
-                        for h in hits
-                    }
-                    if len(picks) == 1:
-                        value = ("def", next(iter(picks.values())))
+                    fits = self._extension_fits(hits)
+                    if len(fits) == 1:
+                        value = ("def", fits[0])
                         continue
-                    if picks:
-                        self._candidates_now = sorted(picks.values())
+                    if fits:
+                        self._candidates_now = fits
                         return None, _UNRESOLVED
                     # The data has the type's every member: a name it
                     # lacks that no project extension gives is external.
@@ -16352,6 +16527,10 @@ class CallResolver:
                 return ("returned", self._returned_type(name, scope_id))
         else:
             hit = self._lexical(name, scope_id, skip_classes=True)
+        if hit and lang == "dotnet" and self._is_class(hit):
+            # A C# type is the one its rules find: one nested in an enclosing
+            # type before one of the namespace.
+            hit = None
         if hit:
             return ("def", hit)
         if lang != "python":
@@ -17050,16 +17229,11 @@ class CallResolver:
                     and self.lang(ref) == "dotnet"
                     and held[1].split("<")[0] in library.data["types"]
                 ):
-                    hits = self._dotnet_extension(held, name)
-                    picks = {
-                        h.rpartition("::")[0]: self._overload_by_arity(h, static=True)
-                        or h
-                        for h in hits
-                    }
-                    if len(picks) == 1:
-                        return ("def", next(iter(picks.values())))
-                    if picks:
-                        self._candidates_now = sorted(picks.values())
+                    fits = self._extension_fits(self._dotnet_extension(held, name))
+                    if len(fits) == 1:
+                        return ("def", fits[0])
+                    if fits:
+                        self._candidates_now = fits
                         return None
                     self._result = _OPAQUE
                     return _EXTERNAL
@@ -17090,10 +17264,19 @@ class CallResolver:
             fields = (self.builder.fields.get(d, {}) for d in self._declarations(ref))
             if self.lang(ref) == "rust" and any(name in f for f in fields):
                 hit = None
-        if hit and called and self.lang(hit) == "dotnet":
-            hit = self._overload_by_arity(hit, static=kind == "def")
-            if not hit:
+        if called and self.lang(ref) == "dotnet":
+            # A call on a value is of a method of its type or of an extension
+            # method written for it that takes what the call passes.
+            member = hit and self._overload_by_arity(hit, static=kind == "def")
+            if hit and not member and self._candidates_now:
                 return None
+            extended = kind == "self" and self._extension_hits(ref, name, complete)
+            fits = sorted({member, *self._extension_fits(extended or ())} - {None})
+            if len(fits) > 1:
+                self._candidates_now = fits
+                return None
+            if fits or hit:
+                return ("def", fits[0]) if fits else None
         if kind in ("def", "cls") and self.lang(ref) == "ruby":
             # A Ruby class that has a singleton method and an instance
             # method of one name has the first as `self.name`, and `new`
@@ -17131,41 +17314,6 @@ class CallResolver:
                 held = self._variable(owner, name)
                 kept = held == _EXTERNAL or held and held[0] in ("def", "library")
                 return held if kept or not called else None
-        if called and name in self.extensions:
-            # A C# extension method written for the type, for a type it
-            # derives from, or for every type where the type has no base
-            # from outside that may have the member itself; none where
-            # those of several classes are.
-            written = {self._name(ref), *self._ancestors(ref)}
-            if complete:
-                written.add("object")
-            hits = [
-                e
-                for e in self.extensions[name]
-                if self.nodes[e]["metadata"]["extends"] in written
-            ]
-            if hits:
-                # An extension an `#if` arm alone defines can be meant
-                # only under that arm.
-                matching = [
-                    e
-                    for e in hits
-                    if not self._guard_conflict(
-                        self.call_guards or (),
-                        self.nodes[e]["metadata"].get("guards", ()),
-                    )
-                ]
-                if not self.call_guards:
-                    matching = [
-                        e for e in matching if not self._effective_guards(e, ref)
-                    ] or [e for e in matching if not self._candidate_only(e, ref)]
-                    if not matching:
-                        self._candidates_now = sorted(hits)
-                        return None
-                hits = matching
-            if hits:
-                owners = {e.rpartition("::")[0] for e in hits}
-                return ("def", hits[0]) if len(owners) == 1 else None
         # A C/C++ field that is called holds a function, or an object that
         # is called.
         if called and self.lang(ref) == "clang" and self._c_field(ref, name):
@@ -17371,7 +17519,9 @@ class CallResolver:
                 if hits:
                     break
         if len({paths[t] for t in hits}) == 1:
-            return hits[0]
+            # One type, declared in parts: the caller's file's part, if any.
+            own = [t for t in hits if t.split("::")[0] == file_id]
+            return (own or hits)[0]
         return None
 
     def _c_unmacroed(self, qualifier):
@@ -17462,7 +17612,10 @@ class CallResolver:
                 inner = {self.members.get(s, {}).get(name) for s in scopes}
                 if inner & set(types):
                     hit = (inner & set(types)).pop()
-                    return None if self._overloaded(hit, types, scope_id) else hit
+                    reached = self._candidates_now
+                    hit = self._c_overload(hit, types, scope_id)
+                    self._candidates_now = reached
+                    return hit
                 written = [a for a in aliases if a[0] in scopes]
                 if written:
                     types, aliases = [], written
@@ -17565,30 +17718,48 @@ class CallResolver:
                     found.add(how)
         return found
 
-    def _overloaded(self, hit, candidates, scope_id):
-        """Whether the C++ definition ``hit`` is one of several of its
-        qualified name that ``scope_id`` is compiled with: an overload or a
-        specialisation in another file is among ``candidates``. Definitions
-        an `#if` arm alone builds are alternatives, not overloads."""
+    def _c_overload(self, hit, candidates, scope_id):
+        """The C++ definition the call that reached ``hit`` is a call of,
+        among those of its qualified name that ``scope_id`` is compiled
+        with: the one of them that takes what the call passes, else None,
+        with them as the candidates. An overload or a specialisation in
+        another file is among ``candidates``, in a file
+        compiled with it or, of external linkage, under a name a prototype
+        declares in a header both files are compiled with, where the caller
+        is C++ (a `.c` file is compiled as C, which has no overloads).
+        Definitions an `#if` arm alone builds are alternatives, not
+        overloads."""
         path = self._c_path(hit)
-        seen = self._sees(scope_id.split("::")[0])
+        file_id = scope_id.split("::")[0]
+        seen = self._sees(file_id)
         defined = {c for c in candidates if "end_lineno" in self.nodes[c]["metadata"]}
         macro = self.nodes[hit]["metadata"].get("kind") == "macro"
         guards = self.call_guards or self.nodes[scope_id]["metadata"].get("guards", ())
-        return (
-            hit in defined
-            and not macro
-            and any(
-                c != hit
-                and c in defined
-                and self._c_path(c) == path
-                and c.split("::")[0] in seen
-                and not self._guard_conflict(
-                    guards, self._effective_guards(c, scope_id)
+        if hit not in defined or macro:
+            return hit
+        others = [
+            c
+            for c in candidates
+            if c != hit
+            and c in defined
+            and self._c_path(c) == path
+            and self.takes(c, self._arguments)
+            and (
+                c.split("::")[0] in seen
+                or not file_id.endswith(".c")
+                and self.nodes[c]["metadata"].get("linkage") != "internal"
+                and any(
+                    c.rpartition("::")[2] in self.builder.declares.get(file, ())
+                    for file in seen & self._sees(c.split("::")[0])
                 )
-                for c in candidates
             )
-        )
+            and not self._guard_conflict(guards, self._effective_guards(c, scope_id))
+        ]
+        fits = [c for c in [hit, *others] if self.takes(c, self._arguments)]
+        if not others or len(fits) == 1:
+            return fits[0] if others else hit
+        self._candidates_now = sorted(fits or [hit, *others])
+        return None
 
     def _constant(self, path, scope_id, seen=frozenset()):
         """The definition that the Ruby constant ``path``, a list of names
@@ -18140,33 +18311,128 @@ class CallResolver:
                 return hit
         return None
 
+    def takes(self, target, passed):
+        """Whether the C# or Java method ``target`` can take ``passed``
+        arguments, where its parser counted what it takes and the call's."""
+        counts = self._entries(target)
+        return counts is None or any(_admits(entry, passed) for entry in counts)
+
+    def _entries(self, target):
+        """``[least, most, types]`` of each overload of the C#, Java or C/C++
+        method ``target``; for C/C++ the least a declaration of the same
+        parameters allows, which can give their defaults."""
+        metadata = self.nodes[target]["metadata"]
+        counts = metadata.get("parameters")
+        if counts is None or self.lang(target) != "clang":
+            return counts
+        declared = self.builder.prototypes.get(metadata["name"], ())
+        return [
+            [
+                min([least] + [d[0] for d in declared if types and d[2] == types]),
+                most,
+                types,
+            ]
+            for least, most, types in counts
+        ]
+
     def _overload_by_arity(self, hit, static=None):
-        """The C# method that the call being resolved, which reached the
-        method ``hit``, can be a call of: the first of ``hit``, its
-        overloads and then those the bases of its type have that takes as
-        many arguments as the call passes and, with ``static`` given, is
-        static or not as that says. ``hit`` itself where it is no method."""
-        owner, _, name = hit.rpartition("::")
-        seen = set()
+        """The C# or Java method that the call being resolved, which reached
+        the method ``hit``, is a call of: of ``hit``, its overloads and
+        those of the bases of its type that a more derived one does not
+        override, the one that takes as many arguments as the call passes
+        and, with ``static`` given, is static or not as that says. None,
+        with them as the candidates, where several do. ``hit`` itself where
+        it is no method. A Java node holds all the overloads of its name in
+        its type."""
+        if "parameters" not in self.nodes[hit]["metadata"]:
+            return hit
+        owner, name = self._member_owner(hit), self.nodes[hit]["metadata"]["name"]
+        seen, overridden, fits = set(), set(), []
         while hit and owner not in seen:
+            inherited = bool(seen)
             seen.add(owner)
+            # A parameter of a type parameter's type is what a subtype's
+            # override takes in its place.
+            params = set(self.nodes[owner]["metadata"].get("generics", ()))
             overloads = [hit]
             while (
                 more := f"{owner}::overload{len(overloads) + 1}_{name}"
             ) in self.nodes:
                 overloads.append(more)
+            written = set()
             for overload in overloads:
                 metadata = self.nodes[overload]["metadata"]
-                if "parameters" not in metadata:
-                    return overload
-                least, most = metadata["parameters"]
-                passed = least if self._arguments is None else self._arguments
-                takes = least <= passed and (most is None or passed <= most)
-                if takes and static in (None, metadata["static"]):
-                    return overload
+                for entry in self._entries(overload) or ():
+                    signature = None if entry[2] is None else tuple(entry[2])
+                    written.add(signature)
+                    if (
+                        overload not in fits
+                        and not (inherited and metadata.get("private"))
+                        and not _overridden(
+                            signature,
+                            overridden,
+                            params,
+                            _JAVA_BOXES if self.lang(overload) == "java" else (),
+                        )
+                        and _admits(entry, self._arguments)
+                        and static in (None, metadata.get("static"))
+                        and (
+                            self.lang(overload) != "dotnet"
+                            or self._typed_as_called(metadata, entry[2])
+                        )
+                    ):
+                        fits.append(overload)
+            overridden |= written - {None}
             hit = self._find_member(owner, name, inherited_only=True)[0]
-            owner = hit and hit.rpartition("::")[0]
-        return None
+            owner = hit and self._member_owner(hit)
+        if len(fits) > 1:
+            self._candidates_now = sorted(fits)
+        return fits[0] if len(fits) == 1 else None
+
+    def _typed_as_called(self, metadata, types):
+        """Whether a C# method of ``metadata`` whose overload takes
+        parameters of ``types`` can be called as the call being resolved
+        is: with type arguments written only if it has type parameters, and
+        without them only if its parameters tell every one."""
+        own = metadata.get("type_parameters", ())
+        if self._typed_call:
+            return bool(own)
+        return all(any(re.search(rf"\b{t}\b", w) for w in types or ()) for t in own)
+
+    def _member_owner(self, member_id):
+        """The type that defines the member ``member_id``."""
+        return _member_split(member_id, self.nodes[member_id]["metadata"]["name"])[0]
+
+    def _extension_hits(self, ref, name, complete):
+        """The C# extension methods ``name`` written for the type ``ref``,
+        for a type it derives from, or for every type where ``complete``
+        says it has no base from outside that may have the member itself,
+        but for one an `#if` arm the call is not under alone defines."""
+        written = {self._name(ref), *self._ancestors(ref)}
+        if complete:
+            written.add("object")
+        return [
+            e
+            for e in self.extensions.get(name, ())
+            if self.nodes[e]["metadata"]["extends"] in written
+            and not self._guard_conflict(
+                self.call_guards or (), self.nodes[e]["metadata"].get("guards", ())
+            )
+        ]
+
+    def _extension_fits(self, hits):
+        """The C# extension methods that the call being resolved, which
+        reached the methods ``hits``, may be a call of: of each, the
+        overload ``_overload_by_arity`` picks, else those it leaves open."""
+        fits, passed = set(), self._arguments
+        # The receiver is an extension method's first argument.
+        self._arguments = passed + 1 if isinstance(passed, int) else passed
+        for hit in hits:
+            self._candidates_now = None
+            one = self._overload_by_arity(hit, static=True)
+            fits.update([one] if one else self._candidates_now or ())
+        self._candidates_now, self._arguments = None, passed
+        return sorted(fits)
 
     def _lexical(self, name, scope_id, skip_classes):
         """Definition of ``name`` in the innermost scope enclosing ``scope_id``.
@@ -18232,12 +18498,19 @@ class CallResolver:
                 return self._find_member(held[1], name, seen=seen)
             return self._exported(owner_id, name, set()), True
         lang = self.lang(owner_id)
+        applied = seen is not None
         seen = set() if seen is None else seen
         if owner_id in seen:
             return None, True
         declarations = self._declarations(owner_id)
         seen.update(declarations)
+        # A Ruby class's singleton methods are `self.<name>`, those of the
+        # modules it extends among them.
+        single = lang == "ruby" and name.startswith("self.")
         if not inherited_only:
+            hit = lang == "ruby" and not single and self._mixed(declarations, name)
+            if hit:
+                return hit, True
             hits = [self.members.get(d, {}).get(name) for d in declarations]
             hits = [hit for hit in hits if hit]
             for d in declarations if lang == "typescript" and not hits else ():
@@ -18255,6 +18528,9 @@ class CallResolver:
                 return None, True
             if hits:
                 return hits[0], True
+            hit = single and self._mixed(declarations, name[5:], "extend")
+            if hit:
+                return hit, True
         # A type the project only writes impl blocks for is declared outside.
         kinds = {self.nodes[d]["metadata"].get("kind") for d in declarations}
         complete = kinds != {"impl"}
@@ -18273,6 +18549,12 @@ class CallResolver:
                     base_types = (
                         [named] if named else self._types_in(lang, bare, declaration)
                     )
+                # A module's singleton methods are not its includers'.
+                base_types = [
+                    t
+                    for t in base_types
+                    if not single or self.nodes[t]["metadata"].get("kind") != "module"
+                ]
                 if not base_types:
                     # A standard trait gives only the members it has.
                     trait = self._standard_type(bare, declaration)
@@ -18299,7 +18581,28 @@ class CallResolver:
             for trait in self.builder.derived.get(declaration, ()):
                 given = (trait, declaration, name, owner_id)
                 complete = complete and not self._std_given(*given)[0]
+        # A Dart mixin looked up as a base of the class it is applied to
+        # leaves its `on` types to that class's superclass.
+        hit = lang == "dart" and not applied and self._mixed(declarations, name, "on")
+        if hit:
+            return hit, True
         return None, complete
+
+    def _mixed(self, declarations, name, how="prepend"):
+        """The member ``name`` of the first type that ``declarations`` list
+        under ``how`` in ``mixins`` that has one."""
+        for declaration in declarations:
+            for written in self.mixins.get((declaration, how), ()):
+                reached = self._candidates_now
+                module = self._type_named(written, declaration)
+                self._candidates_now = reached
+                hit = (
+                    module not in (None, _EXTERNAL)
+                    and (self._find_member(module, name)[0])
+                )
+                if hit:
+                    return hit
+        return None
 
     def _declarations(self, owner_id):
         """The type ``owner_id`` and its other declarations, in a language
@@ -18449,27 +18752,33 @@ class CallResolver:
         # to in it — only where the file declares none do its imports,
         # package, crate or includes decide.
         own = [c for c in candidates if c.split("::")[0] == source_id.split("::")[0]]
+        if lang in ("clang", "dotnet"):
+            # One an `#if` arm the call is not under alone builds binds it
+            # only in the builds that pick the arm.
+            guards = self.call_guards or self.nodes[source_id]["metadata"].get(
+                "guards", ()
+            )
+            built = [
+                c
+                for c in own
+                if set(self._effective_guards(c, source_id)) <= set(guards)
+            ]
+            own = built or own + [
+                c for c in candidates if c not in own and self._in_scope(c, source_id)
+            ]
         scoped = own or [c for c in candidates if self._in_scope(c, source_id)]
         if scoped:
             candidates = scoped
         if lang == "go":
             return self._go_fitting(candidates, source_id)
         if lang in ("clang", "dotnet"):
-            guards = self.call_guards or self.nodes[source_id]["metadata"].get(
-                "guards", ()
-            )
-            if guards:
-                return [
-                    c
-                    for c in candidates
-                    if not self._guard_conflict(
-                        guards, self._effective_guards(c, source_id)
-                    )
-                ]
-            # A definition an `#if` arm alone builds is a candidate, never
-            # what an unguarded call is pinned to.
-            plain = [c for c in candidates if not self._effective_guards(c, source_id)]
-            return plain or list(candidates)
+            return [
+                c
+                for c in candidates
+                if not self._guard_conflict(
+                    guards, self._effective_guards(c, source_id)
+                )
+            ]
         return list(candidates)
 
     def _candidate_only(self, candidate, source_id):
@@ -18810,6 +19119,9 @@ class CodeGraphBuilder:
         # C/C++ file ID -> the function names a prototype in it declares:
         # the definition may sit in any file linked in.
         self.declares = {}
+        # C/C++ function name -> ``[least, most, types]`` of each declaration
+        # of it without a body, where its parameters' defaults may be given
+        self.prototypes = {}
         # Type or variant ID -> {field name or position: its declared type};
         # Python module or class ID -> {variable: origin paths of its values},
         # function ID -> {`()`: origin paths of what it returns}
@@ -19139,15 +19451,17 @@ class CodeGraphBuilder:
         # Track resolution statistics
         stats = {"scip": 0, "regex": 0, "self_type": 0, "unresolved": 0, "external": 0}
         call_resolver = CallResolver(self)
-        # (file, line, name) of each definition -> its node ID
-        nodes_at = {
+        spans = definition_spans(self.nodes)
+        # (file, line, name) -> how many calls of the name the line makes
+        named_calls = Counter(
             (
-                node["id"].split("::")[0][5:],
-                node["metadata"].get("lineno"),
-                node["id"].rpartition("::")[2],
-            ): node["id"]
-            for node in self.nodes
-        }
+                e["source"].split("::")[0][5:],
+                e.get("metadata", {}).get("lineno"),
+                _split_callee(e["target"][4:])[1],
+            )
+            for e in self.edges
+            if e["relation"] == "CALLS" and e["target"].startswith("REF:")
+        )
 
         # Build lookup tables for regex fallback
         # name -> [(node_id, language), ...]
@@ -19244,13 +19558,24 @@ class CodeGraphBuilder:
                     if is_call:
                         # A call is taken from SCIP only where SCIP saw it; a
                         # name match is left to CallResolver.
+                        named = (source_file, lineno, _split_callee(ref_name)[1])
                         found = scip_index.definition_at(
-                            ref_name, source_file, lineno, column
+                            ref_name,
+                            source_file,
+                            lineno,
+                            column,
+                            alone=named_calls[named] == 1,
                         )
                         scip_resolved = found and (
-                            nodes_at.get((*found[1:], _split_callee(ref_name)[1]))
+                            defined_at(spans, *found[1:], _split_callee(ref_name)[1])
                             or found[0]
                         )
+                        # An indexer that names a method that cannot take
+                        # what the call passes did not bind the call.
+                        if scip_resolved in self.node_registry and not (
+                            call_resolver.takes(scip_resolved, arguments)
+                        ):
+                            scip_resolved = None
                         # What SCIP saw go to code outside the project is
                         # no call of a project definition of that name.
                         if not found and scip_index.outside_at(

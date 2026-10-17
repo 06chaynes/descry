@@ -94,6 +94,9 @@ def _build_tools(directory: Path) -> set[str] | None:
     return tools
 
 
+_GRADLE_SETTINGS = ("settings.gradle", "settings.gradle.kts")
+
+
 def _runs_gradle(directory: Path) -> bool:
     """Whether scip-java run in `directory` builds it with Gradle."""
     return _build_tools(directory) == {"Gradle"}
@@ -222,34 +225,22 @@ class JavaAdapter:
         A JVM "project" in descry's sense is any top-level subdirectory
         where scip-java detects exactly one build tool, and so runs, holding
         at least one JVM source file. The root itself is a single project
-        on the same terms when no subdirectory is one.
-
-        Gradle multi-project builds (a root ``settings.gradle``, or a
-        ``settings.gradle.kts`` beside a Gradle marker, where
-        scip-java runs Gradle) are treated as a single unit — scip-java
-        handles their submodules natively, and trying to index a
-        ``buildSrc/`` directory in isolation fails because it depends on
-        the parent project's configuration (observed on spring-framework).
+        on the same terms when its build aggregates the subdirectories' —
+        a Gradle settings file, a Maven `pom.xml` with `<modules>` — or
+        when no subdirectory is one. Indexing a subdirectory of an
+        aggregating build alone fails where it depends on its parent's
+        configuration (a Maven module's parent POM, a Gradle ``buildSrc/``,
+        observed on spring-framework).
         """
+        runs = _scip_java_runs(root) and _has_jvm_sources(root)
+        settings = any((root / name).is_file() for name in _GRADLE_SETTINGS)
+        pom = root / "pom.xml"
+        modules = pom.is_file() and "<modules>" in pom.read_text(errors="replace")
+        aggregates = settings if _runs_gradle(root) else modules
+        if runs and aggregates:
+            return [DiscoveredProject(name=root.name, root=root, language=self.name)]
+
         projects: list[DiscoveredProject] = []
-
-        # Gradle multi-project short-circuit — scip-java handles the
-        # subproject tree natively; iterating ourselves picks up
-        # buildSrc/ alone which fails to build standalone.
-        root_runs_gradle = _runs_gradle(root)
-        root_has_settings = (root / "settings.gradle").is_file() or (
-            root / "settings.gradle.kts"
-        ).is_file()
-        if root_runs_gradle and root_has_settings and _has_jvm_sources(root):
-            projects.append(
-                DiscoveredProject(
-                    name=root.name,
-                    root=root,
-                    language=self.name,
-                )
-            )
-            return projects
-
         for pkg_dir in sorted(root.iterdir()):
             if not pkg_dir.is_dir() or pkg_dir.name.startswith("."):
                 continue
@@ -265,7 +256,7 @@ class JavaAdapter:
                 )
             )
 
-        if not projects and _scip_java_runs(root) and _has_jvm_sources(root):
+        if not projects and runs:
             projects.append(
                 DiscoveredProject(
                     name=root.name,

@@ -67,6 +67,8 @@ class ScipIndex:
 
         # symbol_id -> (file_path, line_number)
         self.definitions: dict[str, tuple[str, int]] = {}
+        # symbol_id -> file_path -> the lines defining it there
+        self._defined: dict[str, dict[str, set[int]]] = {}
 
         # (file_path, line) -> list of symbol_ids (may be multiple if several
         # crates contribute the same relative file). At resolve time we prefer
@@ -74,8 +76,9 @@ class ScipIndex:
         # the first.
         self.references: dict[tuple[str, int], list[str]] = {}
 
-        # (file_path, line, start column) -> symbol_id of the occurrence there
-        self._columns: dict[tuple[str, int, int], str] = {}
+        # (file_path, line) -> (start column, end column where the line holds
+        # it, symbol_id) of each occurrence there
+        self._spans: dict[tuple[str, int], list[tuple[int, int | None, str]]] = {}
         # file_path -> the SCIP position encoding its columns are counted in
         self._position_encodings: dict[str, int] = {}
 
@@ -165,13 +168,19 @@ class ScipIndex:
                 # Check if this is a definition (symbol_roles & 0x1)
                 if occ.symbol_roles & SYMBOL_ROLE_DEFINITION:
                     self.definitions[symbol_id] = (file_path, line)
+                    self._defined.setdefault(symbol_id, {}).setdefault(
+                        file_path, set()
+                    ).add(line)
 
                 # Store all occurrences for reverse lookup. Append to a list
                 # so multi-crate workspaces that share relative filenames
                 # don't silently overwrite each other.
                 key = (file_path, line)
                 if len(occ.range) > 1:
-                    self._columns[(*key, occ.range[1])] = symbol_id
+                    end = occ.range[2] if len(occ.range) == 3 else None
+                    self._spans.setdefault(key, []).append(
+                        (occ.range[1], end, symbol_id)
+                    )
                 bucket = self.references.get(key)
                 if bucket is None:
                     self.references[key] = [symbol_id]
@@ -258,7 +267,7 @@ class ScipIndex:
             Descry node ID if resolved, None otherwise
         """
         lang = self._count_attempt(source_file)
-        chosen = self._symbol_at(ref_name, source_file, line)
+        _, chosen = self._symbol_at(ref_name, source_file, line)
         if chosen is not None:
             def_file, _ = self.definitions[chosen]
             if lang in self._resolution_stats:
@@ -272,28 +281,47 @@ class ScipIndex:
         return result
 
     def definition_at(
-        self, ref_name: str, source_file: str, line: int, column: int | None = None
+        self,
+        ref_name: str,
+        source_file: str,
+        line: int,
+        column: int | None = None,
+        alone: bool = True,
     ) -> tuple[str, str, int] | None:
         """Find the definition of the symbol SCIP recorded at a reference.
 
-        Unlike ``resolve`` this never falls back to matching by name. Where
-        the line references several symbols of ``ref_name``'s name, the one
-        whose occurrence starts at ``column`` (0-based) is taken. ``column``
-        is one number or ``(UTF-8, UTF-16, UTF-32)`` code-unit offsets.
+        Unlike ``resolve`` this never falls back to matching by name. With
+        ``column`` (0-based) given, the symbol of ``ref_name``'s name whose
+        occurrence on the line starts there is taken, else, where the call
+        is ``alone`` of its name on the line, the line's one where no
+        occurrence of it is a token of its name: one an indexer records at
+        the macro whose expansion holds the call. ``column`` is one number
+        or ``(UTF-8, UTF-16, UTF-32)`` code-unit offsets.
+
+        A symbol defined in several files, as an indexer names C `static`
+        functions of one name, is the one of the reference's own file;
+        where none is, or the file defines it at several lines, SCIP does
+        not tell which.
 
         Returns:
             ``(node_id, file, line)`` of the definition, the line 1-based,
             or None when no occurrence at ``source_file``:``line`` carries
-            ``ref_name``'s name, or ``column`` is given and does not tell
-            several such occurrences apart
+            ``ref_name``'s name, ``column`` does not tell which symbol of the
+            name the call is, or SCIP does not tell which of the symbol's
+            definitions it is
         """
         lang = self._count_attempt(source_file)
-        chosen = self._symbol_at(ref_name, source_file, line, column)
+        path, chosen = self._symbol_at(ref_name, source_file, line, column, alone)
         if chosen is None:
             return None
+        defined = self._defined[chosen]
+        def_file = path if len(defined) > 1 else next(iter(defined))
+        lines = defined.get(def_file, ())
+        if len(lines) != 1:
+            return None
+        (def_line,) = lines
         if lang in self._resolution_stats:
             self._resolution_stats[lang]["resolved"] += 1
-        def_file, def_line = self.definitions[chosen]
         return self._to_node_id(chosen, def_file), def_file, def_line
 
     def _stated_project_dir(self, project_root: str) -> str | None:
@@ -348,13 +376,19 @@ class ScipIndex:
         return self._leaving[scheme](symbol)
 
     def _symbol_at(
-        self, ref_name: str, source_file: str, line: int, column: int | None = None
-    ) -> str | None:
-        """The defined symbol referenced at ``source_file``:``line`` under
-        ``ref_name``'s last segment, if any."""
+        self,
+        ref_name: str,
+        source_file: str,
+        line: int,
+        column: int | None = None,
+        alone: bool = True,
+    ) -> tuple[str, str | None]:
+        """The path SCIP has ``source_file`` under, and the defined symbol
+        referenced at ``line`` of it under ``ref_name``'s last segment, if
+        any, as ``definition_at`` tells it."""
         path, named = self._named_at(ref_name, source_file, line)
         named = [cid for cid in named if cid in self.definitions]
-        if column is not None and len(named) > 1:
+        if column is not None and named:
             # A column given in several units is read in the document's;
             # where the index does not say which, any of them may match.
             if isinstance(column, int):
@@ -362,10 +396,20 @@ class ScipIndex:
             else:
                 unit = self._position_encodings.get(path)
                 columns = {column[unit - 1]} if unit else set(column)
-            exact = {self._columns.get((path, line, c)) for c in columns}
-            exact &= set(named)
-            return exact.pop() if len(exact) == 1 else None
-        return named[0] if named else None
+            spans = self._spans.get((path, line), ())
+            exact = set(named) & {s for at, _, s in spans if at in columns}
+            if exact or len(set(named)) > 1 or not alone:
+                return path, exact.pop() if len(exact) == 1 else None
+            # The line's one symbol of the name, recorded elsewhere on it: at
+            # a macro whose expansion holds the call, unless the occurrence
+            # there is a token of that name, another than the call's.
+            size = len(self._simple_name(ref_name))
+            token = any(
+                s == named[0] and end is not None and end - at == size
+                for at, end, s in spans
+            )
+            return path, None if token else named[0]
+        return path, named[0] if named else None
 
     def _named_at(self, ref_name: str, source_file: str, line: int):
         """The path SCIP has ``source_file`` under, and the symbols it

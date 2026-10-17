@@ -106,6 +106,27 @@ _DECLARED_TYPE = (
     r"[A-Za-z_][\w.]*(?:\[[\w.*, ]+\])?)"
 )
 
+
+def _declaring_lines(lines):
+    """``lines`` as declarations are read from them: a variadic `...Type`
+    parameter is a `[]Type` in its function, and an entry of a `var (...)`
+    block is written with its `var`."""
+    read, inside = [], False
+    for line in lines:
+        line = line.replace("...", "[]")
+        if inside and line.strip().startswith(")"):
+            inside = False
+        elif inside:
+            line = re.sub(r"^\s*", lambda m: f"{m[0]}var ", line, count=1)
+        else:
+            inside = bool(_RE_VAR_BLOCK_START.match(line))
+        read.append(line)
+    return read
+
+
+# `name :=` or `var name =`, which declare `name` with the value's type
+_DECLARES = r"(?<![\w.])(?P<var>var\s+)?(?P<name>\w+)\s*(?(var)=|:=)"
+
 _DECLARATIONS = (
     # `name Type` / `name *Type` in a receiver or parameter list; the `(`
     # left before the match keeps it from being read as a file-level one
@@ -120,8 +141,9 @@ _DECLARATIONS = (
     ),
     # `var name Type`
     re.compile(r"\bvar\s+(?P<name>\w+)\s+\*?" + _DECLARED_TYPE),
-    # `name := Type{` / `name = &Type{`
-    re.compile(r"(?<![\w.])(?P<name>\w+)\s*:?=\s*&?" + _DECLARED_TYPE + r"\{"),
+    # `name := Type{` / `var name = &Type{`; an assignment keeps the type
+    # its variable is declared with
+    re.compile(_DECLARES + r"\s*&?" + _DECLARED_TYPE + r"\{"),
     # `name Type` / `name *Type`, alone on its line: a struct field, or with
     # a `,` a parameter or result of a list written one to a line
     re.compile(
@@ -131,17 +153,15 @@ _DECLARATIONS = (
         + r"\s*+,?\s*+(?:`[^`]*`\s*)?(?://.*)?$"
     ),
     # `name := new(Type)`
-    re.compile(r"\b(?P<name>\w+)\s*:?=\s*new\(\s*(?P<type>[A-Za-z_][\w.]*)\s*\)"),
+    re.compile(_DECLARES + r"\s*new\(\s*(?P<type>[A-Za-z_][\w.]*)\s*\)"),
     # `name := value.(Type)` / `name, ok := value.(*Type)`, a type assertion
     # that ends its line or the initializer of an `if`
     re.compile(
-        r"\b(?P<name>\w+)(?:\s*,\s*\w+)?\s*:?=[^=;]*\.\(\s*\*?"
-        r"(?P<type>(?!type\b)[A-Za-z_][\w.]*)\s*\)\s*(?:;.*)?$"
+        r"(?<![\w.])(?P<var>var\s+)?(?P<name>\w+)(?:\s*,\s*\w+)?\s*(?(var)=|:=)"
+        r"[^=;]*\.\(\s*\*?(?P<type>(?!type\b)[A-Za-z_][\w.]*)\s*\)\s*(?:;.*)?$"
     ),
     # `name := make([]Type, n)` / `name := make(map[Key]Type)`
-    re.compile(
-        r"(?<![\w.])(?P<name>\w+)\s*:?=\s*make\(\s*" + _DECLARED_TYPE + r"\s*[,)]"
-    ),
+    re.compile(_DECLARES + r"\s*make\(\s*" + _DECLARED_TYPE + r"\s*[,)]"),
 )
 
 # A line of a struct: `name Type`, `name, other Type`, or the embedded
@@ -541,10 +561,7 @@ class GoParser(BaseParser):
         in_import_block = False
         in_const_block = False
         in_var_block = False
-        # A variadic `...Type` parameter is a `[]Type` in its function.
-        self.scan_declarations(
-            [line.replace("...", "[]") for line in lines], _DECLARATIONS
-        )
+        self.scan_declarations(_declaring_lines(lines), _DECLARATIONS)
         self.enter_context(file_id, 0, len(lines))
         receivers: dict[str, tuple[str, int]] = {}  # type id -> (name, lineno)
         # The type parameters of each generic type the file declares, which

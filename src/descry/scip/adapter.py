@@ -82,7 +82,8 @@ class LanguageAdapter(Protocol):
 
     binary: str
     """Command name probed via ``shutil.which()``. An indexer installed
-    under another name lists it in ``binary_alternatives``."""
+    under another name lists it in ``binary_alternatives``, and one with no
+    ``--version`` names the flag that only reports in ``probe_flag``."""
 
     extensions: tuple[str, ...]
     """Source file extensions this adapter owns (e.g. ``(".java", ".kt", ".scala")``)."""
@@ -156,7 +157,7 @@ def _probe_binary(adapter: LanguageAdapter) -> dict:
     if path:
         try:
             proc = subprocess.run(
-                [path, "--version"],
+                [path, getattr(adapter, "probe_flag", "--version")],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

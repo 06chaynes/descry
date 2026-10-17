@@ -825,7 +825,9 @@ public static class Lookup
         assert metadata["overload2_Load"]["return_type"] == ""
         assert metadata["Load"]["static"] is False
         assert metadata["Shout"]["static"] is True
-        assert metadata["TryFind"]["parameters"] == [3, 3]
+        assert metadata["TryFind"]["parameters"] == [
+            [3, 3, ["string", "out Entry?", "out int"]]
+        ]
 
     def test_receiver_origins(self, builder):
         src = """

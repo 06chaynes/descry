@@ -53,11 +53,16 @@ class RubyAdapter:
     def discover(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
         """Return one DiscoveredProject per top-level Ruby project.
 
-        A Ruby project is any top-level subdirectory containing a
-        ``Gemfile`` plus at least one ``.rb`` source. The root itself
-        becomes the single project when it carries a Gemfile with no
-        competing subdirectory projects.
+        A root with a ``Gemfile`` and ``.rb`` sources is the single
+        project. A root with none is a workspace whose top-level
+        subdirectories, each with a ``Gemfile`` and ``.rb`` sources, are
+        the projects.
         """
+        if (root / "Gemfile").exists():
+            # scip-ruby run at a root with its Gemfile indexes the tree.
+            if not _has_ruby_sources(root):
+                return []
+            return [DiscoveredProject(name=root.name, root=root, language=self.name)]
         seen: set[str] = set()
         projects: list[DiscoveredProject] = []
 
@@ -76,15 +81,6 @@ class RubyAdapter:
                 DiscoveredProject(
                     name=pkg_dir.name,
                     root=pkg_dir,
-                    language=self.name,
-                )
-            )
-
-        if not projects and (root / "Gemfile").exists() and _has_ruby_sources(root):
-            projects.append(
-                DiscoveredProject(
-                    name=root.name,
-                    root=root,
                     language=self.name,
                 )
             )

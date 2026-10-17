@@ -630,6 +630,54 @@ int pick(void) { return second(); }
             ("pick", "second"),
         ]
 
+    def test_guards_of_a_definition_in_several_arms(self, builder):
+        """A definition is guarded by what every arm it is written in
+        shares."""
+        src = """
+#if defined(__APPLE__) && defined(__MACH__)
+int sem_destroy(void) { return 1; }
+#else
+int sem_destroy(void) { return 2; }
+#endif
+#ifdef B
+#ifdef A
+int both(void) { return 1; }
+#else
+int both(void) { return 2; }
+#endif
+#define LIMIT 1
+#endif
+#define LIMIT 2
+""".strip()
+        _parse(builder, src, "src/foo.c")
+        guards = {
+            n["metadata"]["name"]: n["metadata"].get("guards")
+            for n in builder.nodes
+            if n["type"] != "File"
+        }
+        assert guards == {"sem_destroy": None, "both": ["+B"], "LIMIT": None}
+
+    def test_include_guard_of_a_header_written_into_the_file(self, builder):
+        """`#ifndef X` that opens with `#define X` is built in every build,
+        wherever the file holds it; another `#ifndef` is an arm."""
+        src = """
+int before(void) { return 0; }
+#ifndef INNER_H_
+#define INNER_H_
+int inner(void) { return 1; }
+#endif
+#ifndef OTHER
+int other(void) { return 2; }
+#endif
+""".strip()
+        _parse(builder, src, "src/all.c")
+        guards = {
+            n["metadata"]["name"]: n["metadata"].get("guards")
+            for n in builder.nodes
+            if n["type"] == "Function"
+        }
+        assert guards == {"before": None, "inner": None, "other": ["-OTHER"]}
+
     def test_macro_named_like_a_function(self, builder):
         """The function keeps the name; the macro moves aside."""
         src = """

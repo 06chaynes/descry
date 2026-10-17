@@ -221,7 +221,19 @@ Python SDK v2, and a full-tree review's findings are fixed.
   Occurrences are matched by line and column. A call that a Rust index
   records as one of a function, of a concrete type's method or of a trait
   the project implements nowhere, outside the project, is external, where
-  it was kept as one of the project definitions of its name. Index files
+  it was kept as one of the project definitions of its name. The
+  definition an index records is the node whose lines hold its line, a
+  template, decorator or annotation before the name included, and whose
+  name it has, where the node's ID spelled the name otherwise (a C#
+  overload, a Ruby singleton method) and the call went to the first
+  definition of the name. Where the index records two symbols at the
+  call's column, as of a declaration merged with another, defines the
+  symbol at two lines of a file or only in files other than the call's,
+  names a method that cannot take what the call passes (an index that did
+  not bind the call), or records the name on the call's line only at
+  another token of it, the call is resolved from source; one recorded at
+  the macro whose expansion holds the call is still the call's, where the
+  line makes no other call of the name. Index files
   are named
   `<adapter>--<project>.scip`. The SCIP cache follows `DESCRY_CACHE_DIR`,
   and `DESCRY_SCIP_TIMEOUT` overrides the configured timeout.
@@ -265,6 +277,43 @@ Python SDK v2, and a full-tree review's findings are fixed.
 
 ### Fixed
 
+- **Overloads, mixins and `#if` arms.** A call that several overloads take
+  by the number of arguments it passes is left open with them as
+  candidates: C# took the first that took as many, and Java and C++ took
+  a subtype's method of the name whatever a base declares. The overloads
+  of a type and of its bases count, but a base's private ones and those a
+  subtype overrides, a type parameter's parameter by what its argument
+  stands for, so a call only a base's overload takes reaches it. A C/C++
+  function takes as few arguments as a declaration of its parameters
+  allows, which can give their defaults. A C# extension
+  method's receiver is its first argument; a method of the type and an
+  extension that both take a call leave it open; a generic method whose
+  type argument no argument tells is called with it written; a type
+  nested in the enclosing class is meant before one of the namespace, and
+  of a type declared in parts, the caller's file's part. Ruby
+  looks in a prepended module before the class, in an included one after
+  it and before the superclass, the last included first, and in a module
+  a class extends for its singleton methods; an `alias_method` inside
+  `class << self` is a singleton method. A Dart mixin applied to a class
+  leaves its `on` types to the class's superclass, and a `switch` on a
+  variable types it by each `case Type()` to the next case. A Go variable
+  is of the type it is declared with whatever is assigned to it later, and
+  an entry of a `var (...)` block declares. What a TypeScript or
+  JavaScript statement assigns is what the variable holds to the end of
+  its block. A C/C++ definition an `#if` arm the call is not under alone
+  builds is a candidate beside one every build has, where the unguarded
+  one was taken; one defined in several arms is built under what they
+  share, where it had the first arm's; `#ifndef X` that opens with
+  `#define X` anywhere in a file, as an amalgamation holds headers, is no
+  arm; a specialization is a type of its own, named with its arguments,
+  and `T<A>::f` is the member of the one for `A`, else of the template; a
+  C++ caller's function has an overload where a header both files are
+  compiled with declares one, and the call is the one of them that takes
+  it; a conversion operator, `operator fmt::string_view`, is no
+  definition of the name after its `::`. A Rust `impl` in a module is for
+  the module's type of its name, and a block a line opens and splits the
+  statements of ends at its `}`, where what followed a one-line function
+  was filed under it.
 - **Parsers.** Rust `pub(crate)`/`pub(super)` items, `const fn`,
   `extern fn`, one-line blocks, calls in a body on the `fn` line, `impl`
   edges, functions after an `impl` inside a module, methods of an
@@ -602,7 +651,18 @@ Python SDK v2, and a full-tree review's findings are fixed.
   `packages/`, while a package under an excluded or dot-directory is left
   alone. An index file that parses but carries no symbols is logged, since
   that usually means the indexer's own environment was missing rather than
-  a project with no symbols.
+  a project with no symbols. A root with a build of its own is one project
+  to every indexer, where its subdirectories were indexed apart and the
+  root's own sources had none: a CMake or Make root, a Maven root that
+  lists `<modules>`, a Gradle root with a settings file, a `package.json`
+  (and a workspace root whose `src/` holds sources, beside its members),
+  `pyproject.toml`, `setup.py` or `setup.cfg`, a `Gemfile`, a
+  `composer.json`. scip-php is probed with `--help`, since anything else
+  indexes the directory, and scip-dotnet is given the solution or project
+  file, so a `.slnx` solution is indexed. A JavaScript or TypeScript
+  package without a `tsconfig.json` is indexed with one written beside the
+  index, which reads JavaScript too: `--infer-tsconfig` wrote one into the
+  indexed package.
 - **Service and query.** Source is read relative to the project root
   whatever the working directory. A missing, stale or corrupt graph no
   longer stops the MCP server from starting, and is reported by `health`

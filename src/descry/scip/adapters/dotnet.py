@@ -5,9 +5,9 @@ projects via MSBuild. Install:
 
     dotnet tool install --global scip-dotnet
 
-Invocation: ``scip-dotnet index`` at the project or solution root.
-The tool reads ``.sln`` / ``.csproj`` / ``.vbproj`` and can do its own
-``dotnet restore``. Supports ``--output`` so we use
+Invocation: ``scip-dotnet index <solution or project file>`` at its
+directory. The tool reads ``.sln`` / ``.slnx`` / ``.csproj`` /
+``.vbproj`` and can do its own ``dotnet restore``. Supports ``--output`` so we use
 ``output_mode="direct"``.
 
 scip-dotnet v0.2.13 targets ``net9.0`` — on a system with a newer SDK
@@ -248,6 +248,9 @@ class DotnetAdapter:
             raise RuntimeError(f"scip-dotnet incompatibility: {reason}")
 
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
+        # It finds a `.sln` or project file itself, but not a `.slnx`.
+        if found := _find_solution_or_project(project.root):
+            argv.append(found.name)
 
         env_extras: dict[str, str] = {"DOTNET_ROLL_FORWARD": "LatestMajor"}
         if dotnet_root:

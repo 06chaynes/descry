@@ -51,7 +51,7 @@ _RE_ATTR = re.compile(r"(?<![\w.])attr(?:_(reader|writer|accessor))?\b\s*\(?\s*(
 _RE_ALIAS = re.compile(rf"(?<![\w.])alias(?:_method)?\b\s*+\(?\s*+:?({_METHOD_NAME})")
 # include Foo, Bar / extend Foo / prepend Foo
 _RE_MIXIN = re.compile(
-    rf"\s*+(?:include|extend|prepend)\b\s*+\(?\s*+({_CONST}(?:\s*,\s*{_CONST})*)\s*+\)?\s*$"
+    rf"\s*+(include|extend|prepend)\b\s*+\(?\s*+({_CONST}(?:\s*,\s*{_CONST})*)\s*+\)?\s*$"
 )
 # `Class.new(Base)`, `Module.new`, `Struct.new(:a, :b)`, `Data.define(:a)`:
 # an expression that makes a type, whose block is the body of that type
@@ -747,6 +747,35 @@ class RubyParser(BaseParser):
                 and not (named and c[0].rpartition("::")[2].startswith("<"))
             )
 
+        def defined_as(owner_id, name, receiver):
+            # The owner, name and metadata of the method ``name`` of
+            # ``owner_id`` defined on ``receiver``, or in the innermost
+            # `class << object` where none is written.
+            if singleton_classes and not receiver:
+                # In `class << object` a method is that object's, unless a
+                # definition inside it encloses the method.
+                _, first, of = singleton_classes[-1]
+                receiver = of if first >= self._contexts[-1][1] else None
+            method_id = f"{owner_id}::{name}"
+            extra = {}
+            if receiver in ("self", owner_id.rpartition("::")[2]):
+                extra["is_singleton"] = True
+            if receiver and not extra:
+                # A method of one object is named with that object.
+                return self._contexts[-1][0], f"{receiver}.{name}", extra
+            if method_id in self.builder.node_registry and (
+                method_id in singletons
+            ) != bool(extra):
+                # A class may have a singleton method and an instance
+                # method of one name: the first is then `self.name`.
+                if extra:
+                    return owner_id, f"self.{name}", extra
+                self.rename_node(method_id, f"{owner_id}::self.{name}")
+                singletons.discard(method_id)
+            elif extra:
+                singletons.add(method_id)
+            return owner_id, name, extra
+
         for index, code in enumerate(code_lines):
             if not code.strip():
                 continue
@@ -806,34 +835,9 @@ class RubyParser(BaseParser):
                     header = _RE_METHOD.match(code, column)
                     if not header:
                         continue
-                    name = header["name"]
-                    receiver = header["owner"]
-                    if singleton_classes and not receiver:
-                        # In `class << object` a method is that object's,
-                        # unless a definition inside it encloses the method.
-                        _, first, of = singleton_classes[-1]
-                        receiver = of if first >= self._contexts[-1][1] else None
-                    method_id = f"{owner_id}::{name}"
-                    extra = {}
-                    if receiver in ("self", owner_id.rpartition("::")[2]):
-                        extra["is_singleton"] = True
-                    if receiver and not extra:
-                        # A method of one object is named with that object.
-                        owner_id = self._contexts[-1][0]
-                        name = f"{receiver}.{name}"
-                    elif method_id in self.builder.node_registry and (
-                        method_id in singletons
-                    ) != bool(extra):
-                        # A class may have a singleton method and an
-                        # instance method of one name: the first is then
-                        # `self.name`.
-                        if extra:
-                            name = f"self.{name}"
-                        else:
-                            self.rename_node(method_id, f"{owner_id}::self.{name}")
-                            singletons.discard(method_id)
-                    elif extra:
-                        singletons.add(method_id)
+                    owner_id, name, extra = defined_as(
+                        owner_id, header["name"], header["owner"]
+                    )
                     doc = self.get_leading_docstring(lines, index)
                     typed = {
                         found["name"] or found["name2"]: found["type"] or found["type2"]
@@ -1002,8 +1006,9 @@ class RubyParser(BaseParser):
                 m_alias = _RE_ALIAS.search(code)
                 m_defined = m_alias or _RE_DEFINE_METHOD.search(code)
                 if m_defined:
+                    parent_id, name, extra = defined_as(owner_id, m_defined[1], None)
                     self._add(
-                        owner_id, m_defined[1], "Method", lineno, lineno, docstring=""
+                        parent_id, name, "Method", lineno, lineno, docstring="", **extra
                     )
                 if m_alias:
                     scan_start = len(code)
@@ -1046,9 +1051,12 @@ class RubyParser(BaseParser):
                 # A module is mixed into the class whose body the line is
                 # in, not one that a block around the line stands for.
                 if m_mixin and owner_id != file_id and self._scopes[-1][3] == owner_id:
-                    for base in re.findall(_CONST, m_mixin[1]):
+                    for base in re.findall(_CONST, m_mixin[2]):
                         self.builder.add_edge(
-                            owner_id, f"REF:{base.removeprefix('::')}", "INHERITS"
+                            owner_id,
+                            f"REF:{base.removeprefix('::')}",
+                            "INHERITS",
+                            {"mixin": m_mixin[1]},
                         )
 
             # 3. What each instance variable of the type is assigned

@@ -368,7 +368,8 @@ def _write_scip(path, documents, project_root="", position_encoding=0):
 
     ``documents`` maps a relative path to ``(zero_based_line, symbol,
     is_definition)`` occurrences, as an indexer would emit them; a fourth
-    item is the occurrence's start column, 4 without one. ``project_root``
+    item is the occurrence's start column, 4 without one, and a fifth its
+    end, three columns on without one. ``project_root``
     is the URI the index states its document paths are relative to, and
     ``position_encoding`` the unit it counts columns in.
     """
@@ -380,10 +381,10 @@ def _write_scip(path, documents, project_root="", position_encoding=0):
         doc = index.documents.add()
         doc.relative_path = relative_path
         doc.position_encoding = position_encoding
-        for line, symbol, is_definition, *column in occurrences:
+        for line, symbol, is_definition, *columns in occurrences:
             occ = doc.occurrences.add()
-            start = column[0] if column else 4
-            occ.range.extend([line, start, start + 3])
+            start = columns[0] if columns else 4
+            occ.range.extend([line, start, columns[1] if columns[1:] else start + 3])
             occ.symbol = symbol
             occ.symbol_roles = 1 if is_definition else 0
             if is_definition:
@@ -615,13 +616,16 @@ class TestScipIndexResolveLineSemantics:
 
     def test_column_tells_same_named_references_on_a_line_apart(self, tmp_path):
         """`a.run(); b.run();` on one line: each call gets the symbol whose
-        occurrence starts at its own column."""
+        occurrence starts at its own column, where one alone does."""
         documents = {
             "src/alpha.rs": [(0, self.ALPHA_RUN, True)],
             "src/beta.rs": [(0, self.BETA_RUN, True)],
             "src/main.rs": [
                 (4, self.ALPHA_RUN, False, 6),
                 (4, self.BETA_RUN, False, 15),
+                (6, self.ALPHA_RUN, False, 6),
+                (6, self.BETA_RUN, False, 6),
+                (8, self.ALPHA_RUN, False, 2, 11),
             ],
         }
         index = ScipIndex([_write_scip(tmp_path / "app.scip", documents)])
@@ -632,6 +636,33 @@ class TestScipIndexResolveLineSemantics:
             self.BETA_NODE,
         )
         assert index.definition_at("c.run", "app/src/main.rs", 5, 30) is None
+        # Two symbols at one column, as of a declaration merged with another.
+        assert index.definition_at("a.run", "app/src/main.rs", 7, 6) is None
+        # The line's one symbol of the name, elsewhere on it: a declaration,
+        # and the macro whose expansion holds the call.
+        assert index.definition_at("run", "app/src/beta.rs", 1, 9) is None
+        found = index.definition_at("a.run", "app/src/main.rs", 9, 23)
+        assert found[0] == "FILE:app/src/alpha.rs::Alpha::run"
+        # Not where the macro holds another call of the name.
+        assert index.definition_at("a.run", "app/src/main.rs", 9, 23, False) is None
+
+    def test_symbol_defined_more_than_once(self, tmp_path):
+        """A symbol defined in several files is the reference's own file's;
+        one defined at two lines of a file is neither."""
+        documents = {
+            "src/alpha.rs": [(0, self.BETA_RUN, True), (4, self.BETA_RUN, False)],
+            "src/beta.rs": [(0, self.BETA_RUN, True), (4, self.BETA_RUN, False)],
+            "src/main.rs": [(4, self.BETA_RUN, False)],
+            "src/twice.rs": [(0, self.ALPHA_RUN, True), (2, self.ALPHA_RUN, True)],
+            "src/use.rs": [(4, self.ALPHA_RUN, False)],
+        }
+        index = ScipIndex([_write_scip(tmp_path / "app.scip", documents)])
+        assert index.definition_at("run", "app/src/alpha.rs", 5)[1:] == (
+            "src/alpha.rs",
+            1,
+        )
+        assert index.definition_at("run", "app/src/main.rs", 5) is None
+        assert index.definition_at("run", "app/src/use.rs", 5) is None
 
 
 def test_protobuf_runtime_mismatch_loads_nothing(tmp_path, monkeypatch):
@@ -670,6 +701,43 @@ def test_typescript_workspace_entries_outside_root_are_dropped(tmp_path):
     projects = TypeScriptAdapter().discover(root, set())
 
     assert [p.name for p in projects] == ["packages/a"]
+
+
+def test_typescript_workspace_root_with_sources_is_a_project(tmp_path):
+    from descry.scip.adapters.typescript import TypeScriptAdapter
+
+    for pkg in (tmp_path, tmp_path / "demo"):
+        (pkg / "src").mkdir(parents=True)
+        (pkg / "src" / "index.js").write_text("export const x = 1;\n")
+    (tmp_path / "demo" / "package.json").write_text("{}")
+    (tmp_path / "package.json").write_text(json.dumps({"workspaces": ["demo"]}))
+
+    projects = TypeScriptAdapter().discover(tmp_path, set())
+
+    assert sorted(p.name for p in projects) == ["demo", tmp_path.name]
+
+
+def test_typescript_package_without_tsconfig_gets_one_in_the_cache(tmp_path):
+    from descry.scip.adapter import AdapterConfig, DiscoveredProject
+    from descry.scip.adapters.typescript import TypeScriptAdapter
+
+    root, cache = tmp_path / "app", tmp_path / "cache"
+    root.mkdir()
+    cache.mkdir()
+    project = DiscoveredProject(name="app", root=root, language="typescript")
+    out = cache / "typescript--app.scip"
+    inferred = cache / "typescript--app.tsconfig.json"
+    inferred.symlink_to(tmp_path / "elsewhere")
+
+    spec = TypeScriptAdapter().build_command(project, out, AdapterConfig())
+
+    assert spec.argv[-1] == str(inferred)
+    assert json.loads(inferred.read_text())["include"] == [f"{root}/**/*"]
+    assert not (tmp_path / "elsewhere").exists()
+    assert list(root.iterdir()) == []
+    (root / "tsconfig.json").write_text("{}")
+    spec = TypeScriptAdapter().build_command(project, out, AdapterConfig())
+    assert spec.argv[-1] == str(out)
 
 
 def test_typescript_absolute_glob_entry_is_skipped(tmp_path):

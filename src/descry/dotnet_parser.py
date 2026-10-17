@@ -22,6 +22,7 @@ from descry.generate import (
     _bracketed_parts,
     _generic_metadata,
     _strip_generics,
+    argument_count,
     is_generated_source,
     source_lines,
 )
@@ -550,12 +551,18 @@ def _flat(code):
 
 
 def _parameter_counts(parameters):
-    """``[least, most]`` arguments that a call of a method with the
-    parameter list ``parameters`` passes; ``most`` is None for no limit."""
+    """``[[least, most, types]]``: the arguments that a call of a method
+    with the parameter list ``parameters`` passes, ``most`` None for no
+    limit, and the types of its parameters as written, which tell an
+    override."""
     listed = [p for p in _flat(_strip_generics(parameters)).split(",") if p.strip()]
     optional = [p for p in listed if "=" in p or "params" in p.split()]
     most = None if any("params" in p.split() for p in listed) else len(listed)
-    return [len(listed) - len(optional), most]
+    types = [
+        " ".join(part.partition("=")[0].split()[:-1])
+        for part in _bracketed_parts(parameters + ")")
+    ]
+    return [[len(listed) - len(optional), most, types]]
 
 
 def _closing(code_lines, index, column, stops=""):
@@ -730,11 +737,14 @@ class DotnetParser(BaseParser):
                 self.builder.edges[-1]["target"] += "<>"
             closed = self._pairs.get(call_match.end() - 1)
             arguments = _flat(code[call_match.end() : closed or len(code)])
-            if closed:
-                # A literal, blank in the code, is an argument too.
-                passed = lines[index][call_match.end() : closed].strip()
-                counted = arguments.count(",") + 1 if passed else 0
-                self.builder.edges[-1]["metadata"]["args"] = counted
+            listed = _closing(code_lines, index, call_match.end())
+            if listed and listed[2] == ")":
+                self.builder.edges[-1]["metadata"]["args"] = argument_count(
+                    _text(
+                        code_lines, index, call_match.end(), listed[0], listed[1] + 1
+                    ),
+                    _text(lines, index, call_match.end(), listed[0], listed[1] + 1),
+                )
             # `out var name` has the type of that `out` parameter of the
             # call it is an argument of: the result after those before it.
             passed = re.finditer(rf"\bout\s+(?:var\s+({_NAME}))?", arguments)
@@ -1073,7 +1083,7 @@ class DotnetParser(BaseParser):
                 and (member["type"] or member["name"].lstrip("~") == owner)
             ):
                 # A method, a constructor or an operator.
-                scope = generics[context_id]
+                scope, own = generics[context_id], []
                 if operator:
                     name = f"operator {operator['symbol']}"
                     paren = operator.end() - 1
@@ -1081,7 +1091,8 @@ class DotnetParser(BaseParser):
                 else:
                     name, returns = member["name"], member["type"]
                     paren = member.end() - 1
-                    scope |= set(_type_parameters(member["generic"]))
+                    own = _type_parameters(member["generic"])
+                    scope |= set(own)
                     if not member["type"] and name == owner:
                         static = "static" in member["modifiers"].split()
                         name = "<clinit>" if static else "<init>"
@@ -1098,8 +1109,11 @@ class DotnetParser(BaseParser):
                     modifiers = (operator or member)["modifiers"].split()
                     extra = {
                         "static": "static" in modifiers,
+                        "private": "private" in modifiers,
                         "parameters": _parameter_counts(listed),
                     }
+                    if own:
+                        extra["type_parameters"] = own
                     if name in ("<init>", "<clinit>"):
                         extra["is_constructor"] = True
                     elif returns:

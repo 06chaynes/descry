@@ -23,7 +23,9 @@ from descry.generate import (
     _generic_metadata,
     _raw_pointer,
     _strip_generics,
+    argument_count,
     blank_strings,
+    c_specialization,
     is_generated_source,
     source_lines,
 )
@@ -33,6 +35,38 @@ _RE_INCLUDE = re.compile(r'^\s*#\s*include\s+[<"]([^>"]+)[>"]')
 
 # #define MACRO value
 _RE_DEFINE = re.compile(r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _include_guard(source, open_at, arm):
+    """Whether the `#if` arm ``arm`` opened on line ``open_at`` of
+    ``source`` is an include guard: `#ifndef X` that opens with `#define X`."""
+    sign = next(iter(arm)) if len(arm) == 1 else ""
+    first = next((line for line in source[open_at + 1 :] if line.strip()), "")
+    defined = _RE_DEFINE.match(first)
+    return sign[:1] == "-" and bool(defined) and defined[1] == sign[1:]
+
+
+def _parameter_entry(parameters):
+    """``[least, most, types]`` of the parameter list ``parameters``: the
+    arguments a call passes, ``most`` None for a variadic list or pack,
+    which may take none, and the type each other parameter is written with,
+    without qualifiers or spaces, which tells an override."""
+    listed = [] if parameters == ["void"] else parameters
+    # `...`, or a parameter pack, `T&&... args`
+    variadic = bool(listed) and "..." in listed[-1]
+    fixed = listed[:-1] if variadic else listed
+    types = []
+    for part in fixed:
+        written = part.partition("=")[0].strip()
+        declared = _RE_PARAMETER.fullmatch(written)
+        if declared:
+            written = declared["type"] + (declared["pointer"] or "")
+        types.append(
+            re.sub(r"\b(?:const|volatile|struct|class|enum)\b|\s+", "", written)
+        )
+    least = sum("=" not in part for part in fixed)
+    return [least, None if variadic else len(fixed), types]
+
 
 _RE_OPENED_NAMESPACE = re.compile(r"\bnamespace\s+([A-Za-z_]\w*)\s*\{")
 # In the text of a macro, a name that a `;` follows, with array bounds or a
@@ -551,6 +585,7 @@ class ClangParser(BaseParser):
         self._skip_calls = is_generated_source(content)
         self._macros = {}  # ID of each macro of the file -> its metadata
         self._guarded = {}  # line -> the conditionals that enclose it
+        self._sites = {}  # node ID -> the lines of its definitions
         bodies = []  # (macro ID, first line, last line, parameters) of each `#define`
         self._lines = self._prepare(file_id, bodies)
         self._text = "\n".join(self._lines)
@@ -568,10 +603,13 @@ class ClangParser(BaseParser):
         self._body(0, len(self._text), file_id, None)
         # A definition that sits inside an `#if` arm is built only in the
         # configurations that pick the arm: that is evidence about the
-        # call sites that may reach it.
+        # call sites that may reach it. One defined in several arms is
+        # built under what they share.
         for node in self.builder.nodes[self._first_node :]:
             line = node["metadata"].get("lineno")
-            if line and (guards := self._guarded.get(line - 1)):
+            lines = self._sites.get(node["id"]) or ([line - 1] if line else [])
+            arms = [self._guarded.get(index, frozenset()) for index in lines]
+            if arms and (guards := frozenset.intersection(*arms)):
                 node["metadata"]["guards"] = sorted(guards)
         # The calls in a macro's replacement text are the macro's; what its
         # parameters stand for is not known.
@@ -677,6 +715,7 @@ class ClangParser(BaseParser):
                 head = _RE_MACRO_HEAD.match(text)
                 parameters = re.findall(r"[A-Za-z_]\w*", head[1]) if head else []
                 bodies.append((macro_id, index, last, parameters))
+                self._sites.setdefault(macro_id, []).append(index)
                 if macro_id in self._macros:
                     # Another definition of the macro, for another build.
                     self._macros[macro_id].setdefault("rewrites", []).extend(rewrites)
@@ -720,6 +759,13 @@ class ClangParser(BaseParser):
                 group[4][0]
                 for group in groups
                 if group[3] < coded[0] and len(group[4]) == 1
+            ]
+            # So does `#ifndef X` that opens with `#define X` anywhere: a
+            # header written into the file, as an amalgamation does.
+            wrapping += [
+                arms[0]
+                for open_at, arms, _ in closed
+                if len(arms) == 1 and _include_guard(self._source, open_at, arms[0])
             ]
             ambient = frozenset().union(
                 *(
@@ -918,10 +964,13 @@ class ClangParser(BaseParser):
         type_id = f"{parent_id}::{name}"
         end_lineno = bisect_right(self._starts, closer)
         # A specialization, `Box<T*>`, has its parameters at no position of
-        # the arguments of the template it specializes.
+        # the arguments of the template it specializes. It is a type of its
+        # own, named with them, a `::` in them written `.`.
         written = re.split(r"(?<!:):(?!:)", flat, maxsplit=1)[0]
-        if re.search(rf"\b{re.escape(name)}\s*<", written):
+        if special := re.search(rf"\b{re.escape(name)}\s*<", written):
             parameters = []
+            type_id = c_specialization(type_id, written[special.end() :])
+        self._sites.setdefault(type_id, []).append(first)
         if type_id not in self.builder.node_registry:
             self.builder.add_node(
                 type_id,
@@ -1061,7 +1110,18 @@ class ClangParser(BaseParser):
         name = re.sub(r"\s+", " " if spaced else "", name)
         prefix = _before(found)
         first = self._first_line(begin, begin + found.start("name"))
-        path = re.findall(r"([A-Za-z_]\w*)\s*(?:<[^()]*>\s*)?::", found["path"])
+        # A specialization in the path is named with its arguments; a
+        # template written with its own parameters is the template.
+        path = [
+            c_specialization(name, f"{arguments}>")
+            if opened
+            and not set(map(str.strip, _bracketed_parts(f"{arguments}>")))
+            <= self._generic
+            else name
+            for name, opened, arguments in re.findall(
+                r"([A-Za-z_]\w*)\s*(?:(<)([^()]*)>\s*)?::", found["path"]
+            )
+        ]
         scope_id, owner = self._qualified(parent_id, owner, path, first + 1)
         if re.search(r"\bfriend\b", prefix):
             # A friend defined in a type is a function of the scope around it.
@@ -1097,15 +1157,18 @@ class ClangParser(BaseParser):
         member = owner is not None
         function_id = f"{scope_id}::{name}"
         end_lineno = bisect_right(self._starts, last)
+        # What a macro invocation that stands for a head takes is not known.
+        entry = [0, None, None] if words else _parameter_entry(parameters)
         if function_id in self._macros:
             # A macro of the same name moves to `<file>::macro_<name>`.
             del self._macros[function_id]
             self.rename_node(function_id, f"{scope_id}::macro_{name}")
+            self._sites[f"{scope_id}::macro_{name}"] = self._sites.pop(function_id)
         # A `static` written under a conditional the name is not under
         # holds only where that arm compiles, so it is no linkage.
-        inside = self._guarded.get(
-            bisect_right(self._starts, begin + found.start("name")) - 1, frozenset()
-        )
+        named_at = bisect_right(self._starts, begin + found.start("name")) - 1
+        self._sites.setdefault(function_id, []).append(named_at)
+        inside = self._guarded.get(named_at, frozenset())
         static = any(
             self._guarded.get(
                 bisect_right(self._starts, begin + word.start()) - 1, frozenset()
@@ -1127,10 +1190,9 @@ class ClangParser(BaseParser):
             if words:
                 # The type may be one of another file that an argument names.
                 extra["arguments"] = words
-            if inside:
-                extra["guards"] = sorted(inside)
             if not member and (self._internal or static):
                 extra["linkage"] = "internal"
+            extra["parameters"] = [entry]
             self.builder.add_node(
                 function_id,
                 "Method" if member else "Function",
@@ -1142,11 +1204,14 @@ class ClangParser(BaseParser):
                 **extra,
             )
             self.builder.add_edge(scope_id, function_id, "DEFINES")
-        elif not member and not (self._internal or static):
-            # A definition internal under one arm and external under
-            # another is not internal.
-            node = self._node(function_id)
-            if node:
+        elif node := self._node(function_id):
+            # Another overload, or the definition under another arm.
+            held = node["metadata"].setdefault("parameters", [])
+            if entry not in held:
+                held.append(entry)
+            if not member and not (self._internal or static):
+                # A definition internal under one arm and external under
+                # another is not internal.
                 node["metadata"].pop("linkage", None)
         for part in parameters:
             declared = _RE_PARAMETER.fullmatch(part.partition("=")[0].strip())
@@ -1207,6 +1272,12 @@ class ClangParser(BaseParser):
             name = found["name"]
             prefix = _before(found)
             declares = prefix or found["path"] or name == owner or name[0] == "~"
+            listed = next(
+                (head[a + 1 : b] for a, b in spans if a == found.start("params")), ""
+            )
+            self.builder.prototypes.setdefault(name, []).append(
+                _parameter_entry(_bracketed_parts(listed))
+            )
             if not owner and not found["path"]:
                 # A prototype at file or namespace level declares the
                 # function wherever the file is included: the definition
@@ -1385,6 +1456,11 @@ class ClangParser(BaseParser):
                 match.end() - 1,
                 origin,
             )
+            if close := self._pairs.get(match.end() - 1):
+                self.builder.edges[-1]["metadata"]["args"] = argument_count(
+                    code[match.end() : close + 1],
+                    self._source[index][match.end() : close + 1],
+                )
             if given and not std:
                 # `Box<Dog>(`: the template arguments it is called with
                 site = self.builder.edges[-1]["metadata"].setdefault("site", {})

@@ -1035,7 +1035,7 @@ class _ScipStub:
         self.references = references
         self.outside = outside
 
-    def definition_at(self, ref_name, source_file, line, column):
+    def definition_at(self, ref_name, source_file, line, column, alone):
         return self.references.get(
             (source_file, line, column), self.references.get((source_file, line))
         )
@@ -1079,6 +1079,41 @@ class TestScipCallResolution:
         builder.process_directory()
         builder.resolve_references(_ScipStub({}, outside={("lib.rs", 9)}))
         assert not [e for e in builder.edges if e["source"] == "FILE:lib.rs::run"]
+
+    def test_scip_definition_line_picks_the_overload(self, tmp_path):
+        source = """
+        class Log
+        {
+            void Write(int a) {}
+            void Write(string a) {}
+            void Run() { Write("x"); }
+        }
+        """
+        (tmp_path / "Log.cs").write_text(textwrap.dedent(source))
+        builder = CodeGraphBuilder(tmp_path)
+        builder.process_directory()
+        definition = ("FILE:Log.cs::Log::Write", "Log.cs", 5)
+        builder.resolve_references(_ScipStub({("Log.cs", 6): definition}))
+        (edge,) = [e for e in builder.edges if e["source"] == "FILE:Log.cs::Log::Run"]
+        assert edge["target"] == "FILE:Log.cs::Log::overload2_Write"
+        assert edge["metadata"]["resolution_source"] == "scip"
+
+    def test_scip_target_that_cannot_take_the_call_is_not_used(self, tmp_path):
+        """An indexer that did not bind a call may name an overload that
+        takes other arguments than it passes."""
+        source = """
+        class Log
+        {
+            void Write(int a, int b) {}
+            void Run() { Write(1); }
+        }
+        """
+        (tmp_path / "Log.cs").write_text(textwrap.dedent(source))
+        builder = CodeGraphBuilder(tmp_path)
+        builder.process_directory()
+        definition = ("FILE:Log.cs::Log::Write", "Log.cs", 4)
+        builder.resolve_references(_ScipStub({("Log.cs", 5): definition}))
+        assert _calls(builder, "FILE:Log.cs::Log::Run") == []
 
     def test_scip_target_that_is_no_node_is_not_used(self, tmp_path):
         (edge,) = self._resolve(tmp_path, ("FILE:app/lib.rs::probe", "app/lib.rs", 2))
@@ -3507,6 +3542,31 @@ class TestRustCallResolution:
             "FILE:lib.rs::Text::raw"
         ]
         assert _calls(builder, "FILE:lib.rs::Text") == []
+        assert "FILE:lib.rs::both::Text" not in builder.node_registry
+
+    def test_impl_in_a_module_is_of_the_module_s_type(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "lib.rs": """
+                pub struct TempDir(u8);
+
+                mod tests {
+                    pub struct TempDir(u8);
+
+                    impl TempDir {
+                        pub fn new() -> TempDir {
+                            TempDir(0)
+                        }
+                    }
+                }
+                """
+            },
+        )
+        assert "FILE:lib.rs::tests::TempDir::new" in builder.node_registry
+        assert _calls(builder, "FILE:lib.rs::tests::TempDir::new") == [
+            "FILE:lib.rs::tests::TempDir"
+        ]
 
     def test_function_nested_in_a_method_is_not_a_method(self, tmp_path):
         """A `fn` inside a method body belongs to that method and is
@@ -8178,6 +8238,36 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:a.ts::loops") == [run]
         assert _calls(builder, "FILE:a.ts::parts") == [run] * 4
 
+    def test_assignment_tells_what_a_variable_holds_in_its_block(self, tmp_path):
+        """What a statement assigns is what the variable holds to the end of
+        the block it is in; past it, what the variable is declared as."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.ts": """
+                interface Provider { width(t: string): number; }
+                class CanvasProvider implements Provider { width(t: string) { return 1; } }
+                let provider: Provider | undefined;
+                export const getWidth = (t: string) => {
+                  if (!provider) {
+                    provider = new CanvasProvider();
+                    provider.width(t);
+                  }
+                  return provider.width(t);
+                };
+                """
+            },
+        )
+        widths = [
+            e["target"]
+            for e in builder.edges
+            if e["source"] == "FILE:m.ts::getWidth" and e["target"].endswith("width")
+        ]
+        assert widths == [
+            "FILE:m.ts::CanvasProvider::width",
+            "FILE:m.ts::Provider::width",
+        ]
+
     def test_default_and_rest_in_a_pattern(self, tmp_path):
         """A property's default ends nothing it holds a `:` of: the pattern
         binds the property's name. `...rest` binds a name too, of no type
@@ -10574,6 +10664,38 @@ class TestGoCallResolution:
         )
         assert _calls(builder, "FILE:app.go::check") == ["FILE:app.go::Mock::Write"]
 
+    def test_assignment_keeps_the_declared_type(self, tmp_path):
+        """A variable declared of an interface type is of it whatever is
+        assigned to it later."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/app\n",
+                "msg.go": """
+                package app
+
+                type message interface {
+                	unmarshal(data []byte) bool
+                }
+
+                type retryMsg struct{}
+
+                func (m *retryMsg) unmarshal(data []byte) bool { return true }
+
+                func read(data []byte, retry bool) {
+                	var m message
+                	if retry {
+                		m = new(retryMsg)
+                	}
+                	m.unmarshal(data)
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:msg.go::read") == [
+            "FILE:msg.go::message::unmarshal"
+        ]
+
     def test_entry_of_a_var_block_is_a_package_level_variable(self, tmp_path):
         """A name declared in a `var (...)` block has its declared type in
         every function of the file."""
@@ -12293,6 +12415,109 @@ class TestOwnersSourceCannotName:
 
 
 class TestJavaCallResolution:
+    def test_overloads_of_a_type_and_its_base(self, tmp_path):
+        """The overloads a base declares that its subtype does not override
+        are candidates beside the subtype's own."""
+        builder = _index(
+            tmp_path,
+            {
+                "Range.java": """
+                public class Range<T> {
+                    public T fit(T element) { return element; }
+                    public int size(T a) { return 0; }
+                }
+                """,
+                "LongRange.java": """
+                public class LongRange extends Range<Long> {
+                    public long fit(long element) { return element; }
+                    public int size(Long a) { return 1; }
+                    void run(LongRange r) {
+                        r.fit(1L);
+                    }
+                }
+                """,
+            },
+        )
+        (edge,) = [
+            e
+            for e in builder.edges
+            if e["source"] == "FILE:LongRange.java::LongRange::run"
+        ]
+        assert edge["metadata"]["candidates"] == [
+            "FILE:LongRange.java::LongRange::fit",
+            "FILE:Range.java::Range::fit",
+        ]
+
+    def test_override_of_a_generic_method_and_a_private_one(self, tmp_path):
+        """A method taking what a type argument stands for overrides the one
+        taking the type parameter; a base's private method is no candidate."""
+        builder = _index(
+            tmp_path,
+            {
+                "Mutable.java": """
+                public interface Mutable<T> {
+                    void setValue(T value);
+                }
+                """,
+                "Reader.java": """
+                public class Reader {
+                    private void push(int top) {}
+                }
+                """,
+                "Flag.java": """
+                public class Flag extends Reader implements Mutable<Boolean> {
+                    public void setValue(Boolean value) {}
+                    public void setValue(boolean value) {}
+                    private void push(Object top) {}
+                    void run(Flag f) {
+                        f.setValue(true);
+                        push(1);
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Flag.java::Flag::run") == [
+            "FILE:Flag.java::Flag::push",
+            "FILE:Flag.java::Flag::setValue",
+        ]
+
+    def test_overload_a_base_declares(self, tmp_path):
+        """A call reaches the method of its name, in the type or a base,
+        that takes as many arguments as it passes; one that none takes is
+        left open."""
+        builder = _index(
+            tmp_path,
+            {
+                "Base.java": """
+                public abstract class Base {
+                    public final String translate(String input) { return input; }
+                    public abstract int translate(String input, int at, Writer out);
+                    public void each(String... parts) {}
+                }
+                """,
+                "Unescaper.java": """
+                public class Unescaper extends Base {
+                    public int translate(String input, int at, Writer out) { return 0; }
+                    public void run(Unescaper u) {
+                        u.translate("x");
+                        u.translate("x", 0, null);
+                        translate("x", 1);
+                        u.each();
+                        u.each("a", "b");
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Unescaper.java::Unescaper::run") == [
+            "FILE:Base.java::Base::each",
+            "FILE:Base.java::Base::each",
+            "FILE:Base.java::Base::translate",
+            "FILE:Unescaper.java::Unescaper::translate",
+            "REF:translate",
+        ]
+
     def test_lambda_parameter_reads_the_interfaces_abstract_method(self, tmp_path):
         """`x -> x.tally()` given for a `Mapper<Item, String>` parameter:
         `x` is what `Mapper.apply` takes, `Item`."""
@@ -15228,7 +15453,8 @@ class TestDotnetCallResolution:
         """A method whose first parameter is `this T` is called on a T or
         on a type derived from it. One written for a type from outside is
         the call's target where the standard library's data has the type
-        and it lacks the member; a receiver it cannot scope stays open."""
+        and it lacks the member; a receiver it cannot scope stays open. A
+        type name is no receiver: `string.Shout(text)` calls no extension."""
         builder = _index(
             tmp_path,
             {
@@ -15269,10 +15495,89 @@ class TestDotnetCallResolution:
             "FILE:Extensions.cs::Extensions::Describe",
             "FILE:Extensions.cs::Extensions::Shout",
             "FILE:Extensions.cs::Extensions::Shout",
-            "FILE:Extensions.cs::Extensions::Shout",
             "FILE:Shapes.cs::Circle::Draw",
             "REF:numbers.Total",
         ]
+
+    def test_nested_type_generic_method_and_extension_receiver(self, tmp_path):
+        """A type nested in the enclosing class is meant before one of the
+        namespace; a generic method whose type argument no argument tells is
+        called with it written, else an extension may be meant; an extension
+        method's receiver is its first argument."""
+        builder = _index(
+            tmp_path,
+            {
+                "Use.cs": """
+                using System;
+
+                public class Employee { }
+
+                public class Tests
+                {
+                    public class Employee { }
+                    public void Run() { var joe = new Employee(); }
+                }
+
+                public class Box
+                {
+                    public T Get<T>() { return default; }
+                }
+
+                public static class Ext
+                {
+                    public static int Get(this Box box) => 0;
+                    public static bool Is(this Type type, string name, out Type match) { match = null; return true; }
+                    public static bool Is(this Type type, string name) => true;
+                }
+
+                public class Use
+                {
+                    void Run(Box b, Type t) { b.Get(); b.Get<int>(); t.Is("x", out _); }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:Use.cs::Tests::Run") == [
+            "FILE:Use.cs::Tests::Employee"
+        ]
+        assert _calls(builder, "FILE:Use.cs::Use::Run") == [
+            "FILE:Use.cs::Box::Get",
+            "FILE:Use.cs::Ext::Get",
+            "FILE:Use.cs::Ext::Is",
+        ]
+
+    def test_method_and_extension_that_take_the_call(self, tmp_path):
+        """Where the type's method and an extension method written for it
+        both take as many arguments as the call passes, the call is open."""
+        builder = _index(
+            tmp_path,
+            {
+                "Log.cs": """
+                public class Logger
+                {
+                    public Logger ForContext(string name, object value, bool deep = false) => this;
+                }
+
+                public static class LoggerExtensions
+                {
+                    public static Logger ForContext(this Logger logger, int level, string name, object value) => logger;
+                }
+
+                public class Use
+                {
+                    void Run(Logger logger) { logger.ForContext(1, "a", "b"); logger.ForContext("a", 1); }
+                }
+                """,
+            },
+        )
+        (both, one) = [
+            e for e in builder.edges if e["source"] == "FILE:Log.cs::Use::Run"
+        ]
+        assert both["metadata"]["candidates"] == [
+            "FILE:Log.cs::Logger::ForContext",
+            "FILE:Log.cs::LoggerExtensions::ForContext",
+        ]
+        assert one["target"] == "FILE:Log.cs::Logger::ForContext"
 
     def test_attribute_is_a_call_of_its_class(self, tmp_path):
         builder = _index(
@@ -15339,8 +15644,8 @@ class TestDotnetCallResolution:
         assert _calls(builder, "FILE:Other/Reader.cs::Reader::Read") == []
 
     def test_overloads(self, tmp_path):
-        """A call reaches the first overload that takes as many arguments
-        as it passes and is called as it is, on the type or on a value;
+        """A call reaches the overload that takes as many arguments as it
+        passes and is called as it is, on the type or on a value;
         what the call returns is told only where every overload returns the
         same."""
         builder = _index(
@@ -15392,6 +15697,68 @@ class TestDotnetCallResolution:
             "REF:Close",
             "REF:token.GetType",
         ]
+
+    def test_overloads_of_a_type_and_its_base(self, tmp_path):
+        """An override stands for the method it overrides; another overload
+        of the base that takes as many arguments is a candidate too."""
+        builder = _index(
+            tmp_path,
+            {
+                "Token.cs": """
+                public abstract class Token
+                {
+                    public void WriteTo(Writer writer) { }
+                    public abstract void WriteTo(Writer writer, params Converter[] converters);
+                }
+
+                public class Obj : Token
+                {
+                    public override void WriteTo(Writer writer, params Converter[] converters) { }
+                    void Run(Obj o, Writer w) { o.WriteTo(w); o.WriteTo(w, a, b); }
+                }
+                """,
+            },
+        )
+        (one, two) = [
+            e for e in builder.edges if e["source"] == "FILE:Token.cs::Obj::Run"
+        ]
+        assert one["metadata"]["candidates"] == [
+            "FILE:Token.cs::Obj::WriteTo",
+            "FILE:Token.cs::Token::WriteTo",
+        ]
+        assert two["target"] == "FILE:Token.cs::Obj::WriteTo"
+
+    def test_overloads_that_take_as_many_arguments(self, tmp_path):
+        """A call that several overloads can take is left open with them as
+        candidates; the arguments of one are counted to the `)` that closes
+        them."""
+        builder = _index(
+            tmp_path,
+            {
+                "Box.cs": """
+                public class Box
+                {
+                    public void Put(int item) { }
+                    public void Put(string item) { }
+                    public void Put(int item, int at) { }
+                    void Run() {
+                        Put(1);
+                        Put("a, b",
+                            2);
+                    }
+                }
+                """,
+            },
+        )
+        (open_call, two) = [
+            e for e in builder.edges if e["source"] == "FILE:Box.cs::Box::Run"
+        ]
+        assert open_call["target"] == "REF:Put"
+        assert open_call["metadata"]["candidates"] == [
+            "FILE:Box.cs::Box::Put",
+            "FILE:Box.cs::Box::overload2_Put",
+        ]
+        assert two["target"] == "FILE:Box.cs::Box::overload3_Put"
 
     def test_generic_type_from_outside(self, tmp_path):
         """A member of `List<Order>` is the list's; what it returns may be
@@ -15524,6 +15891,204 @@ class TestDotnetCallResolution:
 
 
 class TestClangCallResolution:
+    def test_definition_an_if_arm_alone_builds_is_one_of_the_candidates(self, tmp_path):
+        """An unguarded call may reach a definition built only under an
+        `#if` arm, of its own file or another, as well as an unguarded one;
+        a call under the arm reaches the definition of its file."""
+        builder = _index(
+            tmp_path,
+            {
+                "internal.h": "void make_pending(int h);\nvoid free_all(int n);\n",
+                "core.c": '#include "internal.h"\nvoid make_pending(int h) {}\n',
+                "common.c": (
+                    '#include "internal.h"\n'
+                    "#ifndef __MVS__\nvoid free_all(int n) {}\n#endif\n"
+                ),
+                "os390.c": '#include "internal.h"\nvoid free_all(int n) {}\n',
+                "poll.c": """
+                #include "internal.h"
+                #ifdef _WIN32
+                #define make_pending(h) endgame(h)
+                #endif
+                void close_it(int h) { make_pending(h); free_all(h); }
+                #ifdef _WIN32
+                void close_win(int h) { make_pending(h); }
+                #endif
+                """,
+            },
+        )
+        edges = {
+            e["target"]: e["metadata"].get("candidates")
+            for e in builder.edges
+            if e["source"] == "FILE:poll.c::close_it"
+        }
+        assert edges == {
+            "REF:make_pending": [
+                "FILE:core.c::make_pending",
+                "FILE:poll.c::make_pending",
+            ],
+            "REF:free_all": ["FILE:common.c::free_all", "FILE:os390.c::free_all"],
+        }
+        assert _calls(builder, "FILE:poll.c::close_win") == [
+            "FILE:poll.c::make_pending"
+        ]
+
+    def test_method_of_a_base_that_takes_the_call(self, tmp_path):
+        """A member function reached on a derived type is the one of its
+        name, there or in a base, that takes as many arguments as the call
+        passes."""
+        builder = _index(
+            tmp_path,
+            {
+                "buffer.cc": """
+                template <typename T> class buffer {
+                 public:
+                  void append(const T* begin, const T* end) {}
+                };
+                template <typename T> class memory_buffer : public buffer<T> {
+                 public:
+                  using buffer<T>::append;
+                  void append(const T& range) {}
+                  template <typename... A> void print(const char* fmt, A&&... args) {}
+                };
+                void fill(memory_buffer<char>& out, const char* text) {
+                  out.append(text, text + 4);
+                  out.append("x");
+                  out.print("x");
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:buffer.cc::fill") == [
+            "FILE:buffer.cc::buffer::append",
+            "FILE:buffer.cc::memory_buffer::append",
+            "FILE:buffer.cc::memory_buffer::print",
+        ]
+
+    def test_member_of_a_specialization_written_with_its_arguments(self, tmp_path):
+        """`T<A>::f` is the member of the specialization for `A`, else of
+        the template itself, never of another specialization."""
+        builder = _index(
+            tmp_path,
+            {
+                "f.cc": """
+                template <typename T> struct formatter { int format(T v) { return 0; } };
+                struct string_view {};
+                template <> struct formatter<string_view> { int format(string_view v) { return 1; } };
+                struct moving {};
+                template <> struct formatter<moving> {
+                  int format(moving m) {
+                    formatter<int>::format(1);
+                    return formatter<string_view>::format(string_view());
+                  }
+                };
+                struct incomplete {};
+                template <> struct formatter<incomplete> { int format(incomplete); };
+                int formatter<incomplete>::format(incomplete) {
+                  return formatter<int>::format(42);
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:f.cc::formatter<moving>::format") == [
+            "FILE:f.cc::formatter::format",
+            "FILE:f.cc::formatter<string_view>::format",
+            "FILE:f.cc::string_view",
+        ]
+        # A member defined out of its specialization is the specialization's.
+        assert _calls(builder, "FILE:f.cc::formatter<incomplete>::format") == [
+            "FILE:f.cc::formatter::format"
+        ]
+
+    def test_conversion_operator_named_with_a_scope(self, tmp_path):
+        """A conversion operator's name may hold `::`: it is the operator's,
+        no definition of the name after the last `::`."""
+        builder = _index(
+            tmp_path,
+            {
+                "view.cc": """
+                struct convertible {
+                  explicit operator fmt::wstring_view() const { return {}; }
+                };
+                void use(const wchar_t* text) { wstring_view(text, 2); }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:view.cc::use") == []
+
+    def test_member_of_the_class_an_out_of_line_method_is_of(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "unit.cc": """
+                namespace testing {
+                class UnitTest {
+                 public:
+                  int& listeners();
+                };
+                namespace internal {
+                class UnitTestImpl {
+                 public:
+                  int* listeners() { return &l_; }
+                  void Configure();
+                  int l_;
+                };
+                }
+                int& UnitTest::listeners() { static int x; return x; }
+                namespace internal {
+                void UnitTestImpl::Configure() { listeners(); }
+                }
+                }
+                """,
+            },
+        )
+        assert _calls(
+            builder, "FILE:unit.cc::testing::internal::UnitTestImpl::Configure"
+        ) == ["FILE:unit.cc::testing::internal::UnitTestImpl::listeners"]
+
+    def test_function_of_its_file_that_takes_the_call(self, tmp_path):
+        """A function the caller's file defines is the call's beside a
+        header's declaration of the name that takes other arguments."""
+        builder = _index(
+            tmp_path,
+            {
+                "coding.h": "bool GetSlice(Slice* in, Slice* out);\n",
+                "coding.cc": '#include "coding.h"\nbool GetSlice(Slice* in, Slice* out) { return true; }\n',
+                "table.cc": """
+                #include "coding.h"
+                static Slice GetSlice(const char* data) { return Slice(); }
+                Slice key(const char* p) { return GetSlice(p); }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:table.cc::key") == ["FILE:table.cc::GetSlice"]
+
+    def test_overload_a_prototype_declares(self, tmp_path):
+        """A C++ function of the caller's file has an overload where an
+        included header declares one defined elsewhere, and the call is the
+        one that takes what it passes; a C file has none."""
+        util = "file open_file(FILE** fp = nullptr);\n"
+        defined = "file open_file(FILE** fp) { return file(); }\n"
+        caller = """
+        #include "util.h"
+        file open_file(int& fd) { return file(); }
+        void run() { open_file(); }
+        """
+        builder = _index(
+            tmp_path,
+            {
+                "util.h": util,
+                "util.cc": '#include "util.h"\n' + defined,
+                "test.cc": caller,
+                "c/util.h": util,
+                "c/util.c": '#include "util.h"\n' + defined,
+                "c/test.c": caller,
+            },
+        )
+        # The header's declaration gives the overload elsewhere a default.
+        assert _calls(builder, "FILE:test.cc::run") == ["FILE:util.cc::open_file"]
+        assert _calls(builder, "FILE:c/test.c::run") == ["FILE:c/test.c::open_file"]
+
     def test_declared_type_picks_the_method(self, tmp_path):
         """A local, a parameter, a `Type name(args)` variable and a
         range-`for` variable are of the type they are declared with."""
@@ -16831,6 +17396,56 @@ class TestClangCallResolution:
 
 
 class TestRubyCallResolution:
+    def test_mixins_in_ruby_s_order(self, tmp_path):
+        """A prepended module comes before the class, an included one after
+        it and before its superclass, the last included first; an extended
+        module gives the class its methods, not its instances."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/app.rb": """
+                module Loud
+                  def greet; end
+                end
+                module Quiet
+                  def greet; end
+                  def wave; end
+                end
+                module Dsl
+                  def it(name); end
+                end
+                class Base
+                  def wave; end
+                  def it(name); end
+                  class << self
+                    alias_method :it, :wave
+                  end
+                end
+                class App < Base
+                  include Loud
+                  include Quiet
+                  prepend Loud
+                  extend Dsl
+                  def greet; end
+                  it "runs"
+
+                  def run
+                    greet
+                    wave
+                    it "x"
+                  end
+                end
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/app.rb::App") == ["FILE:lib/app.rb::Dsl::it"]
+        assert _calls(builder, "FILE:lib/app.rb::App::run") == [
+            "FILE:lib/app.rb::Base::it",
+            "FILE:lib/app.rb::Loud::greet",
+            "FILE:lib/app.rb::Quiet::wave",
+        ]
+        assert "FILE:lib/app.rb::Base::self.it" in builder.node_registry
+
     def test_constructed_receiver_resolves_to_its_class_s_method(self, tmp_path):
         """A local or an instance variable assigned `Const.new` is a Const:
         a method called on it is Const's, among several of the name."""
@@ -18115,6 +18730,79 @@ class TestDartCallResolution:
             "FILE:lib/animals.dart::Animal::rest",
             "FILE:lib/animals.dart::Duck::rest",
             "FILE:lib/animals.dart::Flyer::move",
+        ]
+
+    def test_switch_case_promotes_the_variable(self, tmp_path):
+        """In a `case Type():` of a `switch` on a variable the variable is a
+        Type; past the statement it is what it was declared as."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/events.dart": """
+                class Event {}
+                class AddEvent extends Event {}
+
+                extension EventBytes on Event {
+                  String bytes() => '';
+                }
+
+                extension AddEventBytes on AddEvent {
+                  String bytes() => '';
+                }
+
+                void send(Event event) {
+                  final that = event;
+                  switch (that) {
+                    case AddEvent():
+                      that.bytes();
+                    default:
+                      that.bytes();
+                  }
+                  that.bytes();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/events.dart::send") == [
+            "FILE:lib/events.dart::AddEventBytes::bytes",
+            "FILE:lib/events.dart::EventBytes::bytes",
+            "FILE:lib/events.dart::EventBytes::bytes",
+        ]
+
+    def test_mixin_on_type_is_left_to_the_class_it_is_applied_to(self, tmp_path):
+        """A member reached through a mixin a class applies is the class's
+        superclass chain's, not that of the type the mixin is `on`."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/element.dart": """
+                abstract class Element {
+                  bool setValue(int v) => true;
+                }
+
+                mixin WithFuture on Element {
+                  bool setValue(int v) => super.setValue(v);
+                }
+
+                mixin Sync on Element {
+                  void other() {}
+                }
+
+                abstract class Functional extends Element with WithFuture {}
+
+                class State extends Functional with Sync {
+                  void create() {
+                    setValue(1);
+                  }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/element.dart::State::create") == [
+            "FILE:lib/element.dart::WithFuture::setValue"
+        ]
+        assert _calls(builder, "FILE:lib/element.dart::WithFuture::setValue") == [
+            "FILE:lib/element.dart::Element::setValue"
         ]
 
     def test_extension_method_on_a_project_or_an_outside_type(self, tmp_path):
@@ -21176,9 +21864,12 @@ class TestBaseTypes:
         assert _bases(builder, "FILE:db/model.cc::db::Model::Write::Handler") == [
             "FILE:include/batch.h::db::WriteBatch::Handler"
         ]
-        assert _bases(builder, "FILE:db/model.cc::db::formatter") == [
-            "REF:formatter<long>"
+        # A specialization is a type of its own; another instance of the
+        # template it specializes is of the primary template.
+        assert _bases(builder, "FILE:db/model.cc::db::formatter<int>") == [
+            "FILE:db/model.cc::db::formatter"
         ]
+        assert _bases(builder, "FILE:db/model.cc::db::formatter") == []
 
     def test_cpp_base_that_is_a_type_parameter_names_no_type(self, tmp_path):
         """A template's type parameter stands for its argument, not for a

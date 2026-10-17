@@ -133,6 +133,8 @@ _RE_COPIED = re.compile(r"\s*((?!null\b)[A-Za-z_$][\w$]*(?:\??\.[\w$]+)*)\s*;\s*
 _RE_PATTERN_ENDS = re.compile(r"\s*(?:=>|when\b)")
 # What an object pattern follows: `case Foo(`, `final Foo(:name) = value`
 _RE_PATTERN_STARTS = re.compile(r"\b(?:case|final|var)$")
+# `switch (name) {`, a statement on a variable
+_RE_SWITCH_ON = re.compile(r"\bswitch\s*\(\s*([a-z_$][\w$]*)\s*\)\s*\{\s*$")
 # What a call that can only be a constructor's follows
 _RE_CREATES = re.compile(r"\b(?:const|new)$")
 
@@ -147,6 +149,10 @@ _DECLARED_TYPE = (
     r"(?P<type>(?:[a-z_$][\w$]*\.)?[_$]*[A-Z][\w$]*|int|double|num|bool)"
     r"(?P<generic><[^;(){}=]*>)?\??"
 )
+
+# `case Type(`, an object pattern a `switch` statement's case matches
+_RE_CASE_TYPE = re.compile(rf"\s*case\s+{_DECLARED_TYPE}\s*\(")
+_RE_CASE_STARTS = re.compile(r"\s*(?:case|default)\b")
 
 _DECLARATIONS = (
     # `Type name` before `=`, `;`, `,`, `:`, a closing bracket, `in` or
@@ -489,6 +495,27 @@ class DartParser(BaseParser):
                     return at, char == ";"
         return len(lines) - 1, False
 
+    def _switch_cases(self, lines, index):
+        """Where line ``index`` opens a `switch` statement on a variable,
+        declare it as the type each `case Type(` of it matches, to the next
+        case, and as it was declared before from the end of the statement."""
+        found = _RE_SWITCH_ON.search(lines[index])
+        known = found and [
+            d for d in self.declared.get(found[1], ()) if d[0] <= index + 1
+        ]
+        if not known:
+            return
+        before = max(known, key=lambda d: d[0])[1:]
+        last, depth = self._find_block_end(lines, index) - 1, 0
+        for at in range(index + 1, last):
+            if depth == 0 and _RE_CASE_STARTS.match(lines[at]):
+                case = _RE_CASE_TYPE.match(lines[at])
+                held = case and case["type"].replace(".", "::")
+                held = case and (f"{held}{case['generic'] or ''}()", False)
+                self.declared[found[1]].append((at + 1, *(held or before)))
+            depth += lines[at].count("{") - lines[at].count("}")
+        self.declared[found[1]].append((last + 1, *before))
+
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
 
@@ -601,13 +628,19 @@ class DartParser(BaseParser):
                 **_generic_metadata(_bounded_parameters(written or "")),
             )
             # A mixin overrides the superclass and the mixins before it.
+            # A mixin's `on` types are what a class it is applied to extends.
+            mixin = kind == "mixin"
             for base in (
                 *reversed(bases.get("with", ())),
                 *bases.get("extends", ()),
                 *bases.get("implements", ()),
-                *bases.get("on", ()),
+                *(() if mixin else bases.get("on", ())),
             ):
                 self.builder.add_edge(type_id, f"REF:{base}", "INHERITS")
+            for base in bases.get("on", ()) if mixin else ():
+                self.builder.add_edge(
+                    type_id, f"REF:{base}", "INHERITS", {"mixin": "on"}
+                )
             if kind in ("typedef", "extension type") and match["name"]:
                 declared_at.setdefault(named_at, set()).add(column)
             if opened != "{":
@@ -844,6 +877,7 @@ class DartParser(BaseParser):
             self.begin_line(code, lineno, scope, raw_lines[i])
             self._since = since
             self._bind_locals(code, lineno, scope)
+            self._switch_cases(lines, i)
             pattern_end = 0
             for call_match in _RE_CALL.finditer(code):
                 callee = call_match.group(1)

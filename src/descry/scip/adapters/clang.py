@@ -78,15 +78,13 @@ class ClangAdapter:
     def discover(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
         """Return one DiscoveredProject per top-level C/C++ project.
 
-        Discovery precedence:
-        1. **Root compile_commands.json takes priority.** If the
-           workspace has a ``compile_commands.json`` at the root, treat
-           the whole repo as a single project — this is how Bear-backed
-           Makefile builds and top-level CMake builds emit their compdb,
-           and running scip-clang from subdirs would miss the entries.
-        2. Per-subdir projects (each with its own
-           CMakeLists.txt/Makefile/meson.build/compile_commands.json).
-        3. Root as single project if root has a build marker.
+        A root with a build of its own — a ``compile_commands.json`` there
+        or in ``build/``, where a CMake build writes it, or a
+        CMakeLists.txt, Makefile or meson.build — is one project: its
+        subdirectories' build files are parts of it, as `add_subdirectory`
+        and recursive make make them, and scip-clang run from one would
+        miss the root's entries. Only a root with none is a workspace of
+        per-subdir projects, each with its own build file.
         """
         markers = (
             "CMakeLists.txt",
@@ -94,20 +92,14 @@ class ClangAdapter:
             "meson.build",
             "compile_commands.json",
         )
-
-        # Priority 1: root-level compile_commands.json → single project.
-        if (root / "compile_commands.json").exists() and _has_c_sources(root):
-            return [
-                DiscoveredProject(
-                    name=root.name,
-                    root=root,
-                    language=self.name,
-                )
-            ]
+        built = _find_compdb(root) or any((root / m).exists() for m in markers)
+        if built:
+            if not _has_c_sources(root):
+                return []
+            return [DiscoveredProject(name=root.name, root=root, language=self.name)]
 
         seen: set[str] = set()
         projects: list[DiscoveredProject] = []
-
         for marker_name in markers:
             for marker in root.glob(f"*/{marker_name}"):
                 pkg_dir = marker.parent
@@ -127,18 +119,6 @@ class ClangAdapter:
                         language=self.name,
                     )
                 )
-
-        if not projects:
-            root_has_marker = any((root / m).exists() for m in markers)
-            if root_has_marker and _has_c_sources(root):
-                projects.append(
-                    DiscoveredProject(
-                        name=root.name,
-                        root=root,
-                        language=self.name,
-                    )
-                )
-
         projects.sort(key=lambda p: p.name)
         return projects
 

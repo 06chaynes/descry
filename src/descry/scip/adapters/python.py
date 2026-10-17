@@ -39,13 +39,27 @@ class PythonAdapter:
     def discover(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
         """Two discovery modes:
 
-        1. Monorepo: each top-level subdirectory with its own
-           `pyproject.toml` / `setup.py` and at least one `.py` file.
-        2. Single-package root: `root` itself has a packaging marker and
-           Python files in scope. Yields a synthetic project whose name is
-           the root directory's basename (so `.scip` filenames don't
-           collide across projects).
+        1. Single-package root: `root` itself has a packaging marker and
+           Python files in scope; scip-python run there indexes the tree
+           under it. Yields a synthetic project whose name is the root
+           directory's basename (so `.scip` filenames don't collide
+           across projects).
+        2. Monorepo, a root with no marker: each top-level subdirectory
+           with its own `pyproject.toml` / `setup.py` and at least one
+           `.py` file.
         """
+        root_marker_exists = (
+            (root / "pyproject.toml").exists()
+            or (root / "setup.py").exists()
+            or (root / "setup.cfg").exists()
+        )
+        if root_marker_exists:
+            in_scope = (
+                p for p in root.rglob("*.py") if _py_in_scope(root, p, excluded_dirs)
+            )
+            if not any(in_scope):
+                return []
+            return [DiscoveredProject(name=root.name, root=root, language=self.name)]
         seen: set[str] = set()
         projects: list[DiscoveredProject] = []
 
@@ -82,23 +96,6 @@ class PythonAdapter:
                     language=self.name,
                 )
             )
-
-        if not projects:
-            root_marker_exists = (
-                (root / "pyproject.toml").exists()
-                or (root / "setup.py").exists()
-                or (root / "setup.cfg").exists()
-            )
-            if root_marker_exists and any(
-                p for p in root.rglob("*.py") if _py_in_scope(root, p, excluded_dirs)
-            ):
-                projects.append(
-                    DiscoveredProject(
-                        name=root.name,
-                        root=root,
-                        language=self.name,
-                    )
-                )
 
         projects.sort(key=lambda p: p.name)
         return projects
