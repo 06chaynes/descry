@@ -6269,9 +6269,21 @@ def _is_call_chain(expression: str) -> bool:
     return not _casts(expression) and bool(
         re.fullmatch(
             r"[\s)]*(?:(?:await|new)\s+|&(?:mut\s+)?)*[\w$.:?\s]*;?\s*",
-            _strip_parens(expression),
+            _strip_parens(_without_turbofish(expression)),
         )
     )
+
+
+def _without_turbofish(text: str) -> str:
+    """``text`` without Rust's `::<...>` type arguments."""
+    while (at := text.find("::<")) >= 0:
+        depth, end = 0, at + 2
+        for end in range(at + 2, len(text)):
+            depth += (text[end] == "<") - (text[end] == ">")
+            if not depth:
+                break
+        text = text[:at] + text[end + 1 :]
+    return text
 
 
 def _code_units(text: str, before=(0, 0, 0)):
@@ -6503,11 +6515,14 @@ class BaseParser:
         ``owner`` the name of the type `self` or `this` is an instance of."""
         receiver, _, method = callee.rpartition(".")
         field = receiver.removeprefix("this.").removeprefix("self.")
-        if field != receiver and (owner, field) in self.fields:
+        member = field != receiver
+        # A member read on the receiver, `b.held.meow`, follows it.
+        field, _, path = field.partition(".")
+        if member and (owner, field) in self.fields:
             types = self.fields[owner, field]
             value = next(iter(types)) if len(types) == 1 else None
         else:
-            value = self._declared(field, lineno, since, field != receiver)
+            value = self._declared(field, lineno, since, member)
         if value is None:
             return None
         if not value.startswith("#"):
@@ -6516,7 +6531,7 @@ class BaseParser:
             bound = self._declared(param, lineno, since)
             bound = bound or self._declared(param, lineno, since, True)
             value = f"{bound}()" if bound else value
-        return f"{value}.{method}"
+        return f"{value}.{path}.{method}" if path else f"{value}.{method}"
 
     def begin_line(self, code, lineno, scope=None, raw=None):
         """Start reading the calls of ``code``, source line ``lineno``. Call
@@ -7965,17 +7980,25 @@ _RUST_INDEX_LET_RE = re.compile(
 )
 # The traits a `#[derive(...)]` implements for the item below it
 _RUST_DERIVE_RE = re.compile(r"#\[derive\(([^)]*)\)\]")
+# Type arguments written after a path's `::`, nested to three levels
+_RUST_TURBOFISH = r"::<(?:[^<>()]|<(?:[^<>()]|<[^<>()]*>)*>)*>"
+# The value in the head of a block, up to the `{` that opens it: the first
+# outside parentheses, as no struct literal stands there bare
+_RUST_HEAD_VALUE = r"[^(){}]*"
+for _ in range(4):
+    _RUST_HEAD_VALUE = rf"(?:[^(){{}}]|\({_RUST_HEAD_VALUE}\))*"
+_RUST_HEAD_VALUE = rf"(?P<value>{_RUST_HEAD_VALUE}?)\s*\{{"
 # Where a pattern is matched against a value: `for` and `if let` or `while
 # let` with the block they open, `let` with a pattern, and `match`
-_RUST_FOR_RE = re.compile(r"\bfor\s++(?P<pattern>.+?)\s+in\s+(?P<value>.+?)\s*\{\s*$")
+_RUST_FOR_RE = re.compile(r"\bfor\s++(?P<pattern>.+?)\s+in\s+" + _RUST_HEAD_VALUE)
 _RUST_IF_LET_RE = re.compile(
-    r"\b(?:if|while)\s++let\s++(?P<pattern>.+?)\s*=(?!=)\s*(?P<value>.+?)\s*\{\s*$"
+    r"\b(?:if|while)\s++let\s++(?P<pattern>.+?)\s*=(?!=)\s*" + _RUST_HEAD_VALUE
 )
 _RUST_LET_RE = re.compile(
     r"\blet\s+(?P<pattern>[^=]*[(\[{][^=]*?)\s*=(?!=)\s*(?P<value>.+?)"
     r"(?:;|\s+else\s*\{)\s*$"
 )
-_RUST_MATCH_RE = re.compile(r"\bmatch\s++(?P<value>.+?)\s*\{\s*$")
+_RUST_MATCH_RE = re.compile(r"\bmatch\s++" + _RUST_HEAD_VALUE)
 _RUST_ARM_RE = re.compile(r"^\s*+(?P<pattern>.+?)(?:\s+if\s.+?)?\s*=>")
 # The parameters of a closure passed to a call
 _RUST_CLOSURE_RE = re.compile(r"(?:(?<=[(,])|^)\s*(?:move\s+)?\|(?P<params>[^|]*)\|")
@@ -8028,7 +8051,9 @@ _TS_ALIAS_RE = re.compile(
     re.MULTILINE,
 )
 # `type Name = ...` in Rust or TypeScript, behind any visibility or `export`
-_TYPE_ALIAS_RE = re.compile(r"^[ \t]*(?:[\w()]+\s+)*type\s+(\w+)[^=;{]*=", re.MULTILINE)
+_TYPE_ALIAS_RE = re.compile(
+    r"^[ \t]*(?:[\w()]+\s+)*type\s+([\w$]+)[^=;{]*=", re.MULTILINE
+)
 
 # What can follow the `>` that ends type arguments in an expression: what
 # starts no operand, other than `<`, `>`, `+` and `-`
@@ -8625,7 +8650,7 @@ class RustParser(BaseParser):
         re_const = re.compile(
             r"^\s*(?:pub(?:\(.*?\))?\s+)?(?:const|static)\s+([A-Z0-9_]+)\s*:\s*.*?\s*=\s*(.*?);"
         )
-        re_call = re.compile(r"([a-zA-Z0-9_:.<>]+)\(")
+        re_call = re.compile(rf"((?:{_RUST_TURBOFISH}|[a-zA-Z0-9_:.<>])+)\(")
         self.scan_declarations(lines, _rust_declarations())
         # A name a pattern binds has, from there on, no declared type.
         for lineno, line in enumerate(lines, 1):
@@ -8639,7 +8664,7 @@ class RustParser(BaseParser):
         for tree in _RUST_USE_RE.findall(content):
             self.builder.imports.setdefault(file_id, {}).update(_use_leaves(tree))
 
-        current_impl_target = None
+        current_impl_target = impl_bounds = None
         current_trait_impl = (
             None  # Track trait name when in "impl Trait for Struct" block
         )
@@ -8715,16 +8740,23 @@ class RustParser(BaseParser):
 
         def impl_at(index, line):
             """What ``_rust_impl`` reads in the header of the `impl` block
-            that starts with ``line``, line ``index``; three None where none
-            does. The header runs to its `{`, on that line or a later one."""
+            that starts with ``line``, line ``index``, and the bounds the
+            block gives its type parameters, its own or by `where`; four
+            None where none does. The header runs to its `{`, on that line
+            or a later one."""
             if not _RUST_IMPL_RE.match(line):
-                return None, None, None
+                return None, None, None, None
             header = []
             for code, _ in codes[index:]:
                 header.append(code)
                 if "{" in code or ";" in code:
                     break
-            return _rust_impl(_RUST_IMPL_RE.sub("", " ".join(header), count=1))
+            text = _RUST_IMPL_RE.sub("", " ".join(header), count=1)
+            bounds = _rust_type_parameters(text)
+            where = text.partition(" where ")[2]
+            for name, bound in re.findall(r"\b(\w+)\s*:\s*([\w:]+)", where):
+                bounds[name] = bounds.get(name) or bound
+            return (*_rust_impl(text), {k: v for k, v in bounds.items() if v})
 
         i = 0
         while i < len(lines):
@@ -8818,6 +8850,9 @@ class RustParser(BaseParser):
                 }
                 if current_trait_impl and node_type == "Method":
                     node_kwargs["trait_impl"] = current_trait_impl
+                if impl_bounds and node_type == "Method":
+                    # What its `impl` block bounds the type's parameters by
+                    node_kwargs["impl_bounds"] = impl_bounds
 
                 self.builder.add_node(func_id, node_type, **node_kwargs)
                 self.builder.add_edge(parent_id, func_id, "DEFINES")
@@ -8850,6 +8885,7 @@ class RustParser(BaseParser):
                     end_lineno=end_lineno,
                     token_count=token_count,
                     docstring=docstring,
+                    **_generic_metadata(_rust_type_parameters(line[match.end() :])),
                 )
                 self.builder.add_edge(parent_id, type_id, "DEFINES")
                 add_derived(type_id, i)
@@ -8875,6 +8911,7 @@ class RustParser(BaseParser):
                     end_lineno=end_lineno,
                     token_count=token_count,
                     docstring=docstring,
+                    **_generic_metadata(_rust_type_parameters(line[match.end() :])),
                 )
                 self.builder.add_edge(parent_id, type_id, "DEFINES")
                 add_derived(type_id, i)
@@ -8915,7 +8952,7 @@ class RustParser(BaseParser):
             # 3. Impl
             elif (named := impl_at(i, line))[1]:
                 # The trait is tracked for method metadata.
-                trait, current_impl_target, bounds = named
+                trait, current_impl_target, bounds, impl_bounds = named
                 current_trait_impl = _last_segment(trait)
                 struct_id = f"{file_id}::{current_impl_target}"
                 impl_targets.setdefault(
@@ -9005,13 +9042,27 @@ class RustParser(BaseParser):
                         for found in _RUST_CLOSURE_RE.finditer(code)
                     ]
                 self._bodies = []  # (call, argument, columns of the body) of each
+                owner = parent_id.split("::")[-2] if parent_id.count("::") > 1 else None
+                # The block a `for` or an `if let` opens, where its body goes
+                # on on the line: the names the head binds hold there.
+                head = ("for " in code and _RUST_FOR_RE.search(code)) or (
+                    "let " in code and _RUST_IF_LET_RE.search(code)
+                )
+                body = head.end() if head else len(code)
                 for call_match in re_call.finditer(code, call_scan_start):
                     # In `0..items.len()` the callee follows the range's `..`.
                     callee = call_match.group(1).rpartition("..")[2].lstrip(".")
                     start = call_match.end(1) - len(callee)
+                    # `Boxed::<Dog>::new` is a function of the type written
+                    # with its arguments.
+                    typed = re.fullmatch(r"(\w+)::<(.+)>::(\w+)", callee)
+                    typed = typed and f"{typed[1]}<{typed[2]}>.{typed[3]}"
                     # `parse::<T>` calls `parse`; the type arguments are the
                     # call site's, not part of the callee's name.
                     callee = _strip_generics(callee)
+                    if start >= body:
+                        self._bind_patterns(code, i, lines, fn_start, owner)
+                        body = len(code) + 1
                     # `pub(crate)` is a visibility, not a call.
                     if callee and callee != "pub":
                         self._bind_closures(code, i, lines, call_match.start(1))
@@ -9022,12 +9073,12 @@ class RustParser(BaseParser):
                             fn_start,
                             start,
                             call_match.end() - 1,
-                            self._generic_path_origin(callee),
+                            self._generic_path_origin(callee) or typed,
                         )
-                owner = parent_id.split("::")[-2] if parent_id.count("::") > 1 else None
                 self._bind_closures(code, i, lines, len(code))
                 self._name_results(code, lineno, fn_start, owner)
-                self._bind_patterns(code, i, lines, fn_start, owner)
+                if body <= len(code):
+                    self._bind_patterns(code, i, lines, fn_start, owner)
             i += 1
 
         # A field's type, for each struct of that name the file declares.
@@ -9557,6 +9608,22 @@ def _bounded_parameters(text: str) -> dict[str, str]:
         name, _, bound = re.split(r"\s*=(?!>)", part)[0].partition(" extends ")
         if name.split():
             found[name.split()[-1]] = bound.strip()
+    return found
+
+
+def _rust_type_parameters(text: str) -> dict[str, str]:
+    """``{name: bound}`` of the type parameters ``text`` opens with,
+    `<'a, T: 'a + Bound + Other = Default, const N: usize>`: no lifetime,
+    and of a bound its first trait."""
+    text = text.lstrip()
+    found = {}
+    for part in _bracketed_parts(text[1:]) if text.startswith("<") else ():
+        head, _, bound = part.split("=")[0].partition(":")
+        words = head.split()
+        if words and not words[-1].startswith("'"):
+            traits = [b.strip() for b in bound.split("+")]
+            traits = [b for b in traits if b and b[0] not in "'?"]
+            found[words[-1]] = traits[0] if traits and words[0] != "const" else ""
     return found
 
 
@@ -13827,7 +13894,8 @@ class CallResolver:
         of the type argument the call is written with, else of the
         argument passed for a parameter declared as it, else of the one
         that the type the call's result is declared as has in its place in
-        the declared return type, else of its bound."""
+        the declared return type, else, where no argument is passed for it,
+        of its bound."""
         names = list(signature["generics"])
         if not names:
             return {}
@@ -13835,8 +13903,16 @@ class CallResolver:
         values = {}
         for passed, param in zip(site.get("arguments") or (), signature["params"]):
             taken = re.fullmatch(r"[\w$]+\??\s*:\s*([\w$]+)", param)
-            if taken and taken[1] in names and isinstance(passed, str) and not written:
-                values.setdefault(taken[1], self._plain_value(passed, source_id))
+            # What the argument's type gives, not the parameters of a
+            # function it is declared as
+            typed = re.sub(r"\([^()]*\)\s*=>", "", param.partition(":")[2])
+            for name in () if written else names:
+                if re.search(rf"(?<![\w$]){re.escape(name)}(?![\w$])", typed):
+                    # The argument gives it: one not written as a name, or
+                    # of a type it is only part of, leaves it unknown.
+                    plain = taken and taken[1] == name and isinstance(passed, str)
+                    held = plain and self._plain_value(passed, source_id)
+                    values.setdefault(name, held or None)
         if not written and "declared" in site:
             name, arguments, _ = _ts_type_parts(signature["returns"])
             declared = site["declared"]
@@ -13853,7 +13929,7 @@ class CallResolver:
                 written = dict(zip(arguments, _ts_type_parts(declared)[1]))
         for name, bound in signature["generics"].items():
             given = (written[name], source_id) if name in written else (bound, target)
-            if values.get(name) is None:
+            if name in written or name not in values:
                 values[name] = self._returned_type(*given) if given[0] else None
         return values
 
@@ -13886,12 +13962,12 @@ class CallResolver:
         rust_path = "::" in callee and "." not in callee
         lang = self.lang(source_id)
         # A Go callee without an origin is a function, or one of a package,
-        # as a C++ `std::` one is a function of the standard library.
-        function = (
+        # as a C++ `std::` one is a function of the standard library and a
+        # Rust path one of a type or a module.
+        function = origin is None and (
             rust_path
             if lang == "rust"
-            else (lang == "go" or (lang == "clang" and "::" in callee))
-            and origin is None
+            else lang == "go" or (lang == "clang" and "::" in callee)
         )
         if verdict[1] == _EXTERNAL and function:
             # What a function of the standard library returns is in its data.
@@ -15128,8 +15204,10 @@ class CallResolver:
                 known, held = False, value
                 if library:
                     known, held = library.member(value, step)
-                if (classed or python) and not known:
-                    # A static method is called on the type or on a value.
+                rust = library and library.lang == "rust"
+                if (classed or python or rust) and not known:
+                    # A static method is called on the type or on a value; a
+                    # Rust one on the type written with its arguments.
                     known, held = library.member(value, step, table="statics")
                 if (
                     library
@@ -15336,10 +15414,11 @@ class CallResolver:
                 own = _EXTERNAL if self.lang(source_id) == "clang" else None
                 value = unwrapped if step == "?" else own
             elif step != "?":
-                # A value of a generic type carries its type arguments.
+                # A value of a generic type carries its type arguments, as
+                # does the type written with them, `Boxed<Dog>.new`.
                 self._receiver = value[1] if value[0] == "self" else None
-                if value[0] == "self" and len(value) > 2:
-                    self._receiver = value
+                if value[0] in ("self", "def") and len(value) > 2:
+                    self._receiver = ("self", *value[1:])
                 value = self._attr(value, step, called=last)
                 if value is None and last:
                     return None, _UNRESOLVED
@@ -16274,8 +16353,12 @@ class CallResolver:
             return self._returned_type(declared["value_type"], hit, value)
         python = self.lang(ref) == "python"
         if hit and not called and self.nodes[hit]["type"] == "Method":
-            # Java keeps a field that shares a method's name under `field_`.
+            # Java keeps a field that shares a method's name under `field_`;
+            # a Rust one is read as its struct declares it.
             hit = self._find_member(ref, f"field_{name}")[0] or hit
+            fields = (self.builder.fields.get(d, {}) for d in self._declarations(ref))
+            if self.lang(ref) == "rust" and any(name in f for f in fields):
+                hit = None
         if hit and called and self.lang(hit) == "dotnet":
             hit = self._overload_by_arity(hit, static=kind == "def")
             if not hit:
@@ -17043,6 +17126,9 @@ class CallResolver:
         standard = None
         for kind, name in zip(("self", "wrapped"), match.group(1, 3)):
             if name in ("Self", "this"):
+                if kind == "self" and instance and not match[2]:
+                    # The receiver itself, with its type arguments
+                    return instance
                 found = owner
             else:
                 plain = kind == "self" and not match[2]
@@ -17072,6 +17158,9 @@ class CallResolver:
                 # parameter, is not known.
                 held = []
                 for a in _bracketed_parts(returns[returns.index("<") + 1 :]):
+                    if a.startswith("'"):
+                        # A lifetime takes no type parameter's place.
+                        continue
                     value = self._returned_type(a, function_id, instance or receiver)
                     imported = self._imported(a.partition("<")[0].strip(), function_id)
                     outside = value != _EXTERNAL or imported == _EXTERNAL
@@ -17096,12 +17185,19 @@ class CallResolver:
             if name in generics and self._is_class(scope):
                 given = self._instance_arguments(scope, instance)
                 at = generics.index(name)
-                if at < len(given) and given[at] is not None:
+                if at < len(given):
+                    # An instance's argument, known or not: its bound only
+                    # limits what it may be.
                     return given[at]
                 bound = (metadata.get("type_bounds") or {}).get(name)
+                where = scope
+                if not bound:
+                    # A Rust `impl` block bounds them for its own items.
+                    held = self.nodes.get(scope_id, {}).get("metadata", {})
+                    bound, where = held.get("impl_bounds", {}).get(name), scope_id
                 if bound and re.search(rf"(?<![\w$]){re.escape(name)}(?![\w$])", bound):
                     return instance and instance[:2]
-                return self._returned_type(bound, scope) if bound else None
+                return self._returned_type(bound, where) if bound else None
         return False
 
     def _instance_arguments(self, type_id, instance):

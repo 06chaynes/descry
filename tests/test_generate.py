@@ -4139,7 +4139,9 @@ class TestRustCallResolution:
                     let r = 0..
                         n();
                 }
-                pub struct H { pub field: Vec<u8> }
+                pub struct F;
+                impl F { fn n(&self) -> i32 { 3 } }
+                pub struct H { pub field: F }
                 pub fn hop(h: &H, field: &S) {
                     h.
                         field.
@@ -4156,7 +4158,10 @@ class TestRustCallResolution:
             "FILE:src/lib.rs::S::n",
             "FILE:src/lib.rs::n",
         ]
-        assert _calls(builder, "FILE:src/lib.rs::hop") == ["REF:h.field.n", "REF:n"]
+        assert _calls(builder, "FILE:src/lib.rs::hop") == [
+            "FILE:src/lib.rs::F::n",
+            "REF:n",
+        ]
 
     def test_question_mark_takes_the_value_out_of_a_standard_type(self, tmp_path):
         """`?` on an `io::Result<T>` or an `Option<T>` gives a `T`: each
@@ -8805,6 +8810,97 @@ class TestTypeScriptCallResolution:
         assert _candidates(builder, "FILE:a.cc::use") == {
             "REF:ks->Offer": ["FILE:a.cc::EC::Offer"]
         }
+
+    def test_a_rust_generic_type_holds_its_type_arguments(self, tmp_path):
+        """`Boxed<Cat>`'s `T` is a cat through a field, a method's return,
+        `Self`, a field declared `Boxed<Cat>`, a binding to a turbofish
+        constructor and a standard one; an `impl` block's bound holds for
+        its own items, a field read is the field where a method shares its
+        name, and a block's head binds names for a body on its line."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "x"\nversion = "0.1.0"\n',
+                "src/lib.rs": """
+                pub struct Dog;
+                impl Dog { pub fn bark(&self) {} }
+                pub struct Cat;
+                impl Cat { pub fn meow(&self) {} }
+                pub trait Speak { fn speak(&self); }
+                pub struct Boxed<T> { pub held: T }
+                impl<T> Boxed<T> {
+                    pub fn new(held: T) -> Self { Boxed { held } }
+                    pub fn get(&self) -> &T { &self.held }
+                    pub fn held(&self) -> &Dog { &Dog }
+                    pub fn me(&self) -> Self { todo!() }
+                }
+                pub struct Coop<T> { held: T }
+                impl<T: Speak> Coop<T> { pub fn go(&self) { self.held.speak(); } }
+                pub struct Holder { pub boxed: Boxed<Cat> }
+                pub fn run(b: Boxed<Cat>, h: Holder) {
+                    b.held.meow();
+                    b.get().meow();
+                    b.me().get().meow();
+                    h.boxed.get().meow();
+                    let made = Boxed::<Dog>::new(Dog);
+                    made.get().bark();
+                    for d in Vec::<Dog>::new().iter() { d.bark(); }
+                }
+                """,
+            },
+        )
+        calls = _calls(builder, "FILE:src/lib.rs::run")
+        assert calls.count("FILE:src/lib.rs::Cat::meow") == 4
+        assert calls.count("FILE:src/lib.rs::Dog::bark") == 2
+        assert _calls(builder, "FILE:src/lib.rs::Coop::go") == [
+            "FILE:src/lib.rs::Speak::speak"
+        ]
+
+    def test_typescript_alias_named_with_a_dollar_is_no_type_from_outside(
+        self, tmp_path
+    ):
+        """A type alias whose name holds a `$`, read through a namespace
+        import, is the project's: what it stands for is not known, so a
+        call on a value of it is not dropped."""
+        builder = _index(
+            tmp_path,
+            {
+                "errors.ts": """
+                export interface Inner { go(): void }
+                export type $Raw = Inner extends unknown ? Inner : never;
+                """,
+                "use.ts": """
+                import type * as errors from "./errors";
+                export function f(issue: errors.$Raw) { issue.go(); }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:use.ts::f") == ["REF:issue.go"]
+
+    def test_typescript_type_parameter_an_argument_is_passed_for(self, tmp_path):
+        """A function's type parameter is the type of the argument passed
+        for it, which its bound only limits: where that argument's type is
+        not known, so is the parameter's."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Base { base() {} }
+                export class Sub extends Base { only() {} }
+                export class Box<T> { first(): T { return null as any; } }
+                export function make<T extends Base>(items: T[]): Box<T> {
+                  return new Box<T>();
+                }
+                export function use() {
+                  const b = make([new Sub()]);
+                  b.first().only();
+                }
+                """
+            },
+        )
+        assert _candidates(builder, "FILE:a.ts::use")["REF:only"] == [
+            "FILE:a.ts::Sub::only"
+        ]
 
     def test_go_generic_struct_fields_and_named_arrays(self, tmp_path):
         """A generic struct's fields are read after its type parameters, not

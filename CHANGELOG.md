@@ -364,7 +364,21 @@ Python SDK v2, and a full-tree review's findings are fixed.
   to a smart pointer reached what the smart pointer holds: `p->reset()`
   on a `std::unique_ptr<Cat>*` called `Cat::reset`. A call of a member a
   C++ type declares without defining it has the definitions of the types
-  derived from it as candidates; calls in comments, string
+  derived from it as candidates. So does a Rust generic struct or enum,
+  through a field, a method's return, `Self`, a field declared
+  `Boxed<Cat>` and a turbofish path, `Boxed::<Dog>::new` or
+  `Vec::<Dog>::new`, whose type arguments were read off the callee, and
+  an `impl` block's bounds hold for its own items. A call through a field
+  of a variable, `b.held.meow()`, is read from the variable's type in
+  every language, where it was read by name; a Rust field read is the
+  field where a method shares its name; and a `for`, `if let`, `while
+  let` or `match` whose body goes on on its line binds its names there.
+  A TypeScript alias whose name holds a `$` was read as a type from
+  outside. A type parameter an argument is passed for is that argument's
+  type, its bound only limiting it, and an instance's argument stands
+  for its parameter where it is not known: the bound was taken for
+  either, and members of the type passed were missing from it; calls in
+  comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a
