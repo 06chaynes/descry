@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 
 from descry.generate import (
+    _STATEMENT_START_RE,
     BaseParser,
     _bracketed_parts,
     _is_call_chain,
@@ -488,7 +489,11 @@ class PhpParser(BaseParser):
 
         lines = source_lines(content)
         lines = self.split_source(
-            lines, _code_lines(lines), _RE_DEFINITION_HEAD, _RE_TYPE_HEAD
+            lines,
+            _code_lines(lines),
+            _RE_DEFINITION_HEAD,
+            _RE_TYPE_HEAD,
+            statement=_STATEMENT_START_RE,
         )
         skip_calls = is_generated_source(content)
         # Declarations and calls are read from `codes`; `lines` keeps the

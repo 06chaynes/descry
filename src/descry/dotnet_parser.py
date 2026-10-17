@@ -17,6 +17,7 @@ import re
 
 from descry.clang_parser import _if_signs
 from descry.generate import (
+    _STATEMENT_START_RE,
     BaseParser,
     _bracketed_parts,
     _generic_metadata,
@@ -751,7 +752,11 @@ class DotnetParser(BaseParser):
 
         lines = source_lines(content.removeprefix("\ufeff"))
         lines = self.split_source(
-            lines, _code_lines(lines)[0], _RE_DEFINITION_HEAD, _RE_TYPE_HEAD
+            lines,
+            _code_lines(lines)[0],
+            _RE_DEFINITION_HEAD,
+            _RE_TYPE_HEAD,
+            statement=_STATEMENT_START_RE,
         )
         skip_calls = is_generated_source(content)
         # Declarations and calls are read from `code_lines`, which hold no

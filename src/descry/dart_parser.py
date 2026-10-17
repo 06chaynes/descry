@@ -19,6 +19,7 @@ import bisect
 import re
 
 from descry.generate import (
+    _STATEMENT_START_RE,
     _TRAILING_PATH_RE,
     BaseParser,
     _bounded_parameters,
@@ -493,7 +494,11 @@ class DartParser(BaseParser):
 
         raw_lines = source_lines(content)
         raw_lines = self.split_source(
-            raw_lines, _code_lines(raw_lines), _RE_DEFINITION_HEAD, _RE_TYPE_HEAD
+            raw_lines,
+            _code_lines(raw_lines),
+            _RE_DEFINITION_HEAD,
+            _RE_TYPE_HEAD,
+            statement=_STATEMENT_START_RE,
         )
         skip_calls = is_generated_source(content)
         lines = _code_lines(raw_lines)

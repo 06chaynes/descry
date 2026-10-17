@@ -21,6 +21,7 @@ import re
 from descry._comments import strip_block_comments, strip_line_comment
 from descry.generate import (
     _JAVA_BOXES,
+    _STATEMENT_START_RE,
     BaseParser,
     _bracketed_parts,
     _generic_metadata,
@@ -392,6 +393,7 @@ class JavaParser(BaseParser):
             self.blank_lines(lines, ('"""',)),
             _DEFINITION_HEAD_RE,
             _TYPE_HEAD_RE,
+            statement=_STATEMENT_START_RE,
         )
         skip_calls = is_generated_source(content)
 

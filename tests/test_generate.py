@@ -9258,6 +9258,122 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:use.js::run") == ["FILE:lib/http.js::adapter"]
 
+    def test_typescript_parameter_spans_at_their_edges(self, tmp_path):
+        """A parameter's span takes in a call's type arguments in an
+        expression body, a body that opens on the line after the return
+        type, and a conditional the body holds, and ends at the `:` of one
+        the function is a branch of. A later declarator with a type is a
+        variable, a name a declarator gives is read where it is written, an
+        inner `function` hides an outer parameter, and a `readonly` member
+        of an object type is read."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() { return 1; } }
+                class C { other() { return 1; } }
+                declare function h<T, U>(v: T): void;
+                declare function mkA(): A;
+                declare function run(f: () => void): void;
+                const cond = true;
+                const a = new A();
+                const generic = (x: A) => h<A, A>(x.use());
+                function allman(x: A): void
+                { x.use(); }
+                const branch = cond ? (a: C) => (a ? a.other() : a.other()) : a.use();
+                let n = 1, typed: A;
+                const m = 2, made: A = mkA();
+                function declarators() { typed.use(); made.use(); }
+                const f = (x: A) => x.use(), z = x;
+                function late() { z.use(); }
+                export const Outer = ({ on }: { on: A }) => {
+                  run(() => {
+                    const later = () => { on(); };
+                    function on() { mkA(); }
+                  });
+                };
+                function shape(p: { readonly s: A }) { p.s.use(); }
+                """
+            },
+        )
+        use = "FILE:a.ts::A::use"
+        assert _calls(builder, "FILE:a.ts::generic") == [use, "FILE:a.ts::h"]
+        assert _calls(builder, "FILE:a.ts::allman") == [use]
+        assert use in _calls(builder, "FILE:a.ts")
+        assert _calls(builder, "FILE:a.ts::declarators") == [use, use]
+        assert _calls(builder, "FILE:a.ts::late") == ["REF:z.use"]
+        later = "FILE:a.ts::Outer::callback@19::later"
+        assert _calls(builder, later) == ["FILE:a.ts::Outer::callback@19::on"]
+        assert _calls(builder, "FILE:a.ts::shape") == [use]
+
+    def test_typescript_heads_and_bodies_over_lines(self, tmp_path):
+        """A `for` head binds its names wherever its lines break, and a
+        callback whose body starts on the line after its `=>` binds its
+        parameters there."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() { return 1; } }
+                declare function each(f: (x: A) => void): void;
+                export function f(all: A[]) {
+                  for (const y of
+                    all) { y.use(); }
+                  for (
+                    const z of
+                    all
+                  ) { z.use(); }
+                  each((w) =>
+                    w.use());
+                }
+                """
+            },
+        )
+        use = "FILE:a.ts::A::use"
+        assert _calls(builder, "FILE:a.ts::f").count(use) == 3
+
+    def test_typescript_tuples_aliases_and_later_annotations(self, tmp_path):
+        """A parameter of a tuple type gives its elements by position,
+        through a pattern or a literal index; an alias's object type may
+        open on the next line; a later declarator's annotation types the
+        arrow it holds; `typeof` follows names to a type; and a function
+        declared in an inner function hides a parameter read as a
+        receiver."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() { return 1; } }
+                class B { run() { return 1; } }
+                type FB = (b: B) => void;
+                type T =
+                { m(): A };
+                declare function run(f: () => void): void;
+                function pair(p: [A, B], t: T) {
+                  const [u, w] = p;
+                  u.use(); w.run(); p[1].run(); t.m().use();
+                  const a: typeof u = u;
+                  const b: typeof a = a;
+                  b.use();
+                }
+                const f = (x: A) => x.use(), g: FB = (y) => y.run();
+                export const Outer = ({ on }: { on: A }) => {
+                  run(() => {
+                    const later = () => { on.use(); };
+                    function on() { return 1; }
+                  });
+                };
+                """
+            },
+        )
+        use, run_ = "FILE:a.ts::A::use", "FILE:a.ts::B::run"
+        calls = _calls(builder, "FILE:a.ts::pair")
+        assert (calls.count(use), calls.count(run_)) == (3, 2)
+        assert "FILE:a.ts::T::m" in calls
+        assert _calls(builder, "FILE:a.ts::g") == [run_]
+        later = "FILE:a.ts::Outer::callback@17::later"
+        assert _calls(builder, later) == ["REF:on.use"]
+
     def test_go_generic_struct_fields_and_named_arrays(self, tmp_path):
         """A generic struct's fields are read after its type parameters, not
         as an array's elements, and `type A [5]T` is an array of `T`, its
@@ -13443,6 +13559,26 @@ class TestJavaCallResolution:
             "REF:self",
         ]
 
+    def test_fields_declared_on_one_line_are_each_read(self, tmp_path):
+        """Each of two fields a line declares is a field of the type."""
+        builder = _index(
+            tmp_path,
+            {
+                "C.java": """
+                class A { void use() {} }
+                class B { void run() {} }
+                class C {
+                  A a; B b;
+                  void f() { a.use(); b.run(); }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:C.java::C::f") == [
+            "FILE:C.java::A::use",
+            "FILE:C.java::B::run",
+        ]
+
 
 class TestPhpCallResolution:
     def test_constructed_type_picks_the_method(self, tmp_path):
@@ -14280,6 +14416,24 @@ class TestPhpCallResolution:
         )
         assert "FILE:a.php::Widget::spin" in _calls(builder, "FILE:a.php::go")
 
+    def test_properties_declared_on_one_line_are_each_read(self, tmp_path):
+        """Each of two properties a line declares is a property of the
+        class."""
+        builder = _index(
+            tmp_path,
+            {
+                "c.php": """
+                <?php
+                class PA { function use() {} }
+                class PC {
+                  private PA $a; private PA $b;
+                  function f() { $this->a->use(); $this->b->use(); }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:c.php::PC::f") == ["FILE:c.php::PA::use"] * 2
+
 
 class TestDotnetCallResolution:
     def test_namesake_types_of_two_namespaces_of_a_file(self, tmp_path):
@@ -15097,6 +15251,26 @@ class TestDotnetCallResolution:
         )
         kinds = {node["id"]: node["type"] for node in builder.nodes}
         assert kinds["FILE:a.cs::U::r"] == "Constant"
+
+    def test_fields_declared_on_one_line_are_each_read(self, tmp_path):
+        """Each of two fields a line declares is a field of the class."""
+        builder = _index(
+            tmp_path,
+            {
+                "C.cs": """
+                class A { public void Use() {} }
+                class B { public void Run() {} }
+                class C {
+                  A a; B b;
+                  void F() { a.Use(); b.Run(); }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:C.cs::C::F") == [
+            "FILE:C.cs::A::Use",
+            "FILE:C.cs::B::Run",
+        ]
 
 
 class TestClangCallResolution:
@@ -16294,6 +16468,73 @@ class TestClangCallResolution:
             "REF:bad",
         ]
         assert _calls(builder, "FILE:c.cc::C::run") == ["FILE:c.cc::ns1::Base::b"]
+
+    def test_cpp_a_macro_before_a_global_name_marks_no_type(self, tmp_path):
+        """A name the project defines as a macro, before the `::` a return
+        type starts with, is no qualifier of it; one that is a namespace
+        is."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cc": """
+                #define API_
+                namespace NS { class T2 { public: void good() {} }; }
+                class T3 { public: void f() {} };
+                API_ ::std::string where() { return ""; }
+                NS ::T2 mk() { return {}; }
+                API_ ::T3 mk3() { return {}; }
+                void run() { mk3().f(); }
+                """
+            },
+        )
+        returns = {
+            n["id"]: n["metadata"].get("return_type")
+            for n in builder.nodes
+            if n["id"] in ("FILE:a.cc::where", "FILE:a.cc::mk")
+        }
+        assert returns == {"FILE:a.cc::where": "std::string", "FILE:a.cc::mk": "NS::T2"}
+        assert _calls(builder, "FILE:a.cc::run") == [
+            "FILE:a.cc::T3::f",
+            "FILE:a.cc::mk3",
+        ]
+
+    def test_cpp_a_kept_qualifier_names_its_types_in_full(self, tmp_path):
+        """A qualifier kept as written finds the type it names in full from
+        the scope it is written in, not every type in a scope of its last
+        name."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.h": """
+                namespace a { namespace b { namespace internal {
+                class Foo { public: void f() {} };
+                } } }
+                namespace zzz { namespace internal {
+                class Foo { public: void f() {} };
+                } }
+                """,
+                "b.h": """
+                #define OPEN_I namespace internal {
+                #define CLOSE_I }
+                OPEN_I
+                class Foo { public: void f() {} };
+                CLOSE_I
+                """,
+                "c.cc": """
+                #include "a.h"
+                #include "b.h"
+                namespace a { namespace b {
+                void inside() { internal::Foo x; x.f(); }
+                } }
+                namespace a {
+                void outer() { b::internal::Foo z; z.f(); }
+                }
+                """,
+            },
+        )
+        f = "FILE:a.h::a::b::internal::Foo::f"
+        assert _calls(builder, "FILE:c.cc::a::b::inside") == [f]
+        assert _calls(builder, "FILE:c.cc::a::outer") == [f]
 
 
 class TestRubyCallResolution:
@@ -17833,6 +18074,27 @@ class TestDartCallResolution:
             },
         )
         assert _calls(builder, "FILE:lib/a.dart::run") == ["FILE:lib/a.dart::real"]
+
+    def test_fields_declared_on_one_line_are_each_read(self, tmp_path):
+        """Each of two fields a line declares is a field of the class."""
+        builder = _index(
+            tmp_path,
+            {
+                "pubspec.yaml": "name: x\n",
+                "lib/c.dart": """
+                class DA { void use() {} }
+                class DB { void run() {} }
+                class DC {
+                  DA a = DA(); DB b = DB();
+                  void f() { a.use(); b.run(); }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/c.dart::DC::f") == [
+            "FILE:lib/c.dart::DA::use",
+            "FILE:lib/c.dart::DB::run",
+        ]
 
 
 class TestModuleAliases:
