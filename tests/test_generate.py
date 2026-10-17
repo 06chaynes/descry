@@ -4873,12 +4873,12 @@ class TestTypeScriptCallResolution:
         is the arrow's, on its own line. An alias of a function type types
         it as the function type does, whatever one declared inside the arrow
         under its name or a Java interface of that name. A variable of no
-        known type, a union of function types, a parameter of a function
-        type, or a pattern typed where it is written, leaves the call
-        unresolved, as does a union a module's type is in, one of whose
-        alternatives may be an intersection. A `this` parameter is none, a
-        type a module names is read, and a parameter list of no names is no
-        file's end."""
+        known type, a union of function types or a parameter of a function
+        type leaves the call unresolved, as does a union a module's type is
+        in, one of whose alternatives may be an intersection. A pattern
+        typed where it is written takes its parts from that type. A `this`
+        parameter is none, a type a module names is read, and a parameter
+        list of no names is no file's end."""
         builder = _index(
             tmp_path,
             {
@@ -4967,7 +4967,7 @@ class TestTypeScriptCallResolution:
             "mixed",
         ):
             assert _calls(builder, f"FILE:a.ts::{name}") == ["REF:y.fetch"]
-        assert _calls(builder, "FILE:a.ts::unpacked") == ["REF:dog.fetch"]
+        assert _calls(builder, "FILE:a.ts::unpacked") == ["FILE:a.ts::Dog::fetch"]
 
     def test_a_member_whose_dot_ends_the_line_before(self, tmp_path):
         """A call after a `.` that ends the line before is of a member of
@@ -9113,6 +9113,150 @@ class TestTypeScriptCallResolution:
             "FILE:lib/http.js::httpAdapter",
             "REF:this._cb",
         ]
+
+    def test_typescript_parameters_are_their_functions(self, tmp_path):
+        """A parameter, plain or a pattern, is read in its function's span
+        only: not after the function's end on its line, not in a later
+        declarator, and not in another function. A pattern typed where it is
+        written takes its parts from the type, over a file-level name. A
+        member a type declares, `a: A;`, is no name in scope."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() { return 1; } }
+                class B { run() { return 1; } }
+                interface P { a: A; }
+                const b = new B();
+                function j() { const k = (w: A) => w.use(); w.use(); }
+                const f = (x: A) => x.use(), z = x.use();
+                const g = ({ a }: P) => a.use();
+                function h() { a.use(); }
+                const i = ({ b }: { b: A }) => b.use();
+                """
+            },
+        )
+        use = "FILE:a.ts::A::use"
+        assert _calls(builder, "FILE:a.ts::j") == [use, "REF:w.use"]
+        assert "REF:x.use" in _calls(builder, "FILE:a.ts")
+        assert _calls(builder, "FILE:a.ts::g") == [use]
+        assert _calls(builder, "FILE:a.ts::h") == ["REF:a.use"]
+        assert _calls(builder, "FILE:a.ts::i") == [use]
+
+    def test_typescript_object_types_and_object_arguments(self, tmp_path):
+        """An object type, written on a parameter or in the function type an
+        arrow is declared as, over lines or not, has the properties it
+        writes. A method written in an object argument takes its parameters
+        from the property the call's parameter type declares, and a rest
+        parameter of a callback an array of what the callback's type
+        gathers."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Scene { get() { return 1; } }
+                class B { run() { return 1; } }
+                export type Cb<P, E = number> = (props: {
+                  scene: Scene;
+                  property: P;
+                }) => void;
+                interface H { run(c: Scene): void; }
+                declare function withH(h: H): void;
+                declare function all(f: (a: Scene, ...r: B[]) => void): void;
+                function direct(props: { scene: Scene }) { props.scene.get(); }
+                const typed: Cb<
+                  string
+                > = ({
+                  property,
+                  scene,
+                }) => {
+                  scene.get();
+                };
+                function passed() {
+                  withH({ run(c) { c.get(); } });
+                  all((a, ...rs) => { a.get(); rs[0].run(); });
+                }
+                """
+            },
+        )
+        get = "FILE:a.ts::Scene::get"
+        assert _calls(builder, "FILE:a.ts::direct") == [get]
+        assert _calls(builder, "FILE:a.ts::typed") == [get]
+        assert _calls(builder, "FILE:a.ts::passed") == [
+            get,
+            "FILE:a.ts::all",
+            "FILE:a.ts::withH",
+        ]
+        assert _calls(builder, "FILE:a.ts::passed::callback@22") == [
+            "FILE:a.ts::B::run",
+            get,
+        ]
+
+    def test_typescript_declarations_and_heads_over_lines(self, tmp_path):
+        """`new Box;` makes a `Box`; a declarator on a line of its own is of
+        the scope its statement starts in; an object its `=` gives after a
+        blank line, or with members on its `{` line, owns them; a `for` head
+        over lines binds its names; iterating a `Map` gives its key and
+        value by position; `typeof p` of a parameter is what `p` is; and a
+        definition inside a function hides a parameter of the same name the
+        function's enclosing one binds."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class Box { open(): Box { return this; } }
+                function helper() { return 1; }
+                const b1 = new Box;
+                const a5 = new Box(),
+                  b5 = new Box();
+                const o =
+
+                { m() { helper(); },
+                  n() { helper(); } };
+                function use(all: Box[], m: Map<string, Box>, p: Box) {
+                  b1.open(); b5.open(); o.m(); o.n();
+                  for (
+                    const x of all
+                  ) { x.open(); }
+                  for (const [k, v] of m) { v.open(); }
+                  const q: typeof p = p;
+                  q.open();
+                }
+                export const Outer = ({ on }: { on: Box }) => {
+                  run(() => {
+                    const on = () => { helper(); };
+                    const later = () => { on(); };
+                  });
+                };
+                declare function run(f: () => void): void;
+                """
+            },
+        )
+        open_ = "FILE:a.ts::Box::open"
+        calls = _calls(builder, "FILE:a.ts::use")
+        assert calls.count(open_) == 5
+        assert {"FILE:a.ts::o::m", "FILE:a.ts::o::n"} <= set(calls)
+        later = "FILE:a.ts::Outer::callback@21::later"
+        assert _calls(builder, later) == ["FILE:a.ts::Outer::callback@21::on"]
+
+    def test_javascript_default_export_on_one_line(self, tmp_path):
+        """`export default cond && function f() {...}` on one line defines
+        `f`, which an import of the default calls."""
+        builder = _index(
+            tmp_path,
+            {
+                "package.json": '{"name": "x"}',
+                "lib/http.js": """
+                const supported = true;
+                export default supported && function adapter(config) { return config; };
+                """,
+                "use.js": """
+                import adapter from './lib/http.js';
+                export function run() { adapter({}); }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:use.js::run") == ["FILE:lib/http.js::adapter"]
 
     def test_go_generic_struct_fields_and_named_arrays(self, tmp_path):
         """A generic struct's fields are read after its type parameters, not
@@ -13273,6 +13417,32 @@ class TestJavaCallResolution:
             "FILE:A.java::Car::drive",
         ]
 
+    def test_a_bound_through_the_parameter_itself_bounds_nothing(self, tmp_path):
+        """`T extends T`, or two parameters bounded by each other, bound
+        nothing: the call stays unresolved and the index is written."""
+        builder = _index(
+            tmp_path,
+            {
+                "A.java": """
+                package p;
+                class B<T extends T> { T get() { return null; } void self() {} }
+                class M<T extends U, U extends T> { T get() { return null; } }
+                class Use {
+                  void run(B b, M m) {
+                    b.get().self();
+                    m.get().self();
+                  }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:A.java::Use::run") == [
+            "FILE:A.java::B::get",
+            "FILE:A.java::M::get",
+            "REF:self",
+            "REF:self",
+        ]
+
 
 class TestPhpCallResolution:
     def test_constructed_type_picks_the_method(self, tmp_path):
@@ -16071,6 +16241,59 @@ class TestClangCallResolution:
             "FILE:a.cc::Dog::bark",
             "FILE:a.cc::testing::internal::Where",
         ]
+
+    def test_cpp_written_qualifiers_and_spaced_names(self, tmp_path):
+        """A written qualifier names a namespace from the call's scope or one
+        around it, not any of its last name: `testing::internal::f()` is not
+        `other::internal::f`, where a macro opens `internal`. An all-caps
+        name before `::` in a return type is a namespace, and a base list
+        reads `ns ::Base` as `ns::Base`."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.h": """
+                namespace other { namespace internal {
+                class Test { public: void f() {} };
+                void work() {}
+                } }
+                """,
+                "b.h": """
+                #define OPEN_I namespace internal {
+                #define CLOSE_I }
+                namespace testing {
+                OPEN_I
+                class Test { public: void f() {} };
+                void work() {}
+                CLOSE_I
+                }
+                """,
+                "c.cc": """
+                #include "a.h"
+                #include "b.h"
+                namespace NS { class T2 { public: void good() {} }; }
+                class T2 { public: void bad() {} };
+                namespace ns1 { class Base { public: void b() {} }; }
+                NS ::T2 mk() { return {}; }
+                class C : public ns1 ::Base { public: void run() { b(); } };
+                void g() {
+                  testing::internal::Test t;
+                  t.f();
+                  testing::internal::work();
+                  mk().good();
+                  mk().bad();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:c.cc::g") == [
+            "FILE:b.h::testing::Test::f",
+            "FILE:b.h::testing::work",
+            "FILE:c.cc::NS::T2::good",
+            "FILE:c.cc::mk",
+            "FILE:c.cc::mk",
+            "REF:bad",
+        ]
+        assert _calls(builder, "FILE:c.cc::C::run") == ["FILE:c.cc::ns1::Base::b"]
 
 
 class TestRubyCallResolution:

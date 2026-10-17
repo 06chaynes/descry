@@ -484,7 +484,7 @@ def _returned(written: str) -> str:
         " ",
         words,
     )
-    words = re.sub(r"\b[A-Z_][A-Z0-9_]*\s+(?=[A-Za-z_]|::)", "", words)
+    words = re.sub(r"\b[A-Z_][A-Z0-9_]*\s+(?=[A-Za-z_])", "", words)
     held = _held(" ".join(words.split()))
     return "" if held == "auto" else re.sub(r"\s+(?=[*&])", "", held)
 
@@ -936,8 +936,11 @@ class ClangParser(BaseParser):
                 declared["bases"] and re.split(r"(?<!:):(?!:)", flat, maxsplit=1)[1]
             )
             for base in _bracketed_parts(listed or ""):
+                base = re.sub(
+                    r"^(?:\s*(?:public|protected|private|virtual)\b)*", "", base
+                )
                 # `T::template rebind<U>` names a member template of `T`.
-                base = re.sub(r"::\s*template\s+", "::", base)
+                base = re.sub(r"\s*::\s*(?:template\s+)?", "::", base)
                 base = re.sub(r"^(?:\s*\w+\s+(?=\w))*", "", base).strip()
                 # A type parameter, or a member of one, names no type.
                 own = self._dependent(base)

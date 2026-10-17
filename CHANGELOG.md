@@ -392,31 +392,50 @@ Python SDK v2, and a full-tree review's findings are fixed.
   takes its one function type's, and its body on its line is its own. A
   name a pattern binds with a default, or a `catch` pattern, is no global;
   a function another returns, `() => () => {`, is a scope of its own; and
-  a parameter written after a `(` on an unindented line was read as a
-  name of the whole file. It is in scope in the definition and the
-  functions it holds, also where the definition is on one line, whose
-  parameters were read in the definitions after it, `g = (x: B) => ...`
-  beside `f = (x: A) => ...` taking `x` as an `A`; a one-line arrow's
-  calls after the first `;` of its body were the file's. A first
-  declarator, `let a = d, b = d`, is typed by its value as a later one is,
-  and `typeof d` by what `d` is declared as; a one-line `namespace` body
-  and an object whose `{` opens on the next line own their members; a
-  one-line `for (const x of y)` binds `x`; an arrow's own parameters read
-  its annotation over lines, and its rest parameter an array. `new
+  a parameter written after a `(` on an unindented line was read as a name
+  of the whole file. It is in scope in the definition and the functions it
+  holds, also where the definition is on one line, whose parameters were
+  read in the definitions after it, `g = (x: B) => ...` beside `f = (x: A)
+  => ...` taking `x` as an `A`, and after the definition's end on its
+  line, `function j() { const k = (w: A) => w.use(); w.use(); }` or a
+  later declarator; a one-line arrow's calls after the first `;` of its
+  body were the file's. A destructured parameter, `({ a }: P)`, takes its
+  parts from its type, where a name `a` the file declared elsewhere was
+  read, and a member a type declares, `a: A;`, was a name in scope in
+  every function of the file. A parameter of an object type, `(props: {
+  scene: Scene })` or a function type an arrow is declared as, has the
+  properties it writes; an arrow whose annotation's type arguments go on
+  over lines is a definition whose parameters it types; a method written
+  in an object argument, `withH({ run(c) { ... } })`, takes its parameters
+  from the property the call's parameter type declares, and a callback's
+  rest parameter an array of what the callback's type gathers. A
+  definition inside a function hides a parameter of its name an enclosing
+  function binds. A first declarator, `let a = d, b = d`, is typed by its
+  value as a later one is, and `typeof d` by what `d` is declared as; a
+  one-line `namespace` body and an object whose `{` opens on the next line
+  own their members; a one-line `for (const x of y)` binds `x`; an arrow's
+  own parameters read its annotation over lines, and its rest parameter an
+  array. `typeof p` of a parameter is what `p` is declared as, `new Box;`
+  makes a `Box`, a declarator on a line of its own is of the scope its
+  statement starts in, an object a `=` gives after a blank line, or with
+  members on its `{` line, owns them, a `for` head over lines binds its
+  names, and iterating a `Map` gives its key and value by position. `new
   Box().open()` typed the name it was bound to as a `Box`. A field a
   JavaScript class assigns, `this.cb = ...`, is its own, not a member of
-  an outside base, and `export default cond && function f` is `f`. A type
-  parameter whose bound only names it, `T extends Base<T>`, is its bound,
-  where it was read as the receiver's own type, so `b.get().self()`
-  reached `B::self`. A Dart raw string over lines held code on its later
-  lines. In C++ a spaced qualifier, `ns ::T`, of a parameter or field kept
-  the space; a qualified name is looked up as written where a namespace of
-  its name holds the definition, though a macro opens one of that name
-  elsewhere; a lambda with a return type binds its parameters; `typename
-  std::...` declared a type parameter `std`; a macro before
-  `::std::string` was read as its type; and `ns::Box<int>()` reached the
-  file's own specialization where the template is in a namespace a macro
-  opens; calls in comments, string
+  an outside base, and `export default cond && function f`, on one line or
+  over two, is `f`. A type parameter whose bound only names it, `T extends
+  Base<T>`, is its bound, where it was read as the receiver's own type, so
+  `b.get().self()` reached `B::self`. A Dart raw string over lines held
+  code on its later lines. In C++ a spaced qualifier, `ns ::T`, of a
+  parameter or field kept the space; a qualified name is looked up as
+  written where it names, from the call's scope or a namespace around it,
+  a namespace that holds the definition, though a macro opens one of that
+  name elsewhere, and a base list reads `ns ::Base` as `ns::Base`; a
+  lambda with a return type binds its parameters; `typename std::...`
+  declared a type parameter `std`; a macro before `::std::string` was read
+  as its type; and `ns::Box<int>()` reached the file's own specialization
+  where the template is in a namespace a macro opens; calls in comments,
+  string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`
   with a comment before its module or written over lines; a call on a
