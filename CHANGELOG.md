@@ -377,7 +377,13 @@ Python SDK v2, and a full-tree review's findings are fixed.
   outside. A type parameter an argument is passed for is that argument's
   type, its bound only limiting it, and an instance's argument stands
   for its parameter where it is not known: the bound was taken for
-  either, and members of the type passed were missing from it; calls in
+  either, and members of the type passed were missing from it. So does a
+  Go generic type, `Box[Cat]`, through a field, a method's return, a
+  receiver that names its parameters as it likes, a composite literal and
+  a generic function called with its type arguments, `NewBox[Dog](...)`,
+  which was no call at all; a constraint bounds a parameter inside its
+  type. A variable bound to a call chain with an index or type arguments
+  in it, `x := a[i].b()`, holds what its last call returns; calls in
   comments, string
   literals and JSX text; the character after a JavaScript or TypeScript
   `/* */` comment, which was dropped; a `require` or dynamic `import()`

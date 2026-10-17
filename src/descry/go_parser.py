@@ -21,6 +21,7 @@ from descry._comments import strip_block_comments, strip_line_comment
 from descry.generate import (
     BaseParser,
     _bracketed_parts,
+    _generic_metadata,
     _go_type_parts,
     blank_strings,
     go_constraints,
@@ -97,7 +98,7 @@ _RE_BLOCK_ENTRY = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s+[A-Za-z0-9_.\[\]*]
 _RE_CALL = re.compile(
     r"(?<![A-Za-z0-9_])"
     r"([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)"
-    r"\s*\("
+    r"(?P<types>\[(?:[^][]|\[[^][]*\])*\])?\s*\("
 )
 
 # The type a declaration gives a name: `Type` or `Type[Argument]`, or a
@@ -452,6 +453,10 @@ class GoParser(BaseParser):
                     call_match.end() - 1,
                     origin,
                 )
+                if types := call_match["types"]:
+                    # `NewBox[Dog](`: the type arguments it is called with
+                    site = self.builder.edges[-1]["metadata"].setdefault("site", {})
+                    site["types"] = f"<{types[1:-1]}>"
         if ranged := _RE_RANGE.search(code, start):
             # The range variables are the first and the second of what the
             # value ranged over holds: its key or index and its element. It
@@ -649,6 +654,10 @@ class GoParser(BaseParser):
                 if params := _type_parameters(generics):
                     self._generics.append((lineno, end_lineno, params))
                 docstring = self.get_leading_docstring(lines, i)
+                bounds = {
+                    param: (bound or "").replace(".", "::")
+                    for param, bound in (params or {}).items()
+                }
                 self.builder.add_node(
                     type_id,
                     "Class",
@@ -658,6 +667,7 @@ class GoParser(BaseParser):
                     end_lineno=end_lineno,
                     token_count=(end_lineno - lineno + 1) * 10,
                     docstring=docstring,
+                    **_generic_metadata(bounds),
                 )
                 self.builder.add_edge(parent_id, type_id, "DEFINES")
                 # field name -> its type, `>` and what it is declared to
@@ -723,9 +733,9 @@ class GoParser(BaseParser):
                 end_lineno = lineno
                 if opens is not None:
                     end_lineno = self._find_block_end(lines, opens)
+                names = [name.strip() for name in (generics or "").split(",")]
                 if generics:
                     bounds = declared_generics.get(receiver_type, [])
-                    names = [name.strip() for name in generics.split(",")]
                     params = dict(zip(names, bounds + [None] * len(names)))
                     self._generics.append((lineno, end_lineno, params))
                 docstring = self.get_leading_docstring(lines, i)
@@ -739,6 +749,8 @@ class GoParser(BaseParser):
                     docstring=docstring,
                     receiver=receiver_type,
                     return_type=return_type,
+                    # The names the receiver gives the type's parameters
+                    **({"receiver_generics": names} if generics else {}),
                 )
                 receiver_id = f"{file_id}::{receiver_type}"
                 receivers.setdefault(receiver_id, (receiver_type, lineno))
@@ -767,6 +779,19 @@ class GoParser(BaseParser):
                     end_lineno = self._find_block_end(lines, opens)
                 if params := _type_parameters(m_func["generics"]):
                     self._generics.append((lineno, end_lineno, params))
+                    # A call gives each type parameter the type argument it
+                    # is written with or one its arguments infer, never the
+                    # constraint.
+                    self.builder.signatures[func_id] = [
+                        {
+                            "generics": dict.fromkeys(params, ""),
+                            "params": [],
+                            "returns": return_type,
+                            "callbacks": {},
+                            "body": False,
+                            "returned": None,
+                        }
+                    ]
                 docstring = self.get_leading_docstring(lines, i)
                 self.builder.add_node(
                     func_id,

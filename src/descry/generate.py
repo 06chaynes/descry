@@ -6264,13 +6264,14 @@ def _casts(expression: str) -> bool:
 def _is_call_chain(expression: str) -> bool:
     """Whether ``expression``, once the arguments of its calls are taken
     out, is one chain of names: `a.b(x).c()`, `new T(x)`, `await f()`, or
-    the `).c()` such a chain goes on with on a later line. A cast is none:
-    its value has the type it is cast to."""
+    the `).c()` such a chain goes on with on a later line, an index or type
+    arguments after a name, `a[i].b()` or `F[T](x)`, among them. A cast is
+    none: its value has the type it is cast to."""
+    chain = _strip_parens(_without_turbofish(expression))
+    while (bare := re.sub(r"(?<=[\w)\]])\[[^\[\]]*\]", "", chain)) != chain:
+        chain = bare
     return not _casts(expression) and bool(
-        re.fullmatch(
-            r"[\s)]*(?:(?:await|new)\s+|&(?:mut\s+)?)*[\w$.:?\s]*;?\s*",
-            _strip_parens(_without_turbofish(expression)),
-        )
+        re.fullmatch(r"[\s)]*(?:(?:await|new)\s+|&(?:mut\s+)?)*[\w$.:?\s]*;?\s*", chain)
     )
 
 
@@ -8236,6 +8237,23 @@ def _go_type_parts(text):
     if text.startswith("[", len(name)):
         arguments = tuple(_bracketed_parts(text[len(name) + 1 :]))
     return name, arguments, {}
+
+
+def _go_generics(text: str) -> str:
+    """``text``, a Go type, with the `[...]` that instantiates a generic
+    type written `<...>`, as other languages write it; `[]T`, `[n]T` and
+    `map[K]V` hold no type arguments."""
+    written, generic = [], []
+    for at, char in enumerate(text):
+        if char == "[":
+            word = re.search(r"[\w.:]*$", text[:at])[0]
+            generic.append(bool(word) and word != "map")
+            written.append("<" if generic[-1] else char)
+        elif char == "]" and generic:
+            written.append(">" if generic.pop() else char)
+        else:
+            written.append(char)
+    return "".join(written)
 
 
 # What a value of each of Java's primitive types is boxed as
@@ -15665,7 +15683,7 @@ class CallResolver:
             held = self._type_argument(name, scope_id, None)
             if held is not False:
                 return held and ("returned", held)
-            given = generic and written.endswith(">")
+            given = generic and written.endswith("]" if lang == "go" else ">")
             generic = generic and lang not in _OWN_METHOD_LANGS
             found = self._type_named(name, scope_id, not generic)
             if isinstance(found, tuple):
@@ -17112,6 +17130,8 @@ class CallResolver:
             return ("outside", name, tuple(held))
         if self.lang(function_id) == "rust":
             returns = _RUST_BORROW_RE.sub("", returns)
+        if self.lang(function_id) == "go":
+            returns = _go_generics(returns)
         match = re.match(
             r"[&*\s]*(?:'\w+\s+)?(?:mut\s+)?([\w$.:]+)\s*"
             r"(<\s*(?:&\s*)?(?:'\w+\s+)?(?:mut\s+)?([\w$.:]+)?)?",
@@ -17179,9 +17199,14 @@ class CallResolver:
         declares the parameter."""
         instance = receiver if isinstance(receiver, tuple) else None
         instance = instance or (receiver and ("self", receiver))
+        # A Go method's receiver names the type's parameters by position.
+        renamed = self.nodes.get(scope_id, {}).get("metadata", {})
+        renamed = renamed.get("receiver_generics") or ()
         for scope in self._scopes(scope_id):
             metadata = self.nodes.get(scope, {}).get("metadata", {})
             generics = list(metadata.get("generics") or ())
+            if name in renamed and len(renamed) == len(generics):
+                name = generics[renamed.index(name)]
             if name in generics and self._is_class(scope):
                 given = self._instance_arguments(scope, instance)
                 at = generics.index(name)

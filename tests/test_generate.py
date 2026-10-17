@@ -8902,6 +8902,64 @@ class TestTypeScriptCallResolution:
             "FILE:a.ts::Sub::only"
         ]
 
+    def test_a_go_generic_type_holds_its_type_arguments(self, tmp_path):
+        """`Box[Cat]`'s `T` is a cat through a field, a method's return, a
+        pointer receiver, a field declared `Box[Cat]`, a composite literal,
+        a `var` and a generic function called with its type arguments; a
+        method's receiver names the parameters by position, and a
+        constraint bounds `T` inside its type."""
+        builder = _index(
+            tmp_path,
+            {
+                "go.mod": "module example.com/g\n\ngo 1.21\n",
+                "a.go": """
+                package g
+
+                type Dog struct{}
+
+                func (d Dog) Bark() {}
+
+                type Cat struct{}
+
+                func (c Cat) Meow() {}
+
+                type Speaker interface{ Speak() }
+
+                type Box[T any] struct{ Held T }
+
+                func (b Box[T]) Get() T       { return b.Held }
+                func (b *Box[T]) Me() *Box[T] { return b }
+                func (b Box[U]) Peek() U      { return b.Held }
+
+                func NewBox[T any](v T) Box[T] { return Box[T]{Held: v} }
+
+                type Coop[T Speaker] struct{ held T }
+
+                func (c Coop[T]) Go() { c.held.Speak() }
+
+                type Holder struct{ B Box[Cat] }
+
+                func Run(b Box[Cat], h Holder, p *Box[Cat]) {
+                	b.Held.Meow()
+                	b.Me().Get().Meow()
+                	b.Peek().Meow()
+                	h.B.Get().Meow()
+                	p.Get().Meow()
+                	local := Box[Dog]{Held: Dog{}}
+                	local.Get().Bark()
+                	made := NewBox[Dog](Dog{})
+                	made.Get().Bark()
+                	var v Box[Dog]
+                	v.Get().Bark()
+                }
+                """,
+            },
+        )
+        calls = _calls(builder, "FILE:a.go::Run")
+        assert calls.count("FILE:a.go::Cat::Meow") == 5
+        assert calls.count("FILE:a.go::Dog::Bark") == 3
+        assert _calls(builder, "FILE:a.go::Coop::Go") == ["FILE:a.go::Speaker::Speak"]
+
     def test_go_generic_struct_fields_and_named_arrays(self, tmp_path):
         """A generic struct's fields are read after its type parameters, not
         as an array's elements, and `type A [5]T` is an array of `T`, its
