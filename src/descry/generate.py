@@ -6284,9 +6284,35 @@ def _is_call_chain(expression: str) -> bool:
     chain = _strip_parens(_without_turbofish(expression))
     while (bare := re.sub(r"(?<=[\w)\]])\[[^\[\]]*\]", "", chain)) != chain:
         chain = bare
-    return not _casts(expression) and bool(
-        re.fullmatch(r"[\s)]*(?:(?:await|new)\s+|&(?:mut\s+)?)*[\w$.:?\s]*;?\s*", chain)
+    return (
+        not _casts(expression)
+        and not _conditional(chain, 0, len(chain))
+        and bool(
+            re.fullmatch(
+                r"[\s)]*(?:(?:await|new)\s+|&(?:mut\s+)?)*[\w$.:?\s]*;?\s*", chain
+            )
+        )
     )
+
+
+def _conditional(code, start, end):
+    """The column spans of the two branches of the conditional `c ? a : b`
+    that the expression at columns ``start`` to ``end`` of ``code`` is,
+    outside its brackets; None where it is none."""
+    depth, open_, question = 0, 0, None
+    for at in range(start, end):
+        char, around = code[at], code[at - 1 : at + 2]
+        depth += (char in "([{") - (char in ")]}")
+        if depth or char not in "?:" or "??" in around or "::" in around:
+            continue
+        if char == "?" and code[at + 1 : at + 2] != ".":
+            question = at if question is None else question
+            open_ += 1
+        elif char == ":" and open_:
+            open_ -= 1
+            if not open_:
+                return (question + 1, at), (at + 1, end)
+    return None
 
 
 def _without_turbofish(text: str) -> str:
@@ -6334,6 +6360,17 @@ _CASE_LABEL_RE = re.compile(r"\b(?:case\b|default\s*(?::(?!:)|->))")
 _HEADING_STATEMENT_RE = re.compile(
     r"\s*(?:else\s+)?(?:if|for|while|switch|select|match)\b"
 )
+# A control head a statement may follow without braces, the `(` of its
+# condition in group 1
+_BRACELESS_HEAD_RE = re.compile(
+    r"\s*(?:(?:else\s+)?(?:if|while|for)\s*(\()|else\b|do\b)"
+)
+# An `else` that goes on with a statement
+_ELSE_RE = re.compile(r"\s*else\b")
+# An `if` that starts a statement
+_IF_RE = re.compile(r"\s*if\s*\(")
+# What a loop starts with
+_LOOP_RE = re.compile(r"(?<![\w$.])(?:for|while|do)\b")
 # A last statement that leaves the enclosing one
 _EXITS_RE = re.compile(r"(?:^|[;{}])\s*(?:return|throw|continue|break)\b[^;{}]*;\s*$")
 
@@ -6346,6 +6383,11 @@ class BaseParser:
     # Matches the `name =` of a statement whose value types ``name``, in a
     # ``name`` group; an ``unwrap`` group matches where the value is awaited.
     binding_re = None
+    # Whether each binding a line declares hides its name from where its
+    # statement ends, holding no known value until its value is read; False
+    # where the scopes of the file tell where a binding holds, as in
+    # JavaScript and TypeScript.
+    binds_ahead = True
     # Yields ``(name, steps)`` for each name a pattern of the language binds:
     # the steps of an origin path that lead from the value matched to it.
     bindings = None
@@ -6364,6 +6406,10 @@ class BaseParser:
     # Whether what a `case` label declares is in scope in its switch section
     # alone, as in C# and Java
     case_scopes_section = False
+    # Matches the end of a line, outside brackets, that ends a statement, as
+    # in Go after a name, a literal, a closing bracket, `++` or `--`; None
+    # where only a `;` ends one
+    line_ends_statement = None
 
     def __init__(self, builder):
         self.builder = builder
@@ -6391,11 +6437,11 @@ class BaseParser:
         self._tail_unwraps = 0  # `?` operators that follow that call
         self._tail_name = None  # name path the previous line ends with instead
         self._tail_dot = False  # whether the previous line ends with a member's `.`
+        self._value_below = False  # whether the line's binding has its value below
         self._scope = None  # definition the line being read belongs to
         self._raw = ""  # the line being read, as written
         self._units = 0, (0, 0, 0)  # a column of it and the code units before
         self._locals = set()  # (definition ID, name of a parameter or variable)
-        self._declared_columns = {}
         self._members = set()
         self._read_at = None  # column of the call whose receiver is read
         self._first_node = 0  # where the nodes and edges of the file being
@@ -6406,13 +6452,15 @@ class BaseParser:
         self._pending = None
         # the line declaring the type of the name that pending binds, if any
         self._pending_typed = None
+        self._bound_at = None  # where the pending binding names its name
         self._pending_closed = None  # column of the `)` that closes that call
         # (node ID, first line, last line, parameter names) of each context
         self._contexts = []
         # (text, line offsets, closer of each bracket, ``_nested`` brackets)
         # of a file whose blocks scope what they declare, by ``read_blocks``
         self._blocks = None
-        # (line, name, value) of a declaration -> the spans of its scope
+        # (name, entry of ``declared``) of a declaration -> the spans of its
+        # scope
         self._scope_extents = {}
 
     def parse(self, file_path, rel_path, content):
@@ -6451,11 +6499,10 @@ class BaseParser:
         """Record every declaration in ``lines`` that one of ``patterns``
         reads as ``name`` having type ``type``, or as type parameter
         ``param`` being bounded by ``type``."""
-        # name -> [(lineno, origin of its value, at file level)], and
-        # <param> -> [(lineno, bound, at file level)]
+        # name -> [(lineno, origin of its value, at file level, column)], and
+        # <param> -> [(lineno, bound, at file level, column)]; the column of
+        # the name on the line, None where the line does not tell
         self.declared = {}
-        # (lineno, name) -> the column of each declaration of it there
-        self._declared_columns = {}
         self._members = set()  # (lineno, name) of members, read on a receiver
         self.fields = {}
         depth = 0  # parentheses open at the start of the line
@@ -6502,11 +6549,11 @@ class BaseParser:
                     if queried:
                         # `x`, or what the file declares `x` as where it does
                         top = self.declared.get(queried[1], ())
-                        known = [v for _, v, at_top in top if v and at_top]
+                        known = [v for _, v, at_top, _ in top if v and at_top]
                         held = known[-1] if known else queried[1]
-                    self.declared.setdefault(key, []).append((lineno, held, file_level))
-                    columns = self._declared_columns.setdefault((lineno, key), [])
-                    columns.append(named)
+                    self.declared.setdefault(key, []).append(
+                        (lineno, held, file_level, named)
+                    )
                     if self._property(lineno, line, named, match[0], key):
                         self._members.add((lineno, key))
                     # A field is declared at the start of a line, behind
@@ -6535,34 +6582,36 @@ class BaseParser:
         """What ``name`` is declared as at ``lineno``: by its last
         declaration from line ``since``, the start of the enclosing
         definition. Failing that what its file-level declarations agree on.
-        ``anywhere`` looks at every declaration instead, for a field or a
-        type parameter."""
+        ``anywhere`` looks at every declaration instead, for a field."""
         declarations = [
             d
             for d in self.declared.get(name, ())
             if anywhere or (d[0], name) not in self._members
         ]
         if not anywhere:
+            read = lineno, self._read_at
+            # Of those in scope, the ones written before the read
             local = [
                 d
                 for d in declarations
-                if since <= d[0] <= lineno and self._in_scope(name, d[0], lineno, d[1])
+                if since <= d[0] <= lineno
+                and self._in_scope(name, d, lineno)
+                and (read[1] is None or (d[0], self._column(name, d) or 0) < read)
             ]
             if local:
                 line = max(d[0] for d in local)
                 same = [d for d in local if d[0] == line]
-                columns = self._declared_columns.get((line, name), ())
-                if self._read_at is not None and len(columns) == len(same) > 1:
-                    # Of the declarations on the line, the last before the read
-                    before = [d for d, at in zip(same, columns) if at < self._read_at]
-                    same = before[-1:] or same
+                columns = [self._column(name, d) for d in same]
+                if None not in columns and (line < lineno or read[1] is not None):
+                    # The last of the line
+                    same = [max(zip(columns, same), key=lambda b: b[0])[1]]
                 return same[0][1]
         # What a call returned is bound to a variable, never to a field. A
         # parameter or variable of the definition hides a file-level name.
         hidden = self._is_local(name)
         values = {
             v
-            for line, v, top in declarations
+            for line, v, top, _ in declarations
             if (anywhere and v and not v.startswith("#"))
             or (top and not hidden)
             or not since
@@ -6570,49 +6619,64 @@ class BaseParser:
         }
         return values.pop() if len(values) == 1 else None
 
-    def read_blocks(self, code_lines):
+    def read_blocks(self, code_lines, brackets=None):
         """Scope each local declaration by the block it is in, for a language
         whose blocks scope what they declare. ``code_lines`` are the lines
-        declarations are read from, without comments and literal text."""
-        text, starts, closer = _js_brackets(code_lines)
+        declarations are read from, without comments and literal text, and
+        ``brackets`` what ``_js_brackets`` reads of them where known."""
+        text, starts, closer = brackets or _js_brackets(code_lines)
         self._blocks = text, starts, closer, _nested(sorted(closer.items()))
         self._scope_extents = {}
 
-    def _in_scope(self, name, line, lineno, held=None):
-        """Whether the declaration of ``name`` on line ``line``, as ``held``,
-        is in scope where line ``lineno`` is read, at column ``_read_at``
-        where known."""
+    def _in_scope(self, name, declaration, lineno):
+        """Whether ``declaration``, an entry of ``declared`` for ``name``, is
+        in scope where line ``lineno`` is read, at column ``_read_at`` where
+        known."""
         if self._blocks is None:
             return True
-        key = line, name, held
+        key = name, declaration
         if key not in self._scope_extents:
             self._scope_extents[key] = self._scope_spans(*key)
         read = self._blocks[1][lineno - 1] + (self._read_at or 0)
         return any(start <= read <= end for start, end in self._scope_extents[key])
 
-    def _scope_spans(self, line, name, held):
-        """The spans of the code, ``(start, end)`` offsets, where the
-        declaration of ``name`` on line ``line``, as ``held``, is in scope."""
-        return [(0, self._scope_end(line, name))]
+    def _scope_spans(self, name, declaration):
+        """The spans of the code, ``(start, end)`` offsets, where
+        ``declaration``, an entry of ``declared`` for ``name``, is in scope."""
+        return [(0, self._scope_end(name, declaration))]
 
-    def _declaration_site(self, line, name):
-        """``(at, head, block, written)`` of the declaration of ``name`` on
-        line ``line``: the offset it is at, the outermost bracket around it
-        that opens no block if any, the block around both if any, and the
-        statement up to that bracket, or up to the declaration."""
-        text, starts, _, spans = self._blocks
-        first = starts[line - 1]
-        # Where the line first names it, else its end: that of a statement
-        # whose value binds it once read
-        found = re.compile(rf"(?<![\w$]){re.escape(name)}(?![\w$])").search(
-            text, first, starts[line] - 1
-        )
-        at = found.start() if found else starts[line] - 1
+    def _column(self, name, declaration):
+        """The column of ``declaration``, an entry of ``declared`` for
+        ``name``, on its line. One of no column has, in a file read by
+        blocks, where the line first names it, else its end: that of a
+        statement whose value binds it once read; None in any other."""
+        line, column = declaration[0], declaration[3]
+        if column is not None or self._blocks is None:
+            return column
+        text, starts = self._blocks[:2]
+        found = _named(text, name, starts[line - 1], starts[line] - 1)
+        return (starts[line] - 1 if found is None else found) - starts[line - 1]
+
+    def _declaration_site(self, name, declaration):
+        """``(at, head, block, written)`` of ``declaration``, an entry of
+        ``declared`` for ``name``: the offset it is at, the outermost bracket
+        around it that opens no block if any, the block around both if any,
+        and the statement up to that bracket, or up to the declaration."""
+        text, starts, closer, spans = self._blocks
+        at = starts[declaration[0] - 1] + self._column(name, declaration)
 
         def statement(offset):
-            """The statement on the line up to ``offset``."""
+            """The statement on the line up to ``offset``, past each control
+            head it follows without braces."""
             start = text.rfind("\n", 0, offset) + 1
             start = max(start, *(text.rfind(c, start, offset) + 1 for c in ";{}"))
+            while found := _BRACELESS_HEAD_RE.match(text, start, offset):
+                end = (
+                    closer.get(found.start(1), offset) + 1 if found[1] else found.end()
+                )
+                if end > offset:
+                    break
+                start = end
             return text[start:offset]
 
         held, head = _innermost(spans, at), None
@@ -6626,14 +6690,17 @@ class BaseParser:
             head, held = held, _innermost(spans, held[0])
         return at, head, held, statement(head[0] if head else at)
 
-    def _scope_end(self, line, name):
-        """The offset in the code where the scope of the declaration of
-        ``name`` on line ``line`` ends: the end of the block it is in or, for
-        a name a statement's head or parameters declare, of that statement,
-        and for one a `case` label declares, where ``case_scopes_section``
-        says, of its switch section."""
+    def _scope_end(self, name, declaration):
+        """The offset in the code where the scope of ``declaration``, an
+        entry of ``declared`` for ``name``, ends: the end of the block it is
+        in or, for a name a statement's head or parameters declare, of that
+        statement, and for one a `case` label declares, where
+        ``case_scopes_section`` says, of its switch section."""
         text = self._blocks[0]
-        at, head, held, written = self._declaration_site(line, name)
+        at, head, held, written = self._declaration_site(name, declaration)
+        if name[0] == "<":
+            # A type parameter is the definition's whose head declares it.
+            return self._statement_close(at)
         if self.case_scopes_section and held and re.match(r"\s*case\b", written):
             return self._section_end(at, held)
         if head and not _DECLARING_STATEMENT_RE.match(written):
@@ -6653,11 +6720,19 @@ class BaseParser:
     def _statement_close(self, at, orelse=True, heading=False):
         """The offset where the statement going on at offset ``at`` ends: at
         the `}` of the block it goes on to, past an initializer list's `,`, a
-        block that follows and, with ``orelse``, an `else`, at its `;`, or at
-        the bracket that closes what it is in. ``heading`` reads a keyword's
-        head, which a `;` does not end, and where a `{` after an array, a
-        slice or a map type opens a literal."""
+        block that follows and, with ``orelse``, an `else` after the block
+        or the `;`, at its `;`, or at the bracket that closes what it is in.
+        ``heading`` reads a keyword's head, which a `;` does not end, and
+        where a `{` after an array, a slice or a map type opens a literal.
+        An `if` the statement is takes the `else` after it, as the nearest
+        `if` does."""
         text, _, closer, _ = self._blocks
+        inner = not heading and _IF_RE.match(text, at)
+        if inner and inner.end() - 1 in closer:
+            then, other = self._if_branches(closer[inner.end() - 1])
+            at = (other or then)[1]
+            more = orelse and _ELSE_RE.match(text, at + 1)
+            return self._statement_close(more.end(), False) if more else at
         goes_on = re.compile(
             r"\s*(?:else\b|,|(?=\{))" if orelse else r"\s*(?:,|(?=\{))"
         )
@@ -6673,6 +6748,8 @@ class BaseParser:
                 at, heading = more.end(), False
             elif char in "([{":
                 at = closer.get(at, len(text)) + 1
+            elif char == ";" and orelse and (more := _ELSE_RE.match(text, at + 1)):
+                at = more.end()
             elif char in ")]}" or (char == ";" and not heading):
                 return at
             else:
@@ -6690,18 +6767,24 @@ class BaseParser:
             body = text[at : text.find(";", at) + 1]
         return bool(_EXITS_RE.search(body))
 
+    def _if_branches(self, closed):
+        """``(then, orelse)``: the spans of the branches of the `if` whose
+        condition closes at offset ``closed``, ``orelse`` None for none."""
+        then = (closed + 1, self._statement_close(closed + 1, orelse=False))
+        more = _ELSE_RE.match(self._blocks[0], then[1] + 1)
+        return then, more and (then[1] + 1, self._statement_close(more.end(), False))
+
     def _branch_scope(self, closed, held, holds):
         """The spans where what the condition of an `if` tells when it is
         ``holds`` is known, the condition closing at offset ``closed`` in
         the block ``held``: the branch it is ``holds`` in, and past the `if`
         to the end of the block where the other branch exits."""
-        then = (closed + 1, self._statement_close(closed + 1, orelse=False))
-        last = self._statement_close(closed + 1)
-        orelse = (then[1] + 1, last) if last > then[1] else None
+        then, orelse = self._if_branches(closed)
         branch, other = (then, orelse) if holds else (orelse, then)
         spans = [branch] if branch else []
         if other and self._exits(other[0]):
-            spans.append((last + 1, held[1] if held else len(self._blocks[0])))
+            end = held[1] if held else len(self._blocks[0])
+            spans.append(((orelse or then)[1] + 1, end))
         return spans
 
     def _property(self, lineno, line, column, declared, name):
@@ -6735,22 +6818,53 @@ class BaseParser:
             return None
         if not value.startswith("#"):
             # A type parameter stands for its bound.
-            param = f"<{value[:-2]}>"
-            bound = self._declared(param, lineno, since)
-            bound = bound or self._declared(param, lineno, since, True)
-            value = f"{bound}()" if bound else value
+            bounds = self._bounds(value[:-2], lineno)
+            value = f"{bounds.pop()}()" if len(bounds) == 1 else value
         return f"{value}.{path}.{method}" if path else f"{value}.{method}"
 
-    def begin_line(self, code, lineno, scope=None, raw=None):
+    def _bounds(self, param, lineno):
+        """The bounds of type parameter ``param`` where line ``lineno`` is
+        read: those the innermost declaration of it in scope there gives
+        it."""
+        key = f"<{param}>"
+        held = [
+            d
+            for d in self.declared.get(key, ())
+            if d[0] <= lineno and self._in_scope(key, d, lineno)
+        ]
+        return {d[1] for d in held if d[0] == held[-1][0]}
+
+    def begin_line(self, code, lineno, scope=None, raw=None, since=0, owner=None):
         """Start reading the calls of ``code``, source line ``lineno``. Call
         this for every line whose calls are recorded, in order. ``scope`` is
-        the definition a variable the line binds is local to, and ``raw``
-        the line as written where ``code`` has its literals blanked."""
+        the definition a variable the line binds is local to, ``raw`` the
+        line as written where ``code`` has its literals blanked, and
+        ``since`` and ``owner`` what ``call_origin`` takes for the line."""
         self._end_line()
         self._line, self._code = lineno, code
         self._scope, self._raw = scope, raw or code
         self._units = 0, (0, 0, 0)
         self._pairs, self._closes = {}, {}
+        # Each binding the line declares holds from where its statement ends
+        # what it copies where its value is a name or a field, else no known
+        # value until the value is read, unless the parser read the
+        # declaration already.
+        ahead = self.binds_ahead and self.binding_re
+        for found in ahead.finditer(code) if ahead else ():
+            name, end = found["name"], self._ended(code, lineno, found.end())
+            written = {(lineno, found.start("name")), end}
+            entries = self.declared.get(name, ())
+            if not self.declares(found) or any(
+                (e[0], e[3]) in written for e in entries
+            ):
+                continue
+            copied = end[0] == lineno and self._expression_origin(
+                code, found.end(), end[1], lineno, since, owner
+            )
+            held = "?"
+            if copied:
+                held = copied + ".?" * bool(found.groupdict().get("unwrap"))
+            self.declared.setdefault(name, []).append((end[0], held, False, end[1]))
         self._parens, self._innermost = [], [None]
         if code[:1].strip() and code[0] not in ")}]":
             # An unindented line starts a top-level item, unless it opens
@@ -6800,9 +6914,10 @@ class BaseParser:
 
     def _end_line(self):
         """Carry what the finished line leaves open over to the next: its
-        unclosed calls, the call it ends with, and what it binds. A line
-        whose code is blank ends nothing — comments and preprocessor
-        lines leave the open statement alone."""
+        unclosed calls, the call it ends with, and what it binds, returning
+        the entry of ``declared`` it binds, else None. A line whose code is
+        blank ends nothing — comments and preprocessor lines leave the open
+        statement alone."""
         if not self._code.strip():
             return
         self._carried_labels += [
@@ -6833,15 +6948,17 @@ class BaseParser:
             # A name the file gets from elsewhere is no declaration of it.
             binding = None
         closed, self._pending_closed = self._pending_closed, None
+        below, self._value_below = self._value_below, False
         depth = None
-        # The line that declares the name's type, where the line has one
+        # The declaration that gives the name a type, where the binding has one
         declares = None
         if binding:
             name, unwrap = binding["name"], bool(binding.groupdict().get("unwrap"))
             expression = self._code[binding.end() :]
             if self._scope and self.declares(binding):
                 self.add_local(self._scope, name)
-            declares = self._typed_line(name)
+            declares = self._typed_declaration(name, binding.start("name"))
+            self._value_below = not expression.strip()
             # The value goes on over the next lines inside the call it
             # starts with.
             opened = [column for column in self._opens if column >= binding.end()]
@@ -6858,7 +6975,9 @@ class BaseParser:
         ):
             self._code = ""
             return
-        elif self._pending and (continued or self._code.lstrip()[:1] in (".", ")")):
+        elif self._pending and (
+            continued or below or self._code.lstrip()[:1] in (".", ")")
+        ):
             name, unwrap, _ = self._pending
             declares = self._pending_typed
             expression = self._code
@@ -6873,6 +6992,17 @@ class BaseParser:
             name = None
         self._pending = (name, unwrap, depth) if name else None
         self._pending_typed = declares if name else None
+        if binding and not self.binds_ahead:
+            self._bound_at = self._line, binding.start("name")
+        # Where the binding's statement ends, where its unknown value is, or
+        # where it binds across lines the line's end; the binding itself
+        # where the file's scopes tell where it holds
+        if not self.binds_ahead:
+            where = self._bound_at
+        elif binding:
+            where = self._ended(self._code, self._line, binding.end())
+        else:
+            where = self._line, len(self._code)
         self._code = ""
         if name is None or self._tail is None or not value.endswith(")"):
             return
@@ -6882,36 +7012,74 @@ class BaseParser:
             origin = f"#{self._tail}" + ".?" * unwraps
             entries = self.declared.setdefault(name, [])
             # A type the file declares the name with is what it is read as.
-            typed = any(value and top for _, value, top in entries)
-            # Where the line that declares the name's type is the line that
-            # binds it, the call's result is read through that type: one
-            # declaration, holding both.
-            declared = declares and next(
-                (
-                    entry
-                    for entry in entries
-                    if entry[0] == declares
-                    and entry[1]
-                    and not entry[1].startswith("#")
-                ),
-                None,
-            )
-            read_as = declared and self._typed_origin(origin, declared[1])
-            if read_as:
-                top = declared[2] or self._binds_file(name)
-                entries[entries.index(declared)] = (declared[0], read_as, top)
-            else:
-                entries.append(
-                    (self._line, origin, self._binds_file(name) and not typed)
-                )
+            typed = any(value and top for _, value, top, _ in entries)
+            # Where the binding declares the name's type, the call's result
+            # is read through that type: one declaration, holding both, or
+            # the type alone from where the statement ends.
+            if declares in entries:
+                read_as = self._typed_origin(origin, declares[1])
+                if not read_as:
+                    return self._settle(name, *where, declares[1], declares[2])
+                line, _, top, at = declares
+                bound = line, read_as, top or self._binds_file(name), at
+                entries[entries.index(declares)] = bound
+                return bound
+            top = self._binds_file(name) and not typed
+            return self._settle(name, *where, origin, top)
 
-    def _typed_line(self, name):
-        """The line being read, where it declares ``name`` with a type, else
-        None."""
-        for lineno, value, _ in self.declared.get(name, ()):
-            if lineno == self._line and value and not value.startswith("#"):
-                return lineno
-        return None
+    def _ended(self, code, lineno, at):
+        """``(line, column)`` where the statement going on at column ``at``
+        of ``code``, line ``lineno``, ends: at its `;` or the end of a line
+        ``line_ends_statement`` matches, else at the bracket that closes what
+        holds it."""
+        if self._blocks is None:
+            return lineno, _ends_at(code, at)
+        text, starts, closer, _ = self._blocks
+        end = starts[lineno - 1] + at
+        ends = self.line_ends_statement
+        while end < len(text) and text[end] not in ";)]}":
+            if (
+                text[end] == "\n"
+                and ends
+                and ends.search(text, starts[bisect_right(starts, end) - 1], end)
+            ):
+                break
+            end = closer.get(end, end) + 1
+        return self._place(end)
+
+    def _place(self, at):
+        """``(line, column)`` of offset ``at`` of the code ``read_blocks``
+        read."""
+        starts = self._blocks[1]
+        line = bisect_right(starts, at)
+        return line, at - starts[line - 1]
+
+    def _settle(self, name, line, column, held, top=False):
+        """Give the binding of ``name`` whose statement ends at ``column`` of
+        line ``line`` the value ``held``, in place of the unknown one it has
+        from there, and return its entry."""
+        entries = self.declared.setdefault(name, [])
+        bound = line, held, top, column
+        if (unknown := (line, "?", False, column)) in entries:
+            entries[entries.index(unknown)] = bound
+        else:
+            entries.append(bound)
+        return bound
+
+    def _typed_declaration(self, name, column):
+        """The declaration of ``name`` with a known type at ``column`` of the
+        line being read, or at no column of it, else None."""
+        return next(
+            (
+                d
+                for d in self.declared.get(name, ())
+                if d[0] == self._line
+                and d[3] in (column, None)
+                and d[1]
+                and d[1][0] not in "#?"
+            ),
+            None,
+        )
 
     def paren_around(self, column):
         """The column of the innermost `(` of the line being read that is
@@ -7009,12 +7177,20 @@ class BaseParser:
         """``(operand, unwraps)`` of the expression ``text``: what it is
         without the operators around it that leave its origin as it is, and
         how many times its value is unwrapped."""
-        raise NotImplementedError
+        return text, 0
 
     def _expression_origin(self, code, start, end, lineno, since, owner):
         """Origin path of the value of the expression at columns ``start``
         to ``end`` of ``code``, the line being read: of the call chain it
-        is, or of the name or the field it reads. None for any other."""
+        is, or of the name or the field it reads, or of what both branches
+        of a conditional are. None for any other."""
+        if branches := _conditional(code, start, end):
+            # A conditional's value has the type both its branches give.
+            held = {
+                self._expression_origin(code, *branch, lineno, since, owner)
+                for branch in branches
+            }
+            return held.pop() if len(held) == 1 else None
         plain, unwraps = self._operand(code[start:end].strip())
         unwraps = ".?" * unwraps
         if plain.endswith(")"):
@@ -7023,46 +7199,69 @@ class BaseParser:
                 return None
             return f"#{edge}{unwraps}"
         names = plain.split(".")
-        if not all(re.fullmatch(r"[\w$]+", name) for name in names):
+        if names[0][:1].isdigit() or not all(re.fullmatch(r"[\w$]+", n) for n in names):
+            # No name: a number, or an expression
             return None
         # `self.field` has the type its struct declares, where this file
         # has that; any further name is a field of what is before it.
         size = 2 if names[0] == self.self_name else 1
         # The name is read where it is written.
-        read_at, self._read_at = self._read_at, start
-        head = self.call_origin(".".join([*names[:size], "x"]), lineno, since, owner)
-        self._read_at = read_at
+        path = ".".join([*names[:size], "x"])
+        head = self._read_from(start, self.call_origin, path, lineno, since, owner)
         if (head is None or head[0] == "?") and names[0] != self.self_name:
             return None
         head, size = (head[:-2], size) if head else ("self", 1)
         return ".".join([head, *names[size:]]) + unwraps
 
-    def _rebind(self, name, lineno, origin, until=None, after=None):
-        """Give ``name``, which a pattern binds on line ``lineno`` and which
-        was read as of no declared type, the origin path ``origin``, up to
-        line ``until`` where the pattern's block ends there, from where it
-        is ``after`` again."""
+    def _rebind(self, name, lineno, column, origin, until=None, after=None):
+        """Give ``name``, which a pattern binds at ``column`` of line
+        ``lineno`` and which was read as of no declared type, the origin path
+        ``origin``, up to ``(line, column)`` ``until`` where the pattern's
+        block ends there, from where it is ``after`` again."""
         entries = self.declared.setdefault(name, [])
         # What a block binds, as a `for` does, is the block's.
         top = not until and self._binds_file(name)
-        bound = [entry for entry in entries if entry[0] == lineno]
-        if bound:
-            # The first of a line is what the name is read as.
-            entries[entries.index(bound[0])] = (lineno, origin, top)
+        bound = lineno, origin, top, column
+        written = [e for e in entries if (e[0], e[3]) == (lineno, column)]
+        if written:
+            entries[entries.index(written[0])] = bound
         else:
-            entries.append((lineno, origin, top))
+            entries.append(bound)
         if until:
-            entries.append((until, after, False))
+            entries.append((until[0], after, False, until[1]))
 
-    def _bind(self, bindings, index, lines, block, column=0):
-        """Give each name of ``bindings`` that a pattern on line ``index``
-        binds its origin path there, up to the end of the block the line
-        opens from ``column`` on where ``block`` says it has one, else to the
-        end of the line."""
+    def _read_from(self, column, read, *args):
+        """What ``read(*args)`` gives with names read at ``column`` of the
+        line being read."""
+        read_at, self._read_at = self._read_at, column
+        found = read(*args)
+        self._read_at = read_at
+        return found
+
+    def _named_from(self, name, at):
+        """The column where the line being read first names ``name`` from
+        column ``at``, else ``at``."""
+        found = _named(self._code, name, at)
+        return at if found is None else found
+
+    def _bind(self, bindings, index, at, block=False, column=0):
+        """Give each name of ``bindings`` that a pattern written from column
+        ``at`` of line ``index`` binds its origin path there, up to the end
+        of the block the line opens from ``column`` on where ``block`` says
+        it has one, else to the end of the line, and from there what it held
+        before."""
         lineno = index + 1
-        until = block and bindings and self._find_block_end(lines, index, column)
+        until = lineno + 1, 0
+        if block:
+            text, starts, closer, _ = self._blocks
+            if (opened := text.find("{", starts[index] + column)) in closer:
+                # From past its `}`
+                until = self._place(closer[opened] + 1)
         for name, origin in bindings.items():
-            self._rebind(name, lineno, origin, until or lineno + 1)
+            column = self._named_from(name, at)
+            # Past the scope, what the name holds where the pattern binds it
+            after = self._read_from(column, self._declared, name, lineno, 0)
+            self._rebind(name, lineno, column, origin, until, after)
 
     def _bind_closures(self, code, index, lines, before):
         """Type the parameters of the closures that open before column
@@ -7105,12 +7304,13 @@ class BaseParser:
             body = code[end:]
             if closed is None and not body.strip():
                 # A body on the lines after is in scope to the statement's end.
-                until = _statement_end(lines, index) + 2
+                until = _statement_end(lines, index) + 2, 0
                 for name, origin in bindings.items():
-                    self._rebind(name, index + 1, origin, until)
+                    column = self._named_from(name, bar)
+                    self._rebind(name, index + 1, column, origin, until)
                 continue
             block = closed is None and body.count("{") > body.count("}")
-            self._bind(bindings, index, lines, block, end)
+            self._bind(bindings, index, bar, block, end)
 
     def _name_results(self, code, lineno, since, owner):
         """Add to the origin path of each call that was passed a closure on
@@ -7715,7 +7915,20 @@ class PythonParser(BaseParser):
                         {"origin": self._origin(base, node.lineno)},
                     )
 
-            self.builder.fields[class_id] = self._class_attrs(node)
+            self.builder.fields[class_id] = self._class_attrs(node, class_id)
+            self.builder.py_class_assigned[class_id] = {
+                name.id
+                for stmt in node.body
+                for target in (
+                    stmt.targets
+                    if isinstance(stmt, ast.Assign)
+                    else [stmt.target]
+                    if isinstance(stmt, ast.AnnAssign) and stmt.value
+                    else []
+                )
+                for name in ast.walk(target)
+                if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store)
+            }
             for child in node.body:
                 self.visit_node(child, class_id)
 
@@ -8114,13 +8327,16 @@ class PythonParser(BaseParser):
             elif isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom)):
                 self.exits.append(node)
 
-    def _class_attrs(self, class_node):
+    def _class_attrs(self, class_node, class_id):
         """Map each attribute of ``class_node`` to the origin of the value
         it is annotated with or of what a property of that name is
         annotated to return, else to the origins of the values other than
-        `None` that its body and its methods assign to it."""
+        `None` that its body and its methods assign to it. Record those its
+        methods assign to the instance, `self.name = ...`, but for a
+        property's, which its setter takes, as ``class_id``'s."""
         attrs = {}
         assigned = {}
+        instance, properties = {}, set()
         for stmt in class_node.body:
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 origin = self._instance_origin(stmt.annotation)
@@ -8133,6 +8349,8 @@ class PythonParser(BaseParser):
             elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 made = [self._origin(d, stmt.lineno) for d in stmt.decorator_list]
                 read = any(maker in _PY_PROPERTIES for maker in made)
+                if read:
+                    properties.add(stmt.name)
                 if read and stmt.returns:
                     origin = self._instance_origin(stmt.returns)
                     attrs.setdefault(stmt.name, origin)
@@ -8153,13 +8371,21 @@ class PythonParser(BaseParser):
                             or self._origin(target.value, node.lineno) != "self"
                         ):
                             continue
+                        held = instance.setdefault(target.attr, set())
                         if isinstance(node, ast.AnnAssign):
                             origin = self._instance_origin(value)
                             attrs.setdefault(target.attr, origin)
+                            held.add(origin)
                         elif not _py_is_none(value):
                             origin = self._origin(value, node.lineno)
                             assigned.setdefault(target.attr, set()).add(origin)
+                            held.add(origin)
                 self.bindings.pop()
+        self.builder.assigned[class_id] = {
+            name: sorted(origins)
+            for name, origins in instance.items()
+            if name not in properties
+        }
         held = {name: sorted(origins) for name, origins in assigned.items()}
         held.update((name, [origin]) for name, origin in attrs.items())
         return {
@@ -8474,6 +8700,23 @@ def argument_count(code_lines, lines, index, column):
     ]
     passed = _text(held, 0, column, last - index - 1, closed[1] + 1)
     return len(_bracketed_parts(passed, expression=True))
+
+
+def _named(text, name, start, end=None):
+    """The offset where ``text`` first names ``name`` from offset ``start``,
+    before ``end``; None for nowhere."""
+    found = re.compile(rf"(?<![\w$]){re.escape(name)}(?![\w$])").search(
+        text, start, len(text) if end is None else end
+    )
+    return found and found.start()
+
+
+def _ends_at(code, at):
+    """The column where the statement going on at column ``at`` of ``code``
+    ends on the line: at its `;` outside brackets or the bracket that closes
+    what holds it, else at the end of the line."""
+    found = _closing([code], 0, at, ";")
+    return found[1] if found else len(code)
 
 
 def _closing(code_lines, index, column, stops=""):
@@ -9035,7 +9278,18 @@ class RustParser(BaseParser):
         plain = text.rstrip("?")
         return plain, len(text) - len(plain)
 
-    def _bind_arm(self, code, index, lines):
+    def _scope_end(self, name, declaration):
+        """As the base's, but a closure's parameter is in scope to the end
+        of the closure's body."""
+        text, starts = self._blocks[:2]
+        line = starts[declaration[0] - 1]
+        at = line + self._column(name, declaration)
+        for bars in _RUST_BINDER_RES[0].finditer(text, line, starts[declaration[0]]):
+            if bars.start(1) <= at < bars.end(1):
+                return self._statement_close(bars.end(), orelse=False)
+        return super()._scope_end(name, declaration)
+
+    def _bind_arm(self, code, index):
         """Type the names that an arm of a `match` binds on line ``index``,
         from the value matched, up to the end of the arm."""
         indent = len(code) - len(code.lstrip())
@@ -9047,9 +9301,10 @@ class RustParser(BaseParser):
                 name: ".".join([self._matches[-1][1], *steps])
                 for name, steps in self.bindings(found["pattern"])
             }
-            self._bind(bindings, index, lines, code.rstrip().endswith("{"))
+            at, block = found.start("pattern"), code.rstrip().endswith("{")
+            self._bind(bindings, index, at, block)
 
-    def _bind_patterns(self, code, index, lines, since, owner):
+    def _bind_patterns(self, code, index, since, owner):
         """Type the names that a `for`, an `if let`, a `while let` or a
         `let` with a pattern binds on line ``index``, from the value the
         pattern is matched against, and note the value of a `match`."""
@@ -9069,25 +9324,27 @@ class RustParser(BaseParser):
                 for name, steps in self.bindings(found["pattern"])
                 if origin
             }
+            at = found.start("pattern")
             if found.re is _RUST_LET_RE:
                 for name, bound in bindings.items():
-                    self._rebind(name, lineno, bound)
+                    self._rebind(name, lineno, self._named_from(name, at), bound)
             else:
-                self._bind(bindings, index, lines, True)
+                self._bind(bindings, index, at, True)
         if "match " in code and (found := _RUST_MATCH_RE.search(code)):
             span = found.span("value")
             origin = self._expression_origin(code, *span, lineno, since, owner)
             indent = len(code) - len(code.lstrip())
             self._matches.append((indent, origin))
 
-    def _generic_path_origin(self, callee):
-        """Origin of a path that starts at a type parameter: `T::name` is a
-        function of the bound of `T`, `T::Assoc::name` one of a type that
-        only an implementation of the bound names."""
+    def _generic_path_origin(self, callee, lineno):
+        """Origin of a path, read on line ``lineno``, that starts at a type
+        parameter: `T::name` is a function of the bound of `T`,
+        `T::Assoc::name` one of a type that only an implementation of the
+        bound names."""
         root, *path = callee.split("::")
-        if not path or f"<{root}>" not in self.declared:
+        bounds = path and self._bounds(root, lineno)
+        if not bounds:
             return None
-        bounds = {bound for _, bound, _ in self.declared[f"<{root}>"]}
         if len(path) == 1 and len(bounds) == 1:
             return f"{bounds.pop()}.{path[0]}"
         return f"?.{path[-1]}"
@@ -9125,9 +9382,14 @@ class RustParser(BaseParser):
         # A name a pattern binds has, from there on, no declared type.
         for lineno, line in enumerate(lines, 1):
             for binder in _RUST_BINDER_RES:
-                for pattern in binder.findall(line):
-                    for name in re.findall(r"\b[a-z_]\w*\b", pattern):
-                        self.declared.setdefault(name, []).append((lineno, None, False))
+                for pattern in binder.finditer(line):
+                    names = re.compile(r"\b[a-z_]\w*\b").finditer(
+                        line, *pattern.span(1)
+                    )
+                    for name in names:
+                        self.declared.setdefault(name[0], []).append(
+                            (lineno, None, False, name.start())
+                        )
         aliases = _TYPE_ALIAS_RE.findall(content)
         self.builder.type_aliases.update(aliases)
         self.builder.rust_aliases[file_id] = aliases
@@ -9174,7 +9436,7 @@ class RustParser(BaseParser):
                 # `let x = xs[i]` gives `x` the element of `xs`'s type.
                 held = [
                     declared
-                    for at, declared, _ in self.declared.get(match["of"], ())
+                    for at, declared, _, _ in self.declared.get(match["of"], ())
                     if at <= lineno and declared
                 ]
                 if held and held[-1].startswith("#"):
@@ -9193,7 +9455,7 @@ class RustParser(BaseParser):
                         value = f"{taken[-1].strip()}()"
             if value:
                 self.declared.setdefault(match["name"], []).append(
-                    (lineno, value, item)
+                    (lineno, value, item, match.start("name"))
                 )
             inside = ends_inside
         self.read_blocks([code for code, _ in codes])
@@ -9225,18 +9487,18 @@ class RustParser(BaseParser):
                 block_uses.append((_innermost(spans, found.start()), leaves))
         # `let name = Path;` gives `name` the value the path names, unless a
         # `use` in a block around it, which hides the module's names, may
-        # name another.
+        # name another: then no known one.
         for found in _RUST_PATH_LET_RE.finditer(text):
             root = found["path"].partition("::")[0]
-            if not any(
+            hidden = any(
                 start <= found.start() <= end
                 and (root in names or any(n.endswith("*") for n in names))
                 for (start, end), names in block_uses
-            ):
-                line = bisect_right(self._blocks[1], found.start())
-                self.declared.setdefault(found["name"], []).append(
-                    (line, f"!{found['path']}", False)
-                )
+            )
+            line = bisect_right(self._blocks[1], found.start())
+            at = found.start("name") - self._blocks[1][line - 1]
+            held = "?" if hidden else f"!{found['path']}"
+            self.declared.setdefault(found["name"], []).append((line, held, False, at))
 
         def seen_type(module, name):
             """The ID of the type ``name`` names in ``module``: one a module of
@@ -9516,7 +9778,7 @@ class RustParser(BaseParser):
                 else:  # `impl Marker for Foo {}`
                     # Methods of a block written on one line.
                     body = line.index("{")
-                    self.begin_line(code, lineno, raw=lines[i])
+                    self.begin_line(code, lineno, raw=lines[i], since=lineno)
                     for method in _RUST_INLINE_FN_RE.finditer(code, body):
                         method_id = f"{struct_id}::{method['name']}"
                         self.builder.add_node(
@@ -9579,8 +9841,10 @@ class RustParser(BaseParser):
             # 6. Calls
             if parent_id != file_id:
                 code = codes[lineno - 1][0]
-                self.begin_line(code, lineno, parent_id, lines[lineno - 1])
-                self._bind_arm(code, i, lines)
+                owner = parent_id.split("::")[-2] if parent_id.count("::") > 1 else None
+                raw = lines[lineno - 1]
+                self.begin_line(code, lineno, parent_id, raw, fn_start, owner)
+                self._bind_arm(code, i)
                 # The closures on the line whose parameters are still to be read
                 self._closures = []
                 if "|" in code:
@@ -9589,7 +9853,6 @@ class RustParser(BaseParser):
                         for found in _RUST_CLOSURE_RE.finditer(code)
                     ]
                 self._bodies = []  # (call, argument, columns of the body) of each
-                owner = parent_id.split("::")[-2] if parent_id.count("::") > 1 else None
                 # The block a `for` or an `if let` opens, where its body goes
                 # on on the line: the names the head binds hold there.
                 head = ("for " in code and _RUST_FOR_RE.search(code)) or (
@@ -9608,7 +9871,7 @@ class RustParser(BaseParser):
                     # call site's, not part of the callee's name.
                     callee = _strip_generics(callee)
                     if start >= body:
-                        self._bind_patterns(code, i, lines, fn_start, owner)
+                        self._bind_patterns(code, i, fn_start, owner)
                         body = len(code) + 1
                     # `pub(crate)` is a visibility, not a call.
                     if callee and callee != "pub":
@@ -9620,12 +9883,12 @@ class RustParser(BaseParser):
                             fn_start,
                             start,
                             call_match.end() - 1,
-                            self._generic_path_origin(callee) or typed,
+                            self._generic_path_origin(callee, lineno) or typed,
                         )
                 self._bind_closures(code, i, lines, len(code))
                 self._name_results(code, lineno, fn_start, owner)
                 if body <= len(code):
-                    self._bind_patterns(code, i, lines, fn_start, owner)
+                    self._bind_patterns(code, i, fn_start, owner)
             i += 1
 
         # A field's type, for each struct of that name the file declares.
@@ -10083,6 +10346,34 @@ _TS_WRITTEN_MEMBER_NAME = r"#?(?:[A-Za-z0-9_$]+|\"[^\"\n]*\"|'[^'\n]*')"
 _TS_VARIABLE_RE = re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_$]+)")
 # The name of a property in an object literal: `name: value`, quoted or not
 _TS_PROPERTY_RE = re.compile(rf"^\s*({_TS_WRITTEN_MEMBER_NAME})(?=\s*:)")
+# A function's prototype assigned an object other than a literal,
+# `F.prototype = value;`: the function's name and the value
+_JS_PROTOTYPE_RE = re.compile(
+    r"^\s*([\w$]+)\.prototype\s*=(?![=>])(?!\s*\{\s*$)\s*(.+?)[\s;]*$"
+)
+# A member assigned to a function's prototype, `F.prototype.name = value`,
+# or to the function, `F.name = value`: the member's name, the function's
+# and `.prototype` for the first
+_JS_ASSIGNED_MEMBER_RE = re.compile(
+    r"^\s*(?=[\w$]+(?:\.prototype)?\.(?!prototype\b)([\w$]+)\s*=(?![=>]))"
+    r"([\w$]+)(\.prototype(?=\.))?"
+)
+# What a name declares a function or a class by
+_JS_DECLARING_KINDS = frozenset({"function", "class", "var", "let", "const"})
+
+
+def _prototype_base(value: str) -> str | None:
+    """The base of a prototype assigned ``value``: `G` for `new G(...)`,
+    `Object.create(G.prototype, ...)` or `G.prototype`, none for
+    `Object.create(null)`, `null` or `undefined`, else the value as
+    written, an expression whose type is not told."""
+    found = re.fullmatch(
+        r"new\s+([\w$.]+)\s*(?:\(.*\))?"
+        r"|Object\.create\(\s*(?:([\w$.]+)\.prototype\b.*|null\s*)\)"
+        r"|([\w$.]+)\.prototype|null|undefined",
+        value,
+    )
+    return (found[1] or found[2] or found[3]) if found else value
 
 
 def _ts_unquote(name: str) -> str:
@@ -10128,12 +10419,24 @@ def _path_written(written: str) -> str:
     return written.replace("(", "<").replace(")", ">").replace(".", "::")
 
 
+def _value_named(statement: str) -> re.Match | None:
+    """The match of the name ``statement`` gives a value, in group 1: a
+    variable's, a property's or a member's assigned to a function or its
+    prototype."""
+    return (
+        _TS_VARIABLE_RE.match(statement)
+        or _TS_PROPERTY_RE.match(statement)
+        or _JS_ASSIGNED_MEMBER_RE.match(statement)
+    )
+
+
 def _arrow_function(statement: str) -> tuple[str, str] | None:
     """Read `const name = (params) => ...`, with or without a type
     annotation on ``name``, `const name = function (params) ...`, or either
-    function as the value of a property: `name: (params) => ...`. Returns
+    function as the value of a property, `name: (params) => ...`, or of a
+    prototype's member, `F.prototype.name = function (params) ...`. Returns
     the name and the function from its parameters on, else None."""
-    match = _TS_VARIABLE_RE.match(statement) or _TS_PROPERTY_RE.match(statement)
+    match = _value_named(statement)
     if not match:
         return None
     # The initialiser follows the first `=` outside brackets that is not
@@ -10377,12 +10680,10 @@ _JS_DECLARATION_RE = re.compile(
     r"(?P<kind>function|class)\b\s*\*?\s*(?P<name>[A-Za-z_$][\w$]*)",
     re.MULTILINE,
 )
-# `name = value` that starts a statement: what it assigns is what the name
-# holds in the block the statement is in
-_JS_ASSIGNMENT_RE = re.compile(
-    r"(?:^|(?<=[;{}]))[ \t]*(?P<name>[A-Za-z_$][\w$]*)\s*(?P<kind>=)(?![=>])",
-    re.MULTILINE,
-)
+# An operator that gives what is on its left a value: `=`, or one that
+# may, `&&=`, `||=` or `??=`. One that computes, as `+=`, leaves a string
+# a string and a number a number.
+_JS_ASSIGN_RE = re.compile(r"(?<![=!<>])(?:&&|\|\||\?\?)?=(?![=>])")
 # Modifiers a class member is declared behind, in any order
 _TS_MODIFIER_WORDS = (
     "private",
@@ -10428,6 +10729,8 @@ _JS_LEADING_WORDS = frozenset(
 _JS_WORD_END_RE = re.compile(r"[\w$#]+\Z")
 # A decorator without arguments, or the name of one before its arguments
 _JS_DECORATOR_END_RE = re.compile(r"@[\w$.]+\s*\Z")
+# The label of a `switch`'s case
+_JS_CASE_RE = re.compile(r"(?<![\w$.])(?:case\b|default\s*:)")
 # A keyword a block's `{` follows without a `)`
 _JS_BLOCK_OPENER_RE = re.compile(r"(?<![\w$.])(?:else|try|finally|do)\Z")
 # The keyword of a statement whose head is in parentheses, before its `(`
@@ -10438,6 +10741,8 @@ _JS_CONTROL_HEAD_RE = re.compile(
 _TS_INDEXED_RE = re.compile(r"([\w$.]+)\s*\[\s*[\"']([\w$]+)[\"']\s*\]")
 # The origin path of a callback's parameter: `#edge|argument|position`
 _CALLBACK_RE = re.compile(r"#\d+\|")
+# A possibly qualified name in a C/C++ type
+_C_TYPE_NAME_RE = re.compile(r"(?:::)?[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*")
 # What a C/C++ macro that marks a declaration expands to: nothing, an
 # attribute, a specifier or the opening of a namespace
 _C_MARK_RE = re.compile(
@@ -10451,6 +10756,15 @@ _TS_CAST_TYPE_RE = re.compile(
 )
 # A top-level `import` or `export`, which makes a file a module
 _JS_MODULE_RE = re.compile(r"^(?:import(?!\s*[(.])|export)\b", re.MULTILINE)
+# What makes a JavaScript file a CommonJS module, as TypeScript reads one: a
+# `require` call, or a value given to `module.exports` or to a property of it
+# or of `exports`, by assignment or `Object.defineProperty`
+_JS_COMMONJS_RE = re.compile(
+    r"(?<![\w$.])(?:require\s*\("
+    r"|module\s*\.\s*exports\s*(?:(?:\.\s*[\w$]+|\[[^\]]*\])\s*)?="
+    r"|exports\s*(?:\.\s*[\w$]+|\[[^\]]*\])\s*="
+    r"|Object\s*\.\s*defineProperty\s*\(\s*(?:module\s*\.\s*)?exports\b)(?!=)"
+)
 # The one parameter an arrow function writes without parentheses
 _JS_LONE_PARAM_RE = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=>")
 
@@ -10504,12 +10818,13 @@ class _JsScopes:
     """Where each name a JavaScript or TypeScript file binds is in scope,
     read from its code lines, literals blank: what a declaration, a
     parameter list, a `catch` or `for` head, a named function expression
-    or a statement that assigns binds. Each binding is ``(kind, at, lines,
-    span)``: the `(line, column)` it is at, the first and last line it is
-    written over, and the span the language gives it, the block it is in,
-    for a `var` its function, for a parameter its function, for what a
-    `catch` or a `for` head binds the statement the head leads. Lines count
-    from 1."""
+    or an assignment binds. Each binding is ``(kind, at, written, span)``:
+    the `(line, column)` it holds from, the first and last `(line, column)`
+    of where its name and the value it is given are written, and the span
+    the language gives it, the block it is in, for a `var` its function,
+    for a parameter its function, for what a `catch` or a `for` head binds
+    the statement the head leads, for an assignment that may not run, as
+    in a branch, its own text. Lines count from 1."""
 
     def __init__(self, lines):
         self.lines = lines
@@ -10517,6 +10832,7 @@ class _JsScopes:
         self.opener = {close: opened for opened, close in self.closer.items()}
         self.params = self._param_regions()
         self.whole = (1, 0), (len(lines) + 1, 0)
+        self._brackets = _nested(sorted(self.closer.items()))
         opens = sorted(at for at in self.closer if self.text[at] == "{")
         self._blocks = _nested([(at, self.closer[at]) for at in opens])
         self._classes = self._class_bodies()
@@ -10531,10 +10847,17 @@ class _JsScopes:
         )
         self.bindings = {}
         self._declarations()
+        # Where each loop statement starts and just past where it ends
+        self._loops = [
+            (at, (end[0] + 1, end[1]))
+            for found in _LOOP_RE.finditer(self.text)
+            for at in [self.place(found.start())]
+            for end in [self.past_statement(at[0] - 1, at[1])]
+        ]
         for held in self.params.values():
             for start, close, names, end, _ in held:
                 for name in names:
-                    self._add(name, "param", start, (start[0], close[0]), (start, end))
+                    self._add(name, "param", start, (start, close), (start, end))
 
     def _param_regions(self):
         """``{line: [(start, close, names, end, written)]}``: each parameter
@@ -10589,12 +10912,6 @@ class _JsScopes:
         else None."""
         return _innermost(self._functions, at)
 
-    def in_class(self, offset):
-        """Whether the innermost `{`...`}` around ``offset`` is a class's
-        body, where a name is a field's and binds no variable."""
-        held = _innermost(self._blocks, offset)
-        return bool(held) and held[0] in self._classes
-
     def _class_bodies(self):
         """The offsets of the `{` of each class's body."""
         text, bodies = self.text, set()
@@ -10618,54 +10935,72 @@ class _JsScopes:
 
     def _declarations(self):
         text, lines = self.text, self.lines
+        # Where a declaration's own names and the parameters are written,
+        # which no assignment is to
+        bound = {
+            (self.starts[s[0] - 1] + s[1], self.starts[c[0] - 1] + c[1])
+            for held in self.params.values()
+            for s, c, *_ in held
+        }
+        # line -> the offsets of the brackets of a declaration's pattern that
+        # opens on an earlier line and closes on it
+        self.patterns = {}
         for found in _JS_BINDING_HEAD_RE.finditer(text):
             start = found.end()
             row, column = self.place(found.start())
             if _js_member_name(lines, row - 1, column):
                 continue
-            kind = found[1] or "catch"
-            head = _JS_FOR_HEAD_RE.search(
+            kind = found[1] or ("=" if found[2] == "for" else "catch")
+            if text[start] in "[{":
+                closed = self.closer.get(start, start)
+                names = [name for name, _ in _js_bindings(text[start : closed + 1])]
+                after = closed + 1
+            else:
+                closed = after = start + len(re.match(r"[\w$]*", text[start:])[0])
+                names = [text[start:closed]]
+            if kind == "=" and not re.compile(r"\s+(?:of|in)\b").match(text, after):
+                continue  # a `for` head that starts with an assignment
+            bound.add((start, closed))
+            head = kind in ("=", "catch") or _JS_FOR_HEAD_RE.search(
                 text, max(found.start() - 80, 0), found.start()
             )
-            if kind == "catch" or head:
+            if head:
                 # The statement the head leads, from its `(`
                 paren = text.rindex("(", 0, start)
-                head_end = self.place(self.closer.get(paren, len(text)))[0]
+                written = self.place(self.closer.get(paren, len(text)))
                 opened = self.place(paren)
                 row_after, column_after = self.past_statement(
                     *self._past(opened[0] - 1, opened[1])
                 )
                 span = opened, (row_after + 1, column_after)
-            elif kind == "var":
-                span = self.function(self.place(start)) or self.whole
             else:
-                span = self.block(start)
-            if text[start] in "[{":
-                closed = self.closer.get(start, start)
-                bound = [name for name, _ in _js_bindings(text[start : closed + 1])]
-            else:
-                closed = start + len(re.match(r"[\w$]*", text[start:])[0])
-                bound = [text[start:closed]]
-            # The statement's lines, which what its value is read on are;
-            # a head's only.
-            last = (
-                head_end
-                if kind == "catch" or head
-                else (_statement_end(lines, row - 1, column) + 1)
-            )
-            for name in bound:
-                self._add(name, kind, self.place(start), (row, last), span)
-            if kind in ("const", "let", "var"):
-                at_row, at_column = self.place(closed)
-                for later_row, name, _, _ in _declarators(lines, at_row - 1, at_column):
-                    later = (later_row + 1, 0)
-                    self._add(name, kind, later, (later_row + 1,) * 2, span)
+                # The statement, which what its value is read on is
+                last = _statement_end(lines, row - 1, column)
+                written = self._past(row - 1, column, last)
+                written = written[0] + 1, written[1]
+                span = (
+                    self.function(self.place(start)) or self.whole
+                    if kind == "var"
+                    else self.block(start)
+                )
+            at = self.place(start)
+            for name in names:
+                self._add(name, kind, at, (at, written), span)
+            if not head and at[0] < self.place(closed)[0]:
+                self.patterns[self.place(closed)[0]] = start, closed
+            if not head:
+                at_row, at_column = self.place(after)
+                for row, name, end, _ in _declarators(lines, at_row - 1, at_column):
+                    end += self.starts[row]
+                    bound.add((end - len(name), end))
+                    at = self.place(end - len(name))
+                    self._add(name, kind, at, (at, (row + 1, len(lines[row]))), span)
         declared = set()
         for found in _JS_DECLARATION_RE.finditer(text):
             declared.add(found.start("name"))
             at = self.place(found.start("name"))
             span = self.block(found.start())
-            self._add(found["name"], found["kind"], at, (at[0],) * 2, span)
+            self._add(found["name"], found["kind"], at, (at, at), span)
         for found in re.finditer(r"\bfunction\b\s*\*?\s*([\w$]+)\s*\(", text):
             if found.start(1) in declared:
                 continue
@@ -10677,40 +11012,192 @@ class _JsScopes:
                         found[1],
                         "function",
                         opened,
-                        (opened[0],) * 2,
+                        (opened, opened),
                         (opened, region[3]),
                     )
+        self._bound = _nested(sorted(bound, key=lambda b: (b[0], -b[1])))
+        # line -> (name, at, start, end) of each assignment of a name, written
+        # at `(line, column)` at, whose value is written on the line, from
+        # column start to column end
+        self.assigned = {}
+        for found in _JS_ASSIGN_RE.finditer(text):
+            end = _run_start(text, found.start())
+            if text[end - 1 : end] in ("]", "}") and end - 1 in self.opener:
+                start = self.opener[end - 1]
+                names = [name for name, _ in _js_bindings(text[start:end])]
+            elif (
+                word := _JS_WORD_END_RE.search(text, max(end - 100, 0), end)
+            ) and word[0][0] not in "#0123456789":
+                start, names = word.start(), [word[0]]
+            else:
+                continue
+            row, column = self.place(start)
+            if (
+                not names
+                or _js_member_name(lines, row - 1, column)
+                or _innermost(self._bound, start + 1)
+                or (span := self._reach(start)) is None
+            ):
+                continue
+            # What it assigns holds from where its value ends, which reads
+            # what the name held before. `null` and `undefined` have no
+            # members a call through the name could reach.
+            end = self._expression_end(found.end())
+            if text[found.end() : end].strip() in ("null", "undefined"):
+                continue
+            written = (row, column), self.place(end)
+            if not span or found[0] != "=":
+                span = written
+            for name in names:
+                self._add(name, "=", written[1], written, span)
+            value = self.place(found.end())
+            if value[0] == written[1][0] and text[start] not in "[{":
+                self.assigned.setdefault(value[0], []).append(
+                    (names[0], written[0], value[1], written[1][1])
+                )
 
-        def in_block(match):
-            # A statement starts after a `;`, a `}`, a block's `{`, which no
-            # object, pattern or class body is, or a line break that ends
-            # the statement before: True. One that is the body of an `if`, a
-            # loop or an `else` is a block of its own: False. None for none.
-            end = _run_start(text, match.start())
-            last = text[end - 1 : end]
-            if last == "{":
-                block = not self.in_class(match.start())
-                return block and _js_opens_block(text, end - 1) or None
-            if last == ")":
-                opened = self.opener.get(end - 1, 0)
-                return not _JS_CONTROL_HEAD_RE.search(text, max(opened - 12, 0), opened)
-            if word := _JS_WORD_END_RE.search(text, max(end - 100, 0), end):
+    def _control(self, close):
+        """The keyword of the control statement whose head the `)` at offset
+        ``close`` closes, else None."""
+        opened = self.opener.get(close)
+        found = opened is not None and _JS_CONTROL_HEAD_RE.search(
+            self.text, max(opened - 12, 0), opened
+        )
+        return found[0].split()[0] if found else None
+
+    def _statements(self, held):
+        """Whether the bracket span ``held``, None for the file, holds
+        statements: the file, a block or a class's body."""
+        return (
+            held is None
+            or held[0] in self._classes
+            or _js_opens_block(self.text, held[0])
+        )
+
+    def _reach(self, start):
+        """Where the left side of an assignment, which starts at offset
+        ``start``, is assigned each time the statement it is in runs: the
+        span of the block the statement is in, of a `switch`'s body the
+        statement's case; False where it may not be, in a branch, an
+        operand that may not be evaluated, a function's expression body or
+        a loop's later clauses; None where it is no variable's: a
+        declaration's type, a field, an enum member or a default in a
+        pattern."""
+        text = self.text
+        held = _innermost(self._brackets, start)
+        # The token read is the first before the target; no bracket around
+        # the target has been left; the statement is the assignment.
+        at, first, level, direct = start, True, True, True
+        while True:  # back to where the statement starts
+            end = _run_start(text, at)
+            if (
+                "\n" in text[end:at]
+                and self._statements(held)
+                and not text.endswith(_JS_CONTINUES_EXPRESSION + (",",), 0, end)
+                and not text.startswith(_JS_CONTINUES_EXPRESSION, at)
+            ):
+                break
+            if end == (held[0] + 1 if held else 0):
+                if self._statements(held):
+                    break
+                if first and text[held[0]] == "{":
+                    return None  # a property's place, in a pattern or an enum
+                outer = _innermost(self._brackets, held[0])
+                if self._control(held[1]):
+                    keyword = _JS_CONTROL_HEAD_RE.search(
+                        text, max(held[0] - 12, 0), held[0]
+                    )
+                    at, held, direct = keyword.start(), outer, False
+                    break
+                at, held, first, level, direct = held[0], outer, False, False, False
+                continue
+            char = text[end - 1]
+            word = _JS_WORD_END_RE.search(text, max(end - 100, 0), end)
+            if char in ")]}":
+                opened = self.opener.get(end - 1)
+                if (
+                    char == "}"
+                    and opened is not None
+                    and _js_opens_block(text, opened)
+                    and self._statements(held)
+                ):
+                    break
+                if char == ")" and self._control(end - 1):
+                    return False  # a statement's body without braces
+                if first or opened is None:
+                    return None
+                at = opened
+            elif char == ";":
+                if held and text[held[0]] == "(":
+                    return False  # a `for` head's test or update
+                break
+            elif char == "?" or text.startswith(("&&", "||", "=>"), end - 2):
+                return False
+            elif char == ":":
+                # A declaration's type follows its name or pattern.
+                named = _run_start(text, end - 1, "?!")
+                if text[named - 1 : named] in ("]", "}"):
+                    named = self.opener.get(named - 1, named)
+                elif before := _JS_WORD_END_RE.search(text, max(named - 100, 0), named):
+                    named = before.start()
+                if _innermost(self._bound, named + 1):
+                    return None
+                at = end - 1
+            elif word:
                 if word[0] in ("else", "do"):
                     return False
-                return None if word[0] in _JS_LEADING_WORDS else True
-            return True if not last or last in ";}]'\"`" else None
+                if first and word[0] not in ("return", "yield", "throw"):
+                    return None
+                at = word.start()
+            elif char in "=,":
+                direct = direct and char != "="
+                at = end - 1
+            elif first or char == "<" and level:
+                return None  # no assignment's place, or a type parameter's
+            else:
+                at = end - 1
+            first = False
+        end = _run_start(text, at)
+        if (text[end - 1 : end] == ")" and self._control(end - 1)) or (
+            _JS_BLOCK_OPENER_RE.search(text, max(end - 8, 0), end)
+        ):
+            return False  # a statement's body without braces
+        if not held:
+            return self.whole
+        if direct and held[0] in self._classes:
+            return None
+        end = held[1]
+        if self._control(_run_start(text, held[0]) - 1) == "switch":
+            # A `switch` runs the statements from the case it jumps to.
+            end = next(
+                (
+                    label.start()
+                    for label in _JS_CASE_RE.finditer(text, start, end)
+                    if _innermost(self._brackets, label.start()) == held
+                ),
+                end,
+            )
+        return self.place(held[0]), self.place(end)
 
-        for found in _JS_ASSIGNMENT_RE.finditer(text):
-            block = in_block(found)
-            if block is None:
-                continue
-            # What it assigns holds from the statement's end: its value
-            # reads what the name held before.
-            row, column = self.place(found.start("name"))
-            last = _statement_end(lines, row - 1, column)
-            at = last + 1, len(lines[last])
-            span = self.block(found.start()) if block else ((row, column), at)
-            self._add(found["name"], "=", at, (row, last + 1), span)
+    def _expression_end(self, at):
+        """The offset where the expression that starts at offset ``at`` ends:
+        at the `,`, the `;` or the closing bracket after it outside brackets,
+        at a `:` that ends a branch of a conditional, or where its statement
+        ends."""
+        text = self.text
+        row, column = self.place(at)
+        last = _statement_end(self.lines, row - 1, column)
+        limit = self.starts[last] + len(self.lines[last])
+        branches = 0
+        while at < limit and text[at] not in ",;)]}" and (text[at] != ":" or branches):
+            if text[at] in "([{":
+                at = self.closer.get(at, limit)
+            elif text.startswith(("?.", "??"), at):
+                at += 1
+            else:
+                branches += (text[at] == "?") - (text[at] == ":")
+            at += 1
+        return min(at, limit)
 
     def _code_at(self, row, column):
         """The line index and column of the first code at or after column
@@ -10789,43 +11276,58 @@ class _JsScopes:
             else:
                 return row, column
 
-    def typed(self, binding):
-        """Whether the declaration ``binding`` writes its name's type."""
-        row, column = binding[1]
-        return binding[0] != "=" and bool(
-            re.match(r"[\w$]+\s*[?!]?\s*:(?!:)", self.lines[row - 1][column:])
-        )
+    def typed(self, name, binding):
+        """Whether the declaration ``binding`` of ``name`` writes its type."""
+        kind, (row, column), written, _ = binding
+        annotated = rf"{re.escape(name)}\s*[?!]?\s*:(?!:)"
+        if kind == "param":
+            start, end = (self.starts[r - 1] + c for r, c in written)
+            return bool(re.search(rf"(?<![\w$.]){annotated}", self.text[start:end]))
+        return kind != "=" and bool(re.match(annotated, self.lines[row - 1][column:]))
 
-    def reassigned(self, name, span, after, read):
-        """The assignments of ``name`` that blocks inside ``span`` hold,
-        written after ``after`` and closed before ``read``, of the variable
-        no declaration in those blocks binds: past its block one may have
-        given what the variable holds."""
-        bindings = self.bindings.get(name, ())
+    def assignments(self, name, span):
+        """The assignments of ``name`` in ``span``, of the variable a
+        declaration of that span binds: those no declaration inside it
+        binds."""
         inside = [
             b
-            for b in bindings
-            if b[3] != span and span[0] <= b[3][0] <= b[3][1] <= span[1]
+            for b in self.bindings.get(name, ())
+            if span[0] <= b[3][0] <= b[3][1] <= span[1]
         ]
-        declared = [b[3] for b in inside if b[0] != "="]
+        declared = [b[3] for b in inside if b[0] != "=" and b[3] != span]
         return [
             b
             for b in inside
-            if b[0] == "="
-            and after < b[1]
-            and b[3][1] < read
-            and not any(d[0] <= b[1] <= d[1] for d in declared)
+            if b[0] == "=" and not any(d[0] <= b[1] <= d[1] for d in declared)
         ]
 
-    def visible(self, name, read, last, more=()):
-        """The bindings of ``name``, and ``more``, in scope where it is read,
-        somewhere from ``read`` to ``last``: those whose span holds that, a
-        declaration from the start of its span, an assignment written before
-        the read or read from a function inside the one it is in."""
+    def reassigned(self, name, span, after, read):
+        """The assignments of ``name`` that blocks inside ``span`` hold,
+        written after ``after`` and closed before ``read`` or in a loop that
+        holds ``read`` and starts after ``after``, of the variable no
+        declaration in those blocks binds: past its block one may have
+        given what the variable holds, and in the loop's next run."""
+        loops = [loop for loop in self._loops if after < loop[0] <= read <= loop[1]]
+        return [
+            b
+            for b in self.assignments(name, span)
+            if b[3] != span
+            and after < b[1]
+            and (
+                b[3][1] < read
+                or any(loop[0] <= b[2][0] and b[2][1] <= loop[1] for loop in loops)
+            )
+        ]
+
+    def visible(self, name, read, last):
+        """The bindings of ``name`` in scope where it is read, somewhere from
+        ``read`` to ``last``: those whose span holds that, a declaration from
+        the start of its span, an assignment written before the read or read
+        from a function inside the one it is in."""
         reader = self.function(read)
         return [
             b
-            for b in [*self.bindings.get(name, ()), *more]
+            for b in self.bindings.get(name, ())
             if b[3][0] <= last
             and read <= b[3][1]
             and (b[1] <= last or b[0] != "=" or self.function(b[1]) != reader)
@@ -11044,8 +11546,11 @@ def _own_line_span(code: str, name_end: int) -> tuple[int, int] | None:
     return None
 
 
-# The name, annotation and `=` of a declarator after a `,`
-_TS_DECLARATOR_RE = re.compile(r"\s*([A-Za-z_$][\w$]*)\s*(?::[^=,;]*)?=(?![=>])\s*")
+# The name, annotation and `=` of a declarator after a `,`, the `=` where
+# it has a value
+_TS_DECLARATOR_RE = re.compile(
+    r"\s*([A-Za-z_$][\w$]*)\s*(?::[^=,;]*)?(?:(=)(?![=>])\s*|(?=[,;]|\s*$))"
+)
 
 
 def _value_end(code: str, start: int) -> int:
@@ -11063,7 +11568,8 @@ def _value_end(code: str, start: int) -> int:
                     code[column] == ","
                     and (
                         not code[column + 1 :].strip()
-                        or _TS_DECLARATOR_RE.match(code, column + 1)
+                        or (found := _TS_DECLARATOR_RE.match(code, column + 1))
+                        and found[2]
                     )
                 )
             )
@@ -11103,17 +11609,17 @@ def _passed_objects(
 
 def _declarators(
     lines: list[str], index: int, after: int
-) -> list[tuple[int, str, int, int]]:
+) -> list[tuple[int, str, int, int | None]]:
     """Each declarator after the first of the `const`, `let` or `var`
     statement whose first binding, a name or a destructuring pattern, ends
     at column ``after`` of line ``index``: `b` in `const a = f, b = () =>
     g();` or on a line the statement goes on to, as the index of its line,
     its name, the column its name ends at and the column its value starts
-    at. ``lines`` are the file's lines with the text of their literals
-    blanked."""
+    at, None for none. ``lines`` are the file's lines with the text of
+    their literals blanked."""
     declarators = []
     depth = 0
-    in_value = False  # past the first declarator's `=`
+    in_value = False  # past the declarator's `=`
     row, column = index, after
     while row < len(lines):
         code = lines[row]
@@ -11122,25 +11628,23 @@ def _declarators(
             if not in_value:
                 # The annotation's `<>` hold commas of their own.
                 depth += (char in "([{<") - (char in ")]}>" and code[column - 1] != "=")
-                if (
+                in_value = (
                     char == "="
                     and depth == 0
                     and code[column + 1 : column + 2] not in "=>"
-                ):
-                    in_value = True
+                )
             else:
                 depth += (char in "([{") - (char in ")]}")
-                if depth < 0 or (depth == 0 and char == ";"):
-                    return declarators
-                if depth == 0 and char == ",":
-                    rest, at, offset = code[column + 1 :], row, column + 1
-                    if not rest.strip() and row + 1 < len(lines):
-                        rest, at, offset = lines[row + 1], row + 1, 0
-                    named = _TS_DECLARATOR_RE.match(rest)
-                    if named:
-                        declarators.append(
-                            (at, named[1], offset + named.end(1), offset + named.end())
-                        )
+            if depth < 0 or (depth == 0 and char == ";"):
+                return declarators
+            if depth == 0 and char == ",":
+                rest, at, offset = code[column + 1 :], row, column + 1
+                if not rest.strip() and row + 1 < len(lines):
+                    rest, at, offset = lines[row + 1], row + 1, 0
+                if named := _TS_DECLARATOR_RE.match(rest):
+                    in_value = False
+                    value = offset + named.end() if named[2] else None
+                    declarators.append((at, named[1], offset + named.end(1), value))
             column += 1
         # The statement goes on where a bracket is open or the line ends
         # with the `,` before another declarator.
@@ -11161,6 +11665,19 @@ def _class_body_open(code: str, start: int) -> int | None:
             return column
         depth += (char in "([<") - (char in ")]>")
     return None
+
+
+def _declared_static(code: str, name: str) -> bool:
+    """Whether ``code``, a line of a class body, declares the member
+    ``name`` `static`."""
+    words = "|".join((*_TS_MODIFIER_WORDS, "get", "set", "accessor"))
+    return bool(
+        re.search(
+            rf"(?<![\w$.])static\s+(?:(?:{words})\s+|\*\s*)*"
+            rf"[\"']?{re.escape(name)}(?![\w$])",
+            code,
+        )
+    )
 
 
 def _member_filed(found: re.Match, text: str) -> str:
@@ -11576,6 +12093,9 @@ _JS_BLOCK_FUNCTION_RE = re.compile(
 )
 # The `new` a constructed type is named after
 _JS_NEW_RE = re.compile(r"\bnew\s+$")
+# What follows a function's parameters up to its block body's `{`: a return
+# type and an arrow's `=>`
+_JS_BODY_OPENS_RE = re.compile(r"\s*(?::[^=;{}()]*)?(?:=>)?\s*\{")
 _JS_FUNCTION_HEAD_RE = re.compile(r"\bfunction\s*\*?\s*$")
 # What a function expression follows where it is a value
 _JS_VALUE_START_RE = re.compile(r"(?:[(,=?:!|&]|\b(?:return|default|void))\s*$")
@@ -11590,18 +12110,14 @@ _JS_LITERAL_RE = re.compile(
 _JS_LITERAL_TYPES = {"/": "RegExp", "[": "Array"}
 # `this.name =`, an assignment to a field of the object a method is of
 _JS_THIS_FIELD_RE = re.compile(r"\bthis\.([\w$]+)\s*=(?![=>])")
-# What opens a `for` head, and `const pattern of value` or `const name in
-# value` in it
+# What opens a `for` head, and `const pattern of value` or `name in value`
+# in it
 _JS_FOR_START_RE = re.compile(r"\bfor\s*(?:await\s*)?\(")
 _JS_FOR_PARTS_RE = re.compile(
-    r"\s*(?:const|let|var)\s+(?P<pattern>.+?)\s+(?P<kind>of|in)\s+(?P<value>.+?)\s*"
+    r"\s*(?:(?:const|let|var)\s+)?(?P<pattern>.+?)\s+(?P<kind>of|in)\s+(?P<value>.+?)\s*"
 )
-# The line a declaration's pattern goes on over lines from, and the last
-# line of one, which closes it and gives the value
-_JS_PATTERN_OPENS_RE = re.compile(r"\b(?:const|let|var)\s+(?P<open>[\[{])[^\]}=]*$")
-_JS_PATTERN_END_RE = re.compile(
-    r"\s*[^=]*?(?P<close>[\]}])\s*=(?![=>])\s*(?P<value>.+?);?\s*$"
-)
+# The value a pattern's closing bracket is given, to the end of the line
+_JS_PATTERN_VALUE_RE = re.compile(r"\s*=(?![=>])\s*(?P<value>.+?);?\s*$")
 # A declaration that takes a value apart: `const { a, b } = value`
 _JS_PATTERN_RE = re.compile(
     r"\b(?:const|let|var)\s+(?P<pattern>[\[{].*[\]}])\s*=(?!=)\s*(?P<value>.+?);?\s*$"
@@ -11640,9 +12156,11 @@ _JS_CLAUSE_RE = {
     "do": re.compile(r"while\b"),
 }
 # Where a variable's binding starts, a name or a pattern, and the keyword
-# that declares it: `const`, `let`, `var`, or a `catch` clause's
+# that declares it, `const`, `let`, `var` or `using`, or the clause whose
+# head binds it: a `catch`, or a `for` whose head assigns a variable
 _JS_BINDING_HEAD_RE = re.compile(
-    r"(?<![\w$])(?:(const|let|var)\s+|catch\s*\(\s*)(?=[\w$\[{])"
+    r"(?<![\w$])(?:(const|let|var|using)\s+"
+    r"|(catch|for)\s*(?:await\s*)?\(\s*(?!(?:const|let|var|using)\s))(?=[\w$\[{])"
 )
 # The key of a property in an object pattern and the `:` after it, where
 # the pattern binds another name than the key: `key: name`, `[computed]:`
@@ -11688,10 +12206,10 @@ def _blank_js_strings(
     carried over from an earlier line is blanked together with the quote
     that closes it. ``keep`` leaves the text of the literals that open on
     the line where it is, for a reader of what a literal holds: an import's
-    module, a constant's value. With ``jsx``, the text of a JSX element is
-    turned to spaces too, and its tags and `{...}` expressions are kept;
-    ``before`` is the code the line follows, which no line break ends
-    before a `<` or a `/`."""
+    module, a constant's value. With ``jsx``, the text of a JSX element and
+    the names of its attributes are turned to spaces too, and its tags and
+    `{...}` expressions are kept; ``before`` is the code the line follows,
+    which no line break ends before a `<` or a `/`."""
     out = ""
     # open literals and comments: a quote character, a `${`'s brace depth,
     # `/*` for a comment still open, `<` or `</` for a JSX tag and `>` for
@@ -11752,6 +12270,11 @@ def _blank_js_strings(
                     out += "/"
                     i += 1
                 ch = ">"
+            elif top == "<" and (ch.isalnum() or ch in "_$-:"):
+                # An attribute's name, which names no variable
+                if keep:
+                    kept_at[len(out)] = ch
+                ch = " "
             out += ch
         elif isinstance(top, str):
             # The text of a literal that opened on this line.
@@ -11897,10 +12420,11 @@ _TS_BODY_HEAD_RE = re.compile(
     rf"|(?P<nested>{_TS_WRITTEN_MEMBER_NAME})\s*:)\s*\Z)"
 )
 # A line that opens an object it ends with: `export default {`, a
-# property's `key: {` or an element's `{`
+# property's `key: {`, a function's prototype, `F.prototype = {`, or an
+# element's `{`
 _TS_OBJECT_OPENS_RE = re.compile(
-    rf"\s*(?:(?P<default>export\s+default\s*)|(?P<key>{_TS_WRITTEN_MEMBER_NAME})\s*:\s*)?"
-    r"\{\s*$"
+    rf"\s*(?:(?P<default>export\s+default\s*)|(?P<key>{_TS_WRITTEN_MEMBER_NAME})\s*:\s*"
+    r"|(?P<prototype>[\w$]+)\.prototype\s*=\s*)?\{\s*$"
 )
 # What starts a statement after a block's `}` or a statement's `;` in the
 # other brace languages: not a word that goes on with the statement before
@@ -12067,6 +12591,7 @@ def _split_lines(
 
 
 class TSParser(BaseParser):
+    binds_ahead = False
     language = "typescript"
 
     def _property(self, lineno, line, column, declared, name):
@@ -12108,11 +12633,19 @@ class TSParser(BaseParser):
         declaration of that name in a narrower scope says."""
         return name not in self._imported
 
-    def _bind(self, bindings, index, *_):
+    def _bind(self, bindings, index, at, *_):
         """As the base's, where the binding is in scope is read from the
-        source."""
+        source; each name is bound where the code first names it from
+        column ``at`` of line ``index`` on."""
+        self._bind_from(bindings, self._scopes.starts[index] + at)
+
+    def _bind_from(self, bindings, offset):
+        """Give each name of ``bindings`` its origin path where the code
+        first names it from offset ``offset`` on."""
         for name, origin in bindings.items():
-            self._rebind(name, index + 1, origin)
+            found = _named(self._scopes.text, name, offset)
+            line, column = self._scopes.place(offset if found is None else found)
+            self._rebind(name, line, column, origin)
 
     def _read_as(self, origin):
         """The origin path a folded declaration reads a name as: what the
@@ -12154,7 +12687,7 @@ class TSParser(BaseParser):
                 # first in a statement too: `..., g: Fn =`
                 declared = re.search(
                     r"(?:\b(?:const|let|var)\s+|,\s*)([\w$]+)"
-                    r"(?:\s*:\s*((?:=>|<[^<>]*>|\([^()]*\)|[^;=,(<])*?))?\s*=\s*$",
+                    r"(?:\s*:\s*((?:=>|<[^<>]*>|\((?:[^()]|\([^()]*\))*\)|[^;=,(<])*?))?\s*=\s*$",
                     head,
                 )
                 later = declared and declared[0].startswith(",")
@@ -12178,14 +12711,14 @@ class TSParser(BaseParser):
                 # A function type an annotation writes outside parentheses
                 continue
             bindings = self._param_bindings(f"{origin}.^", params)
-            self._bind(bindings, index)
+            self._bind(bindings, index, bar)
         while self._held_closures and self._held_closures[0][0] < before:
             # A function given as a property of an object literal that a
             # call is passed takes what the call passes to that property.
             bar, params = self._held_closures.pop(0)
             if held := self._argument_label(code, bar):
                 bindings = self._param_bindings(f"{held}|", params)
-                self._bind(bindings, index)
+                self._bind(bindings, index, bar)
         super()._bind_closures(code, index, lines, before)
 
     def _param_bindings(self, origin, params):
@@ -12288,21 +12821,21 @@ class TSParser(BaseParser):
         if not found:
             found = _JS_PATTERN_RE.search(code)
         pattern = found and found["pattern"]
+        # The offset where the pattern is written
+        written = found and self._scopes.starts[index] + found.start("pattern")
         kind = found and found.groupdict().get("kind")
         span = found and found.span("value")
         if not found and (over := self._for_head_over_lines(code, index, lines)):
-            found, (pattern, kind, span, _) = True, over
-        if not found and (ended := _JS_PATTERN_END_RE.match(code)):
-            # A pattern over lines, from the line its declaration opens it on.
-            opened = None
-            for row in range(index - 1, max(index - 40, -1), -1):
-                if opened := _JS_PATTERN_OPENS_RE.search(lines[row]):
-                    break
-            if not opened:
+            found, (pattern, kind, span, _, head) = True, over
+            written = self._scopes.starts[head[0]] + head[1]
+        if not found and (opened := self._scopes.patterns.get(index + 1)):
+            # A pattern over lines that closes on this one
+            written, closed = opened
+            column = closed - self._scopes.starts[index] + 1
+            if not (found := _JS_PATTERN_VALUE_RE.match(code, column)):
                 return
-            parts = [lines[row][opened.start("open") :], *lines[row + 1 : index]]
-            pattern = " ".join([*parts, code[: ended.end("close")]])
-            found, span = ended, ended.span("value")
+            pattern = self._scopes.text[written : closed + 1]
+            span = found.span("value")
         if not found:
             return
         lineno = index + 1
@@ -12322,21 +12855,23 @@ class TSParser(BaseParser):
         bindings = {
             name: _bound_origin(origin, steps) for name, steps in self.bindings(pattern)
         }
-        self._bind(bindings, index)
+        self._bind_from(bindings, written)
 
     @staticmethod
     def _for_head_over_lines(code, index, lines):
-        """``(pattern, kind, value span, close)`` of a `for` head an earlier
-        line opens whose value starts on line ``index``, of code ``code``:
-        the span is the value's columns there and ``close`` the column of
-        the `)` that closes the head where it is on the line. None for any
-        other line."""
+        """``(pattern, kind, value span, close, head)`` of a `for` head an
+        earlier line opens whose value starts on line ``index``, of code
+        ``code``: the span is the value's columns there, ``close`` the column
+        of the `)` that closes the head where it is on the line, and
+        ``head`` the line index and column the head starts at after its `(`.
+        None for any other line."""
         for row in range(index - 1, max(index - 6, -1), -1):
             if heads := list(_JS_FOR_START_RE.finditer(lines[row])):
                 break
         else:
             return None
-        before = " ".join([lines[row][heads[-1].end() :], *lines[row + 1 : index]])
+        head = row, heads[-1].end()
+        before = " ".join([lines[row][head[1] :], *lines[row + 1 : index]])
         depth = 1 + before.count("(") - before.count(")")
         if depth < 1:
             return None
@@ -12357,7 +12892,7 @@ class TSParser(BaseParser):
             return None
         span = parts.start("value") - shift, parts.end("value") - shift
         close = column if row == index else None
-        return parts["pattern"], parts["kind"], span, close
+        return parts["pattern"], parts["kind"], span, close, head
 
     def _binds_file(self, name):
         """A line outside every definition that starts at the margin, as
@@ -12400,78 +12935,97 @@ class TSParser(BaseParser):
             return (lineno, 0), (lineno, 1 << 30)
         return (lineno, self._read_at), (lineno, self._read_at)
 
-    def _bindings(self, name, lineno, more=()):
-        """The bindings of ``name``, and ``more``, in scope where it is read
-        on line ``lineno`` (see ``_read``): the innermost first, of those of
-        one scope the last written."""
-        visible = self._scopes.visible(name, *self._read(lineno), more)
+    def _bindings(self, name, lineno):
+        """The bindings of ``name`` in scope where it is read on line
+        ``lineno`` (see ``_read``): the innermost first, of those of one
+        scope the last written."""
+        visible = self._scopes.visible(name, *self._read(lineno))
         return sorted(
             visible,
             key=lambda b: (b[3][0], (-b[3][1][0], -b[3][1][1]), b[1]),
             reverse=True,
         )
 
+    def _declaration(self, name, lineno):
+        """The innermost of ``_bindings`` that declares ``name``, not an
+        assignment; None for none."""
+        return next((b for b in self._bindings(name, lineno) if b[0] != "="), None)
+
     def _declared(self, name, lineno, since, anywhere=False):
-        """As the base's for a field or a type parameter, `<T>`; any other
-        name is read as the innermost binding in scope declares it, where
-        one of no declared value, as an untyped parameter, hides those
-        around it, and one read before it is set has no value. A function
-        inside reads the binding written before it
-        or any of its scope written after, and past a block that assigns
-        the variable it holds what the block gives or what it held: where
-        they differ the value is not known, but for a variable declared
-        with a type. A declaration the source shows no binding of on its
-        line is in scope in the block around the line, but a class's
-        field."""
-        if anywhere or name.startswith("<"):
+        """As the base's for a field; any other name is read as the
+        innermost binding in scope declares or assigns it, where one of no
+        value known, as an untyped parameter or an assignment of a value not
+        read, hides those around it, and one read before it is set has no
+        value. A function inside reads the binding written before it or any
+        of its scope written after, and past an assignment that may not have
+        run the variable holds what it gives or what it held: where they
+        differ or one is not known the value is not known, but for a
+        variable declared with a type."""
+        if anywhere:
             return super()._declared(name, lineno, since, anywhere)
         entries = [
             d for d in self.declared.get(name, ()) if (d[0], name) not in self._members
         ]
-        written = self._scopes.bindings.get(name, ())
-        loose = [
-            (
-                "loose",
-                (line, 0),
-                (line, line),
-                self._scopes.block(self._scopes.starts[line - 1]),
-            )
-            for line in {d[0] for d in entries}
-            if line <= len(self._scopes.lines)
-            and not any(b[2][0] <= line <= b[2][1] for b in written)
-            and not self._scopes.in_class(self._scopes.starts[line - 1])
-        ]
 
-        def held(bound):
-            found = [d for d in entries if bound[2][0] <= d[0] <= bound[2][1]]
-            # A callback's parameter and a declaration on one line are told
-            # apart by what their value is.
+        def value(bound):
+            """What the binding ``bound`` gives the name: the last of the
+            declarations written in its text. A callback's parameter and a
+            declaration on one line are told apart by what their value is."""
+            first, last = bound[2]
+            found = [d for d in entries if first <= (d[0], d[3]) <= last]
             param = bound[0] == "param"
             kept = [d for d in found if bool(_CALLBACK_RE.match(d[1] or "")) == param]
-            return kept or found
+            return (kept or found or [(0, None)])[-1][1]
 
         read = self._read(lineno)[1]
-        chosen = []
-        for bound in self._bindings(name, lineno, loose):
-            if chosen and bound[3] != chosen[0][3]:
-                break
-            if bound[0] == "=" and not held(bound):
-                # What an assignment gives is not read: the variable is
-                # still of the type it is declared with.
-                continue
-            if self._scopes.unset(bound, read):
-                return None
-            chosen.append(bound)
-            if bound[1] <= read:
-                chosen += self._scopes.reassigned(name, bound[3], bound[1], read)
-                break
-        chosen = [b for b in chosen if b[0] != "=" or held(b)]
-        values = {(held(b) or [(0, None)])[-1][1] for b in chosen}
-        if len(values) > 1:
-            # A variable declared with a type holds a value of that type.
-            typed = [b for b in chosen if self._scopes.typed(b)]
-            values = {(held(b) or [(0, None)])[-1][1] for b in typed}
-        return values.pop() if len(values) == 1 else None
+        bindings = self._bindings(name, lineno)
+        declared = self._declaration(name, lineno)
+        reader = self._scopes.function(read)
+        # A function reads a variable from around it after any assignment
+        # another function makes, or an earlier run of itself made.
+        assigned = []
+        if declared and self._scopes.function(declared[1]) != reader:
+            assigned = self._scopes.assignments(name, declared[3])
+        if any(self._scopes.function(b[1]) != reader for b in assigned):
+            chosen = [declared, *assigned]
+        else:
+            chosen = []
+            for bound in bindings:
+                if chosen and bound[3] != chosen[0][3]:
+                    break
+                if self._scopes.unset(bound, read):
+                    return None
+                chosen.append(bound)
+                if bound[1] <= read:
+                    chosen += self._scopes.reassigned(name, bound[3], bound[1], read)
+                    if bound is declared:
+                        chosen += assigned
+                    break
+        values = {value(b) for b in chosen}
+        if len(values) == 1 and None not in values:
+            return values.pop()
+        # A variable declared with a type holds a value of that type.
+        typed = declared and self._scopes.typed(name, declared)
+        return value(declared) if typed else None
+
+    def _assigned(self, code, name, at, start, end, lineno, since, owner):
+        """Origin path of the value at columns ``start`` to ``end`` of
+        ``code``, line ``lineno``, that an assignment of ``name`` written at
+        ``(line, column)`` ``at`` gives it: of the call or the name it is.
+        None where the line binds the name again or the scan gives it a
+        type of its own, as `new T()` does, and for a variable declared
+        with a type, which holds that type."""
+        declared = self._read_from(start, self._declaration, name, lineno)
+        lines = [range(b[2][0][0], b[2][1][0] + 1) for b in self._scopes.bindings[name]]
+        if (
+            declared
+            and self._scopes.typed(name, declared)
+            or sum(lineno in written for written in lines) > 1
+            or any((d[0], d[3]) == at for d in self.declared.get(name, ()))
+        ):
+            return None
+        held = self._expression_origin(code, start, end, lineno, since, owner)
+        return None if held and re.search(r"(?:^|\.)[\w$]+$", held) else held
 
     def _object_held(self, lines, index, column, since, owner):
         """What each property of the object literal that opens at ``column``
@@ -12709,7 +13263,18 @@ class TSParser(BaseParser):
         # counted on it.
         code_lines = self._code_lines = _blank_js_lines(lines, jsx=jsx)
         self._scopes = _JsScopes(code_lines)
-        if _JS_MODULE_RE.search(self._scopes.text):
+        scopes = self._scopes
+        # The blocks scope a type parameter.
+        self.read_blocks(code_lines, (scopes.text, scopes.starts, scopes.closer))
+        # What a module declares is its own: a file with an `import` or an
+        # `export`, one its extension makes one, or a JavaScript file that
+        # CommonJS does.
+        if (
+            _JS_MODULE_RE.search(scopes.text)
+            or rel_path.endswith((".mjs", ".cjs", ".mts", ".cts"))
+            or rel_path.endswith((".js", ".jsx"))
+            and _JS_COMMONJS_RE.search(scopes.text)
+        ):
             self.builder.js_modules.add(file_id)
         self.scan_declarations(lines, _TS_DECLARATIONS)
         self.builder.type_aliases.update(_TYPE_ALIAS_RE.findall(content))
@@ -12786,7 +13351,10 @@ class TSParser(BaseParser):
                 source = source[
                     start[1] : len(source) - len(lines[close[0] - 1]) + close[1] + 1
                 ]
+                offset, at = scopes.starts[start[0] - 1] + start[1], 0
                 for part in _bracketed_parts(source[1:]) if listed else ():
+                    part_at = source.index(part, at)
+                    at = part_at + len(part)
                     typed = _TS_TYPED_PARAMETER_RE.fullmatch(part)
                     written = typed and typed[2].removeprefix("readonly ").strip()
                     if not typed or typed[1][0] not in "[{" and written[0] not in "[{":
@@ -12797,7 +13365,12 @@ class TSParser(BaseParser):
                         self.builder.parameter_types[held] = typed[2], file_id
                     for name, steps in _js_bindings(typed[1]):
                         value = _bound_origin(held, steps)
-                        self.declared.setdefault(name, []).append((row, value, False))
+                        named = scopes.place(
+                            _named(scopes.text, name, offset + part_at)
+                        )
+                        self.declared.setdefault(name, []).append(
+                            (named[0], value, False, named[1])
+                        )
         # Configuration patterns: interceptors, middleware, event handlers
         # These are method calls that set up important runtime behavior
         re_interceptor = re.compile(
@@ -12810,7 +13383,8 @@ class TSParser(BaseParser):
             r"^\s*([a-zA-Z0-9_]+)\.on\s*\(\s*['\"]([a-zA-Z0-9_:]+)['\"]"
         )
 
-        untyped = ("", 0)  # the variable the line before declared, and that line
+        # The variable the line before declared, that line and its column
+        untyped = ("", 0, None)
         # The call that starts the value of a variable declared with a type,
         # and that type, until the call is closed
         initialises = None
@@ -12858,6 +13432,101 @@ class TSParser(BaseParser):
         interface_ids = set()  # interfaces that have the ID `<scope>::<name>`
         type_bodies = set()  # interfaces and object types, whatever their ID
         value_ids = set()  # functions and variables, which always have it
+        # What prototype assignments file members under: the prototypes,
+        # `F.prototype`, made here, and classes
+        prototype_ids = set()
+        # The functions whose prototypes the file writes to
+        prototyped = set(
+            re.findall(r"^\s*([\w$]+)\.prototype\b", scopes.text, re.MULTILINE)
+        )
+
+        def declared(name, lineno):
+            """``(ID, kind)`` of the function or the class that ``name``
+            names where line ``lineno`` reads it, `function` or `class`:
+            the binding in scope, declared in the innermost definition
+            around the line that holds the declaration, the declaration's
+            own aside. A function declaration is hoisted; a variable holds a
+            function from where it is given one. None for anything else."""
+            bound = self._declaration(name, lineno)
+            if bound is None or bound[0] not in _JS_DECLARING_KINDS:
+                return None
+            row = bound[1][0]
+            scope = next(c[0] for c in reversed(self._contexts) if c[1] < row <= c[2])
+            owner_id = f"{scope}::{name}"
+            if bound[0] == "class":
+                return owner_id, "class"
+            node = self._node(owner_id)
+            value = node and node["metadata"].get("value")
+            if (
+                node
+                and (node["type"] == "Function" or value and _function_value(value))
+                or bound[0] == "function"
+                and not node
+                and row > lineno
+            ):
+                return owner_id, "function"
+            return None
+
+        def prototype(name, lineno, member=True):
+            """The ID of what the instances of the function or class
+            ``name``, as line ``lineno`` names it, take a member assigned to
+            its prototype from: the class, or the function's prototype,
+            `F.prototype`, made on first use. Without ``member`` the
+            prototype itself is assigned, which a class's cannot be. None
+            where ``name`` names no such function or class."""
+            found = declared(name, lineno)
+            if not found or found[1] == "class" and not member:
+                return None
+            if found[1] == "class":
+                prototype_ids.add(found[0])
+                return found[0]
+            made = f"{found[0]}.prototype"
+            if made not in prototype_ids:
+                self.builder.add_node(
+                    made,
+                    "Class",
+                    name=f"{name}.prototype",
+                    kind="prototype",
+                    lineno=lineno,
+                )
+                self.builder.add_edge(found[0].rpartition("::")[0], made, "DEFINES")
+                prototype_ids.add(made)
+            return made
+
+        # The static members: those a class body declares `static`, and those
+        # assigned to a function or a class
+        static_ids = set()
+
+        def free_key(owner_id, name):
+            """The key a member ``name`` assigned to ``owner_id`` is filed
+            under: ``name``, and given again `name#2` and on."""
+            key, count = name, 1
+            while self._node(f"{owner_id}::{key}"):
+                count += 1
+                key = f"{name}#{count}"
+            return key
+
+        def member_id(owner_id, name, lineno):
+            """The ID of the member ``name`` that line ``lineno`` writes in
+            the body of ``owner_id``: of a class, one declared `static` is
+            the constructor's, and a static and an instance member of one
+            name are two."""
+            member = f"{owner_id}::{name}"
+            row = code_lines[lineno - 1] if owner_id in class_ids else ""
+            static = _declared_static(row, name.rpartition(" ")[2])
+            if self._node(member) and static != (member in static_ids):
+                member = f"{owner_id}::{free_key(owner_id, name)}"
+            static_ids.update([member] if static else ())
+            return member
+
+        def hold(owner_id, key, name, held, lineno):
+            """File the member ``name`` of ``owner_id`` that holds what the
+            name ``held`` does, under ``key``."""
+            member_id = f"{owner_id}::{key}"
+            self.builder.add_node(
+                member_id, "Constant", name=name, value=held, lineno=lineno
+            )
+            self.builder.add_edge(owner_id, member_id, "DEFINES")
 
         def enter(node_id, lineno, end_lineno, signature="", span=None):
             """Make a definition that spans further lines the context, and
@@ -12913,16 +13582,58 @@ class TSParser(BaseParser):
                     return node_id
             return file_id
 
+        def invoked(row, column):
+            """Whether the function written from column ``column`` of line
+            ``row``, a 0-based index, is called where it is written:
+            `(() => {...})()`, `(function () {...}())`, `!function () {...}()`.
+            It is then no function but what it returns."""
+            text, at = scopes.text, scopes.starts[row] + column
+            group = text[:at].rstrip()
+            if group.endswith("(") and len(group) - 1 in scopes.closer:
+                after = scopes.closer[len(group) - 1] + 1
+                if text[after:].lstrip()[:1] == "(":
+                    return True
+            head = re.compile(r"(?:async\s*)?(?:function\b\s*\*?\s*[\w$]*\s*)?").match(
+                text, at
+            )
+            params = head.end()
+            params = (
+                scopes.closer.get(params, params)
+                if text[params : params + 1] == "("
+                else params
+            )
+            body = _JS_BODY_OPENS_RE.match(text, params + 1)
+            closed = body and scopes.closer.get(body.end() - 1)
+            return bool(closed) and text[closed + 1 :].lstrip()[:1] == "("
+
+        def value_start(row):
+            """The column of line ``row`` that the value given on it starts
+            at, inside the parentheses it may be written in; None where the
+            line gives none."""
+            code = code_lines[row]
+            given = "=" if _TS_VARIABLE_RE.match(code) or "=" in code else ":"
+            found = re.compile(
+                rf"{given}(?![=>])\s*(?:\((?=\s*(?:\(|function\b|async\b))\s*)?"
+            ).search(code)
+            return found and found.end()
+
+        def source_at(row, column, parent_id, spans):
+            """The definition whose code column ``column`` of line ``row`` is:
+            that of the innermost of ``spans`` that holds it, else the one
+            ``owner_at`` gives, else ``parent_id``."""
+            source = owner_at(row, column) or parent_id
+            for span_start, span_end, node_id in spans:
+                if span_start <= column < span_end:
+                    source = node_id
+            return source
+
         def value_of(name, lineno, since, owner, column):
             """The origin of a call of ``name`` at column ``column`` of line
             ``lineno`` that calls a value: `?` for a parameter, what one
             declared `typeof x` holds, and `=name` for a variable a function
             declares, where no definition there defines the name and the
             variable's origin is not known."""
-            read_at, self._read_at = self._read_at, column
-            bindings = self._bindings(name, lineno)
-            self._read_at = read_at
-            bound = next((b for b in bindings if b[0] != "="), None)
+            bound = self._read_from(column, self._declaration, name, lineno)
             # A name a `require` binds is the module's.
             if (
                 bound is None
@@ -13047,7 +13758,8 @@ class TSParser(BaseParser):
                         or angles > 0
                     )
                     if arrow or not open_ended:
-                        return j, arrow, text
+                        start = arrow and value_start(idx)
+                        return j, None if start and invoked(idx, start) else arrow, text
                 return idx, None, ""
 
             def consume_sig(idx, start=0):
@@ -13140,7 +13852,7 @@ class TSParser(BaseParser):
                 open_member = None
                 made = []
                 for member, name_end, text, member_end in written:
-                    mid = f"{class_id}::{member}"
+                    mid = member_id(class_id, member, lineno)
                     return_type, param_types, typed = self._extract_ts_types(text)
                     self.builder.add_node(
                         mid,
@@ -13196,6 +13908,37 @@ class TSParser(BaseParser):
             # unless it is written inside brackets, where the line declares
             # what it does without it.
             cx = None if continuing else re_class.search(code_lines[i])
+            # A member assigned to the prototype of a function or a class is
+            # its instances', one assigned to a function, `F.name = value`,
+            # the function's own, written `F.name` as source writes it: a
+            # function, or what a name holds. A member assigned again is
+            # `name#2` and on. A prototype assigned an object other than a
+            # literal has the base the object is read through.
+            assignment = not continuing and _JS_ASSIGNED_MEMBER_RE.match(code_lines[i])
+            given = assignment and code_lines[i][assignment.end() :].partition("=")[2]
+            name_given = given and re.fullmatch(
+                r"\s*(?!(?:true|false|null|undefined|this)\b)([A-Za-z_$][\w$]*)\s*;?\s*",
+                given,
+            )
+            filed_as = None
+            if name_given or given and _function_value(given):
+                owner = (
+                    prototype(assignment[2], lineno)
+                    if assignment[3]
+                    else (declared(assignment[2], lineno) or (None,))[0]
+                )
+                key = owner and free_key(owner, assignment[1])
+                if not assignment[3] and owner:
+                    static_ids.add(f"{owner}::{key}")
+                if owner and name_given:
+                    hold(owner, key, assignment[1], name_given[1], lineno)
+                elif owner:
+                    object_id, object_scope, filed_as = owner, None, key
+            replaced = not continuing and _JS_PROTOTYPE_RE.match(code_lines[i])
+            if replaced and (made := prototype(replaced[1], lineno, member=False)):
+                base = _prototype_base(replaced[2])
+                if base:
+                    self.builder.add_edge(made, f"REF:{base}", "INHERITS")
             if continuing or held_open or (cx and cx.group("enclosed") is None):
                 pass
             elif (match := re_const.search(line)) and (
@@ -13213,7 +13956,11 @@ class TSParser(BaseParser):
                     # A namespace and a value of one name are one: the
                     # value's type gives the members the namespace has not.
                     namespaces[cid]["value_type"] = value_type
-                if val and (held := _arrow_function(line)):
+                if (
+                    val
+                    and (held := _arrow_function(line))
+                    and not invoked(i, value_start(i) or 0)
+                ):
                     valued = self._arrow_typed(held[1], line)
                     arrow_id = cid
                     own_defs.append((cid, match.end(1)))
@@ -13258,10 +14005,10 @@ class TSParser(BaseParser):
             elif parent_id not in class_ids and (
                 opened := _TS_OBJECT_OPENS_RE.match(code_lines[i])
             ):
-                # An object `export default` gives, a property's or an
-                # element's: its functions are its members. A property's is
-                # named as source reaches it, through its key; the others no
-                # name source writes.
+                # An object `export default` gives, a property's, a
+                # prototype or an element's: its functions are its members.
+                # A property's is named as source reaches it, through its
+                # key; the others no name source writes.
                 last = self._find_block_end(code_lines, i)
                 key = opened["key"] and parent_id in object_ids and opened["key"]
                 if key:
@@ -13270,6 +14017,8 @@ class TSParser(BaseParser):
                         oid, "Constant", name=_ts_unquote(key), lineno=lineno
                     )
                     self.builder.add_edge(parent_id, oid, "DEFINES")
+                elif opened["prototype"]:
+                    oid = prototype(opened["prototype"], lineno, member=False)
                 elif opened["key"] is None and (opened["default"] or array):
                     held = elements_of and lineno <= elements_of[1] and elements_of[0]
                     oid = self._nameless_owner(
@@ -13395,7 +14144,7 @@ class TSParser(BaseParser):
                 name, parameters = arrow
                 j = statement[0]
                 docstring = self.get_leading_docstring(lines, i)
-                fid = f"{object_id or parent_id}::{name}"
+                fid = f"{object_id or parent_id}::{filed_as or name}"
                 # A block is left open where the statement stops; an
                 # expression body ends with the statement.
                 last = code_lines[j]
@@ -13416,7 +14165,10 @@ class TSParser(BaseParser):
                     valued = typed
                 self.builder.add_node(
                     fid,
-                    "Function",
+                    # A prototype's function is its instances' method.
+                    "Method"
+                    if fid.rpartition("::")[0] in prototype_ids
+                    else "Function",
                     name=name,
                     signature=signature,
                     lineno=lineno,
@@ -13426,7 +14178,7 @@ class TSParser(BaseParser):
                     signatures=self._overloads(fid, typed, end_lineno),
                 )
                 self.builder.add_edge(object_id or parent_id, fid, "DEFINES")
-                named = _TS_VARIABLE_RE.match(line) or _TS_PROPERTY_RE.match(line)
+                named = _value_named(line)
                 if named and _ts_unquote(named.group(1)) == name:
                     own_defs.append((fid, named.end(1)))
                 enter(
@@ -13438,13 +14190,22 @@ class TSParser(BaseParser):
                 head = statement[2][: len(statement[2]) - len(parameters)]
                 annotated = re.search(r":\s*(.*?)\s*=\s*$", head)
                 if j > i and annotated:
-                    # Over lines, the arrow's parameters read the function
-                    # type it is declared as where they close.
+                    # Over lines, the arrow's parameters, the first list
+                    # that closes on line j, read the function type it is
+                    # declared as.
                     params = _function_parameters(parameters)
                     bindings = self._param_bindings(
                         f">{_path_written(annotated[1])}.^", params
                     )
-                    self._bind(bindings, j)
+                    opened = min(
+                        (
+                            r[0]
+                            for r in scopes.params.get(j + 1, ())
+                            if r[1][0] == j + 1
+                        ),
+                        default=(i + 1, 0),
+                    )
+                    self._bind(bindings, opened[0] - 1, opened[1])
                 arrow_id = fid
                 signature_until = j + 1  # its last line, as a line number
             elif parent_id in object_ids and (match := re_held.match(line)):
@@ -13452,7 +14213,14 @@ class TSParser(BaseParser):
                 # what that holds.
                 spread, key, name = match.groups()
                 held = ("*" if spread else key or name, "", name)
-                self.builder.reexports.setdefault(parent_id, []).append(held)
+                if parent_id in prototype_ids and spread:
+                    # A prototype spread an object has what that has.
+                    self.builder.add_edge(parent_id, f"REF:{name}", "INHERITS")
+                elif parent_id in prototype_ids:
+                    member = key or name
+                    hold(parent_id, free_key(parent_id, member), member, name, lineno)
+                else:
+                    self.builder.reexports.setdefault(parent_id, []).append(held)
             elif (
                 parent_id in type_bodies
                 and (written := _ts_type_member(code_lines, i))
@@ -13568,7 +14336,7 @@ class TSParser(BaseParser):
                 ):
                     declared_at = name_start
                     docstring = self.get_leading_docstring(lines, i)
-                    mid = f"{object_id or parent_id}::{name}"
+                    mid = member_id(object_id or parent_id, name, lineno)
                     return_type, param_types, typed = self._extract_ts_types(full_sig)
                     # Build signature like: function name(p1: T1, p2: T2): ReturnType
                     signature = self._build_ts_signature(name, param_types, return_type)
@@ -13620,7 +14388,9 @@ class TSParser(BaseParser):
                 j, full_sig, end_lineno = consume_sig(i)
                 # An accessor is filed as source writes it, `get name`, which
                 # tells a pair apart and is no name a method can have.
-                mid = f"{object_id or parent_id}::{accessor_type} {name}"
+                mid = member_id(
+                    object_id or parent_id, f"{accessor_type} {name}", lineno
+                )
                 return_type, param_types, typed = self._extract_ts_types(full_sig)
                 # Build signature for getter/setter
                 if accessor_type == "get":
@@ -13832,9 +14602,9 @@ class TSParser(BaseParser):
                 entries = self.declared.get(name, [])
                 kept = [e for e in entries if e[0] != untyped[1] or e[1]]
                 if not any(e[0] == untyped[1] for e in kept):
-                    kept.append((untyped[1], None, False))
+                    kept.append((untyped[1], None, False, untyped[2]))
                 self.declared[name] = kept
-            untyped = ("", 0)
+            untyped = ("", 0, None)
             if literal := _JS_LITERAL_RE.search(code):
                 builtin = _JS_LITERAL_TYPES.get(literal["literal"][0], "string")
                 if builtin == "Array":
@@ -13843,10 +14613,15 @@ class TSParser(BaseParser):
                     self.builder.literals[array[0]] = []
                     builtin = f"Array<{array[0]}>"
                 self.declared.setdefault(literal["name"], []).append(
-                    (lineno, f"{builtin}()", not line[:1].isspace())
+                    (
+                        lineno,
+                        f"{builtin}()",
+                        not line[:1].isspace(),
+                        literal.start("name"),
+                    )
                 )
             elif binding := self.binding_re.search(code):
-                untyped = (binding["name"], lineno)
+                untyped = (binding["name"], lineno, binding.start("name"))
             since = self.context_at(lineno)[1]
             # The definition the line is in, before it enters those the
             # line opens
@@ -13910,7 +14685,11 @@ class TSParser(BaseParser):
                 block_end = self._find_block_end(code_lines, i, opened)
                 if block_end <= lineno:
                     continue
-                if self.paren_around(bar) is None and len(self._open_calls) <= outer:
+                if (
+                    self.paren_around(bar) is None
+                    and len(self._open_calls) <= outer
+                    and not invoked(i, bar)
+                ):
                     # Not an argument: the lines of its body are those
                     # of the definition around it, or of the constant
                     # whose value holds it, and read its parameters too.
@@ -13946,6 +14725,8 @@ class TSParser(BaseParser):
                 head := _TS_DECLARATION_HEAD_RE.match(code_lines[i])
             ):
                 for at, *declarator in _declarators(code_lines, i, head.end()):
+                    if declarator[2] is None:
+                        continue
                     top = self._binds_file(declarator[0])
                     later_declarators.setdefault(at, []).append(
                         (parent_id, head[1], top, *declarator)
@@ -13955,7 +14736,8 @@ class TSParser(BaseParser):
                 # The first is typed by its value as a later one is, where no
                 # call is it: what a call returns, the line's binding gives.
                 value_end = _value_end(code_lines[i], first.end())
-                if code[first.end() : value_end].rstrip().endswith(")"):
+                value = code[first.end() : value_end].rstrip()
+                if value.endswith(")") and _is_call_chain(value):
                     continue
                 typed_as = self._expression_origin(
                     code, first.end(), value_end, lineno, since, owner
@@ -13963,7 +14745,7 @@ class TSParser(BaseParser):
                 # A member read it holds is read through the name itself: a
                 # call of a name a body declares calls what the name holds.
                 if typed_as and not re.search(r"(?:^|\.)[\w$]+$", typed_as):
-                    self._rebind(first[1], lineno, typed_as)
+                    self._rebind(first[1], lineno, first.start(1), typed_as)
             for scope_id, kind, top, later, name_end, value_at in declared_here:
                 # A later declarator is typed by its value as the first is.
                 value_end = _value_end(code_lines[i], value_at)
@@ -13971,13 +14753,15 @@ class TSParser(BaseParser):
                     code, value_at, value_end, lineno, since, owner
                 )
                 if typed_as:
-                    self.declared.setdefault(later, []).append((lineno, typed_as, top))
+                    self.declared.setdefault(later, []).append(
+                        (lineno, typed_as, top, name_end - len(later))
+                    )
                 if top and later in self.declared:
                     # The declaration scan reads an indented line as inside
                     # a definition.
                     self.declared[later] = [
-                        (line, value, at_top or line == lineno)
-                        for line, value, at_top in self.declared[later]
+                        (line, value, at_top or line == lineno, at)
+                        for line, value, at_top, at in self.declared[later]
                     ]
                 held = _function_value(line[value_at:])
                 constant = kind == "const"
@@ -14019,12 +14803,18 @@ class TSParser(BaseParser):
             ):
                 spans.append((*region, self.enclosing_scope(parent_id)))
             # A field a class's code assigns, `this.name = value`, is the
-            # class's own.
-            assigner = parent_id
-            while assigner and assigner not in class_ids:
-                assigner = assigner.rpartition("::")[0]
-            for assigned in _JS_THIS_FIELD_RE.finditer(code) if assigner else ():
-                self.builder.js_assigned.setdefault(assigner, set()).add(assigned[1])
+            # class's own; one the body of a function whose prototype the
+            # file writes to assigns, its instance's.
+            for assigned in _JS_THIS_FIELD_RE.finditer(code):
+                writer = assigner = source_at(i, assigned.start(), parent_id, spans)
+                while assigner and assigner not in class_ids | prototype_ids:
+                    assigner = assigner.rpartition("::")[0]
+                if not assigner and writer.rpartition("::")[2] in prototyped:
+                    assigner = f"{writer}.prototype"
+                if assigner:
+                    value = code[assigned.end() :].partition(";")[0].strip()
+                    held = self.builder.assigned.setdefault(assigner, {})
+                    held.setdefault(assigned[1], set()).add(value)
             # A `for` head that closes on the line: the names it binds hold
             # in a body written after it there.
             head = _JS_FOR_START_RE.search(code)
@@ -14103,12 +14893,8 @@ class TSParser(BaseParser):
                         held = self._this_in_object(code, match.start(1))
                         if held:
                             origin = f"{held}.{called}"
-                    source = owner_at(i, match.start(1)) or parent_id
-                    for span_start, span_end, node_id in spans:
-                        if span_start <= match.start(1) < span_end:
-                            source = node_id
                     self.add_call(
-                        source,
+                        source_at(i, match.start(1), parent_id, spans),
                         callee,
                         lineno,
                         since,
@@ -14269,6 +15055,12 @@ class TSParser(BaseParser):
                 )
             self._bind_closures(code, i, code_lines, len(code))
             self._name_results(code, lineno, since, owner)
+            for name, at, start, end in self._scopes.assigned.get(lineno, ()):
+                held = self._assigned(code, name, at, start, end, lineno, since, owner)
+                if held:
+                    self.declared.setdefault(name, []).append(
+                        (lineno, held, False, start)
+                    )
             if body <= len(code):
                 self._bind_patterns(code, i, code_lines, since, owner)
             for index, paren, _ in calls:
@@ -14297,6 +15089,9 @@ class TSParser(BaseParser):
                 array = (array[0], depth) if depth > 0 else None
             i += 1
 
+        for node in self.builder.nodes[self._first_node :]:
+            if node["id"] in static_ids:
+                node["metadata"]["static"] = True
         # What the resolver reads by the ID a node ends up with: its
         # signatures, and each field's type for each class or interface of
         # that name in the file.
@@ -14941,12 +15736,15 @@ class CallResolver:
         # parameters its arguments deduce}
         self.c_specializations = {}
         self._bounding = set()  # type parameters whose bounds are being read
+        self._reading = set()  # (class, attribute) whose values are being read
         for node_id, node in self.nodes.items():
             parent, name = _member_split(node_id, node["metadata"].get("name", ""))
             self.c_spaces.update(node["metadata"].get("opens", ()))
             if parent:
                 lang = self.lang(node_id)
-                self.by_name.setdefault((lang, name), []).append(node_id)
+                # A JavaScript member given again, `name#2`, is one of its name.
+                written = re.sub(r"#\d+$", "", name) if lang == "typescript" else name
+                self.by_name.setdefault((lang, written), []).append(node_id)
                 self.members.setdefault(parent, {})[name] = node_id
                 declared = self._name(node_id)
                 special = name.startswith(f"{declared}<")
@@ -14959,6 +15757,10 @@ class CallResolver:
                     # a C++ specialization by the arguments it is named with.
                     self.renamed_types.setdefault((lang, declared), []).append(node_id)
                     self.companions[f"{parent}::{declared}"] = node_id
+                if node["metadata"].get("kind") == "prototype":
+                    # A function's prototype is what `new` makes an instance of.
+                    function = name.removesuffix(".prototype")
+                    self.companions[f"{parent}::{function}"] = node_id
         # Object-like C/C++ macro -> what every definition of it expands
         # to, None where they disagree; and the names scopes are written by
         self.c_macros, self.c_scopes = {}, set(self.c_spaces)
@@ -15709,18 +16511,38 @@ class CallResolver:
             for path in paths:
                 scopes = imported
                 for segment in path:
-                    found = (self._find_member(scope, segment)[0] for scope in scopes)
+                    found = (
+                        self._find_member(scope, segment, static=True)[0]
+                        for scope in scopes
+                    )
                     scopes = [scope for scope in found if scope]
                 hits = {
                     i for i in scopes if not qualifier and i.endswith(f"::{looked_up}")
                 }
-                hits |= {self._find_member(scope, looked_up)[0] for scope in scopes}
+                hits |= {
+                    self._find_member(scope, looked_up, static=True)[0]
+                    for scope in scopes
+                }
                 hits.discard(None)
                 if hits:
                     break
             if hits or (candidates and (len(qualifier) <= 1 or rooted)):
                 hit = self._decide(sorted(hits), source_id) if hits else None
                 return (hit, "regex") if hit else (None, _UNRESOLVED)
+        held = len(qualifier) == 1 and self._written(qualifier[0], source_id, set())
+        if self._js_function(held):
+            # A property of a function is one assigned to it, else one every
+            # function has, else one assigned to it where none is told,
+            # which any member of the name may be.
+            hit, complete = self._find_member(held, name)
+            if hit or complete == _SEVERAL:
+                return (hit, "regex") if hit else (None, _UNRESOLVED)
+            function = self.standard[lang].value("Function", {})
+            if self.standard[lang].member(function, name)[0]:
+                self._result = _OPAQUE
+                return None, _EXTERNAL
+            self._resolve_member(candidates, lang, callee)
+            return None, _UNRESOLVED
         if not candidates:
             # No project symbol has the name; that alone does not say where
             # the receiver, and so the result, comes from.
@@ -15734,8 +16556,15 @@ class CallResolver:
         if not qualifier:
             return self._resolve_bare(name, candidates, source_id, lang, callee)
         receiver = qualifier[-1]
-        if receiver in _SELF_RECEIVERS.get(lang, ()):
-            owners = [self._enclosing_class(source_id)] if len(qualifier) == 1 else []
+        static = None
+        # JavaScript's `super` is the base of the class around, or of its
+        # constructor in a static member.
+        javascript_super = lang == "typescript" and receiver == "super"
+        if receiver in _SELF_RECEIVERS.get(lang, ()) or javascript_super:
+            # `this` in a JavaScript static member is its constructor.
+            static = len(qualifier) == 1 and self._static_owner(source_id)
+            owner = static or self._enclosing_class(source_id)
+            owners = [owner] if len(qualifier) == 1 else []
             source = "self_type"
         else:
             owners = self._types_in(lang, receiver, source_id, len(qualifier) == 1)
@@ -15776,7 +16605,16 @@ class CallResolver:
         if any(owners):
             hits, complete = set(), True
             for owner in owners:
-                hit, owner_complete = self._find_member(owner, name)
+                if javascript_super:
+                    hit, owner_complete = self._find_member(
+                        owner, name, inherited_only=True, static=bool(static)
+                    )
+                elif source == "self_type" and receiver != "cls" and not static:
+                    hit, owner_complete = self._instance_member(owner, name)
+                else:
+                    # A type named is its constructor, whose members are
+                    # the static ones.
+                    hit, owner_complete = self._find_member(owner, name, static=True)
                 # A namespace may hold more than the project puts in it,
                 # unless it is a value too, whose type tells what it holds.
                 metadata = self.nodes[owner]["metadata"]
@@ -16176,20 +17014,35 @@ class CallResolver:
                 paths = inherited[1] if paths is None else paths
         return base, paths
 
-    def _js_file(self, path):
+    def _js_file(self, path, entry=True):
         """File ID of the JS/TS module at ``path``, written with any or no
-        extension, or naming a directory with an index module; a
-        declaration file where no module is there."""
+        extension, or naming a directory: the module its package.json names
+        if ``entry``, else its index module; a declaration file where no
+        module is there."""
         path = posixpath.normpath(path)
         if re.search(r"\.[cm]?tsx?$", path) and f"FILE:{path}" in self.nodes:
             # A TypeScript extension names the file itself.
             return f"FILE:{path}"
         stem = re.sub(r"\.[cm]?[jt]sx?$", "", path)
-        for tail in ("", "/index"):
+
+        def module(base):
+            base = posixpath.normpath(base)
             for extension in (*_JSTS_EXTENSIONS, ".d.ts", ".d.mts", ".d.cts"):
-                if f"FILE:{stem}{tail}{extension}" in self.nodes:
-                    return f"FILE:{stem}{tail}{extension}"
-        return None
+                if f"FILE:{base}{extension}" in self.nodes:
+                    return f"FILE:{base}{extension}"
+            return None
+
+        entries = self.builder.js_entries.get(path, ()) if entry else ()
+        named = (
+            self._js_file(posixpath.join(path, written), False)
+            for written in entries
+            if isinstance(written, str)
+        )
+        return (
+            module(stem)
+            or next(filter(None, named), None)
+            or module(posixpath.join(stem, "index"))
+        )
 
     def _dart_file(self, uri, file_id):
         """File ID of the Dart library that ``uri`` names in a directive of
@@ -16336,7 +17189,11 @@ class CallResolver:
         own, one it re-exports from another module or holds by a name it is
         written with, or a module it re-exports whole under that name. What
         a file exports whole, `export = X`, is its default, ``=``, and holds
-        every other name it exports."""
+        every other name it exports. A JavaScript function's declarations
+        are no properties of it."""
+        if self._js_function(file_id):
+            given = self._assigned(file_id, name)
+            return given[0] if len(given) == 1 else None
         entries = self.builder.reexports.get(file_id, ())
         whole = [original for exported, _, original in entries if exported == "="]
         if whole:
@@ -16369,6 +17226,43 @@ class CallResolver:
             if hit:
                 return hit
         return None
+
+    def _assigned(self, owner_id, name, static=False):
+        """The definitions of the member ``name`` of the JavaScript or
+        TypeScript type or function ``owner_id``, under ``name`` and, given
+        again, `name#2` and on: each a node, what a member that holds a name
+        holds, or what a field typed `typeof f` holds. Of a class, those
+        ``static`` says, the constructor's or its instances'; of a function,
+        its static ones, a declaration in its body being none."""
+        node = self.nodes[owner_id]
+        function = self._js_function(owner_id)
+        split = function or node["type"] == "Class" and not node["metadata"].get("kind")
+        found, key, count = [], name, 1
+        while hit := self.members.get(owner_id, {}).get(key):
+            metadata = self.nodes[hit]["metadata"]
+            if not split or bool(metadata.get("static")) == (static or function):
+                value = (
+                    metadata.get("value")
+                    if self.nodes[hit]["type"] == "Constant"
+                    else None
+                )
+                held = value and self._returned_type(f"typeof {value}", owner_id)
+                found.append(held[1] if held else hit)
+            count += 1
+            key = f"{name}#{count}"
+        written = self.builder.fields.get(owner_id, {}).get(name, "")
+        held = not found and _TS_TYPEOF_RE.fullmatch(written)
+        held = held and self._returned_type(written, owner_id)
+        return found + [held[1]] if held else found
+
+    def _js_function(self, node_id):
+        """Whether ``node_id`` is a JavaScript or TypeScript function."""
+        node = self.nodes.get(node_id)
+        return bool(
+            node
+            and self.lang(node_id) == "typescript"
+            and node["type"] in ("Function", "Method")
+        )
 
     def _written(self, name, scope_id, seen):
         """What ``name`` written in the JS/TS ``scope_id`` stands for: the
@@ -17258,7 +18152,11 @@ class CallResolver:
         source = "regex"
         root, steps = steps[0], steps[1:]
         owner = self._enclosing_class(source_id)
-        if root in ("self", "cls", "super") and owner:
+        static = root == "self" and self._static_owner(source_id)
+        if static:
+            # `this` in a JavaScript static member is its constructor.
+            source, value = "self_type", ("cls", static)
+        elif root in ("self", "cls", "super") and owner:
             source = "self_type"
             value = (root, owner)
             if root == "super":
@@ -17267,6 +18165,18 @@ class CallResolver:
             value = None
         elif root in self.builder.parameter_types:
             value = self._returned_type(*self.builder.parameter_types[root])
+        elif root in self.builder.narrowings:
+            # Promoted where each object's type derives from the type
+            made, held, before = self.builder.narrowings[root]
+            target = self._type_named(re.match(r"[^<(]+", held)[0], source_id)
+            kept = target not in (None, _EXTERNAL) and all(
+                target in self._lineage(self._type_named(t, source_id), set())
+                for t in made
+            )
+            value, ahead, source = self._root_value(
+                held if kept else before, source_id, seen
+            )
+            steps = ahead + steps
         elif root.startswith(":") and not root.startswith("::"):
             # `::App::User` is a name read in scope, PHP's in full.
             value = self._annotated(root[1:], source_id)
@@ -18139,7 +19049,14 @@ class CallResolver:
                 # field holds, with its arguments.
                 self._receiver = held
             return self._attr(held, name, seen, called)
-        hit, complete = self._find_member(ref, name, inherited_only=kind == "super")
+        if kind == "self":
+            hit, complete = self._instance_member(ref, name)
+        else:
+            # A class named, or `this` in a static member, is the
+            # constructor, whose members are the static ones.
+            hit, complete = self._find_member(
+                ref, name, inherited_only=kind == "super", static=kind != "super"
+            )
         declared = hit and not called and len(value) > 2 and self.nodes[hit]["metadata"]
         if declared and declared.get("value_type"):
             # A field of a generic type's value is of its type with the
@@ -18202,12 +19119,16 @@ class CallResolver:
                     held = declared and self._returned_type(declared, declaration)
                     self._result = held or _OPAQUE
                     return _EXTERNAL
-        for owner in self._lineage(ref, set()) if python else ():
+        for owner in (
+            self._lineage(ref, set()) if python and complete != _SEVERAL else ()
+        ):
             if name in self.builder.fields.get(owner, ()):
                 # What is called is a definition the attribute holds.
                 held = self._variable(owner, name)
                 kept = held == _EXTERNAL or held and held[0] in ("def", "library")
                 return held if kept or not called else None
+            if self._assigns(owner, name):
+                break
         # A C/C++ field that is called holds a function, or an object that
         # is called.
         if called and self.lang(ref) == "clang" and self._c_field(ref, name):
@@ -18331,9 +19252,26 @@ class CallResolver:
                     return None if unknown else _EXTERNAL
         if not types:
             types = self._types_in(lang, name, scope_id)
-            if lang == "typescript" and not types and self._types(lang, name):
-                # Is none of them in reach, the name is not the project's:
-                # the writing names the language's global.
+            # A JavaScript function names its prototype, which its
+            # instances and a class that extends it take their members from.
+            held = (
+                lang == "typescript"
+                and not (types or qualifier)
+                and self.companions.get(
+                    self._lexical(name, scope_id, skip_classes=True)
+                )
+            )
+            types = [held] if held else types
+            if (
+                lang == "typescript"
+                and imported is None
+                and not qualifier
+                and not types
+                and self._types(lang, name)
+            ):
+                # Is none of them in reach and no import binds the name, it
+                # is not the project's: the writing names the language's
+                # global.
                 return _EXTERNAL
         if lang == "rust" and qualifier:
             crate = self._use_crate("::".join(qualifier), scope_id)
@@ -19361,7 +20299,23 @@ class CallResolver:
             )
         )
 
+    def _static_owner(self, node_id):
+        """The JavaScript class or function whose static member ``node_id``
+        is code of, which `this` is there; None where it is code of none."""
+        for scope in (
+            self._scopes(node_id) if self.lang(node_id) == "typescript" else ()
+        ):
+            if self.nodes.get(scope, {}).get("metadata", {}).get("static"):
+                return self._member_owner(scope)
+            if self._is_class(scope):
+                return None
+        return None
+
     def _enclosing_class(self, node_id):
+        if f"{node_id}.prototype" in self.nodes:
+            # In a JavaScript function given a prototype, `this` is the
+            # instance it constructs.
+            return f"{node_id}.prototype"
         for scope in self._scopes(node_id):
             if self._is_class(scope):
                 return scope
@@ -19404,21 +20358,43 @@ class CallResolver:
 
     def _entries(self, target):
         """``[least, most, types]`` of each overload of the C#, Java or C/C++
-        method ``target``; for C/C++ the least a declaration of the same
-        parameters allows, which can give their defaults."""
+        method ``target``; for C/C++ the least that the defaults of all its
+        declarations of the same parameter types allow, by position."""
         metadata = self.nodes[target]["metadata"]
         counts = metadata.get("parameters")
         if counts is None or self.lang(target) != "clang":
             return counts
         declared = self.builder.prototypes.get(target.partition("::")[2], ())
-        return [
-            [
-                min([least] + [d[0] for d in declared if types and d[2] == types]),
-                most,
-                types,
-            ]
-            for least, most, types in counts
-        ]
+        entries = []
+        for least, most, types in counts:
+            defaulted = set(range(least, len(types or ())))
+            for positions, written, scope in declared:
+                if types and self._c_same_types(written, scope, types, target):
+                    defaulted.update(positions)
+            while least - 1 in defaulted:
+                least -= 1
+            entries.append([least, most, types])
+        return entries
+
+    def _c_same_types(self, one, one_scope, other, other_scope):
+        """Whether the C/C++ parameter types ``one``, written in ``one_scope``,
+        and ``other``, written in ``other_scope``, are the same: alike once
+        each name in them is taken for the project type it names there, and
+        one that names none is read without the namespaces macros open."""
+
+        def canonical(types, scope_id):
+            def named(found):
+                *qualifier, name = found[0].split("::")
+                held = self._c_type([q for q in qualifier if q], name, scope_id)
+                if held and held != _EXTERNAL:
+                    return held
+                return "::".join([*self._c_written(qualifier, (), scope_id), name])
+
+            return [_C_TYPE_NAME_RE.sub(named, t) for t in types]
+
+        return one == other or canonical(one, one_scope) == canonical(
+            other, other_scope
+        )
 
     def _overload_by_arity(self, hit, static=None):
         """The method that the call being resolved, which reached the C#,
@@ -19510,6 +20486,7 @@ class CallResolver:
         hides its bases' members of the name unless `using` brings them in."""
         return any(
             name in self.members.get(d, {})
+            or name in self.builder.fields.get(d, ())
             or name in self.builder.c_declared.get(d, ())
             for d in declarations
         ) and not any(name in self.builder.c_using.get(d, ()) for d in declarations)
@@ -19536,7 +20513,7 @@ class CallResolver:
                         _substituted(a, bindings[type_id])
                         for a in (_bracketed_parts(listed) if opened else ())
                     ]
-                    for base_type in self._base_types(base, declaration):
+                    for base_type in self._base_types(base, declaration) or ():
                         if not self._looks_into(declaration, base_type):
                             continue
                         params = self.nodes[base_type]["metadata"].get("generics", ())
@@ -19611,7 +20588,11 @@ class CallResolver:
             ):
                 continue
             hit = self.members.get(scope, {}).get(name)
-            if hit:
+            # A function's static members are no names in its body.
+            if hit and not (
+                self._is_function_scope(scope)
+                and self.nodes[hit]["metadata"].get("static")
+            ):
                 return hit
         return None
 
@@ -19639,8 +20620,12 @@ class CallResolver:
         }
         return [t for t in depth if depth[t] == max(depth.values())]
 
-    def _find_member(self, owner_id, name, inherited_only=False, seen=None):
-        """Look ``name`` up in a type or module and then in the type's bases.
+    def _find_member(
+        self, owner_id, name, inherited_only=False, seen=None, static=False
+    ):
+        """Look ``name`` up in a type or module and then in the type's bases;
+        with ``static`` among a JavaScript class's static members, the
+        constructor's, and those of the constructors it extends.
 
         Returns ``(node_id, complete)``; ``complete`` is False when a base is
         not a project type, so a miss may be a member defined outside, and
@@ -19663,6 +20648,11 @@ class CallResolver:
             held = self._declared_type(owner_id)
             if isinstance(held, tuple) and held[0] == "self":
                 return self._find_member(held[1], name, seen=seen)
+            given = self._js_function(owner_id) and self._assigned(owner_id, name)
+            if given and len(given) > 1:
+                # A member assigned again is any of its assignments.
+                self._candidates_now = given
+                return None, _SEVERAL
             return self._exported(owner_id, name, set()), True
         lang = self.lang(owner_id)
         applied = seen is not None
@@ -19682,13 +20672,12 @@ class CallResolver:
                 return hit, True
             hits = [self.members.get(d, {}).get(name) for d in declarations]
             hits = [hit for hit in hits if hit]
-            for d in declarations if lang == "typescript" and not hits else ():
-                # A field typed `typeof f` holds `f`.
-                written = self.builder.fields.get(d, {}).get(name, "")
-                held = _TS_TYPEOF_RE.fullmatch(written) and self._returned_type(
-                    written, d
-                )
-                hits += [held[1]] if held else []
+            if lang == "typescript":
+                given = [self._assigned(d, name, static) for d in declarations]
+                if any(len(one) > 1 for one in given):
+                    self._candidates_now = sorted({h for one in given for h in one})
+                    return None, _SEVERAL
+                hits = [one[0] for one in given if one]
             # Any two that are not a pure virtual function and its definition
             # are alternatives of the build.
             hits = self._defined(hits)
@@ -19699,6 +20688,9 @@ class CallResolver:
             if lang == "clang" and self._c_hides(declarations, name):
                 # Declared in the class, which hides the bases' members
                 return None, True
+            if name in self.builder.py_class_assigned.get(owner_id, ()):
+                # An attribute of the class, found before its bases' members
+                return None, True
             hit = single and self._mixed(declarations, name[5:], "extend")
             if hit:
                 return hit, True
@@ -19708,10 +20700,30 @@ class CallResolver:
         for declaration in declarations:
             for base in self.bases.get(declaration, ()):
                 bare = _split_callee(base)[1]
+                found = self._base_types(base, declaration)
+                if found is None:
+                    # The base may be any type of its name, or of none: the
+                    # members of those, or every member of the name, are
+                    # candidates, not what the call reaches.
+                    types = self._types(lang, bare)
+                    hits = (
+                        (
+                            self._find_member(t, name, seen=set(seen), static=static)[0]
+                            for t in types
+                        )
+                        if types
+                        else (
+                            c
+                            for c in self.by_name.get((lang, name), ())
+                            if self._is_class(c.rpartition("::")[0])
+                        )
+                    )
+                    self._candidates_now = sorted(set(filter(None, hits))) or None
+                    return None, _SEVERAL
                 # A module's singleton methods are not its includers'.
                 base_types = [
                     t
-                    for t in self._base_types(base, declaration)
+                    for t in found
                     if not single or self.nodes[t]["metadata"].get("kind") != "module"
                 ]
                 if not base_types:
@@ -19724,7 +20736,13 @@ class CallResolver:
                 hits = set()
                 for base_type in base_types:
                     reached = self._candidates_now
-                    hit, base_complete = self._find_member(base_type, name, seen=seen)
+                    kind = self.nodes[base_type]["metadata"].get("kind")
+                    if static and kind == "prototype":
+                        # The constructor a class extends is the function.
+                        base_type = base_type.removesuffix(".prototype")
+                    hit, base_complete = self._find_member(
+                        base_type, name, seen=seen, static=static
+                    )
                     if not self._looks_into(declaration, base_type):
                         # Its members are not the type's, but what it derives
                         # from outside may have extension methods.
@@ -19767,19 +20785,29 @@ class CallResolver:
     def _base_types(self, base, declaration):
         """The types the base ``base`` of ``declaration`` is: the type its
         name stands for where the subtype is declared, every type of that
-        name when that cannot be told, none for a type from outside. Those
-        types are not what the call may reach."""
+        name in reach when that cannot be told, none for a type from
+        outside, None when no type of the name is in reach and the base is
+        not told to be outside."""
         reached = self._candidates_now
         named = self._type_named(base, declaration)
         self._candidates_now = reached
         if named == _EXTERNAL:
             return []
-        bare = _split_callee(base)[1]
-        return (
-            [named]
-            if named
-            else self._types_in(self.lang(declaration), bare, declaration)
+        if named:
+            return [named]
+        lang, bare = self.lang(declaration), _split_callee(base)[1]
+        found = self._types_in(lang, bare, declaration)
+        if found or self._types(lang, bare):
+            return found or None
+        # A JavaScript base that an expression gives, or a value of the
+        # project that is no type, is of a type not told.
+        root = base.split(".")[0]
+        untold = lang == "typescript" and (
+            not re.fullmatch(r"[\w$]+(?:\.[\w$]+)*", base)
+            or self._lexical(root, declaration, skip_classes=True)
+            or isinstance(self._imported(root, declaration), list)
         )
+        return None if untold else []
 
     def _mixed(self, declarations, name, how="prepend"):
         """The member ``name`` of the first type that ``declarations`` list
@@ -19828,10 +20856,60 @@ class CallResolver:
         return False, None
 
     def _assigns(self, owner_id, name):
-        """Whether the JavaScript or TypeScript class ``owner_id`` assigns
-        the field ``name`` itself, `this.name = ...`."""
-        declarations = self._declarations(owner_id)
-        return any(name in self.builder.js_assigned.get(d, ()) for d in declarations)
+        """Whether the JavaScript, TypeScript or Python class ``owner_id``
+        assigns the attribute ``name`` itself: `this.name = ...`, `self.name
+        = ...`, or `name = ...` in a Python class body."""
+        return any(
+            name in self.builder.assigned.get(d, ())
+            or name in self.builder.py_class_assigned.get(d, ())
+            for d in self._declarations(owner_id)
+        )
+
+    def _instance_member(self, owner_id, name):
+        """`_find_member` on an instance of the Python, JavaScript or
+        TypeScript class ``owner_id``: an attribute that the methods of the
+        class or a base assign to the instance is found before a method of
+        the name. The member is what the values assigned hold, a member
+        read (`this.m`, `this.m.bind(this)`, `self.m`) the class's member
+        of that name; where they do not tell one, None with it and the
+        method as the candidates. Read inside one of its values, the
+        attribute is the class's member."""
+        if self.lang(owner_id) not in ("python", "typescript"):
+            return self._find_member(owner_id, name)
+        hit, complete = self._find_member(owner_id, name, seen=set())
+        if (owner_id, name) in self._reading:
+            return hit, complete
+        types = [t for t, _ in self._lookup_order(owner_id, name)]
+        written = [
+            (d, value)
+            for t in types
+            for d in self._declarations(t)
+            if name in self.builder.assigned.get(d, ())
+            for value in self.builder.assigned[d][name] or [None]
+        ]
+        if not written or hit and self.nodes[hit]["type"] != "Method":
+            return hit, complete
+        held = set()
+        self._reading.add((owner_id, name))
+        for declaration, value in written:
+            read = value and re.fullmatch(
+                r"(?:this|self)\.([\w$]+)(?:\.bind\([^()]*\))?", value
+            )
+            if read:
+                held.add(self._find_member(owner_id, read[1], seen=set())[0])
+            elif value and self.lang(declaration) == "python":
+                found = self._value(value, declaration, set())
+                held.add(found[1] if found and found[0] == "def" else None)
+            else:
+                held.add(None)
+        self._reading.discard((owner_id, name))
+        if len(held) == 1 and None not in held:
+            return held.pop(), True
+        fits = sorted((held | {hit}) - {None})
+        if fits:
+            self._candidates_now = fits
+            return None, _SEVERAL
+        return None, True
 
     def _std_inherited(self, owner_id, name):
         """Value the member ``name`` returns that the project type
@@ -20290,6 +21368,7 @@ class CodeGraphBuilder:
         self.go_modules = {}
         self.rust_crates = {}
         self.js_packages = {}  # name -> (directory, `exports` of package.json)
+        self.js_entries = {}  # directory -> its package.json's main, types, typings
         self.js_dependencies = set()
         # tsconfig path -> (configs it extends, `baseUrl`, `paths`), as written
         self.ts_configs = {}
@@ -20314,9 +21393,10 @@ class CodeGraphBuilder:
         # C/C++ file ID -> the function names a prototype in it declares:
         # the definition may sit in any file linked in.
         self.declares = {}
-        # C/C++ function, by its ID without the file, -> ``[least, most,
-        # types]`` of each declaration of it without a body, where its
-        # parameters' defaults may be given
+        # C/C++ function, by its ID without the file, -> ``[defaulted, types,
+        # scope]`` of each declaration of it without a body: the positions of
+        # the parameters it gives defaults, their types, and the ID it is
+        # declared in
         self.prototypes = {}
         # Type or variant ID -> {field name or position: its declared type};
         # Python module or class ID -> {variable: origin paths of its values},
@@ -20346,7 +21426,11 @@ class CodeGraphBuilder:
         self.js_bound = {}  # JS/TS file ID -> the names its declarations bind
         # JS/TS files that are modules: what they declare is named in them
         self.js_modules = set()
-        self.js_assigned = {}  # JS/TS class ID -> the fields its code assigns
+        # JS/TS or Python class ID -> {attribute its methods assign to the
+        # instance, `this.name = ...` or `self.name = ...`: the values, the
+        # text written in JS/TS, the origin paths in Python}
+        self.assigned = {}
+        self.py_class_assigned = {}  # Python class ID -> the names its body binds
         # Function ID -> its signatures as written, one for each overload:
         # the bound of each type parameter, the parameters, the return type
         # and, by argument position, the declared types of the parameters
@@ -20359,6 +21443,10 @@ class CodeGraphBuilder:
         # `{N}` -> (an object or a tuple type a parameter is declared, its
         # file's ID)
         self.parameter_types = {}
+        # `%N` -> (the types of the new objects assigned to a Dart variable
+        # promoted to a type, that type's origin path, the origin path of
+        # what the variable was before)
+        self.narrowings = {}
         # The literal a function returns -> the function, in whose scope the
         # names in it are read
         self.literal_scopes = {}
@@ -20539,6 +21627,9 @@ class CodeGraphBuilder:
             folder = rel_path.rpartition("/")[0]
             exports = manifest.get("exports")
             self.js_packages[manifest.get("name")] = (folder, exports)
+            self.js_entries[folder or "."] = [
+                manifest[k] for k in ("main", "types", "typings") if k in manifest
+            ]
             for key, value in manifest.items():
                 if key.endswith("ependencies") and isinstance(value, dict):
                     self.js_dependencies.update(value)

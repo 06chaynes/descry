@@ -174,8 +174,6 @@ _REBINDINGS = (
 # `Type::CASE`
 _PATH = r"(?:\$\w+|\\?[A-Za-z_][\w\\]*::\$?\w+)(?:\??->\w+)*"
 _RE_PATH = re.compile(_PATH)
-# `$name = $other;`
-_RE_COPY = re.compile(rf"^\s*\$(?P<name>\w+)\s*=\s*(?P<path>{_PATH})\s*;\s*$")
 # `foreach ($over as $key => $name)`, and `[$a, $b] = $over;`
 _RE_FOREACH = re.compile(
     r"\bforeach\s*\((?P<over>.+)\s+as\s+(?:[^)]*=>\s*)?&?(?P<names>\$\w+)\s*\)"
@@ -315,18 +313,12 @@ class PhpParser(BaseParser):
     _imports: dict[str, str]
     _functions: dict[str, str]
 
-    def _end_line(self):
-        line, binding = self._line, self.binding_re.search(self._code)
-        super()._end_line()
-        if binding:
-            self._unbind(binding["name"], line)
-
-    def _unbind(self, name, lineno):
-        """Leave the variable ``name`` without a known type from ``lineno``
-        on, unless a declaration on that line gives it one."""
+    def _unbind(self, name, lineno, column):
+        """Leave the variable ``name`` without a known type from ``column``
+        of ``lineno`` on, unless a declaration on that line gives it one."""
         entries = self.declared.setdefault(name, [])
         if not any(entry[0] == lineno for entry in entries):
-            entries.append((lineno, "?", False))
+            entries.append((lineno, "?", False, column))
 
     def _class_name(self, written):
         """Full name of the class the file being parsed writes as
@@ -403,18 +395,20 @@ class PhpParser(BaseParser):
                 found.add(held or None)
         return found.pop() if len(found) == 1 else None
 
-    def _value(self, code, start, end, lineno, since, owner):
+    def _expression_origin(self, code, start, end, lineno, since, owner):
         """Origin path of the expression at columns ``start`` to ``end`` of
         ``code``, the line being read: of the call chain it is, or of the
         variable, property or constant it reads. None for any other."""
-        text = code[start:end].strip()
+        text = self._raw[start:end].strip()
         if text.endswith(")"):
             edge = self._closes.get(start + len(code[start:end].rstrip()) - 1)
             chain = edge is not None and _is_call_chain(self._code[start:end])
             return f"#{edge}" if chain else None
         if not _RE_PATH.fullmatch(text):
             return None
-        held = self._receiver(_RE_ACCESS.split(text), lineno, since, owner)
+        # The path is read where it is written.
+        path = _RE_ACCESS.split(text)
+        held = self._read_from(start, self._receiver, path, lineno, since, owner)
         return None if held == "?" else held
 
     def _bases(self, header):
@@ -511,8 +505,10 @@ class PhpParser(BaseParser):
         self._namespace, self._imports, self._functions = "", {}, {}
 
         # Indented, so that no declaration is read as one at file level: a
-        # function sees none of the file's variables.
+        # function sees none of the file's variables. Columns are the code's.
         self.scan_declarations([f" {code}" for code in codes], _DECLARATIONS)
+        for entries in self.declared.values():
+            entries[:] = [(line, held, top, at - 1) for line, held, top, at in entries]
 
         # A type (class/interface/trait/enum) is the context for the
         # definitions up to its closing brace; a method or function is the
@@ -643,7 +639,7 @@ class PhpParser(BaseParser):
                 bound = re.search(r"\$(\w+)\s*=\s*$", code[: m_anonymous.start()])
                 if bound:
                     self.declared.setdefault(bound[1], []).append(
-                        (lineno, f"=class@{lineno}()", False)
+                        (lineno, f"=class@{lineno}()", False, bound.start(1))
                     )
                 # Its header is still code of the member it is created in.
                 self.enter_context(anonymous_id, lineno, end_lineno)
@@ -692,9 +688,10 @@ class PhpParser(BaseParser):
                     entries = self.declared.setdefault(parameter, [])
                     native = [e for e in entries if lineno <= e[0] <= last + 1]
                     if not native:
-                        entries.append((lineno, f"{written}()", False))
+                        entries.append((lineno, f"{written}()", False, None))
                     elif _RE_TYPE_ARGUMENTS.search(written):
-                        self._rebind(parameter, native[0][0], f"{written}()")
+                        line, _, _, at = native[0]
+                        self._rebind(parameter, line, at, f"{written}()")
                 if in_type and name == "__construct":
                     for index in range(i, last + 1):
                         for promoted in _RE_PROMOTED.finditer(codes[index]):
@@ -725,25 +722,17 @@ class PhpParser(BaseParser):
 
             # What the line says of its variables: `/** @var Type $name */`
             # types the statement below it; a rebinding leaves a variable
-            # untyped; a copy has the type of what it copies; `instanceof`
-            # types a variable inside the block the line opens, or from an
-            # `assert` on.
+            # untyped; `instanceof` types a variable inside the block the line
+            # opens, or from an `assert` on.
             for tag in _RE_VARIABLE_TAG.finditer(lines[i]):
                 self.declared.setdefault(tag["name"], []).append(
-                    (lineno + 1, f"{tag['type']}()", False)
+                    (lineno + 1, f"{tag['type']}()", False, None)
                 )
             for rebinding in _REBINDINGS:
                 for found in rebinding.finditer(code):
-                    for name in re.findall(r"\$(\w+)", found["names"]):
-                        self._unbind(name, lineno)
-            copied = _RE_COPY.match(code)
-            if copied:
-                path = _RE_ACCESS.split(copied["path"])
-                held = self._receiver(path, lineno, since, owner)
-                if held != "?":
-                    self.declared.setdefault(copied["name"], []).append(
-                        (lineno, held, False)
-                    )
+                    names = re.compile(r"\$(\w+)").finditer(code, *found.span("names"))
+                    for name in names:
+                        self._unbind(name[1], lineno, name.start(1))
             narrowed: dict[str, set[str]] = {}
             for found in _RE_INSTANCEOF.finditer(code):
                 narrowed.setdefault(found["name"], set()).add(found["type"])
@@ -755,10 +744,10 @@ class PhpParser(BaseParser):
                 if len(held) == 1 and (asserted or opens_block):
                     entries = self.declared.setdefault(name, [])
                     before = self._declared(name, lineno, since) or "?"
-                    entries.append((lineno, f"{held.pop()}()", False))
+                    entries.append((lineno, f"{held.pop()}()", False, None))
                     if not asserted:
                         end = self._find_block_end(codes, i, code.rindex("{"))
-                        entries.append((end, before, False))
+                        entries.append((end, before, False, None))
 
             # Calls (inside any definition — a method, a function, etc.,
             # one on its line too)
@@ -766,7 +755,7 @@ class PhpParser(BaseParser):
                 chained = _RE_OPERATOR.sub(
                     lambda found: _CHAIN_OPERATORS[found.group()], code
                 )
-                self.begin_line(chained, lineno, raw=lines[i])
+                self.begin_line(chained, lineno, raw=lines[i], since=since, owner=owner)
                 for created in _RE_NEW.finditer(code, call_scan_start):
                     origin = self._created(created[1], owner)
                     column = created.start(1)
@@ -811,6 +800,7 @@ class PhpParser(BaseParser):
                         else:
                             origin = f"?.{name}"
                     elif path:
+                        self._read_at = start  # `add_call` clears it
                         origin = f"{self._receiver(path, lineno, since, owner)}.{name}"
                     elif re.search(r"\bnew$", before):
                         if name == "class":
@@ -848,12 +838,15 @@ class PhpParser(BaseParser):
                 # What a `foreach` or a destructuring assignment takes from
                 # a value is an element of it, unless a `@var` says more.
                 for found in (_RE_FOREACH.search(code), _RE_DESTRUCTURING.match(code)):
-                    over = found and self._value(
+                    over = found and self._expression_origin(
                         code, *found.span("over"), lineno, since, owner
                     )
-                    for name in re.findall(r"\$(\w+)", found["names"]) if over else ():
-                        if self._declared(name, lineno, lineno) == "?":
-                            self._rebind(name, lineno, f"{over}.*")
+                    names = found and re.compile(r"\$(\w+)").finditer(
+                        code, *found.span("names")
+                    )
+                    for name in names if over else ():
+                        if self._declared(name[1], lineno, lineno) == "?":
+                            self._rebind(name[1], lineno, name.start(1), f"{over}.*")
 
             i += 1
 

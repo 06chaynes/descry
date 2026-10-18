@@ -632,26 +632,24 @@ class DotnetParser(BaseParser):
     def _end_line(self):
         binding = self.binding_re.search(self._code)
         name = binding["name"] if binding else self._pending and self._pending[0]
-        known = len(self.declared.get(name, ()))
-        untyped = (self._line, "?", False)
+        untyped = binding and (self._line, "?", False, binding.start("name"))
         # A `.Method(` that goes on a bound chain and is left open.
         opens = self._opens and self._code.lstrip().startswith(".")
         depth = len(self._open_calls)
-        super()._end_line()
-        if len(self.declared.get(name, ())) > known and untyped in self.declared[name]:
+        if super()._end_line() and untyped in self.declared[name]:
             # The call chain bound to the variable types it.
             self.declared[name].remove(untyped)
         if opens and self._pending and self._pending[2] is None:
             # The chain goes on behind the `)` that closes the call.
             self._pending = (*self._pending[:2], depth)
 
-    def _scope_end(self, line, name):
+    def _scope_end(self, name, declaration):
         """As the base's, but a variable an expression declares, by `is` or
         as an `out` argument, is in scope to the end of the lambda body, of
         the loop, `using`, `lock`, `fixed`, `switch` or `catch` statement
         whose head declares it, else of the block around it."""
         text, _, _, spans = self._blocks
-        at, head, held, written = self._declaration_site(line, name)
+        at, head, held, written = self._declaration_site(name, declaration)
         before = text[head[0] : at] if head else written
         found = _RE_EXPRESSION_VARIABLE.search(before)
         if not found or (
@@ -660,7 +658,7 @@ class DotnetParser(BaseParser):
             and not found[1]
             and _RE_AFTER_PARAMETERS.match(text, _innermost(spans, at)[1] + 1)
         ):
-            return super()._scope_end(line, name)
+            return super()._scope_end(name, declaration)
         if "=>" in before:
             return self._statement_close(at - len(before) + before.rindex("=>") + 2)
         if head and _RE_SCOPING_HEAD.match(written):
@@ -689,7 +687,7 @@ class DotnetParser(BaseParser):
         lineno = index + 1
         pending = sorted({at for at, _, _ in self._attributes if at < index})
         for at in [*pending, index]:
-            self.begin_line(code_lines[at], at + 1, raw=lines[at])
+            self.begin_line(code_lines[at], at + 1, raw=lines[at], since=since)
             for line, column, name in self._attributes:
                 if line == at:
                     # `[Name]` applies the class NameAttribute.
@@ -700,11 +698,14 @@ class DotnetParser(BaseParser):
         self._attributes = []
         code = code_lines[index]
         for untyped in _RE_UNTYPED.finditer(code, start):
-            for name in re.findall(_NAME, " ".join(filter(None, untyped.groups()))):
-                self.declared.setdefault(name, []).append((lineno, "?", False))
+            names = re.compile(_NAME).finditer(code, *untyped.span(untyped.lastindex))
+            for name in names:
+                self.declared.setdefault(name[0], []).append(
+                    (lineno, "?", False, name.start())
+                )
         for each in _RE_FOREACH_VAR.finditer(code, start):
             element = self.call_origin(f"{each[2]}.*", lineno, since)
-            self.declared[each[1]][-1] = (lineno, element, False)
+            self.declared[each[1]][-1] = (lineno, element, False, each.start(1))
         for created in _RE_CREATION.finditer(code):
             written = created[created.lastgroup]
             if created.end() > start and written not in _NOT_TYPES:
@@ -758,7 +759,8 @@ class DotnetParser(BaseParser):
             for position, out in enumerate(passed, 1):
                 if out[1]:
                     bound = f"#{len(self.builder.edges) - 1}.@{position}"
-                    self.declared[out[1]][-1] = (lineno, bound, False)
+                    entries = self.declared[out[1]]
+                    entries[-1] = (lineno, bound, False, entries[-1][3])
 
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
@@ -863,7 +865,9 @@ class DotnetParser(BaseParser):
                 held = f"{held['type']}{held['generic'] or ''}()" if held else "?"
                 names.append(("value", held.replace(".", "::")))
             for name, held in names:
-                self.declared.setdefault(name, []).append((first_line, held, False))
+                self.declared.setdefault(name, []).append(
+                    (first_line, held, False, None)
+                )
 
         i = 0
         n = len(lines)

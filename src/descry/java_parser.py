@@ -343,16 +343,14 @@ class JavaParser(BaseParser):
             return f"{self._supers[-1][1] if self._supers else 'super'}().{path}"
         if path.startswith("this."):
             return f"{root}().{path[5:]}"
-        typed = [
-            d[0]
-            for d in self.declared.get(root, ())
-            if since <= d[0] <= lineno and self._in_scope(root, d[0], lineno, d[1])
-        ]
-        bound = [
-            n
-            for n in self._untyped.get(root, ())
-            if since <= n <= lineno and self._in_scope(root, n, lineno)
-        ]
+        typed, bound = (
+            [
+                d[0]
+                for d in table.get(root, ())
+                if since <= d[0] <= lineno and self._in_scope(root, d, lineno)
+            ]
+            for table in (self.declared, self._untyped)
+        )
         if max(bound, default=0) > max(typed, default=0):
             return f"?.{path}"
         if not typed:
@@ -360,18 +358,18 @@ class JavaParser(BaseParser):
         head = super().call_origin(f"{root}.x", lineno, since)
         return f"{head[:-2] if head else '?'}.{path}"
 
-    def _pattern_scope(self, line, name):
-        """``(spans, typed)`` where line ``line`` declares ``name`` in a
-        pattern after `instanceof`: the spans of its scope, and whether it
-        holds there the type the pattern tests, as it does where the test
-        matched. A loop or an expression that only `&&` joins the test into
-        tells that in the rest of it. An `if` tells it in the branch its
-        condition holds in where only `&&` joins the test into it, or fails
-        in where only `||` joins the test's negation, and past the `if`
-        where the other branch exits. None where no such pattern declares
-        it."""
+    def _pattern_scope(self, name, declaration):
+        """``(spans, typed)`` where ``declaration``, an entry of ``declared``
+        for ``name``, is a pattern's after `instanceof`: the spans of its
+        scope, and whether it holds there the type the pattern tests, as it
+        does where the test matched. A loop or an expression that only `&&`
+        joins the test into tells that in the rest of it. An `if` tells it
+        in the branch its condition holds in where only `&&` joins the test
+        into it, or fails in where only `||` joins the test's negation, and
+        past the `if` where the other branch exits. None where no such
+        pattern declares it."""
         text, _, _, spans = self._blocks
-        at, head, held, written = self._declaration_site(line, name)
+        at, head, held, written = self._declaration_site(name, declaration)
         last = held[1] if held else len(text)
         if not _RE_PATTERN_BEFORE.search(text[head[0] : at] if head else written):
             return None
@@ -429,7 +427,7 @@ class JavaParser(BaseParser):
                 for number, param in enumerate(_bracketed_parts(params + ")"))
                 for name, steps in self.bindings(param)
             }
-            self._bind(bindings, index, lines, code.rstrip().endswith("{"))
+            self._bind(bindings, index, bar, code.rstrip().endswith("{"))
         super()._bind_closures(code, index, lines, before)
 
     def _has_body(self, lines, index, code):
@@ -484,14 +482,16 @@ class JavaParser(BaseParser):
         self.scan_declarations(
             [line.replace("...", "[]") for line in lines], _DECLARATIONS
         )
-        # name -> the lines where a `var` or a lambda binds it without a
-        # type
+        # name -> each `(line, None, False, column)` where a `var` or a
+        # lambda binds it without a type
         self._untyped = {}
         for lineno, line in enumerate(lines, 1):
             for found in _RE_UNTYPED.finditer(line):
-                for param in (found[1] or found[2] or found[3]).split(","):
-                    for name in param.split()[-1:]:
-                        self._untyped.setdefault(name, []).append(lineno)
+                params = found.span(found.lastindex)
+                for name in re.compile(r"[\w$]+(?=\s*(?:,|$))").finditer(line, *params):
+                    self._untyped.setdefault(name[0], []).append(
+                        (lineno, None, False, name.start())
+                    )
         # (last line, type) of each anonymous class body the line is in
         self._supers = []
 
@@ -523,13 +523,14 @@ class JavaParser(BaseParser):
         # Where a pattern's variable is in scope; it gives no type where
         # whether it matched is not known.
         for name, entries in self.declared.items():
-            for index, (line, _, top) in enumerate(entries):
+            for index, entry in enumerate(entries):
+                line, _, top, column = entry
                 if "instanceof" not in code_lines[line - 1]:
                     continue
-                if found := self._pattern_scope(line, name):
+                if found := self._pattern_scope(name, entry):
                     if not found[1]:
-                        entries[index] = (line, "?", top)
-                    self._scope_extents[line, name, entries[index][1]] = found[0]
+                        entries[index] = (line, "?", top, column)
+                    self._scope_extents[name, entries[index]] = found[0]
 
         i = 0
         n = len(lines)
@@ -758,7 +759,7 @@ class JavaParser(BaseParser):
                 since = bodies[0][1] if bodies else lineno
                 written = code
                 code = _plain_instantiations(code)
-                self.begin_line(code, lineno, raw=raw_line)
+                self.begin_line(code, lineno, raw=raw_line, since=since)
                 if lineno in anonymous and code.lstrip().startswith("}"):
                     self.continue_chain(code.index("}"), anonymous.pop(lineno))
                 # The lambdas on the line whose parameters are still to be

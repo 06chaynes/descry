@@ -321,6 +321,8 @@ _DECLARATIONS = (
     ),
     # `for (auto& name : expr)` — `auto` reads no type; the range's does.
     re.compile(r"\bfor\s*\(\s*(?P<type>auto)\s*[*&\s]*(?P<name>[A-Za-z_]\w*)\s*:"),
+    # The parameter of a `catch` handler
+    re.compile(r"\bcatch\s*\(\s*" + _SPECIFIERS + _TYPE + _DECLARATOR + r"\s*\)"),
 )
 # What stands before the name in `Type name(args);`, which declares `name`.
 # A name in capitals there stands for a specifier macro.
@@ -648,7 +650,9 @@ class ClangParser(BaseParser):
         for macro_id, first, last, parameters in () if self._skip_calls else bodies:
             nesting = []
             for parameter in parameters:
-                self.declared.setdefault(parameter, []).append((first + 1, "?", False))
+                self.declared.setdefault(parameter, []).append(
+                    (first + 1, "?", False, None)
+                )
             for index in range(first, last + 1):
                 code = blank_strings(self._source[index], None, ("R",))[0]
                 head = _RE_MACRO_NAME.match(code) if index == first else None
@@ -1271,7 +1275,7 @@ class ClangParser(BaseParser):
             if declared and declared["name"] not in _C_CONTROL_KEYWORDS:
                 held = f"{_raw_pointer(_held(declared['type']), declared['pointer'])}()"
                 self.declared.setdefault(declared["name"], []).append(
-                    (first + 1, held, False)
+                    (first + 1, held, False, None)
                 )
                 self.add_local(function_id, declared["name"])
             elif pointer := re.search(r"\(\s*\*\s*(\w+)\s*\)", part):
@@ -1338,6 +1342,8 @@ class ClangParser(BaseParser):
             listed = next(
                 (head[a + 1 : b] for a, b in spans if a == found.start("params")), ""
             )
+            parts = _bracketed_parts(listed)
+            types = _parameter_entry(parts)[2]
             # Filed under the path of the function it declares, from the
             # file's scopes, as the IDs of its definitions name it.
             path = re.sub(r"\s+", "", found["path"] or "")
@@ -1345,7 +1351,13 @@ class ClangParser(BaseParser):
             scope = parent_id.partition("::")[2]
             self.builder.prototypes.setdefault(
                 f"{scope}::{declared}" if scope else declared, []
-            ).append(_parameter_entry(_bracketed_parts(listed)))
+            ).append(
+                [
+                    [at for at, part in enumerate(parts[: len(types)]) if "=" in part],
+                    types,
+                    parent_id,
+                ]
+            )
             if owner and not found["path"]:
                 self.builder.c_declared.setdefault(parent_id, set()).add(name)
             if not owner and not found["path"]:
@@ -1458,18 +1470,23 @@ class ClangParser(BaseParser):
         bare call written as an argument of another gets the origin
         `^callee^position` of that one: a macro may qualify it."""
         code = code.replace("->", "?.")
-        self.begin_line(code, index + 1, source_id, self._source[index])
+        self.begin_line(code, index + 1, source_id, self._source[index], since)
         for lambda_ in _RE_LAMBDA.finditer(code):
             # A lambda's parameters are what they are declared as, in its body.
-            until = self._find_block_end(self._lines, index, lambda_.end() - 1) + 1
+            until = self._find_block_end(self._lines, index, lambda_.end() - 1) + 1, 0
+            at = lambda_.start("params")  # where the part starts
             for part in _bracketed_parts(lambda_["params"] + ")"):
-                declared = _RE_PARAMETER.fullmatch(part.partition("=")[0].strip())
+                written = part.partition("=")[0]
+                declared = _RE_PARAMETER.fullmatch(written.strip())
                 if declared:
                     name = declared["name"]
                     held = _raw_pointer(_held(declared["type"]), declared["pointer"])
                     held = f"{held}()"
                     outer = self._declared(name, index + 1, since)
-                    self._rebind(name, index + 1, held, until, outer)
+                    column = at + len(written) - len(written.lstrip())
+                    column += declared.start("name")
+                    self._rebind(name, index + 1, column, held, until, outer)
+                at += len(part) + 1
         # A name whose template arguments close more `>` than they open
         # stands inside arguments opened before it: what they are followed
         # by is no call of it.
@@ -1527,7 +1544,7 @@ class ClangParser(BaseParser):
                 # `Type name(args);` declares `name`.
                 held = _raw_pointer(declared["type"], declared["pointer"])
                 self.declared.setdefault(name, []).append(
-                    (index + 1, f"{held}()", False)
+                    (index + 1, f"{held}()", False, match.start(1))
                 )
                 continue
             origin = None
@@ -1589,9 +1606,8 @@ class ClangParser(BaseParser):
                 if not depth:
                     held = self._closes.get(column, held)
             if held is not None:
-                self.declared.setdefault(binding["name"], []).append(
-                    (index + 1, f"#{held}", False)
-                )
+                end = self._ended(code, index + 1, binding.end())
+                self._settle(binding["name"], *end, f"#{held}")
                 self.add_local(source_id, binding["name"])
 
     def _iterated(self, name, lineno, since):

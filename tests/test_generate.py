@@ -1614,6 +1614,74 @@ class TestPythonCallResolution:
             "FILE:base.py::Base::setup"
         ]
 
+    def test_an_attribute_the_class_body_assigns_hides_the_bases_method(self, tmp_path):
+        """A name a class body assigns is the class's attribute, found
+        before a base's method of the name: a call of it calls what it
+        holds, where that is known, and never the base's method."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.py": """
+                def helper(x): ...
+
+                class B:
+                    def f(self, x): ...
+                    def h(self, x): ...
+
+                class D(B):
+                    f = None
+                    h = helper
+
+                    def run(self):
+                        self.f(1)
+                        self.h(1)
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.py::D::run") == [
+            "FILE:a.py::helper",
+            "REF:self.f",
+        ]
+
+    def test_an_attribute_the_instance_is_assigned_hides_the_classs_method(
+        self, tmp_path
+    ):
+        """An attribute a method assigns to the instance is found before a
+        method of the name, the class's or a base's: a call of it reaches
+        the member it is assigned, else stays open with the method as a
+        candidate."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.py": """
+                import functools
+
+                class B:
+                    def f(self): ...
+
+                class D(B):
+                    def __init__(self):
+                        self.f = functools.partial(self.f, 1)
+                        self.g = self._g
+                        self.k = self.k
+
+                    def _g(self): ...
+                    def g(self): ...
+                    def k(self): ...
+
+                    def run(self):
+                        self.f()
+                        self.g()
+                        self.k()
+                """,
+            },
+        )
+        assert _candidates(builder, "FILE:a.py::D::run") == {
+            "REF:self.f": ["FILE:a.py::B::f"],
+            "FILE:a.py::D::_g": None,
+            "FILE:a.py::D::k": None,
+        }
+
     def test_self_call_inherited_from_external_base_is_external(self, tmp_path):
         builder = _index(
             tmp_path,
@@ -4875,6 +4943,184 @@ class TestRustCallResolution:
             "FILE:src/lib.rs::B::go",
         ]
 
+    def test_a_let_in_a_block_on_the_line_of_the_outer_one(self, tmp_path):
+        """A `let` in a block on the line of an outer `let` of its name
+        shadows that one to the end of the block, not after."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                struct A;
+                impl A { fn go(&self) {} }
+                struct B;
+                impl B { fn go(&self) {} }
+
+                fn run() { let x = A; { let x = B; x.go(); } x.go(); }
+                fn typed() { let x: A = A; { let x: B = B; x.go(); } x.go(); }
+                """
+            },
+        )
+        for name in ("run", "typed"):
+            assert _calls(builder, f"FILE:src/lib.rs::{name}") == [
+                "FILE:src/lib.rs::A::go",
+                "FILE:src/lib.rs::B::go",
+            ]
+
+    def test_a_let_hides_its_name_from_its_statement_s_end(self, tmp_path):
+        """A `let` hides the outer binding of its name from where its
+        statement ends: its value reads the outer one."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                struct A;
+                impl A { fn go(&self) -> B { B } }
+                struct B;
+                impl B { fn run(&self) {} }
+
+                fn run(x: A) { let x = x.go(); x.run(); }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::run") == [
+            "FILE:src/lib.rs::A::go",
+            "FILE:src/lib.rs::B::run",
+        ]
+
+    def test_a_copy_or_a_borrow_has_the_type_of_what_it_copies(self, tmp_path):
+        """`let x = y;` and `let x = &y;` give `x` the type of `y`."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                struct H;
+                impl H { fn build(&self) {} }
+                struct G;
+                impl G { fn build(&self) {} }
+
+                fn run(h: H) {
+                    let h = &h;
+                    h.build();
+                    let k = h;
+                    k.build();
+                }
+                """
+            },
+        )
+        assert (
+            _calls(builder, "FILE:src/lib.rs::run") == ["FILE:src/lib.rs::H::build"] * 2
+        )
+
+    def test_a_value_below_its_let_is_its_value(self, tmp_path):
+        """A `let` whose value is on the line below holds that value, which
+        reads the outer binding of its name."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                struct A;
+                impl A { fn go(&self) -> B { B } }
+                struct B;
+                impl B { fn run(&self) {} }
+
+                fn run(x: A) {
+                    let x =
+                        x.go();
+                    x.run();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::run") == [
+            "FILE:src/lib.rs::A::go",
+            "FILE:src/lib.rs::B::run",
+        ]
+
+    def test_a_pattern_s_name_is_the_outer_one_past_its_block(self, tmp_path):
+        """Past the block of an `if let` or a `for`, a name its pattern binds
+        is what it was before."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                struct A;
+                impl A { fn go(&self) {} }
+                struct B;
+                impl B { fn go(&self) {} }
+
+                fn iflet(o: Option<B>) {
+                    let x = A;
+                    if let Some(x) = o {
+                        x.go();
+                    }
+                    x.go();
+                }
+                fn forin(v: Vec<B>) {
+                    let x = A;
+                    for x in v {
+                        x.go();
+                    }
+                    x.go();
+                }
+                """
+            },
+        )
+        for name in ("iflet", "forin"):
+            assert _calls(builder, f"FILE:src/lib.rs::{name}") == [
+                "FILE:src/lib.rs::A::go",
+                "FILE:src/lib.rs::B::go",
+            ]
+
+    def test_a_closure_s_parameter_is_its_own_to_the_body_s_end(self, tmp_path):
+        """A closure's parameter shadows the outer binding of its name in
+        the closure's body, not after."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                struct A;
+                impl A { fn go(&self) {} }
+                struct B;
+                impl B { fn go(&self) {} }
+
+                fn run() {
+                    let x = A;
+                    let f = |x: B| x.go();
+                    x.go();
+                }
+                fn one_line() { let x = A; let f = |x: B| x.go(); x.go(); }
+                """
+            },
+        )
+        for name in ("run", "one_line"):
+            assert _calls(builder, f"FILE:src/lib.rs::{name}") == [
+                "FILE:src/lib.rs::A::go",
+                "FILE:src/lib.rs::B::go",
+            ]
+
+    def test_a_type_parameter_is_its_declaration_s(self, tmp_path):
+        """A type parameter is in scope in the item that declares it: the
+        bound another function gives a parameter of its name is not its."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                trait B { fn use_it(&self); fn make() -> Self; }
+                struct S<T: B> { t: T }
+                impl<T: B> S<T> {
+                    fn held(&self, x: T) { x.use_it(); T::make(); }
+                }
+                fn m<T: B>(y: T) { y.use_it(); }
+                fn k<T>(x: T) { x.use_it(); T::make(); }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::S::held") == [
+            "FILE:src/lib.rs::B::make",
+            "FILE:src/lib.rs::B::use_it",
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::k") == []
+
     def test_an_impl_in_a_module_is_for_the_type_the_module_names(self, tmp_path):
         """`impl S` in a module is for the `S` the module declares, before
         or after the block, or imports from a module of the file; never the
@@ -5585,6 +5831,37 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:a.ts::emit") == ["FILE:a.ts::Doc::typeset"]
         assert _calls(builder, "FILE:a.ts::send") == ["REF:peer.typeset"]
 
+    def test_a_field_the_instance_is_assigned_hides_the_classs_method(self, tmp_path):
+        """A field a method assigns to the instance, `this.name = ...`, is
+        found before a method of the name, the class's or a base's: a call
+        of it reaches the member it is assigned, bound or not, else stays
+        open with the method as a candidate."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                function make() { return () => 1; }
+                class B { f(x) {} g() {} }
+                class D extends B {
+                  constructor() {
+                    super();
+                    this.f = this.f.bind(this);
+                    this.g = make();
+                    this.h = this.k.bind(this);
+                  }
+                  k() {}
+                  h() {}
+                  run() { this.f(1); this.g(); this.h(); }
+                }
+                """,
+            },
+        )
+        assert _candidates(builder, "FILE:a.js::D::run") == {
+            "FILE:a.js::B::f": None,
+            "REF:this.g": ["FILE:a.js::B::g"],
+            "FILE:a.js::D::k": None,
+        }
+
     def test_this_call_resolves_through_a_generic_base_class(self, tmp_path):
         """`class A<T extends B> extends C<T>` inherits from C, not B."""
         builder = _index(
@@ -5641,6 +5918,66 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:src/bundle.ts::bundle") == [
             "FILE:scripts/make.ts::check"
         ]
+
+    def test_directory_import_reaches_the_module_its_package_names(self, tmp_path):
+        """A specifier naming a directory, the project's root among them, is
+        the module the directory's package.json names, else its index."""
+        builder = _index(
+            tmp_path,
+            {
+                "package.json": '{"name": "pkg", "main": "./lib/main.js"}',
+                "lib/main.js": "export class Command { parse() {} }\n",
+                "index.js": "export class Command { parse() {} }\n",
+                "compat/package.json": '{"main": "dist/x.mjs", "types": "src/x.d.ts"}',
+                "compat/src/x.d.ts": "export class Shim { run(): void; }\n",
+                "tests/t.cjs": """
+                const commander = require('../');
+                const { Shim } = require('../compat');
+                function run() {
+                  new commander.Command().parse();
+                  new Shim().run();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:tests/t.cjs::run") == [
+            "FILE:compat/src/x.d.ts::Shim",
+            "FILE:compat/src/x.d.ts::Shim::run",
+            "FILE:lib/main.js::Command",
+            "FILE:lib/main.js::Command::parse",
+        ]
+
+    def test_names_from_a_project_module_not_located_stay_unresolved(self, tmp_path):
+        """A name an import binds to a project module that cannot be
+        located is not the language's global: calls on its values and on
+        `this` of a class it is the base of stay open, with the members of
+        the types of its name as candidates."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.d.ts": "export class Component { setState(s: any): void; }\n",
+                "b.jsx": """
+                import { Component } from './missing';
+                import * as lib from './missing';
+                class C extends Component {
+                  go() { this.setState({}); }
+                }
+                function run() {
+                  new Component().setState({});
+                  new lib.Component().setState({});
+                }
+                """,
+            },
+        )
+        member = "FILE:a.d.ts::Component::setState"
+        assert _candidates(builder, "FILE:b.jsx::C::go") == {
+            "REF:this.setState": [member]
+        }
+        assert _candidates(builder, "FILE:b.jsx::run") == {
+            "REF:Component": None,
+            "REF:lib.Component": None,
+            "REF:setState": [member],
+        }
 
     def test_call_through_a_project_import_reaches_that_module(self, tmp_path):
         """`ns.name()` on a namespace import reaches the imported file's
@@ -8358,6 +8695,42 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:b.ts::watch") == ["FILE:c.ts::Ticker"]
 
+    def test_a_type_parameter_is_its_declaration_s(self, tmp_path):
+        """A type parameter is in scope in the function, class or method
+        that declares it: the bound another function gives a parameter of
+        its name is not its."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class B { use() {} }
+                class C<T extends B> {
+                  held(x: T) { x.use(); }
+                }
+                function m<T extends B>(y: T) { y.use(); }
+                function k<T>(x: T) { x.use(); }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::C::held") == ["FILE:a.ts::B::use"]
+        assert _calls(builder, "FILE:a.ts::k") == []
+
+    def test_a_commonjs_file_is_a_module(self, tmp_path):
+        """A JavaScript file that calls `require` or gives `module.exports`
+        or a property of `exports` a value is a CommonJS module, as is a
+        `.mjs` or a `.cjs` file: what it declares is not a script's."""
+        builder = _index(
+            tmp_path,
+            {
+                "cjs.js": "const A = { use() {} };\nmodule.exports = A;\n",
+                "mod.js": "function only() {}\nexports.only = only;\n",
+                "q.mjs": "class Q { use() {} }\n",
+                "lib.js": "function helper() {}\n",
+                "user.js": "new A();\nonly();\nnew Q();\nhelper();\n",
+            },
+        )
+        assert _calls(builder, "FILE:user.js") == ["FILE:lib.js::helper"]
+
     def test_a_member_two_namesake_bases_have_is_neither_ones(self, tmp_path):
         """Where a base's name may stand for either of two classes that
         both have the member, the call reaches one of them: it is left
@@ -10725,6 +11098,704 @@ class TestTypeScriptCallResolution:
         assert bark not in _calls(builder, "FILE:a.ts::below")
         assert _calls(builder, "FILE:a.ts::passed").count(bark) == 2
 
+    def test_an_assignment_anywhere_in_a_statement_assigns(self, tmp_path):
+        """An assignment changes what a variable holds wherever it is
+        written: in a body without braces, a branch of a conditional, a
+        sequence, a pattern, `??=`, a function's expression body; one that
+        may not run leaves the variable open after it. A member's
+        assignment and a JSX attribute assign no variable, and `using`
+        declares one."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.tsx": """
+                class A { use() {} }
+                class B { use() {} }
+                declare const c: boolean;
+                declare function run(f: () => void): void;
+                export function branch() {
+                  let x = new A();
+                  if (c) x = new B();
+                  x.use();
+                }
+                export function operand() {
+                  let x = new A();
+                  const t = c ? x = new B() : null;
+                  x.use();
+                }
+                export function sequence() {
+                  let x = new A();
+                  const q = (x.use(), x = new B());
+                  x.use();
+                }
+                export function pattern() {
+                  let x = new A();
+                  [x] = [new B()];
+                  x.use();
+                }
+                export function logical() {
+                  let x = new A();
+                  x ??= new B();
+                  x.use();
+                }
+                export function arrow() {
+                  let x = new A();
+                  run(() => x = new B());
+                  x.use();
+                }
+                export function member(o: { x: B }) {
+                  const x = new A();
+                  o.x = new B();
+                  const e = <input
+                    x={o} />;
+                  x.use();
+                }
+                export function using() {
+                  let x = new A();
+                  { using x = new B(); x.use(); }
+                  x.use();
+                }
+                """
+            },
+        )
+        a, b = "FILE:a.tsx::A", "FILE:a.tsx::B"
+        use_a, use_b, open_ = f"{a}::use", f"{b}::use", "REF:x.use"
+        for open_after in ("branch", "operand", "pattern", "logical", "arrow"):
+            assert _calls(builder, f"FILE:a.tsx::{open_after}")[-1] == open_
+        assert _calls(builder, "FILE:a.tsx::sequence") == [a, use_a, b, use_b]
+        assert use_a in _calls(builder, "FILE:a.tsx::member")
+        assert _calls(builder, "FILE:a.tsx::using") == [a, use_a, b, use_b]
+
+    def test_a_for_head_assigns_a_variable_declared_before(self, tmp_path):
+        """`for (x of items)` gives `x` each element in the loop, after
+        which it holds the last or what it held; `for (k in o)` the keys."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() {} }
+                class B { use() {} }
+                export function of(items: B[]) {
+                  let x = new A();
+                  for (x of items) { x.use(); }
+                  x.use();
+                }
+                export function keys(o: object) {
+                  let k = new A();
+                  for (k in o) { k.use(); }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::of") == [
+            "FILE:a.ts::A",
+            "FILE:a.ts::B::use",
+            "REF:x.use",
+        ]
+        assert "FILE:a.ts::A::use" not in _calls(builder, "FILE:a.ts::keys")
+
+    def test_bindings_on_one_line_hold_what_each_is_given(self, tmp_path):
+        """Two bindings of a name on one line hold what each is given where
+        it is written: a parameter its own type, an assignment its value."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() {} }
+                class B { use() {} }
+                class C { use() {} }
+                export function g() {
+                  const h = (x: A) => x.use(), i = (x: C) => x.use();
+                  const u = (x) => x.use(), t = (x: B) => x.use();
+                }
+                export function m() { let x = new A(); x = new B(); x.use(); }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::g::h") == ["FILE:a.ts::A::use"]
+        assert _calls(builder, "FILE:a.ts::g::i") == ["FILE:a.ts::C::use"]
+        assert _calls(builder, "FILE:a.ts::g::u") == ["REF:x.use"]
+        assert "FILE:a.ts::B::use" in _calls(builder, "FILE:a.ts::m")
+        assert "FILE:a.ts::A::use" not in _calls(builder, "FILE:a.ts::m")
+
+    def test_an_assignment_gives_its_value_or_leaves_the_variable_open(self, tmp_path):
+        """`x = value` gives `x` what a call or a name it is holds, and a
+        value of no type read, as one a conditional picks, leaves it open,
+        but a variable declared with a type holds that type, and `null`
+        gives no type."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() {} }
+                class B { use() {} }
+                declare const c: boolean;
+                declare function makeB(): B;
+                const other = new B();
+                export function call() {
+                  let x = new A();
+                  x = makeB();
+                  x.use();
+                }
+                export function name() {
+                  let x = new A();
+                  x = other;
+                  x.use();
+                }
+                export function picked() {
+                  let x = new A();
+                  x = c ? makeB() : other;
+                  x.use();
+                }
+                export function typed() {
+                  let x: A = new A();
+                  x = makeB() as any;
+                  x.use();
+                }
+                export function param(x: A) {
+                  x = x || makeB();
+                  x.use();
+                }
+                export function nulled() {
+                  let x = new A();
+                  x = null;
+                  x.use();
+                }
+                """
+            },
+        )
+        for given in ("call", "name"):
+            assert "FILE:a.ts::B::use" in _calls(builder, f"FILE:a.ts::{given}")
+        assert _calls(builder, "FILE:a.ts::picked")[-1] == "REF:x.use"
+        for kept in ("typed", "param", "nulled"):
+            assert "FILE:a.ts::A::use" in _calls(builder, f"FILE:a.ts::{kept}")
+
+    def test_a_pattern_over_lines_ends_at_its_closing_bracket(self, tmp_path):
+        """A declaration's pattern that goes on over lines ends at the
+        bracket that closes it, not at an array type's `]` below it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() {} }
+                class B { use() {} }
+                export function f(input: { a: A }, other: B[]) {
+                  const {
+                    a,
+                  } = input;
+                  let path: B[] = other;
+                  a.use();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::f") == ["FILE:a.ts::A::use"]
+
+    def test_a_conditional_gives_the_type_both_branches_give(self, tmp_path):
+        """`c ? a : b` gives a declared or assigned variable the type both
+        its branches give, where they give the same one, else none."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() {} }
+                class B { use() {} }
+                declare const c: boolean;
+                declare function mkA(): A;
+                declare function mkB(): B;
+                const a1 = new A(), a2 = new A(), b1 = new B();
+                export function calls() {
+                  const x = c ? mkA() : mkB();
+                  x.use();
+                }
+                export function same() {
+                  const y = c ? a1 : a2;
+                  y.use();
+                }
+                export function assigned() {
+                  let v = new A();
+                  v = c ? a1 : b1;
+                  v.use();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::calls")[-1] == "REF:x.use"
+        assert _calls(builder, "FILE:a.ts::same") == ["FILE:a.ts::A::use"]
+        assert _calls(builder, "FILE:a.ts::assigned")[-1] == "REF:v.use"
+
+    def test_a_function_reads_a_variable_around_it_after_any_assignment(self, tmp_path):
+        """A function may run after another function, or an earlier run of
+        itself, assigned a variable declared around it: a read there holds
+        any value written, before the function's own assignment too. Past
+        an assignment the function makes, where no other function assigns
+        the variable, it holds what that gives."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() {} }
+                class B { use() {} }
+                let x = new A();
+                export function f(c: boolean) {
+                  x.use();
+                  if (c) x = new B();
+                  x.use();
+                }
+                export function g(c: boolean) { if (c) { x = new B(); } x.use(); }
+                let y = new A();
+                export function h() {
+                  y.use();
+                  y = new B();
+                  y.use();
+                }
+                """
+            },
+        )
+        open_ = "REF:x.use"
+        assert _calls(builder, "FILE:a.ts::f").count(open_) == 2
+        assert _calls(builder, "FILE:a.ts::h") == [
+            "FILE:a.ts::B",
+            "FILE:a.ts::B::use",
+            "REF:y.use",
+        ]
+
+    def test_an_assignment_a_loop_or_a_case_may_run_leaves_a_read_open(self, tmp_path):
+        """A read in a loop reads what an assignment later in it gave on the
+        loop's run before; a `switch` runs the statements from the case it
+        jumps to, so an assignment in one case holds to that case's end."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() {} }
+                class B { use() {} }
+                declare const c: boolean;
+                export function loop() {
+                  let x = new A();
+                  while (c) {
+                    x.use();
+                    x = new B();
+                  }
+                }
+                export function cases(k: number) {
+                  let x = new A();
+                  switch (k) {
+                    case 1:
+                      x = new B();
+                      x.use();
+                      break;
+                    case 2:
+                      x.use();
+                  }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::loop")[-1] == "REF:x.use"
+        assert _calls(builder, "FILE:a.ts::cases")[-2:] == [
+            "FILE:a.ts::B::use",
+            "REF:x.use",
+        ]
+
+    def test_a_constructor_functions_prototype_members_are_its_instances(
+        self, tmp_path
+    ):
+        """A function assigned to `F.prototype.name`, or listed in
+        `F.prototype = {...}`, is a member of what `new F()` makes, of
+        `this` in F and its members, and of a class that extends F. A
+        member assigned a name holds what the name does. Calling F itself
+        still calls the function."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/component.js": """
+                export function Component(props) {
+                  this.props = props;
+                  this.init();
+                }
+                Component.prototype.setState = function (update) {};
+                Component.prototype.init = function () {
+                  this.setState({});
+                };
+                Component.prototype.render = render;
+                function render() {}
+                export var Store = function () {};
+                Store.prototype = {
+                  save() {},
+                  load: function () {},
+                };
+                """,
+                "a.jsx": """
+                import { Component, Store } from './src/component.js';
+                class R extends Component {
+                  go() { this.setState({}); this.render(); }
+                }
+                function f() {
+                  const c = new Component();
+                  c.setState({});
+                  Component({});
+                  const s = new Store();
+                  s.save();
+                  s.load();
+                }
+                """,
+            },
+        )
+        prototype = "FILE:src/component.js::Component.prototype"
+        assert _calls(builder, "FILE:src/component.js::Component") == [
+            f"{prototype}::init"
+        ]
+        assert _calls(builder, f"{prototype}::init") == [f"{prototype}::setState"]
+        assert _calls(builder, "FILE:a.jsx::R::go") == [
+            f"{prototype}::setState",
+            "FILE:src/component.js::render",
+        ]
+        assert _calls(builder, "FILE:a.jsx::f") == [
+            "FILE:src/component.js::Component",
+            "FILE:src/component.js::Component",
+            f"{prototype}::setState",
+            "FILE:src/component.js::Store",
+            "FILE:src/component.js::Store.prototype::load",
+            "FILE:src/component.js::Store.prototype::save",
+        ]
+
+    def test_only_a_prototypes_members_are_a_constructor_functions_instances(
+        self, tmp_path
+    ):
+        """A function declared inside a constructor function and one assigned
+        to the function itself are no members of its instances, nor is a
+        prototype member one of the function. A member the constructor
+        assigns the instance hides the prototype's of its name."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                function Loader() {
+                  function onLoad() {}
+                  onLoad();
+                  this.done = null;
+                }
+                Loader.create = function () {};
+                Loader.prototype.start = function () {};
+                Loader.prototype.done = function () {};
+                function f() {
+                  const l = new Loader();
+                  l.onLoad();
+                  l.create();
+                  l.done();
+                  Loader.start();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.js::f") == [
+            "FILE:a.js::Loader",
+            "REF:Loader.start",
+            "REF:l.done",
+        ]
+
+    def test_a_prototype_assigned_an_object_has_the_base_it_is_read_through(
+        self, tmp_path
+    ):
+        """`F.prototype = Object.create(G.prototype)` and `F.prototype = new
+        G()` give F's instances G's prototype members; a base from outside
+        has a member F's prototype lacks. A prototype an expression gives,
+        or a class whose base one gives, has a base whose type is not told:
+        a member it lacks is one of those of its name."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                import { Ext } from 'some-package';
+                function Base() {}
+                Base.prototype.base = function () {};
+                function Kid() {}
+                Kid.prototype = Object.create(Base.prototype);
+                function Kid2() {}
+                Kid2.prototype = new Base();
+                function Out() {}
+                Out.prototype = new Ext();
+                function Mixed() {}
+                Mixed.prototype = mixin(Base);
+                function mixin(x) { return x; }
+                class Other { zz() {} }
+                class Made extends mixin(Base) {
+                  go() { this.zz(); }
+                }
+                function f() {
+                  new Kid().base();
+                  new Kid2().base();
+                  new Out().zz();
+                  new Mixed().zz();
+                }
+                """
+            },
+        )
+        base = "FILE:a.js::Base.prototype::base"
+        assert _calls(builder, "FILE:a.js::f") == [
+            base,
+            base,
+            "FILE:a.js::Kid",
+            "FILE:a.js::Kid2",
+            "FILE:a.js::Mixed",
+            "FILE:a.js::Out",
+            "REF:zz",
+        ]
+        assert _calls(builder, "FILE:a.js::Made::go") == ["REF:this.zz"]
+        open_calls = [
+            e["metadata"]["candidates"]
+            for e in builder.edges
+            if e["target"] in ("REF:zz", "REF:this.zz")
+        ]
+        assert open_calls == [["FILE:a.js::Other::zz"]] * 2
+
+    def test_a_prototype_member_names_the_function_or_class_in_reach(self, tmp_path):
+        """`F.prototype.name = ...` names the F in reach where it is written,
+        a function declared after it or around it too; for a class it is a
+        member of the class, which a member the class has of the name is
+        then either of."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                function init() {
+                  Late.prototype.late = function () {};
+                  Late.prototype.named = helper;
+                }
+                function Late() {}
+                function helper() {}
+                class K {
+                  km() {}
+                }
+                K.prototype.extra = function () {
+                  this.km();
+                };
+                K.prototype.km = function () {};
+                function f() {
+                  new Late().late();
+                  new Late().named();
+                  new K().extra();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.js::f") == [
+            "FILE:a.js::K",
+            "FILE:a.js::K::extra",
+            "FILE:a.js::Late",
+            "FILE:a.js::Late",
+            "FILE:a.js::Late.prototype::late",
+            "FILE:a.js::helper",
+        ]
+        km = [e for e in builder.edges if e["source"] == "FILE:a.js::K::extra"]
+        assert [(e["target"], e["metadata"]["candidates"]) for e in km] == [
+            ("REF:this.km", ["FILE:a.js::K::km", "FILE:a.js::K::km#2"])
+        ]
+
+    def test_a_member_assigned_to_a_function_is_its_own(self, tmp_path):
+        """`F.name = value` is a static member of the function F: `F.name()`
+        reaches it, an instance of F does not, nor does a name read in F's
+        body. A member assigned again,
+        to F or to its prototype, is each assignment, whose body is its own:
+        a call of it is open with both."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                export function F() {
+                  create();
+                }
+                F.create = function () { return new F(); };
+                F.named = helper;
+                F.twice = function () { one(); };
+                F.twice = function () { two(); };
+                F.prototype.m = function () { one(); };
+                F.prototype.m = function () { two(); };
+                function create() {}
+                function helper() {}
+                function one() {}
+                function two() {}
+                """,
+                "b.js": """
+                import { F } from './a.js';
+                function g() {
+                  F.create();
+                  F.named();
+                  F.twice();
+                  const x = new F();
+                  x.m();
+                  x.create();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.js::F") == ["FILE:a.js::create"]
+        assert _calls(builder, "FILE:a.js::F::twice#2") == ["FILE:a.js::two"]
+        assert _calls(builder, "FILE:a.js::F.prototype::m#2") == ["FILE:a.js::two"]
+        assert _calls(builder, "FILE:b.js::g") == [
+            "FILE:a.js::F",
+            "FILE:a.js::F::create",
+            "FILE:a.js::helper",
+            "REF:F.twice",
+            "REF:x.create",
+            "REF:x.m",
+        ]
+        open_calls = {
+            e["target"]: e["metadata"].get("candidates")
+            for e in builder.edges
+            if e["source"] == "FILE:b.js::g" and e["target"].startswith("REF:")
+        }
+        assert open_calls == {
+            "REF:F.twice": ["FILE:a.js::F::twice", "FILE:a.js::F::twice#2"],
+            "REF:x.create": None,
+            "REF:x.m": ["FILE:a.js::F.prototype::m", "FILE:a.js::F.prototype::m#2"],
+        }
+
+    def test_a_classs_static_members_are_its_constructors(self, tmp_path):
+        """A class's `static` members, and one assigned to it, are members
+        of the class itself: `K.name()` and a subclass constructor reach
+        them, and in one of them `this` is the class and `super` its base
+        constructor, as in an instance member `super` is the base's
+        instance. An instance reaches none of them, nor does `K.name()`
+        reach an instance member. A static and an instance member of one
+        name are two, `name#2`."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class K {
+                  static create() { return new K(); }
+                  static helper() { this.create(); }
+                  run() { this.create(); this.go(); }
+                  go() {}
+                  both() {}
+                  static both() {}
+                }
+                K.assigned = function () { this.helper(); };
+                export class R extends K {
+                  static more() { this.create(); super.create(); }
+                  again() { super.go(); }
+                }
+                function f(k: K) {
+                  K.create();
+                  K.run();
+                  k.create();
+                  R.create();
+                  K.assigned();
+                  new R().create();
+                  K.both();
+                  k.both();
+                }
+                """
+            },
+        )
+        k = "FILE:a.ts::K"
+        assert _calls(builder, f"{k}::helper") == [f"{k}::create"]
+        assert _calls(builder, f"{k}::run") == [f"{k}::go", "REF:this.create"]
+        assert _calls(builder, f"{k}::assigned") == [f"{k}::helper"]
+        assert _calls(builder, "FILE:a.ts::R::more") == [f"{k}::create"] * 2
+        assert _calls(builder, "FILE:a.ts::R::again") == [f"{k}::go"]
+        assert _calls(builder, "FILE:a.ts::f") == [
+            f"{k}::assigned",
+            f"{k}::both",
+            f"{k}::both#2",
+            f"{k}::create",
+            f"{k}::create",
+            "FILE:a.ts::R",
+            "REF:K.run",
+            "REF:create",
+            "REF:k.create",
+        ]
+
+    def test_a_function_called_where_it_is_written_is_what_it_returns(self, tmp_path):
+        """A function expression called where it is written, `(() => {...})()`,
+        `(function () {...}())` or `function () {...}()`, is no function:
+        the constant it is given holds what it returns, and its body is a
+        scope no source names, as a callback's is."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                function helper() {}
+                export const api = (() => {
+                  helper();
+                  return { get() {} };
+                })();
+                const legacy = function () {
+                  helper();
+                }();
+                !function () {
+                  helper();
+                }();
+                function f() {
+                  api();
+                  api.get();
+                }
+                """
+            },
+        )
+        types = {n["id"]: n["type"] for n in builder.nodes}
+        assert types["FILE:a.js::api"] == "Constant"
+        assert types["FILE:a.js::legacy"] == "Constant"
+        for line in (3, 7, 10):
+            assert _calls(builder, f"FILE:a.js::callback@{line}") == [
+                "FILE:a.js::helper"
+            ]
+        assert _calls(builder, "FILE:a.js") == []
+        assert _calls(builder, "FILE:a.js::f") == ["FILE:a.js::api"]
+
+    def test_a_field_a_one_line_function_assigns_hides_a_prototype_member(
+        self, tmp_path
+    ):
+        """`this.name = value` in a constructor or a method written on one
+        line is a field of the instance, which hides the prototype's member
+        of the name."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                function H() { this.hm = null; }
+                H.prototype.hm = function () {};
+                H.prototype.reset = function () { this.other = null; };
+                H.prototype.other = function () {};
+                function f() {
+                  new H().hm();
+                  new H().other();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.js::f") == [
+            "FILE:a.js::H",
+            "FILE:a.js::H",
+            "REF:hm",
+            "REF:other",
+        ]
+
+    def test_a_property_of_a_function_is_none_it_declares(self, tmp_path):
+        """`F.name()` calls what is assigned to F's property, not a function
+        declared in F's body: of a function of the project it is open,
+        unless every function has it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                export function Loader() {
+                  function inner() {}
+                }
+                """,
+                "b.js": """
+                import { Loader } from './a.js';
+                function g() {
+                  Loader.inner();
+                  Loader.bind(null);
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:b.js::g") == ["REF:Loader.inner"]
+
 
 class TestGoCallResolution:
     def test_bare_call_is_the_function_not_a_method_of_that_name(self, tmp_path):
@@ -11772,6 +12843,61 @@ class TestGoCallResolution:
             "FILE:app.go::B::Go",
             "FILE:app.go::B::Go",
         ]
+
+    def test_declarations_in_blocks_on_one_line(self, tmp_path):
+        """A declaration in a block hides the outer one of its name to the
+        end of the block, where they share a line."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type A struct{}
+
+                func (A) Go() {}
+
+                type B struct{}
+
+                func (B) Go() {}
+
+                func run() { x := A{}; { x := B{}; x.Go() }; x.Go() }
+                func typed() { var x A; { var x B; x.Go() }; x.Go() }
+                """
+            },
+        )
+        for name in ("run", "typed"):
+            assert _calls(builder, f"FILE:app.go::{name}") == [
+                "FILE:app.go::A::Go",
+                "FILE:app.go::B::Go",
+            ]
+
+    def test_an_initializer_below_its_name_reads_the_outer_one(self, tmp_path):
+        """A statement that goes on past a `:=` that ends its line reads, on
+        the next line, what its names held before."""
+        builder = _index(
+            tmp_path,
+            {
+                "app.go": """
+                package app
+
+                type A struct{}
+
+                func (A) Go() int { return 0 }
+
+                type B struct{}
+
+                func (B) Go() int { return 0 }
+
+                func run(x A) {
+                    x, n :=
+                        x.Go(), 1
+                    _ = n
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:app.go::run") == ["FILE:app.go::A::Go"]
 
     def test_initializer_of_an_if_or_switch_binds_its_names(self, tmp_path):
         builder = _index(
@@ -13181,6 +14307,87 @@ class TestJavaCallResolution:
             "FILE:K.java::B::go",
         ]
         assert _calls(builder, "FILE:K.java::K::loops") == ["FILE:K.java::B::go"]
+
+    def test_a_pattern_under_a_braceless_if(self, tmp_path):
+        """A pattern in the condition of an `if` that another `if` leads
+        without braces is scoped by its own `if`."""
+        builder = _index(
+            tmp_path,
+            {
+                "U.java": """
+                class A { void go() {} }
+                class B extends A { void go() {} }
+                class U {
+                  void run(boolean a, Object o) {
+                    if (a) if (!(o instanceof B x)) return; else x.go();
+                  }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:U.java::U::run") == ["FILE:U.java::B::go"]
+
+    def test_a_negated_pattern_s_variable_is_in_scope_in_the_else_of_a_braceless_branch(
+        self, tmp_path
+    ):
+        """The `else` after a branch that is one statement without braces is
+        where a negated pattern holds the type tested."""
+        builder = _index(
+            tmp_path,
+            {
+                "K.java": """
+                class A { void go() {} }
+                class B { void go() {} }
+                class K {
+                  A x;
+                  void run(Object o) {
+                    if (!(o instanceof B x)) o.hashCode(); else x.go();
+                  }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:K.java::K::run") == ["FILE:K.java::B::go"]
+
+    def test_an_else_belongs_to_the_nearest_if_without_one(self, tmp_path):
+        """In `if (!(o instanceof B x)) if (a) …; else …; else x.go();` the
+        first `else` is the inner `if`'s, so the second is where the
+        negated pattern holds the type tested."""
+        builder = _index(
+            tmp_path,
+            {
+                "K.java": """
+                class A { void go() {} }
+                class B { void go() {} }
+                class K {
+                  A x;
+                  void run(Object o, boolean a) {
+                    if (!(o instanceof B x)) if (a) o.hashCode(); else o.hashCode(); else x.go();
+                  }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:K.java::K::run") == ["FILE:K.java::B::go"]
+
+    def test_a_var_copy_has_the_type_of_what_it_copies(self, tmp_path):
+        """`var x = y;` gives `x` the type of `y`."""
+        builder = _index(
+            tmp_path,
+            {
+                "U.java": """
+                class H { void build() {} }
+                class G { void build() {} }
+                class U {
+                  void run(H h) {
+                    var k = h;
+                    k.build();
+                  }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:U.java::U::run") == ["FILE:U.java::H::build"]
 
     def test_arguments_of_a_call_over_several_lines(self, tmp_path):
         """A call passes as many arguments as stand between its `(` and the
@@ -15827,6 +17034,25 @@ class TestDotnetCallResolution:
             "FILE:K.cs::K::Run",
         ]
 
+    def test_a_var_copy_has_the_type_of_what_it_copies(self, tmp_path):
+        """`var x = y;` gives `x` the type of `y`."""
+        builder = _index(
+            tmp_path,
+            {
+                "U.cs": """
+                class H { public void Build() {} }
+                class G { public void Build() {} }
+                class U {
+                    void Run(H h) {
+                        var k = h;
+                        k.Build();
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:U.cs::U::Run") == ["FILE:U.cs::H::Build"]
+
     def test_what_an_expression_declares_is_in_scope_to_its_block_s_end(self, tmp_path):
         """`is T name` and `out T name` declare to the end of the block, or
         of the loop whose head declares, and a `case` pattern to the end of
@@ -17166,6 +18392,89 @@ class TestClangCallResolution:
             "FILE:run.cpp::B::go",
         ]
 
+    def test_declarations_in_blocks_on_one_line(self, tmp_path):
+        """A declaration in a block, or a lambda's parameter, hides the outer
+        one of its name to the end of the block, and one in a block is not
+        the next block's, where they share a line."""
+        builder = _index(
+            tmp_path,
+            {
+                "run.cpp": """
+                struct A { void go() {} };
+                struct B { void go() {} };
+                void outer() { A x; { B x; x.go(); } x.go(); }
+                void siblings() { { A x; x.go(); } { B x; x.go(); } }
+                void lambda() { A x; auto f = [](B x) { x.go(); }; x.go(); }
+                """
+            },
+        )
+        for name in ("outer", "siblings", "lambda"):
+            assert _calls(builder, f"FILE:run.cpp::{name}") == [
+                "FILE:run.cpp::A::go",
+                "FILE:run.cpp::B::go",
+            ]
+
+    def test_a_call_bound_declaration_hides_the_outer_one(self, tmp_path):
+        """An `auto` declaration hides the outer one of its name from where
+        its statement ends, of no known type before its value is read."""
+        builder = _index(
+            tmp_path,
+            {
+                "run.cpp": """
+                struct A { void go() {} };
+                struct B { void go() {} };
+                B mk_b() { return B{}; }
+                void run() { A x; { auto x = mk_b(); x.go(); } x.go(); }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:run.cpp::run") == [
+            "FILE:run.cpp::A::go",
+            "FILE:run.cpp::mk_b",
+            "REF:x.go",
+        ]
+
+    def test_an_auto_copy_has_the_type_of_what_it_copies(self, tmp_path):
+        """`auto x = y;` gives `x` the type of `y`."""
+        builder = _index(
+            tmp_path,
+            {
+                "run.cpp": """
+                struct H { void build() {} };
+                struct G { void build() {} };
+                void run(H h) {
+                  auto k = h;
+                  k.build();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:run.cpp::run") == ["FILE:run.cpp::H::build"]
+
+    def test_a_catch_parameter_is_its_handler_s(self, tmp_path):
+        """A `catch` handler's parameter has its declared type in the
+        handler's block, and hides the outer one of its name there alone."""
+        builder = _index(
+            tmp_path,
+            {
+                "run.cpp": """
+                struct A { void go() {} };
+                struct B { void go() {} };
+                struct C { void go() {} };
+                void run() {
+                  A e;
+                  try { throw 1; } catch (B& e) { e.go(); } catch (const C* e) { e->go(); }
+                  e.go();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:run.cpp::run") == [
+            "FILE:run.cpp::A::go",
+            "FILE:run.cpp::B::go",
+            "FILE:run.cpp::C::go",
+        ]
+
     def test_method_of_a_base_that_takes_the_call(self, tmp_path):
         """A member function reached on a derived type is the one of its
         name, there or in a base, that takes as many arguments as the call
@@ -17233,6 +18542,21 @@ class TestClangCallResolution:
             "REF:d.g",
         ]
         assert _candidates(builder, "FILE:a.cc::run")["REF:d.g"] is None
+
+    def test_a_derived_field_hides_the_bases_members_of_its_name(self, tmp_path):
+        """A field hides its class's bases' members of its name: a call of it
+        calls what it holds, never a base's method."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cc": """
+                struct B { void f(int x) {} void g(int x) {} };
+                struct D : B { int f; void (*g)(int); };
+                void run(D d) { d.f(1); d.g(1); }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.cc::run") == []
 
     def test_member_of_a_specialization_written_with_its_arguments(self, tmp_path):
         """`T<A>::f` is the member of the specialization for `A`, else of
@@ -17373,6 +18697,67 @@ class TestClangCallResolution:
             },
         )
         assert _calls(builder, "FILE:main.cpp::run") == ["FILE:main.cpp::put"]
+
+    def test_defaults_of_a_declaration_that_writes_the_types_differently(
+        self, tmp_path
+    ):
+        """A declaration gives its defaults to the definition whose parameters
+        have its types, however each writes them: through an alias, a
+        using-declaration, a qualifier, or a namespace a macro opens."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cc": """
+                namespace N { struct P {}; }
+                using N::P;
+                struct A { void f(P* p, int a, int c = 0); void f(int a); void g(); };
+                void A::f(N::P* p, int a, int c) {}
+                void A::f(int a) {}
+                void A::g() { P* p = nullptr; f(p, 1); }
+                """,
+                "util.h": """
+                #define NS_BEGIN namespace bssl {
+                #define NS_END }
+                NS_BEGIN
+                template <typename T> using Ptr = std::unique_ptr<T>;
+                struct S {};
+                void put(bssl::Ptr<S>* in, bool free_in = true);
+                NS_END
+                """,
+                "util.cc": """
+                #include "util.h"
+                NS_BEGIN
+                void put(Ptr<S>* in, bool free_in) {}
+                NS_END
+                """,
+                "main.cc": """
+                #include "util.h"
+                NS_BEGIN
+                void put(int a, int b, int c) {}
+                void run(Ptr<S>* p) { put(p); }
+                NS_END
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.cc::A::g") == ["FILE:a.cc::A::f"]
+        assert _calls(builder, "FILE:main.cc::run") == ["FILE:util.cc::put"]
+
+    def test_defaults_accumulate_by_position_over_declarations(self, tmp_path):
+        """Each declaration of a function may give defaults to more of its
+        parameters: a call may leave out every one some declaration gives."""
+        builder = _index(
+            tmp_path,
+            {
+                "util.h": "void put(int a, int b = 1);\nvoid put(int a = 0, int b);\n",
+                "util.cc": '#include "util.h"\nvoid put(int a, int b) {}\n',
+                "main.cc": """
+                #include "util.h"
+                void put(int a, int b, int c) {}
+                void run() { put(); }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:main.cc::run") == ["FILE:util.cc::put"]
 
     def test_arguments_are_counted_to_the_closing_parenthesis(self, tmp_path):
         """A call passes as many arguments as stand between its `(` and the
@@ -20572,6 +21957,301 @@ class TestDartCallResolution:
             name("Sq"),
         ]
 
+    def test_an_assignment_ends_an_is_promotion(self, tmp_path):
+        """An assignment to a promoted variable demotes it from where its
+        value is read on, and in a loop from the top of the loop."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/shape.dart": """
+                class Shape { String name() => ''; }
+                class Sq extends Shape {
+                  String name() => '';
+                  void side() {}
+                  Sq get next => this;
+                }
+                class Ci extends Shape { String name() => ''; }
+
+                void line(Shape s) {
+                  if (s is Sq) { s = Ci(); s.name(); }
+                }
+
+                void read(Shape s) {
+                  if (s is Sq) {
+                    s = s.next;
+                    s.name();
+                  }
+                }
+
+                void loop(Shape s, bool c) {
+                  if (s is Sq) {
+                    s.side();
+                    while (c) {
+                      s.name();
+                      s = Ci();
+                    }
+                  }
+                }
+                """,
+            },
+        )
+        name = "FILE:lib/shape.dart::{}::name".format
+        ci, side = "FILE:lib/shape.dart::Ci", "FILE:lib/shape.dart::Sq::side"
+        assert _calls(builder, "FILE:lib/shape.dart::line") == [ci, name("Shape")]
+        assert _calls(builder, "FILE:lib/shape.dart::read") == [name("Shape")]
+        assert _calls(builder, "FILE:lib/shape.dart::loop") == [ci, name("Shape"), side]
+
+    def test_an_assignment_demotes_only_where_it_reaches(self, tmp_path):
+        """An assignment in a branch leaves the other branch promoted, and
+        the code past the `if` where the branch exits; past one that falls
+        through the variable is demoted."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/shape.dart": """
+                class Shape { String name() => ''; }
+                class Sq extends Shape { String name() => ''; void side() {} }
+                class Ci extends Shape { String name() => ''; }
+
+                void branches(Shape s, bool b) {
+                  if (s is Sq) {
+                    if (b) { s = Ci(); } else { s.side(); }
+                    s.name();
+                  }
+                }
+
+                void exits(Shape s, bool b) {
+                  if (s is Sq) {
+                    if (b) {
+                      s = Ci();
+                      return;
+                    }
+                    s.side();
+                  }
+                }
+                """,
+            },
+        )
+        ci, side = "FILE:lib/shape.dart::Ci", "FILE:lib/shape.dart::Sq::side"
+        assert _calls(builder, "FILE:lib/shape.dart::branches") == [
+            ci,
+            "FILE:lib/shape.dart::Shape::name",
+            side,
+        ]
+        assert _calls(builder, "FILE:lib/shape.dart::exits") == [ci, side]
+
+    def test_an_if_case_promotes_where_its_pattern_matched(self, tmp_path):
+        """`if (s case Sq())` promotes `s` in its guard and its branch, and
+        past the `if` where the other branch exits, not in the other
+        branch."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/shape.dart": """
+                class Shape { String name() => ''; }
+                class Sq extends Shape { String name() => ''; void side() {} }
+
+                void matched(Shape s) {
+                  if (s case Sq()) s.side();
+                  if (s case Sq(:final side)) { s.side(); } else { s.name(); }
+                  if (s case Sq() when s.name() == '') {} else { return; }
+                  s.side();
+                }
+                """,
+            },
+        )
+        name = "FILE:lib/shape.dart::{}::name".format
+        side = "FILE:lib/shape.dart::Sq::side"
+        assert _calls(builder, "FILE:lib/shape.dart::matched") == [
+            name("Shape"),
+            name("Sq"),
+            side,
+            side,
+            side,
+        ]
+
+    def test_an_assignment_of_a_new_object_of_a_subtype_keeps_the_promotion(
+        self, tmp_path
+    ):
+        """Assigning a new object of a type that derives from the promoted one
+        keeps the variable promoted, on every path that reaches the read;
+        an object of any other type demotes it."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/shape.dart": """
+                class Shape { String name() => ''; }
+                class Sq extends Shape { String name() => ''; }
+                class SqSub extends Sq {}
+                class Ci extends Shape { String name() => ''; }
+
+                void sub(Shape s, bool b) {
+                  if (s is Sq) {
+                    if (b) { s = SqSub(); }
+                    s.name();
+                  }
+                }
+
+                void mixed(Shape s, bool b) {
+                  if (s is Sq) {
+                    if (b) { s = Ci(); } else { s = SqSub(); }
+                    s.name();
+                  }
+                }
+                """,
+            },
+        )
+        made = "FILE:lib/shape.dart::{}".format
+        assert _calls(builder, "FILE:lib/shape.dart::sub") == [
+            made("Sq::name"),
+            made("SqSub"),
+        ]
+        assert _calls(builder, "FILE:lib/shape.dart::mixed") == [
+            made("Ci"),
+            made("Shape::name"),
+            made("SqSub"),
+        ]
+
+    def test_an_assignment_in_a_case_reaches_neither_another_case_nor_past_one_that_leaves(
+        self, tmp_path
+    ):
+        """An assignment in a case of a `switch` leaves the other cases
+        promoted, and the code past the `switch` where its case leaves it by
+        a `return`; past one that ends, the variable is demoted."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/shape.dart": """
+                class Shape { String name() => ''; }
+                class Sq extends Shape { String name() => ''; void side() {} }
+                class Ci extends Shape { String name() => ''; }
+
+                void ends(Shape s, bool b) {
+                  if (s is Sq) {
+                    switch (b) {
+                      case true:
+                        s = Ci();
+                      case false:
+                        s.side();
+                    }
+                    s.name();
+                  }
+                }
+
+                void leaves(Shape s, bool b) {
+                  if (s is Sq) {
+                    switch (b) {
+                      case true:
+                        s = Ci();
+                        return;
+                      case false:
+                    }
+                    s.side();
+                  }
+                }
+
+                void block(Shape s, bool b) {
+                  if (s is Sq) {
+                    switch (b) {
+                      case true:
+                        {
+                          s = Ci();
+                          throw 0;
+                        }
+                      case false:
+                    }
+                    s.side();
+                  }
+                }
+                """,
+            },
+        )
+        ci, side = "FILE:lib/shape.dart::Ci", "FILE:lib/shape.dart::Sq::side"
+        assert _calls(builder, "FILE:lib/shape.dart::ends") == [
+            ci,
+            "FILE:lib/shape.dart::Shape::name",
+            side,
+        ]
+        assert _calls(builder, "FILE:lib/shape.dart::leaves") == [ci, side]
+        assert _calls(builder, "FILE:lib/shape.dart::block") == [ci, side]
+
+    def test_an_assignment_in_a_block_of_a_case_body_ends_its_promotion(self, tmp_path):
+        """An assignment in a block of a case body demotes the variable past
+        the block, where the block closes on the assignment's line too."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/shape.dart": """
+                class Shape { String name() => ''; }
+                class Sq extends Shape { String name() => ''; }
+                class Ci extends Shape { String name() => ''; }
+
+                void branch(Shape s, bool b) {
+                  switch (s) {
+                    case Sq():
+                      if (b) { s = Ci(); }
+                      s.name();
+                    default:
+                  }
+                }
+
+                void block(Shape s) {
+                  switch (s) {
+                    case Sq():
+                      { s = Ci(); }
+                      s.name();
+                    default:
+                  }
+                }
+                """,
+            },
+        )
+        expected = ["FILE:lib/shape.dart::Ci", "FILE:lib/shape.dart::Shape::name"]
+        assert _calls(builder, "FILE:lib/shape.dart::branch") == expected
+        assert _calls(builder, "FILE:lib/shape.dart::block") == expected
+
+    def test_unclosed_type_arguments_are_read_in_linear_time(self, tmp_path):
+        """A line of `x<` and two hundred `a<b>` before a `(` is read at
+        once, as type arguments are found by one scan of each run."""
+        start = time.monotonic()
+        _index(tmp_path, {"lib/p.dart": "void f() { x<" + "a<b>" * 200 + "(); }\n"})
+        assert time.monotonic() - start < 10
+
+    def test_a_switch_expression_arm_promotes_and_its_patterns_call_nothing(
+        self, tmp_path
+    ):
+        """In an arm of a `switch` expression on a variable the variable is
+        the type its patterns agree on; no alternative of an `||` pattern,
+        whose type arguments may hold a `,`, is a call, and a guard's calls
+        are."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/shape.dart": """
+                class Shape { String name() => ''; }
+                class Sq extends Shape { String name() => ''; }
+                class Ci extends Shape { String name() => ''; }
+                class Pair<A, B> extends Shape { String name() => ''; }
+                bool check() => true;
+
+                String arms(Shape s) => switch (s) {
+                  Sq() || Ci() => s.name(),
+                  Sq() when check() => s.name(),
+                  Pair<int, String>() => s.name(),
+                  _ => s.name(),
+                };
+                """,
+            },
+        )
+        name = "FILE:lib/shape.dart::{}::name".format
+        assert _calls(builder, "FILE:lib/shape.dart::arms") == [
+            name("Pair"),
+            name("Shape"),
+            name("Shape"),
+            name("Sq"),
+            "FILE:lib/shape.dart::check",
+        ]
+
     def test_a_name_a_block_declares_is_its_own_to_the_block_s_end(self, tmp_path):
         """A declaration in a block, or in a `for` head, hides the outer one
         of its name to the end of the block or the statement, not after; a
@@ -20611,6 +22291,47 @@ class TestDartCallResolution:
             "FILE:lib/run.dart::B::go",
             "FILE:lib/run.dart::B::go",
             "FILE:lib/run.dart::B::go",
+        ]
+
+    def test_declarations_in_blocks_on_one_line(self, tmp_path):
+        """A declaration in a block hides the outer one of its name to the
+        end of the block, where they share a line."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/run.dart": """
+                class A { void go() {} }
+                class B { void go() {} }
+                void run() { A x = A(); { B x = B(); x.go(); } x.go(); }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/run.dart::run") == [
+            "FILE:lib/run.dart::A",
+            "FILE:lib/run.dart::A::go",
+            "FILE:lib/run.dart::B",
+            "FILE:lib/run.dart::B::go",
+        ]
+
+    def test_an_awaited_copy_holds_what_the_future_gives(self, tmp_path):
+        """`var x = await y;` holds what the future `y` holds gives."""
+        builder = _index(
+            tmp_path,
+            {
+                "lib/run.dart": """
+                class Response { String readAsString() => ''; }
+                Future<Response> request() async => Response();
+                void run() async {
+                  var future = request();
+                  var response = await future;
+                  response.readAsString();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:lib/run.dart::run") == [
+            "FILE:lib/run.dart::Response::readAsString",
+            "FILE:lib/run.dart::request",
         ]
 
     def test_mixin_on_type_is_left_to_the_class_it_is_applied_to(self, tmp_path):
@@ -24250,7 +25971,8 @@ class TestBaseTypes:
 
     def test_typescript_base_that_is_a_parameter_names_no_type(self, tmp_path):
         """A class that extends a parameter of the function it is written
-        in extends the value passed, not a class of the parameter's name."""
+        in extends the value passed, not a class of the parameter's name:
+        a member it lacks is of a type not told."""
         builder = _index(
             tmp_path,
             {
@@ -24272,7 +25994,7 @@ class TestBaseTypes:
             },
         )
         assert _bases(builder, "FILE:mix.ts::mix::Mixed") == ["REF:Base"]
-        assert _calls(builder, "FILE:mix.ts::mix::Mixed::go") == []
+        assert _calls(builder, "FILE:mix.ts::mix::Mixed::go") == ["REF:this.run"]
         assert _bases(builder, "FILE:mix.ts::plain::Sub") == ["FILE:mix.ts::Base"]
         assert _calls(builder, "FILE:mix.ts::plain::Sub::go") == [
             "FILE:mix.ts::Base::run"
@@ -24324,7 +26046,7 @@ class TestBaseTypes:
         )
         for held in ("callback@5::Listed", "callback@11::Alone", "taken::Taken"):
             assert _bases(builder, f"FILE:mix.ts::{held}") == ["REF:Base"]
-            assert _calls(builder, f"FILE:mix.ts::{held}::go") == []
+            assert _calls(builder, f"FILE:mix.ts::{held}::go") == ["REF:this.run"]
         for caller in ("callback@5", "arrow", "taken", "typed"):
             assert _calls(builder, f"FILE:mix.ts::{caller}") == ["REF:helper"]
         assert _bases(builder, "FILE:mix.ts::After") == ["FILE:mix.ts::Base"]
@@ -24380,7 +26102,7 @@ class TestBaseTypes:
         )
         for held in ("outer::Made", "shared::Late"):
             assert _bases(builder, f"FILE:a.js::{held}") == ["REF:Base"]
-            assert _calls(builder, f"FILE:a.js::{held}::go") == []
+            assert _calls(builder, f"FILE:a.js::{held}::go") == ["REF:this.run"]
         assert _calls(builder, "FILE:a.js::outer::inner") == ["REF:helper"]
         assert _calls(builder, "FILE:a.js::curried") == ["REF:helper"]
         assert _calls(builder, "FILE:a.js") == [

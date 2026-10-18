@@ -214,11 +214,6 @@ _RE_RANGE = re.compile(
     r"(?P<over>[^{]*)"
 )
 
-# `name := value` / `name, ok := value`, the value no call and no literal
-_RE_COPY = re.compile(
-    r"\s*(?P<name>\w+)(?:\s*,\s*\w+)?\s*:=\s*(?P<value>[^;(){}]+?)\s*$"
-)
-
 # `switch name := value.(type) {`
 _RE_TYPE_SWITCH = re.compile(
     r"\s*switch\s+(?P<name>\w+)\s*:=\s*(?P<value>.+?)\.\(type\)\s*\{"
@@ -226,9 +221,10 @@ _RE_TYPE_SWITCH = re.compile(
 # `case Type:` / `case *Type:`, a clause of one type
 _RE_CASE = re.compile(r"\s*case\s+\*?" + _DECLARED_TYPE + r"\s*:")
 
-# The simple statement an `if`, `switch` or `for` header starts with, in
-# group 2
-_RE_INITIALIZER = re.compile(r"(\s*(?:\}\s*else\s+)?(?:if|switch|for)\s)([^;{]*);")
+# The keyword of an `if`, `switch` or `for` header and a space
+_HEADER = r"(?:\}\s*else\s+)?(?:if|switch|for)\s"
+# The simple statement a header starts with, in group 2
+_RE_INITIALIZER = re.compile(rf"(\s*{_HEADER})([^;{{]*);")
 
 # `name := func(`, a variable that holds a function literal
 _RE_LITERAL = re.compile(r"\s*(?P<name>\w+)\s*:?=\s*func\s*\(")
@@ -365,8 +361,11 @@ def _signature_tail(
 class GoParser(BaseParser):
     """Regex-driven Go source parser."""
 
+    line_ends_statement = re.compile(r"(?:[\w)\]}\"'`]|\+\+|--)[ \t]*$")
+    # Of a statement of its own or the one a header starts with
     binding_re = re.compile(
-        r"^\s*(?P<var>var\s+)?(?P<name>\w+)(?P<later>(?:\s*,\s*[\w.]+)*)\s*"
+        rf"^\s*(?:{_HEADER}\s*(?=[^;{{]*;))?"
+        r"(?P<var>var\s+)?(?P<name>\w+)(?P<later>(?:\s*,\s*[\w.]+)*)\s*"
         r"(?P<short>:)?=(?!=)"
     )
     # What the binding being read has after its first name, and whether it
@@ -381,20 +380,22 @@ class GoParser(BaseParser):
             self._code = " " * header.end(1) + header[2]
         binding = self.binding_re.search(self._code)
         if binding:
-            self._later = re.findall(r"[\w.]+", binding["later"])
+            later = re.compile(r"[\w.]+").finditer(self._code, *binding.span("later"))
+            self._later = [(found[0], found.start()) for found in later]
             self._declares = self.declares(binding)
         name = binding["name"] if binding else self._pending and self._pending[0]
-        known = len(self.declared.get(name, ()))
-        super()._end_line()
-        if self._later and len(self.declared.get(name, ())) > known:
+        bound = super()._end_line()
+        if self._later and bound and bound[1][0] == "#":
             # `a, b := f()` binds each name to the result of the call in its
             # position; an assignment leaves the later variables the types
             # they were declared with.
-            line, call, _ = self.declared[name].pop()
-            names = [name, *self._later] if self._declares else [name]
-            for position, bound in enumerate(names):
-                self.declared.setdefault(bound, []).append(
-                    (line, f"{call}.@{position}", False)
+            self.declared[name].remove(bound)
+            line, call, _, column = bound
+            names = [(name, column), *(self._later if self._declares else ())]
+            for position, (named, at) in enumerate(names):
+                # Where the binding goes on from a line before, at the line's end
+                self.declared.setdefault(named, []).append(
+                    (line, f"{call}.@{position}", False, at if binding else column)
                 )
 
     def declares(self, binding):
@@ -424,9 +425,16 @@ class GoParser(BaseParser):
     def _declared_on(self, name, lineno):
         """The type a declaration on line ``lineno`` gives ``name``, as it
         is written there; None where none does."""
-        held = (held for at, held, _ in self.declared.get(name, ()) if at == lineno)
+        held = (d[1] for d in self.declared.get(name, ()) if d[0] == lineno)
         held = next(held, "")
         return held[:-2].replace("::", ".") if held.endswith("()") else None
+
+    def _expression_origin(self, code, start, end, lineno, since, owner):
+        """What ``_held`` reads the expression at columns ``start`` to
+        ``end`` of ``code`` as, where it is written."""
+        return self._read_from(
+            start, self._held, code[start:end].strip(), lineno, since
+        )
 
     def _held(self, expression, lineno, since):
         """Origin path of what ``expression`` holds at ``lineno``: a variable
@@ -460,22 +468,14 @@ class GoParser(BaseParser):
         """Record the calls on ``code``, the line ``raw`` with its literals
         blanked, from column ``start`` on. ``since`` is the first line of
         the enclosing function."""
-        self.begin_line(code, lineno, source_id, raw)
-        if copied := _RE_COPY.fullmatch(
-            header[2] if (header := _RE_INITIALIZER.match(code)) else code[start:]
-        ):
-            held = self._held(copied["value"], lineno, since)
-            if held:
-                self.declared.setdefault(copied["name"], []).append(
-                    (lineno, held, False)
-                )
-        elif literal := _RE_LITERAL.match(code, start):
+        self.begin_line(code, lineno, source_id, raw, since)
+        if literal := _RE_LITERAL.match(code, start):
             # A call of the variable returns what the literal declares.
             returns = _signature_tail([code], 0, code, literal.end())[0]
             if returns:
-                self.declared.setdefault(literal["name"], []).append(
-                    (lineno, f"={literal['name']}>{returns}", False)
-                )
+                held = f"={literal['name']}>{returns}"
+                end = self._ended(code, lineno, literal.end("name"))
+                self._settle(literal["name"], *end, held)
         for call_match in _RE_CALL.finditer(code, start):
             callee = call_match.group(1)
             before = code[: call_match.start(1)].rstrip()
@@ -517,7 +517,7 @@ class GoParser(BaseParser):
                 if ranged[part]:
                     origin = f"{held}.@{position}" if held else "?"
                     self.declared.setdefault(ranged[part], []).append(
-                        (lineno, origin, False)
+                        (lineno, origin, False, ranged.start(part))
                     )
         # In a clause of a type switch its variable has the one type the
         # clause names, else the type of the value switched on.
@@ -534,7 +534,7 @@ class GoParser(BaseParser):
             elif code.lstrip().startswith(("case", "default")):
                 if clause := _RE_CASE.match(code):
                     held = f"{clause['type'].replace('.', '::')}()"
-                self.declared.setdefault(name, []).append((lineno, held, False))
+                self.declared.setdefault(name, []).append((lineno, held, False, None))
 
     def _add_import(self, file_id, alias, path):
         self.builder.add_edge(file_id, f"MODULE:{path}", "IMPORTS")
@@ -647,11 +647,12 @@ class GoParser(BaseParser):
             grouped = []
             group = _RE_VAR_GROUP.fullmatch(line)
             if group and (group["var"] or kinds[i] == "var"):
-                grouped = re.findall(r"\w+", group["names"])
+                names = list(re.compile(r"\w+").finditer(line, *group.span("names")))
+                grouped = [name[0] for name in names]
                 held = f"{group['type'].replace('.', '::')}()"
-                for name in grouped:
-                    self.declared.setdefault(name, []).append(
-                        (lineno, held, context_id == file_id)
+                for name in names:
+                    self.declared.setdefault(name[0], []).append(
+                        (lineno, held, context_id == file_id, name.start())
                     )
 
             # An entry of a const or var block is a constant.

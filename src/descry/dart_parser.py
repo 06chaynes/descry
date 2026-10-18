@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import bisect
 import re
+from itertools import pairwise
 
 from descry.generate import (
+    _LOOP_RE,
     _STATEMENT_START_RE,
     _TRAILING_PATH_RE,
     BaseParser,
@@ -111,11 +113,12 @@ _RE_CALL = re.compile(
     r"\s*\("
 )
 
-# The type arguments of a call or of a named constructor: `Foo<T>(`,
-# `Map<String, List<int>>(`, `Foo<T>.named(`
-_RE_TYPE_ARGUMENTS = re.compile(
-    r"(?<=[\w$])<[\w\s,.?$]*(?:<[\w\s,.?<>$]*>[\w\s,.?$]*)*>(?=\s*\(|\.[\w$])"
-)
+# A run of what type arguments are written with, and a bracket of them
+_RE_TYPE_ARGUMENT_RUN = re.compile(r"[\w\s,.?<>$]+")
+_RE_ANGLE = re.compile(r"[<>]")
+_RE_NAME_CHAR = re.compile(r"[\w$]")
+# What follows the type arguments of a call or of a named constructor
+_RE_CALLED = re.compile(r"\s*\(|\.[\w$]")
 
 # A value that is one call, as ``_read_header`` returns it: `Type(~)`,
 # `const Type<~>.named(~)`, `prefix.function(~)`
@@ -129,15 +132,11 @@ _RE_LITERAL = re.compile(
 )
 
 # `name.path;`, a value that is a variable or a member read
-_RE_COPIED = re.compile(r"\s*((?!null\b)[A-Za-z_$][\w$]*(?:\??\.[\w$]+)*)\s*;\s*")
+_RE_COPIED = re.compile(r"\s*((?!null\b)[A-Za-z_$][\w$]*(?:\??\.[\w$]+)*)\s*")
 
-# What follows the `)` of an object pattern in a `switch` expression
-_RE_PATTERN_ENDS = re.compile(r"\s*(?:=>|when\b)")
-# What an object pattern follows: `case Foo(`, `final Foo(:name) = value`,
-# `case Foo() || Bar(`
-_RE_PATTERN_STARTS = re.compile(
-    r"\b(?:case|final|var)$|\bcase\b(?:(?!\bwhen\b).)*(?:\|\||&&)$"
-)
+# What an object pattern follows outside a `switch` and an if-case:
+# `final Foo(:name) = value`, `for (var Foo(:name) in`
+_RE_PATTERN_STARTS = re.compile(r"\b(?:final|var)$")
 # A field pattern of an object pattern: `name: Type(` of an object pattern
 # in it, or a variable pattern without a type, `name: final x`, `:final x`
 # or `:x`
@@ -149,8 +148,22 @@ _RE_FIELD_PATTERN = re.compile(
 _RE_FOR_IN = re.compile(
     r"\bfor\s*\(\s*(?:var|final)\s+([\w$]+)\s+in\s+([\w$]+(?:\.[\w$]+)*)\s*\)"
 )
-# `switch (name) {`, a statement on a variable
-_RE_SWITCH_ON = re.compile(r"\bswitch\s*\(\s*([a-z_$][\w$]*)\s*\)\s*\{\s*$")
+# `if (` and `switch (`, a statement or an expression
+_RE_BRANCHING = re.compile(r"(?<![\w$])(if|switch)\s*\(")
+# What a head of a `switch` statement or the pattern of an if-case starts with
+_RE_CASE_LABEL = re.compile(r"(?<![\w$])(?:case|default)\b")
+# What a guard starts with
+_RE_GUARD = re.compile(r"\bwhen\b")
+# A new object of a type, the value of an assignment up to its `(`
+_RE_NEW = re.compile(
+    r"\s*(?:const\s+|new\s+)?((?:[a-z_$][\w$]*\.)?[_$]*[A-Z][\w$]*)(?:<[^;]*?>)?\("
+)
+# A last statement that leaves a case of a `switch`, which `break` only ends
+_RE_LEAVES = re.compile(r"[;{}:]\s*(?:return|rethrow|throw|continue)\b[^;{}]*;\s*$")
+# What a name follows where a statement declares it: a type, `var`, `final`
+_RE_DECLARES = re.compile(
+    r"(?<![\w$])(?!(?:else|return|do|yield|throw)\b)[\w$]+\??$|>\??$"
+)
 # What a call that can only be a constructor's follows
 _RE_CREATES = re.compile(r"\b(?:const|new)$")
 
@@ -171,11 +184,12 @@ _DECLARED_TYPE = (
 _RE_PATTERN_TYPE = re.compile(
     rf"\s*(?:final\s+)?{_DECLARED_TYPE}\s*(?:\(|[a-z_$][\w$]*\s*(?::|$))"
 )
-_RE_CASE_STARTS = re.compile(r"\s*(?:case|default)\b")
 # What ends an operand: an operator of lower precedence than `is`, a
-# conditional's `?` or `:`, a separator or a bracket; `==` and the like
-# are read past
-_RE_OPERATOR = re.compile(r"&&|\|\||\?\?|=>|[=!<>]=|\?(?![.\[])|[=:,;()\[\]{}]")
+# conditional's `?` or `:`, a separator or a bracket; `==` and the like,
+# and type arguments, which a `<` after a name may start, are read past
+_RE_OPERATOR = re.compile(
+    r"(?<=[\w$])<(?!=)|&&|\|\||\?\?|=>|[=!<>]=|\?(?![.\[])|[=:,;()\[\]{}]"
+)
 # What may stand before an operand that starts a statement or a guard
 _RE_OPERAND_HEAD = re.compile(r"(?s)\s*(?:(?:return|yield)\s+|.*\bwhen\s+)?")
 # What ends the expression of an arm of a `switch` expression
@@ -394,12 +408,50 @@ def _parameter_names(parameters: str) -> list[str]:
     return names
 
 
-def _case_type(head):
-    """The origin path of the type every alternative of the pattern in the
-    case head ``head`` tests for, where they agree; None for any other."""
-    pattern = re.match(r"\s*case\b((?:(?!\bwhen\b).)*)", head)
+def _type_arguments(code, called=False):
+    """``{start: end}`` of the type arguments that a `<` after a name starts
+    in ``code``, `<T>` or `<String, List<int>>`, where ``called`` only those
+    of a call or of a named constructor, `Foo<T>(` or `Foo<T>.named(`: to
+    the first `>` where no `<` comes before it, else to the last `>` of
+    the run of their characters that ends a nested list, one right after
+    another `>`. One scan of each run, so no text takes longer."""
+    ends = {}
+    for run in _RE_TYPE_ARGUMENT_RUN.finditer(code):
+        angles = [found.start() for found in _RE_ANGLE.finditer(code, *run.span())]
+        closes = [
+            index
+            for index in range(1, len(angles))
+            if code[angles[index]] == code[angles[index - 1]] == ">"
+            and (not called or _RE_CALLED.match(code, angles[index] + 1))
+        ]
+        for index, at in enumerate(angles[:-1]):
+            if code[at] != "<" or not at or not _RE_NAME_CHAR.match(code, at - 1):
+                continue
+            after = angles[index + 1]
+            if code[after] == ">":
+                if not called or _RE_CALLED.match(code, after + 1):
+                    ends[at] = after + 1
+            elif closes and closes[-1] >= index + 3:
+                ends[at] = angles[closes[-1]] + 1
+    return ends
+
+
+def _blank_type_arguments(code):
+    """``code`` with the type arguments of each call and named constructor
+    blank."""
+    blank, at = [], 0
+    for start, end in sorted(_type_arguments(code, called=True).items()):
+        if start >= at:
+            blank += [code[at:start], " " * (end - start)]
+            at = end
+    return "".join([*blank, code[at:]])
+
+
+def _case_type(pattern):
+    """The origin path of the type every alternative of ``pattern`` tests
+    for, where they agree; None for any other."""
     types = set()
-    for alternative in pattern[1].split("||") if pattern else [""]:
+    for alternative in pattern.split("||"):
         tested = _RE_PATTERN_TYPE.match(alternative)
         held = tested and tested["type"].replace(".", "::")
         types.add(tested and f"{held}{tested['generic'] or ''}()")
@@ -430,30 +482,20 @@ class DartParser(BaseParser):
     def _end_line(self):
         binding = self.binding_re.search(self._code)
         name = binding["name"] if binding else self._pending and self._pending[0]
-        known = len(self.declared.get(name, ()))
-        line, code, since = self._line, self._code, self._since
-        super()._end_line()
-        if len(self.declared.get(name, ())) > known:
+        line, code = self._line, self._code
+        if bound := super()._end_line():
             # A cascade has the value of its target.
-            at, origin, top = self.declared[name][-1]
+            at, origin, top, column = bound
             target = origin[1:].isdigit() and self._targets.get(int(origin[1:]))
             if target:
-                self.declared[name][-1] = (at, target, top)
-        elif binding:
-            # A copy has the type of what it copies, a literal its own; any
-            # other value that is no call leaves the name without a known
-            # type.
-            copied = _RE_COPIED.fullmatch(code, binding.end())
+                entries = self.declared[name]
+                entries[entries.index(bound)] = (at, target, top, column)
+        elif binding and not self._typed_declaration(name, binding.start("name")):
+            # A literal has its own type.
             literal = _RE_LITERAL.match(code, binding.end())
-            origin = "?"
             if literal and code.rstrip().endswith(("];", "};", literal[0])):
-                origin = f"{literal.lastgroup}<>()"
-            elif copied:
-                path = copied[1].replace("?", "")
-                origin = self._path_origin(f"{path}.", line, since)[:-1]
-                if binding["unwrap"]:
-                    origin += ".?"
-            self.declared.setdefault(name, []).append((line, origin, False))
+                held = f"{literal.lastgroup}<>()"
+                self._settle(name, *self._ended(code, line, binding.end()), held)
         statement = code.rstrip()
         if binding:
             self._unbound = (name, 0, bool(binding["unwrap"]))
@@ -471,7 +513,7 @@ class DartParser(BaseParser):
                     chained = statement.lstrip()[0] in ".)}" and edge is not None
                     origin = self._targets.get(edge, f"#{edge}") if chained else "?"
                     self.declared.setdefault(name, []).append(
-                        (line, origin + ".?" * (chained and awaited), False)
+                        (line, origin + ".?" * (chained and awaited), False, None)
                     )
 
     def call_origin(self, callee, lineno, since, owner=None):
@@ -482,6 +524,19 @@ class DartParser(BaseParser):
         # A type parameter without a bound says nothing of the value.
         unbound = held.removesuffix("().") in self._type_params
         return ("?." if unbound else held) + rest
+
+    def _expression_origin(self, code, start, end, lineno, since, owner):
+        """The origin path ``_path_origin`` gives the name or the field, read
+        through `?.` too, that the expression at columns ``start`` to
+        ``end`` of ``code`` is, where it is written; None for any other."""
+        copied = _RE_COPIED.fullmatch(code, start, end)
+        if not copied:
+            return None
+        path = f"{copied[1].replace('?', '')}."
+        origin = self._read_from(
+            copied.start(1), self._path_origin, path, lineno, since
+        )
+        return origin[:-1]
 
     def _path_origin(self, path, lineno, since):
         """Origin path of a call of ``path``, a dotted name: one through
@@ -507,33 +562,42 @@ class DartParser(BaseParser):
     def _bind_locals(self, code, lineno, scope):
         """Record the variables and parameters line ``lineno`` declares in
         ``scope``, those without a type as of no known one."""
-        untyped = list(filter(None, sum(_RE_UNTYPED.findall(code), ())))
+        # (name, column) of each, the column None for a closure's or a
+        # destructured one
+        untyped = [
+            (found[group], found.start(group))
+            for found in _RE_UNTYPED.finditer(code)
+            for group in range(1, _RE_UNTYPED.groups + 1)
+            if found[group]
+        ]
         closures = self._closure_params.get(lineno, ())
         for names in (*_RE_DESTRUCTURED.findall(code), *closures):
-            untyped += _parameter_names(names)
+            untyped += [(name, None) for name in _parameter_names(names)]
         held_by = {}  # name -> what a pattern or a loop gives it
         for found in _RE_CALL.finditer(code):
-            if self._object_pattern(code, found.start(1), found.end() - 1):
+            if self._object_pattern(code, found.start(1)):
                 self._bind_fields(found[1], code[found.end() :], held_by)
         for name, path in _RE_FOR_IN.findall(code):
             # An element of what the loop iterates
             held_by[name] = self.call_origin(f"{path}.*", lineno, self._since)
-        for name in untyped:
+        for name, column in untyped:
             held = held_by.get(name) or "?"
-            self.declared.setdefault(name, []).append((lineno, held, False))
+            self.declared.setdefault(name, []).append((lineno, held, False, column))
         if scope:
             typed = (match["name"] for match in _DECLARATIONS[0].finditer(code))
-            for name in (*untyped, *typed):
+            for name in (*(name for name, _ in untyped), *typed):
                 self.add_local(scope, name)
 
-    def _object_pattern(self, code, start, paren):
-        """Whether ``code`` has an object pattern whose type starts at
-        column ``start`` and whose `(` is at ``paren``."""
-        closed = self._pairs.get(paren)
-        return bool(
-            _RE_PATTERN_STARTS.search(code[:start].rstrip())
-            or (closed and _RE_PATTERN_ENDS.match(code, closed + 1))
-        )
+    def _object_pattern(self, code, start):
+        """Whether ``code``, the line being read, has an object pattern
+        whose type starts at column ``start``, not a constant one."""
+        before = code[:start].rstrip()
+        if _RE_CREATES.search(before):
+            return False
+        at = self._blocks[1][self._line - 1] + start
+        index = bisect.bisect_right(self._patterns, (at + 1,)) - 1
+        in_switch = index >= 0 and at < self._patterns[index][1]
+        return in_switch or bool(_RE_PATTERN_STARTS.search(before))
 
     def _bind_fields(self, pattern, inside, fields):
         """Add to ``fields`` the origin path of each variable that a field
@@ -573,11 +637,141 @@ class DartParser(BaseParser):
                     return at, char == ";"
         return len(lines) - 1, False
 
-    def _scope_spans(self, line, name, held):
-        """As the base's, but the declaration an `is` test on line ``line``
-        makes is in scope only where the test promotes ``name``."""
-        spans = self._promoted(line, name, held)
-        return super()._scope_spans(line, name, held) if spans is None else spans
+    def _scope_spans(self, name, declaration):
+        """As the base's, but the declaration that an `is` test, a case of a
+        `switch` or an if-case makes, or an assignment to a variable they
+        promote, is in scope only where ``_promote`` says."""
+        spans = self._promotions.get((name, declaration))
+        return super()._scope_spans(name, declaration) if spans is None else spans
+
+    def _promote(self, name, promotion, spans):
+        """Put ``promotion``, an entry of ``declared`` for ``name``, in scope
+        in ``spans``, but in the code an assignment to it there reaches: from
+        past its value, or from the top of the outermost loop in them that
+        holds it, which Dart demotes there. Where each assignment that
+        reaches a part is of a new object of a type, declare ``name`` there
+        as `%N`, read as the promoted type where each type derives from it
+        and else as it was before."""
+        text, _, closer, _ = self._blocks
+        assigns = re.compile(rf"(?<![\w$.]){re.escape(name)}\s*=(?![=>])")
+        reached = []  # (offset, the parts it reaches, the type it makes or None)
+        for start, end in spans:
+            for found in assigns.finditer(text, start, end):
+                if _RE_DECLARES.search(
+                    text[max(found.start() - 80, 0) : found.start()].rstrip()
+                ):
+                    continue
+                at = found.start()
+                loop = self._loop_start(at, start)
+                if loop is not None:
+                    reached.append((at, self._reached(loop, loop, start), None))
+                    continue
+                after = self._operand_end(found.end())[1]
+                made = _RE_NEW.match(text, found.end(), after)
+                tail = made and text[made.end() - 1 : after].rstrip()
+                if made and closer.get(made.end() - 1) != made.end() - 2 + len(tail):
+                    made = None
+                made = made and made[1].replace(".", "::")
+                reached.append((at, self._reached(at, after, start), made))
+        # Each piece of the spans by the assignments that reach it last on
+        # some path: an assignment alone reaches the first of its parts.
+        cuts = sorted(
+            {at for parts in reached for a, b in parts[1] for at in (a, b + 1)}
+        )
+        pieces = {}
+        for start, end in spans:
+            edges = [start, *(c for c in cuts if start < c <= end), end + 1]
+            for at, until in pairwise(edges):
+                live = tuple(
+                    index
+                    for index, (_, parts, _) in enumerate(reached)
+                    if any(a <= at <= b for a, b in parts)
+                    and not any(
+                        p[0][0] <= at <= p[0][1] for _, p, _ in reached[index + 1 :]
+                    )
+                )
+                pieces.setdefault(live, []).append((at, until - 1))
+        self._promotions[name, promotion] = pieces.get((), [])
+        made = {live: [reached[i][2] for i in live] for live in pieces if live}
+        made = {live: types for live, types in made.items() if all(types)}
+        if made:
+            # What it was before, read where the promotion is written
+            column = self._column(name, promotion)
+            line = promotion[0]
+            before = self._read_from(column, self._declared, name, line, self._since)
+            before = before or "?"
+        for live, types in made.items():
+            origin = f"%{len(self.builder.narrowings)}"
+            self.builder.narrowings[origin] = types, promotion[1], before
+            at = max(reached[i][0] for i in live)
+            line, column = self._place(at)
+            narrowed = line, origin, False, column
+            self.declared[name].append(narrowed)
+            self._promotions[name, narrowed] = pieces[live]
+
+    def _reached(self, at, after, floor):
+        """The spans of the code that the statement at offset ``at``, which
+        assigns from offset ``after`` on, reaches: out of each `if` and each
+        `switch` after offset ``floor`` that it is in a branch or a case of,
+        never into another, and past it where that branch does not exit."""
+        text, starts, closer, _ = self._blocks
+        out = []
+        for found in reversed(list(_RE_BRANCHING.finditer(text, floor, at))):
+            if found[1] == "if":
+                branches = [
+                    b for b in self._if_branches(closer.get(found.end() - 1, at)) if b
+                ]
+                last = branches[-1][1]
+            else:
+                line = bisect.bisect_right(starts, found.start()) - 1
+                stored = [
+                    m for m in self._switches.get(line, ()) if m[0] == found.start()
+                ]
+                if not stored:
+                    continue
+                _, _, last, bodies = stored[0]
+                branches = [spans[0] for spans, _ in bodies]
+            branch = next((b for b in branches if b[0] <= at <= b[1]), None)
+            if branch is None:
+                continue
+            out.append((after, branch[1]))
+            if found[1] == "if" and self._exits(branch[0]):
+                return out
+            if found[1] == "switch" and self._leaves(*branch):
+                return out
+            at, after = found.start(), last + 1
+        return [*out, (after, len(text))]
+
+    def _leaves(self, start, end):
+        """Whether the code from offset ``start`` to ``end``, a case of a
+        `switch`, ends by leaving it: its last statement, or the last one in
+        the block that is its last."""
+        text = self._blocks[0]
+        body = text[start:end].rstrip()
+        close = start + len(body) - 1
+        opened = self._openers.get(close) if body.endswith("}") else None
+        if opened is not None and re.search(r"[;{}:]\s*$", text[start:opened]):
+            return self._leaves(opened, close)
+        return bool(_RE_LEAVES.search(body))
+
+    def _loop_start(self, at, floor):
+        """The offset of the outermost loop after offset ``floor`` whose
+        statement holds offset ``at``; None for none."""
+        text, _, closer, _ = self._blocks
+        for loop in _LOOP_RE.finditer(text, floor, at):
+            head = loop.end()
+            if loop[0] != "do":
+                head = closer.get(text.find("(", head), at) + 1
+            if self._statement_close(head, orelse=False) >= at:
+                return loop.start()
+        return None
+
+    def _operand_end(self, at, ends=_ARM_ENDS):
+        """``(token, offset)`` of the first of ``ends``, tokens of
+        `_RE_OPERATOR`, after offset ``at``, past brackets."""
+        while (found := self._operator(at))[0] not in ends:
+            at = found[1] + len(found[0])
+        return found
 
     def _operator(self, at, back=False):
         """``(token, offset)`` of what ends the operand going on at offset
@@ -589,6 +783,8 @@ class DartParser(BaseParser):
                 token, at = found[0], found.end()
                 if token in "([{":
                     at = closer.get(found.start(), len(text)) + 1
+                elif token == "<":
+                    at = self._argument_ends.get(found.start(), at)
                 elif not re.fullmatch("[=!<>]=", token):
                     return token, found.start()
             return "", len(text)
@@ -685,10 +881,7 @@ class DartParser(BaseParser):
                     block = _innermost(spans, closed)
                     out.append((closed, self._section_end(closed, block)))
                 elif promoted and right == "=>":
-                    arm = closed + 2
-                    while (found := self._operator(arm))[0] not in _ARM_ENDS:
-                        arm = found[1] + len(found[0])
-                    out.append((closed, found[1]))
+                    out.append((closed, self._operand_end(closed + 2)[1]))
                 return out
             if right == "?":
                 branches = self._branches(closed)
@@ -714,56 +907,79 @@ class DartParser(BaseParser):
             out.append((closed + 1, self._statement_close(closed + 1, orelse=False)))
         return out
 
-    def _switch_cases(self, lines, index):
-        """Where line ``index`` opens a `switch` statement on a variable Dart
-        promotes, a local one or a private final field, declare it in each
-        case body as the type that every pattern of the case heads sharing
-        the body tests it for, and as it was declared before where they do
-        not agree and from where the body assigns it."""
-        found = _RE_SWITCH_ON.search(lines[index])
-        if not found:
-            return
-        name, line = found[1], index + 1
-        declared = [d for d in self.declared.get(name, ()) if d[0] <= line]
-        promotable = [
-            d
-            for d in declared
-            if d[0] >= self._since and self._in_scope(name, d[0], line, d[1])
-        ] or [
-            d
-            for d in declared
-            if name[0] == "_" and re.search(r"\bfinal\b", lines[d[0] - 1])
+    def _unguarded(self, start, end):
+        """The span of the pattern from offset ``start`` to a guard or to
+        offset ``end``."""
+        guard = _RE_GUARD.search(self._blocks[0], start, end)
+        return start, guard.start() if guard else end
+
+    def _switch_bodies(self, opened):
+        """``(spans, patterns)`` of each case body or arm of the `switch`
+        whose block opens at offset ``opened``: the span of its code, from
+        its last head, and the spans of the patterns of its heads, without
+        their guards."""
+        text, _, closer, spans = self._blocks
+        block = opened, closer.get(opened, len(text))
+        labels = [
+            label
+            for label in _RE_CASE_LABEL.finditer(text, opened, block[1])
+            if _innermost(spans, label.start()) == block
         ]
-        if not promotable:
-            return
-        before = max(promotable, key=lambda d: d[0])[1:]
-        _, starts, _, spans = self._blocks
-        block = _innermost(spans, starts[line])
-        assigns = re.compile(rf"(?<![\w$.]){re.escape(name)}\s*=(?![=>])")
-        entries = self.declared[name]
-        shared = []  # (line, type tested) of the heads of the body to come
-        last, depth = self._find_block_end(lines, index) - 1, 0
-        for at in range(line, last):
-            code = lines[at]
-            head = depth == 0 and _RE_CASE_STARTS.match(code)
-            if head:
-                shared.append((at + 1, _case_type(code)))
-            if shared and code.strip() and not (head and code.rstrip()[-1] == ":"):
-                # The body starts: the heads promote where they agree.
-                types = {held for _, held in shared}
+        bodies, patterns = [], []
+        if labels and not text[opened + 1 : labels[0].start()].strip():
+            for label, following in zip(labels, [*labels[1:], None]):
+                colon = self._operand_end(label.end(), (":", *_ARM_ENDS))[1]
+                patterns.append(self._unguarded(label.end(), colon))
+                end = following.start() if following else block[1]
+                if not following or text[colon + 1 : end].strip():
+                    bodies.append(([(label.start(), end)], patterns))
+                    patterns = []
+            return bodies
+        at = opened + 1
+        while (at := re.compile(r"\s*").match(text, at).end()) < block[1]:
+            token, arrow = self._operand_end(at, ("=>", *_ARM_ENDS))
+            if token != "=>":
+                break
+            end = self._operand_end(arrow + 2)[1]
+            bodies.append(([(at, end)], [self._unguarded(at, arrow)]))
+            at = end + 1
+        return bodies
+
+    def _promotions_on(self, lines, index):
+        """Promote what line ``index`` promotes: a name an `is` test there
+        tests, and a variable Dart promotes, a local one or a private final
+        field, that a `switch` or an if-case there opens on, in each case
+        body, arm and matched branch, as the type that every pattern of its
+        heads tests it for, where they agree."""
+        text, starts, _, _ = self._blocks
+        line = index + 1
+        for found in _DECLARATIONS[1].finditer(text, starts[index], starts[line]):
+            name, held = found["name"], f"{self._scanned_type(found.groupdict())}()"
+            for entry in self.declared.get(name, ()):
+                if entry[:2] == (line, held) and (name, entry) not in self._promotions:
+                    self._promote(name, entry, self._promoted(line, name, held))
+        for _, name, _, bodies in self._switches.get(index, ()):
+            declared = [d for d in self.declared.get(name, ()) if d[0] <= line]
+            promotable = [
+                d
+                for d in declared
+                if d[0] >= self._since and self._in_scope(name, d, line)
+            ] or [
+                d
+                for d in declared
+                if name[0] == "_" and re.search(r"\bfinal\b", lines[d[0] - 1])
+            ]
+            if not promotable:
+                continue
+            for spans, patterns in bodies:
+                types = {_case_type(text[at:until]) for at, until in patterns}
                 held = types.pop() if len(types) == 1 else None
-                entries.append((shared[-1][0], *((held, False) if held else before)))
-                shared = []
-            for assigned in [] if head else assigns.finditer(code):
-                entries.append((at + 1, *before))
-                # Out of a block in the body the variable stays as assigned.
-                around, outer = _innermost(spans, starts[at] + assigned.start()), None
-                while around and around != block:
-                    around, outer = _innermost(spans, around[0]), around
-                if outer:
-                    end = self._statement_close(outer[0])
-                    entries.append((bisect.bisect_right(starts, end), *before))
-            depth += code.count("{") - code.count("}")
+                if not held:
+                    continue
+                at, column = self._place(spans[0][0])
+                case = at, held, False, column
+                self.declared[name].append(case)
+                self._promote(name, case, spans)
 
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
@@ -790,9 +1006,41 @@ class DartParser(BaseParser):
         self.scan_declarations(joined, _DECLARATIONS)
         self.read_blocks(lines)
         self._openers = {end: start for start, end in self._blocks[2].items()}
+        # `<` -> the end of the type arguments it starts, by ``_type_arguments``
+        self._argument_ends = _type_arguments(self._blocks[0])
+        text, starts, closer, spans = self._blocks
+        # (name, entry of ``declared``) of what promotes a variable or is
+        # assigned to one promoted -> where it holds, by ``_promote``
+        self._promotions = {}
+        # line index -> (offset, variable matched or None, offset of the `}`
+        # of a `switch`, ``_switch_bodies``) of each `switch` and if-case
+        # there; spans of the patterns of all
+        self._switches, self._patterns = {}, []
+        for found in _RE_BRANCHING.finditer(text):
+            opened = found.end() - 1
+            closed = closer.get(opened, len(text))
+            if found[1] == "switch":
+                block = re.compile(r"\s*\{").match(text, closed + 1)
+                if not block:
+                    continue
+                head, bodies = closed, self._switch_bodies(block.end() - 1)
+                closed = closer.get(block.end() - 1, len(text))
+            else:
+                case = _RE_CASE_LABEL.search(text, opened, closed)
+                if not case:
+                    continue
+                matched = self._branch_scope(closed, _innermost(spans, opened), True)
+                head, pattern = case.start(), self._unguarded(case.end(), closed)
+                bodies = [([(case.end(), closed), *matched], [pattern])]
+            on = re.fullmatch(r"\s*([a-z_$][\w$]*)\s*", text[opened + 1 : head])
+            line = bisect.bisect_right(starts, found.start()) - 1
+            self._switches.setdefault(line, []).append(
+                (found.start(), on and on[1], closed, bodies)
+            )
+            self._patterns += [span for _, patterns in bodies for span in patterns]
+        self._patterns.sort()
         # line -> the parameter lists of the function expressions opening there
-        text, starts = self._blocks[:2]
-        blanked = _RE_TYPE_ARGUMENTS.sub(lambda match: " " * len(match[0]), text)
+        blanked = _blank_type_arguments(text)
         self._closure_params = {}
         for found in _RE_CLOSURE.finditer(blanked):
             line = bisect.bisect_right(starts, found.start(1))
@@ -1057,8 +1305,10 @@ class DartParser(BaseParser):
             for param in params:
                 self.add_local(node_id, param)
                 # One the line types, or tests with `is`, holds what that says.
-                if (index + 1, param) not in self._declared_columns:
-                    self.declared.setdefault(param, []).append((index + 1, "?", False))
+                if not any(d[0] == index + 1 for d in self.declared.get(param, ())):
+                    self.declared.setdefault(param, []).append(
+                        (index + 1, "?", False, None)
+                    )
             self.enter_context(node_id, index + 1, last + 1, frozenset(params))
             return at + 1
 
@@ -1133,11 +1383,11 @@ class DartParser(BaseParser):
                     if node_id != file_id and node_id not in types
                 )
             written = code
-            code = _RE_TYPE_ARGUMENTS.sub(lambda match: " " * len(match[0]), code)
-            self.begin_line(code, lineno, scope, raw_lines[i])
+            code = _blank_type_arguments(code)
+            self.begin_line(code, lineno, scope, raw_lines[i], since)
             self._since = since
+            self._promotions_on(lines, i)
             self._bind_locals(code, lineno, scope)
-            self._switch_cases(lines, i)
             pattern_end = 0
             for call_match in _RE_CALL.finditer(code):
                 callee = call_match.group(1)
@@ -1153,7 +1403,7 @@ class DartParser(BaseParser):
                 ):
                     continue
                 before = code[:start].rstrip()
-                if self._object_pattern(code, start, paren):
+                if self._object_pattern(code, start):
                     # An object pattern, and the patterns inside it, call nothing.
                     pattern_end = self._pairs.get(paren) or len(code)
                     continue

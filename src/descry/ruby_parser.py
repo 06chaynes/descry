@@ -690,17 +690,17 @@ class RubyParser(BaseParser):
         origin += "".join(f".{link}()" for link in links[:-1])
         return ("call", links[-1], f"{origin}.{links[-1]}")
 
-    def _declare(self, name, lineno, since, origin, depth=None):
-        """Bind the local variable ``name`` on ``lineno`` to a value of
-        origin path ``origin``, `?` for one of no known type. A name new to
-        the definition that starts on line ``since`` lasts to the end of
-        the innermost block open, or of the innermost of the ``depth``
-        outermost ones."""
+    def _declare(self, name, lineno, since, origin, depth=None, column=None):
+        """Bind the local variable ``name`` at ``column`` of ``lineno``, None
+        for a parameter, to a value of origin path ``origin``, `?` for one
+        of no known type. A name new to the definition that starts on line
+        ``since`` lasts to the end of the innermost block open, or of the
+        innermost of the ``depth`` outermost ones."""
         entries = self.declared.setdefault(name, [])
         scopes = self._scopes[:depth]
         if scopes and not self._declared(name, lineno, since):
             scopes[-1][1].setdefault(name, len(entries))
-        entries.append((lineno, origin, False))
+        entries.append((lineno, origin, False, column))
 
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
@@ -1201,12 +1201,19 @@ class RubyParser(BaseParser):
                 chain = _RE_CHAIN.fullmatch(_strip_parens(value))
                 if not origin and edge is not None and chain:
                     origin = f"#{edge}"
-                self._declare(bound["name"], lineno, since, origin or "?", outer_scopes)
+                self._declare(
+                    bound["name"],
+                    lineno,
+                    since,
+                    origin or "?",
+                    outer_scopes,
+                    bound.start("name"),
+                )
                 del assigned[bound["name"]]
             for name, column in assigned.items():
                 # A variable is one of the block its assignment is in.
                 depth = outer_scopes + sum(at < column for at in opened_at)
-                self._declare(name, lineno, since, "?", depth)
+                self._declare(name, lineno, since, "?", depth, column)
 
         # An instance variable has a type where every value it is assigned
         # in its class is an instance of that one, and its reader returns it.
