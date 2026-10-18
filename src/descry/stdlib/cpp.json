@@ -863,7 +863,7 @@
   "bad_weak_ptr": "std::bad_weak_ptr`0",
   "barrier": "std::barrier`1",
   "basic": "std::basic",
-  "basic_common_reference": "std::basic_common_reference`4",
+  "basic_common_reference": "std::basic_common_reference`2",
   "basic_const_iterator": "std::basic_const_iterator`1",
   "basic_filebuf": "std::basic_filebuf`2",
   "basic_format_arg": "std::basic_format_arg`1",
@@ -976,9 +976,9 @@
   "common_comparison_category": "std::common_comparison_category`1",
   "common_comparison_category_t": "std::common_comparison_category`1",
   "common_iterator": "std::common_iterator`2",
-  "common_reference": "std::common_reference`3",
+  "common_reference": "std::common_reference`1",
   "common_reference_t": "std::common_reference_t",
-  "common_type": "std::common_type`4",
+  "common_type": "std::common_type`1",
   "common_type_t": "std::common_type`1",
   "common_view": "std::common_view`1",
   "comp_ellint_1": "std::comp_ellint_1",
@@ -1051,7 +1051,7 @@
   "cregex_token_iterator": "std::regex_token_iterator`3",
   "crend": "std::crend",
   "csub_match": "std::sub_match`1",
-  "ctype": "std::ctype`3",
+  "ctype": "std::ctype`1",
   "ctype_base": "std::ctype_base`0",
   "ctype_byname": "std::ctype_byname`1",
   "current_exception": "std::current_exception",
@@ -1252,7 +1252,7 @@
   "format_to_n": "std::format_to_n",
   "format_to_n_result": "std::format_to_n_result`1",
   "formatted_size": "std::formatted_size",
-  "formatter": "std::formatter`4",
+  "formatter": "std::formatter`2",
   "forward": "std::forward",
   "forward_as_tuple": "std::forward_as_tuple",
   "forward_iterator_tag": "std::forward_iterator_tag`0",
@@ -1270,7 +1270,7 @@
   "front_insert_iterator": "std::front_insert_iterator`1",
   "front_inserter": "std::front_inserter",
   "fstream": "std::basic_fstream`2",
-  "function": "std::function`2",
+  "function": "std::function`1",
   "future": "std::future`1",
   "future_category": "std::future_category",
   "future_errc": "std::future_errc`0",
@@ -1315,7 +1315,7 @@
   "has_single_bit": "std::has_single_bit",
   "has_unique_object_representations": "std::has_unique_object_representations`1",
   "has_virtual_destructor": "std::has_virtual_destructor`1",
-  "hash": "std::hash`2",
+  "hash": "std::hash`1",
   "hash_value": "std::hash_value",
   "hecto": "std::ratio`0",
   "hermite": "std::hermite",
@@ -1349,7 +1349,7 @@
   "in_value_result": "std::in_value_result`2",
   "includes": "std::includes",
   "inclusive_scan": "std::inclusive_scan",
-  "incrementable_traits": "std::incrementable_traits`2",
+  "incrementable_traits": "std::incrementable_traits`1",
   "independent_bits_engine": "std::independent_bits_engine`2",
   "index_sequence": "std::integer_sequence`1",
   "index_sequence_for": "std::index_sequence_for",
@@ -1394,7 +1394,7 @@
   "is_array": "std::is_array`1",
   "is_assignable": "std::is_assignable`2",
   "is_base_of": "std::is_base_of`2",
-  "is_bind_expression": "std::is_bind_expression`2",
+  "is_bind_expression": "std::is_bind_expression`1",
   "is_block_file": "std::is_block_file",
   "is_bounded_array": "std::is_bounded_array`1",
   "is_character_file": "std::is_character_file",
@@ -1529,7 +1529,7 @@
   "iter_value_t": "std::iter_value_t",
   "iterator": "std::iterator`5",
   "iterator_t": "std::iterator_t",
-  "iterator_traits": "std::iterator_traits`2",
+  "iterator_traits": "std::iterator_traits`1",
   "join": "std::join",
   "join_view": "std::join_view`1",
   "join_with": "std::join_with",
@@ -1708,7 +1708,7 @@
   "move_backward_result": "std::in_out_result`2",
   "move_if_noexcept": "std::move_if_noexcept",
   "move_iterator": "std::move_iterator`1",
-  "move_only_function": "std::move_only_function`2",
+  "move_only_function": "std::move_only_function`1",
   "move_result": "std::in_out_result`2",
   "move_sentinel": "std::move_sentinel`1",
   "mt19937": "std::mersenne_twister_engine`1",
@@ -1827,7 +1827,7 @@
   "overflow_error": "std::overflow_error`0",
   "owner_less": "std::owner_less`1",
   "owning_view": "std::owning_view`1",
-  "packaged_task": "std::packaged_task`2",
+  "packaged_task": "std::packaged_task`1",
   "pair": "std::pair`2",
   "pairwise": "std::pairwise",
   "pairwise_transform": "std::pairwise_transform",
@@ -1981,7 +1981,7 @@
   "resetiosflags": "std::resetiosflags",
   "resize_and_overwrite": "std::resize_and_overwrite",
   "resize_file": "std::resize_file",
-  "result_of": "std::result_of`2",
+  "result_of": "std::result_of`1",
   "result_of_t": "std::result_of`1",
   "rethrow_exception": "std::rethrow_exception",
   "rethrow_if_nested": "std::rethrow_if_nested",
@@ -2197,9 +2197,9 @@
   "try_to_lock_t": "std::try_to_lock_t`0",
   "tuple": "std::tuple`1",
   "tuple_cat": "std::tuple_cat",
-  "tuple_element": "std::tuple_element`2",
-  "tuple_element_t": "std::tuple_element`2",
-  "tuple_size": "std::tuple_size`2",
+  "tuple_element": "std::tuple_element`1",
+  "tuple_element_t": "std::tuple_element`1",
+  "tuple_size": "std::tuple_size`1",
   "type_identity": "std::type_identity`1",
   "type_identity_t": "std::type_identity_t",
   "type_index": "std::type_index`0",
@@ -2266,7 +2266,7 @@
   "upper_bound": "std::upper_bound",
   "uppercase": "std::uppercase",
   "use_facet": "std::use_facet",
-  "uses_allocator": "std::uses_allocator`4",
+  "uses_allocator": "std::uses_allocator`2",
   "uses_allocator_construction_args": "std::uses_allocator_construction_args",
   "utc_clock": "std::utc_clock`0",
   "utc_seconds": "std::utc_seconds",
@@ -2528,13 +2528,6 @@
    "params": [],
    "statics": {}
   },
-  "std::allocator_traits`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::allocator_traits`1": {
    "aliases": {
     "allocator_type": "_Alloc",
@@ -2566,13 +2559,6 @@
     "max_size": "_A2::size_type",
     "select_on_container_copy_construction": "_Alloc"
    }
-  },
-  "std::allocator`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
   },
   "std::allocator`1": {
    "aliases": {
@@ -2723,13 +2709,6 @@
    ],
    "statics": {}
   },
-  "std::atomic`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::atomic`1": {
    "aliases": {
     "value_type": "_Tp"
@@ -2762,13 +2741,6 @@
    "params": [
     "_Tp1"
    ],
-   "statics": {}
-  },
-  "std::auto_ptr`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::auto_ptr`1": {
@@ -2864,13 +2836,6 @@
     "operator=": "bad_exception",
     "what": "char"
    },
-   "params": [],
-   "statics": {}
-  },
-  "std::bad_expected_access`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
    "params": [],
    "statics": {}
   },
@@ -2974,18 +2939,6 @@
    ],
    "statics": {}
   },
-  "std::basic_common_reference`4": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_T1",
-    "_T2",
-    "_U1",
-    "_U2"
-   ],
-   "statics": {}
-  },
   "std::basic_const_iterator`1": {
    "aliases": {
     "difference_type": "iter_difference_t<_It>",
@@ -3015,13 +2968,6 @@
    "params": [
     "_It"
    ],
-   "statics": {}
-  },
-  "std::basic_filebuf`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::basic_filebuf`2": {
@@ -3136,13 +3082,6 @@
    ],
    "statics": {}
   },
-  "std::basic_fstream`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::basic_fstream`2": {
    "aliases": {
     "char_type": "_CharT",
@@ -3168,13 +3107,6 @@
    ],
    "statics": {}
   },
-  "std::basic_ifstream`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::basic_ifstream`2": {
    "aliases": {
     "char_type": "_CharT",
@@ -3198,13 +3130,6 @@
     "_CharT",
     "_Traits"
    ],
-   "statics": {}
-  },
-  "std::basic_ios`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::basic_ios`2": {
@@ -3246,13 +3171,6 @@
     "_CharT",
     "_Traits"
    ],
-   "statics": {}
-  },
-  "std::basic_iostream`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::basic_iostream`2": {
@@ -3316,17 +3234,6 @@
    ],
    "statics": {}
   },
-  "std::basic_istream`0": {
-   "aliases": {
-    "traits_type": "std::char_traits<wchar_t>"
-   },
-   "bases": [],
-   "methods": {
-    "operator ": "bool"
-   },
-   "params": [],
-   "statics": {}
-  },
   "std::basic_istream`2": {
    "aliases": {
     "char_type": "_CharT",
@@ -3361,13 +3268,6 @@
    ],
    "statics": {}
   },
-  "std::basic_istringstream`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::basic_istringstream`3": {
    "aliases": {
     "allocator_type": "_Alloc",
@@ -3392,13 +3292,6 @@
     "_Traits",
     "_Alloc"
    ],
-   "statics": {}
-  },
-  "std::basic_ofstream`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::basic_ofstream`2": {
@@ -3449,16 +3342,6 @@
    ],
    "statics": {}
   },
-  "std::basic_ostream`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {
-    "operator ": "bool",
-    "operator=": "_Disable_exceptions"
-   },
-   "params": [],
-   "statics": {}
-  },
   "std::basic_ostream`2": {
    "aliases": {
     "char_type": "_CharT",
@@ -3484,13 +3367,6 @@
     "_CharT",
     "_Traits"
    ],
-   "statics": {}
-  },
-  "std::basic_ostringstream`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::basic_ostringstream`3": {
@@ -3628,13 +3504,6 @@
     "_CharT",
     "_Traits"
    ],
-   "statics": {}
-  },
-  "std::basic_streambuf`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::basic_streambuf`2": {
@@ -3832,13 +3701,6 @@
     "npos": "s"
    }
   },
-  "std::basic_stringbuf`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::basic_stringbuf`3": {
    "aliases": {
     "allocator_traits": "std::allocator_traits<_Alloc>",
@@ -3871,13 +3733,6 @@
     "_Traits",
     "_Alloc"
    ],
-   "statics": {}
-  },
-  "std::basic_stringstream`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::basic_stringstream`3": {
@@ -4035,13 +3890,6 @@
    ],
    "statics": {}
   },
-  "std::bit_and`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::bit_and`1": {
    "aliases": {},
    "bases": [
@@ -4053,13 +3901,6 @@
    "params": [
     "_Tp"
    ],
-   "statics": {}
-  },
-  "std::bit_not`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::bit_not`1": {
@@ -4075,13 +3916,6 @@
    ],
    "statics": {}
   },
-  "std::bit_or`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::bit_or`1": {
    "aliases": {},
    "bases": [
@@ -4093,13 +3927,6 @@
    "params": [
     "_Tp"
    ],
-   "statics": {}
-  },
-  "std::bit_xor`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::bit_xor`1": {
@@ -4219,13 +4046,6 @@
    ],
    "statics": {}
   },
-  "std::char_traits`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::char_traits`1": {
    "aliases": {},
    "bases": [
@@ -4302,22 +4122,6 @@
    ],
    "statics": {}
   },
-  "std::clock_time_conversion`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
-  "std::clock_time_conversion`1": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Clock"
-   ],
-   "statics": {}
-  },
   "std::clock_time_conversion`2": {
    "aliases": {},
    "bases": [],
@@ -4329,13 +4133,6 @@
    "statics": {}
   },
   "std::codecvt_base`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
-  "std::codecvt_byname`0": {
    "aliases": {},
    "bases": [],
    "methods": {},
@@ -4362,13 +4159,6 @@
    "params": [],
    "statics": {}
   },
-  "std::codecvt_utf16`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::codecvt_utf16`1": {
    "aliases": {},
    "bases": [
@@ -4378,13 +4168,6 @@
    "params": [
     "_Elem"
    ],
-   "statics": {}
-  },
-  "std::codecvt_utf8_utf16`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::codecvt_utf8_utf16`1": {
@@ -4398,13 +4181,6 @@
    ],
    "statics": {}
   },
-  "std::codecvt_utf8`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::codecvt_utf8`1": {
    "aliases": {},
    "bases": [
@@ -4414,13 +4190,6 @@
    "params": [
     "_Elem"
    ],
-   "statics": {}
-  },
-  "std::codecvt`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::codecvt`3": {
@@ -4451,13 +4220,6 @@
     "id": "l"
    }
   },
-  "std::collate_byname`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::collate_byname`1": {
    "aliases": {
     "char_type": "_CharT",
@@ -4470,13 +4232,6 @@
    "params": [
     "_CharT"
    ],
-   "statics": {}
-  },
-  "std::collate`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::collate`1": {
@@ -4501,13 +4256,6 @@
    "statics": {
     "id": "l"
    }
-  },
-  "std::common_comparison_category`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
   },
   "std::common_comparison_category`1": {
    "aliases": {
@@ -4535,13 +4283,6 @@
    ],
    "statics": {}
   },
-  "std::common_reference`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::common_reference`1": {
    "aliases": {},
    "bases": [],
@@ -4551,73 +4292,12 @@
    ],
    "statics": {}
   },
-  "std::common_reference`2": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Tp1",
-    "_Tp2"
-   ],
-   "statics": {}
-  },
-  "std::common_reference`3": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Tp1",
-    "_Tp2",
-    "_Rest"
-   ],
-   "statics": {}
-  },
-  "std::common_type`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::common_type`1": {
    "aliases": {},
    "bases": [],
    "methods": {},
    "params": [
     "_Tp"
-   ],
-   "statics": {}
-  },
-  "std::common_type`2": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Tp1",
-    "_Tp2"
-   ],
-   "statics": {}
-  },
-  "std::common_type`3": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Tp1",
-    "_Tp2",
-    "_Rp"
-   ],
-   "statics": {}
-  },
-  "std::common_type`4": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_T1",
-    "_T2",
-    "_U1",
-    "_U2"
    ],
    "statics": {}
   },
@@ -4659,13 +4339,6 @@
    "statics": {
     "operator()": "auto"
    }
-  },
-  "std::complex`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
   },
   "std::complex`1": {
    "aliases": {
@@ -4729,13 +4402,6 @@
     "_Iftrue",
     "_Iffalse"
    ],
-   "statics": {}
-  },
-  "std::conjunction`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::conjunction`1": {
@@ -4817,13 +4483,6 @@
    "statics": {}
   },
   "std::copy_options`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
-  "std::coroutine_handle`0": {
    "aliases": {},
    "bases": [],
    "methods": {},
@@ -4930,13 +4589,6 @@
     "xdigit": "s"
    }
   },
-  "std::ctype_byname`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::ctype_byname`1": {
    "aliases": {
     "mask": "typename ctype<_CharT>::mask"
@@ -4948,13 +4600,6 @@
    "params": [
     "_CharT"
    ],
-   "statics": {}
-  },
-  "std::ctype`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::ctype`1": {
@@ -4980,17 +4625,6 @@
    "statics": {
     "id": "l"
    }
-  },
-  "std::ctype`3": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_CharT",
-    "_Traits",
-    "_Alloc"
-   ],
-   "statics": {}
   },
   "std::cv_status`0": {
    "aliases": {},
@@ -5250,13 +4884,6 @@
    ],
    "statics": {}
   },
-  "std::disjunction`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::disjunction`1": {
    "aliases": {},
    "bases": [
@@ -5266,13 +4893,6 @@
    "params": [
     "_Bn"
    ],
-   "statics": {}
-  },
-  "std::divides`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::divides`1": {
@@ -5764,25 +5384,6 @@
    ],
    "statics": {}
   },
-  "std::formatter`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
-  "std::formatter`1": {
-   "aliases": {},
-   "bases": [],
-   "methods": {
-    "operator ": "auto",
-    "operator()": "auto"
-   },
-   "params": [
-    "_CharT"
-   ],
-   "statics": {}
-  },
   "std::formatter`2": {
    "aliases": {},
    "bases": [],
@@ -5792,32 +5393,6 @@
    "params": [
     "_Tp",
     "_CharT"
-   ],
-   "statics": {}
-  },
-  "std::formatter`3": {
-   "aliases": {},
-   "bases": [],
-   "methods": {
-    "operator ": "auto",
-    "operator()": "auto"
-   },
-   "params": [
-    "_CharT",
-    "_Tp",
-    "_Container"
-   ],
-   "statics": {}
-  },
-  "std::formatter`4": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_CharT",
-    "_Tp",
-    "_Container",
-    "_Compare"
    ],
    "statics": {}
   },
@@ -5943,16 +5518,6 @@
    ],
    "statics": {}
   },
-  "std::function`2": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Res",
-    "_ArgTypes"
-   ],
-   "statics": {}
-  },
   "std::future_errc`0": {
    "aliases": {},
    "bases": [],
@@ -5974,13 +5539,6 @@
    "statics": {}
   },
   "std::future_status`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
-  "std::future`0": {
    "aliases": {},
    "bases": [],
    "methods": {},
@@ -6180,13 +5738,6 @@
    ],
    "statics": {}
   },
-  "std::hash`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::hash`1": {
    "aliases": {},
    "bases": [
@@ -6195,16 +5746,6 @@
    "methods": {},
    "params": [
     "_Tp"
-   ],
-   "statics": {}
-  },
-  "std::hash`2": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Tp",
-    "_Dp"
    ],
    "statics": {}
   },
@@ -6349,16 +5890,6 @@
    "methods": {},
    "params": [
     ""
-   ],
-   "statics": {}
-  },
-  "std::incrementable_traits`2": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_It",
-    "_Sent"
    ],
    "statics": {}
   },
@@ -6688,16 +6219,6 @@
    ],
    "statics": {}
   },
-  "std::is_bind_expression`2": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Result",
-    "_Signature"
-   ],
-   "statics": {}
-  },
   "std::is_bounded_array`1": {
    "aliases": {},
    "bases": [
@@ -6718,13 +6239,6 @@
    "params": [
     "_Tp"
    ],
-   "statics": {}
-  },
-  "std::is_clock`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::is_clock`1": {
@@ -6850,13 +6364,6 @@
    ],
    "statics": {}
   },
-  "std::is_error_code_enum`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::is_error_code_enum`1": {
    "aliases": {},
    "bases": [
@@ -6866,13 +6373,6 @@
    "params": [
     "_Tp"
    ],
-   "statics": {}
-  },
-  "std::is_error_condition_enum`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::is_error_condition_enum`1": {
@@ -7216,13 +6716,6 @@
    ],
    "statics": {}
   },
-  "std::is_null_pointer`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::is_null_pointer`1": {
    "aliases": {},
    "bases": [
@@ -7243,13 +6736,6 @@
    "params": [
     "_Tp"
    ],
-   "statics": {}
-  },
-  "std::is_placeholder`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::is_placeholder`1": {
@@ -7554,13 +7040,6 @@
    ],
    "statics": {}
   },
-  "std::is_void`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::is_void`1": {
    "aliases": {},
    "bases": [
@@ -7638,16 +7117,6 @@
    "methods": {},
    "params": [
     "_Iterator"
-   ],
-   "statics": {}
-  },
-  "std::iterator_traits`2": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_It",
-    "_Sent"
    ],
    "statics": {}
   },
@@ -8050,13 +7519,6 @@
    "params": [],
    "statics": {}
   },
-  "std::logical_and`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::logical_and`1": {
    "aliases": {},
    "bases": [
@@ -8070,13 +7532,6 @@
    ],
    "statics": {}
   },
-  "std::logical_not`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::logical_not`1": {
    "aliases": {},
    "bases": [
@@ -8088,13 +7543,6 @@
    "params": [
     "_Tp"
    ],
-   "statics": {}
-  },
-  "std::logical_or`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::logical_or`1": {
@@ -8129,13 +7577,6 @@
    ],
    "statics": {}
   },
-  "std::make_signed`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::make_signed`1": {
    "aliases": {
     "type": "typename __make_signed_selector<_Tp>::__type"
@@ -8145,13 +7586,6 @@
    "params": [
     "_Tp"
    ],
-   "statics": {}
-  },
-  "std::make_unsigned`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::make_unsigned`1": {
@@ -8499,13 +7933,6 @@
    "params": [],
    "statics": {}
   },
-  "std::messages_byname`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::messages_byname`1": {
    "aliases": {
     "char_type": "_CharT",
@@ -8518,13 +7945,6 @@
    "params": [
     "_CharT"
    ],
-   "statics": {}
-  },
-  "std::messages`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::messages`1": {
@@ -8560,13 +7980,6 @@
    ],
    "statics": {}
   },
-  "std::minus`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::minus`1": {
    "aliases": {},
    "bases": [
@@ -8578,13 +7991,6 @@
    "params": [
     "_Tp"
    ],
-   "statics": {}
-  },
-  "std::modulus`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::modulus`1": {
@@ -8601,13 +8007,6 @@
    "statics": {}
   },
   "std::money_base`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
-  "std::money_get`0": {
    "aliases": {},
    "bases": [],
    "methods": {},
@@ -8635,13 +8034,6 @@
     "id": "l"
    }
   },
-  "std::money_put`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::money_put`2": {
    "aliases": {
     "char_type": "_CharT",
@@ -8663,13 +8055,6 @@
     "id": "l"
    }
   },
-  "std::moneypunct_byname`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::moneypunct_byname`1": {
    "aliases": {
     "char_type": "_CharT",
@@ -8685,13 +8070,6 @@
    "statics": {
     "intl": "o"
    }
-  },
-  "std::moneypunct`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
   },
   "std::moneypunct`1": {
    "aliases": {
@@ -8854,16 +8232,6 @@
    ],
    "statics": {}
   },
-  "std::move_only_function`2": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Res",
-    "_ArgTypes"
-   ],
-   "statics": {}
-  },
   "std::move_sentinel`1": {
    "aliases": {},
    "bases": [],
@@ -8934,13 +8302,6 @@
     "_Compare",
     "_Alloc"
    ],
-   "statics": {}
-  },
-  "std::multiplies`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::multiplies`1": {
@@ -9029,13 +8390,6 @@
     "try_lock": "bool",
     "unlock": "void"
    },
-   "params": [],
-   "statics": {}
-  },
-  "std::negate`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
    "params": [],
    "statics": {}
   },
@@ -9175,13 +8529,6 @@
    "params": [],
    "statics": {}
   },
-  "std::num_get`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::num_get`2": {
    "aliases": {
     "char_type": "_CharT",
@@ -9202,13 +8549,6 @@
     "id": "l"
    }
   },
-  "std::num_put`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::num_put`2": {
    "aliases": {
     "char_type": "_CharT",
@@ -9228,13 +8568,6 @@
    "statics": {
     "id": "l"
    }
-  },
-  "std::numeric_limits`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
   },
   "std::numeric_limits`1": {
    "aliases": {},
@@ -9257,13 +8590,6 @@
     "signaling_NaN": "_Tp"
    }
   },
-  "std::numpunct_byname`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::numpunct_byname`1": {
    "aliases": {
     "char_type": "_CharT",
@@ -9276,13 +8602,6 @@
    "params": [
     "_CharT"
    ],
-   "statics": {}
-  },
-  "std::numpunct`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::numpunct`1": {
@@ -9446,13 +8765,6 @@
    "params": [],
    "statics": {}
   },
-  "std::owner_less`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::owner_less`1": {
    "aliases": {},
    "bases": [],
@@ -9487,16 +8799,6 @@
    "methods": {},
    "params": [
     "_Signature"
-   ],
-   "statics": {}
-  },
-  "std::packaged_task`2": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Res",
-    "_ArgTypes"
    ],
    "statics": {}
   },
@@ -9653,13 +8955,6 @@
    ],
    "statics": {}
   },
-  "std::plus`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::plus`1": {
    "aliases": {},
    "bases": [
@@ -9789,13 +9084,6 @@
     "_Sequence",
     "_Compare"
    ],
-   "statics": {}
-  },
-  "std::promise`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::promise`1": {
@@ -10347,16 +9635,6 @@
    ],
    "statics": {}
   },
-  "std::result_of`2": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Functor",
-    "_ArgTypes"
-   ],
-   "statics": {}
-  },
   "std::reverse_iterator`1": {
    "aliases": {
     "difference_type": "iter_difference_t<_Iterator>",
@@ -10450,13 +9728,6 @@
     "_OuterAlloc",
     "_InnerAllocs"
    ],
-   "statics": {}
-  },
-  "std::scoped_lock`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::scoped_lock`1": {
@@ -10553,13 +9824,6 @@
     "_Compare",
     "_Alloc"
    ],
-   "statics": {}
-  },
-  "std::shared_future`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::shared_future`1": {
@@ -11198,13 +10462,6 @@
    "params": [],
    "statics": {}
   },
-  "std::time_get_byname`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::time_get_byname`2": {
    "aliases": {
     "char_type": "_CharT",
@@ -11218,13 +10475,6 @@
     "_CharT",
     "_InIter"
    ],
-   "statics": {}
-  },
-  "std::time_get`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::time_get`2": {
@@ -11284,13 +10534,6 @@
     "min": "time_point<_Clock, _Dur>"
    }
   },
-  "std::time_put_byname`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
-   "statics": {}
-  },
   "std::time_put_byname`2": {
    "aliases": {
     "char_type": "_CharT",
@@ -11304,13 +10547,6 @@
     "_CharT",
     "_OutIter"
    ],
-   "statics": {}
-  },
-  "std::time_put`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::time_put`2": {
@@ -11430,16 +10666,6 @@
    ],
    "statics": {}
   },
-  "std::tuple_element`2": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Tp1",
-    "_Tp2"
-   ],
-   "statics": {}
-  },
   "std::tuple_size`1": {
    "aliases": {},
    "bases": [],
@@ -11447,23 +10673,6 @@
    "params": [
     "_Tp"
    ],
-   "statics": {}
-  },
-  "std::tuple_size`2": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Tp1",
-    "_Tp2"
-   ],
-   "statics": {}
-  },
-  "std::tuple`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::tuple`1": {
@@ -12015,29 +11224,6 @@
    ],
    "statics": {}
   },
-  "std::uses_allocator`3": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Tp",
-    "_Seq",
-    "_Alloc"
-   ],
-   "statics": {}
-  },
-  "std::uses_allocator`4": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Tp",
-    "_Sequence",
-    "_Compare",
-    "_Alloc"
-   ],
-   "statics": {}
-  },
   "std::utc_clock`0": {
    "aliases": {
     "duration": "chrono::duration<rep, period>",
@@ -12138,15 +11324,6 @@
    },
    "params": [
     "_Types"
-   ],
-   "statics": {}
-  },
-  "std::vector`1": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [
-    "_Alloc"
    ],
    "statics": {}
   },
@@ -12519,13 +11696,6 @@
     "_Duration",
     "_TimeZonePtr"
    ],
-   "statics": {}
-  },
-  "std::zoned_traits`0": {
-   "aliases": {},
-   "bases": [],
-   "methods": {},
-   "params": [],
    "statics": {}
   },
   "std::zoned_traits`1": {

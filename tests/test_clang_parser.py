@@ -559,7 +559,7 @@ static struct { int a; } table[] = {{1}, {2}};
         assert builder.fields["FILE:src/foo.c::value"] == {
             "kind": "int",
             "number": "double",
-            "ptr": "node",
+            "ptr": "node*",
         }
         assert "list_t" in builder.type_aliases
 
@@ -587,6 +587,29 @@ int run(int n) {
         assert _call_pairs(builder) == [("run", "work")]
         assert _spans(builder, "Method") == {"Env::NewFile": (4, 4)}
 
+    def test_a_control_keyword_is_no_macro_its_head_is_written_in(self, builder):
+        """A bare call in an `if` or `while` head is no argument of a macro
+        that could qualify it."""
+        src = """
+int run(int n) {
+  if (ready(n)) {}
+  while (more(n)) {}
+  return CHECK(valid(n));
+}
+""".strip()
+        _parse(builder, src)
+        origins = {
+            e["target"]: e["metadata"].get("origin")
+            for e in builder.edges
+            if e["relation"] == "CALLS"
+        }
+        assert origins == {
+            "REF:ready": None,
+            "REF:more": None,
+            "REF:CHECK": None,
+            "REF:valid": "^CHECK^0",
+        }
+
     def test_lambda_body_calls_from_its_function(self, builder):
         src = """
 void each(Items* items) {
@@ -598,6 +621,19 @@ void each(Items* items) {
 """.strip()
         _parse(builder, src)
         assert _call_pairs(builder) == [("each", "record"), ("each", "walk")]
+
+    def test_a_name_inside_template_arguments_is_no_call(self, builder):
+        """A dependent type that closes template arguments opened on an
+        earlier line is not what the `(` behind them calls."""
+        src = """
+template <typename Iter>
+Matcher<typename Traits<Iter>::value_type> Of(Iter first, Iter last) {
+  return Matcher<
+      typename ::std::iterator_traits<Iter>::value_type>(first, last);
+}
+""".strip()
+        _parse(builder, src)
+        assert _call_pairs(builder) == []
 
 
 class TestPreprocessor:
@@ -796,6 +832,35 @@ static int both(void) { return 2; }
 """.strip()
         _parse(builder, src, "src/foo.h")
         assert _call_pairs(builder) == [("RELEASE", "unref"), ("LIMIT", "compute")]
+
+    def test_macro_invocation_alone_on_its_lines_ends_its_statement(self, builder):
+        """A macro invocation without `;` that stands alone on its lines and
+        that a declaration follows is a statement of its own; one before
+        the name of a function is part of its head."""
+        src = """
+PRAGMA(push)
+#include <windows.h>
+PRAGMA(pop)
+extern "C" {
+int helper(void) { return 0; }
+}
+PRAGMA(diagnostic ignored "-Wother")
+template <bool B, typename T = void>
+using enable_if_t = typename std::enable_if<B, T>::type;
+RETURNS(int)
+open_it(void) { return helper(); }
+""".strip()
+        _parse(builder, src, "src/foo.h")
+        assert builder.c_aliases == {
+            "enable_if_t": [("FILE:src/foo.h", "std::enable_if<B, T>::type")]
+        }
+        assert _spans(builder, "Function") == {"helper": (5, 5), "open_it": (10, 11)}
+        assert _call_pairs(builder) == [
+            ("", "PRAGMA"),
+            ("", "PRAGMA"),
+            ("", "PRAGMA"),
+            ("open_it", "helper"),
+        ]
 
 
 class TestScopes:

@@ -25,6 +25,7 @@ from descry.generate import (
     BaseParser,
     _bracketed_parts,
     _generic_metadata,
+    _innermost,
     argument_count,
     blank_strings,
     is_generated_source,
@@ -146,12 +147,13 @@ _RE_CALL = re.compile(
 
 _PRIMITIVES = "boolean|byte|char|short|int|long|float|double"
 _DECLARATIONS = (
-    # `Type name` before `=`, `;`, `,`, `)`, `:`, `&&` or `->`: a local, a
-    # field, a parameter, a for-each variable or what a pattern binds. The
-    # type is read with its type arguments, and an array of any type.
+    # `Type name` before `=`, `;`, `,`, `)`, `:`, `&&`, `->` or `when`: a
+    # local, a field, a parameter, a for-each variable or what a pattern
+    # binds. The type is read with its type arguments, and an array of any
+    # type.
     re.compile(
         rf"\b(?P<type>[A-Z][\w.]*(?:{_TYPE_ARGUMENTS})?(?:\[\])*|(?:{_PRIMITIVES})(?:\[\])+)"
-        r"\s+(?P<name>[A-Za-z_$][\w$]*)\s*(?=[=;,):]|&&|->)"
+        r"\s+(?P<name>[A-Za-z_$][\w$]*)\s*(?=[=;,):]|&&|->|when\b)"
     ),
     # A type parameter's bound: `<T extends Type`
     re.compile(
@@ -187,6 +189,13 @@ _LAMBDA = r"(?<![\w$.])(?<!\bcase\s)([\w$]+)\s*->|\(([\w$\s,]+)\)\s*->"
 _RE_LAMBDA = re.compile(_LAMBDA)
 # The name a `var` binds, and those a lambda does
 _RE_UNTYPED = re.compile(rf"\bvar\s+([\w$]+)|{_LAMBDA}")
+# What a pattern's variable follows: `instanceof` and its type, or a record
+# pattern's type and `(`
+_RE_PATTERN_BEFORE = re.compile(r"\binstanceof\s+[^;&|!=:]*$")
+# An operator that lets a condition hold where a pattern in it does not match
+_RE_NOT_ONLY_AND = re.compile(r"\|\||!(?!=)|\?[^:]*:")
+# A statement led by a condition: an `if`, in group 1, or a loop
+_RE_CONDITION_HEAD = re.compile(r"\s*(?:else\s+)?(?:(if)|while|for)\s*$")
 # `receiver::name`, a reference to a method or with `new` to a constructor
 _RE_METHOD_REFERENCE = re.compile(r"(?<![\w$.])([\w$.]+)\s*::\s*([A-Za-z_$][\w$]*)")
 _RE_NEW_GENERIC = re.compile(r"(?:\bnew\s+[A-Za-z_$][A-Za-z0-9_$.]*|\.)\s*<")
@@ -302,6 +311,7 @@ class JavaParser(BaseParser):
     """
 
     binding_re = re.compile(r"\bvar\s+(?P<name>\w+)\s*=(?!=)")
+    case_scopes_section = True
 
     @staticmethod
     def bindings(param):
@@ -333,14 +343,61 @@ class JavaParser(BaseParser):
             return f"{self._supers[-1][1] if self._supers else 'super'}().{path}"
         if path.startswith("this."):
             return f"{root}().{path[5:]}"
-        typed = [d[0] for d in self.declared.get(root, ()) if since <= d[0] <= lineno]
-        bound = [n for n in self._untyped.get(root, ()) if since <= n <= lineno]
+        typed = [
+            d[0]
+            for d in self.declared.get(root, ())
+            if since <= d[0] <= lineno and self._in_scope(root, d[0], lineno, d[1])
+        ]
+        bound = [
+            n
+            for n in self._untyped.get(root, ())
+            if since <= n <= lineno and self._in_scope(root, n, lineno)
+        ]
         if max(bound, default=0) > max(typed, default=0):
             return f"?.{path}"
         if not typed:
             return f"{root}.{path}"
         head = super().call_origin(f"{root}.x", lineno, since)
         return f"{head[:-2] if head else '?'}.{path}"
+
+    def _pattern_scope(self, line, name):
+        """``(spans, typed)`` where line ``line`` declares ``name`` in a
+        pattern after `instanceof`: the spans of its scope, and whether it
+        holds there the type the pattern tests, as it does where the test
+        matched. A loop or an expression that only `&&` joins the test into
+        tells that in the rest of it. An `if` tells it in the branch its
+        condition holds in where only `&&` joins the test into it, or fails
+        in where only `||` joins the test's negation, and past the `if`
+        where the other branch exits. None where no such pattern declares
+        it."""
+        text, _, _, spans = self._blocks
+        at, head, held, written = self._declaration_site(line, name)
+        last = held[1] if held else len(text)
+        if not _RE_PATTERN_BEFORE.search(text[head[0] : at] if head else written):
+            return None
+        if head:
+            condition = text[head[0] : head[1]]
+        else:
+            condition = text[at - len(written) : self._statement_close(at)]
+        loop = head and _RE_CONDITION_HEAD.match(written)
+        holds = not _RE_NOT_ONLY_AND.search(condition)
+        if not holds:
+            test = _innermost(spans, at)
+            negated = (
+                loop
+                and loop[1]
+                and _innermost(spans, test[0]) == head
+                and re.fullmatch(r"(?:[^&?]*\|\|)?\s*!\s*", text[head[0] + 1 : test[0]])
+                and re.fullmatch(r"\s*(?:\|\|[^&?]*)?", text[test[1] + 1 : head[1]])
+                and not _RE_NOT_ONLY_AND.search(text[test[0] : test[1]])
+            )
+            if not negated:
+                return [(0, last)], False
+        if not loop:
+            return [(0, self._statement_close(head[0] if head else at))], True
+        if not loop[1]:
+            return [(0, self._statement_close(head[1] + 1, False))], True
+        return [(0, head[1]), *self._branch_scope(head[1], held, holds)], True
 
     def _lambda_target(self, before):
         """The type a lambda at the end of ``before`` is assigned to or
@@ -447,12 +504,37 @@ class JavaParser(BaseParser):
         anonymous: dict[int, int] = {}  # last line of an anonymous body -> `new` edge
         enums: set[str] = set()  # IDs of the enum types
 
+        # Each line without its block comments, which keeps annotations and
+        # signatures in Javadoc out of the graph; the same as code, without
+        # its line comment and with its string literals blanked; and whether
+        # it is text of a text block.
+        raw_lines, code_lines, texts = [], [], []
+        in_block_comment, in_text_block = False, None
+        for raw_line in lines:
+            raw_line, in_block_comment = strip_block_comments(
+                raw_line, in_block_comment
+            )
+            was_in_text_block = in_text_block
+            code, in_text_block = blank_strings(raw_line, in_text_block, ('"""',))
+            raw_lines.append(raw_line)
+            code_lines.append(code)
+            texts.append(was_in_text_block or in_text_block)
+        self.read_blocks(code_lines)
+        # Where a pattern's variable is in scope; it gives no type where
+        # whether it matched is not known.
+        for name, entries in self.declared.items():
+            for index, (line, _, top) in enumerate(entries):
+                if "instanceof" not in code_lines[line - 1]:
+                    continue
+                if found := self._pattern_scope(line, name):
+                    if not found[1]:
+                        entries[index] = (line, "?", top)
+                    self._scope_extents[line, name, entries[index][1]] = found[0]
+
         i = 0
         n = len(lines)
-        in_block_comment = False
-        in_text_block = None
         while i < n:
-            raw_line = lines[i]
+            raw_line, code = raw_lines[i], code_lines[i]
             lineno = i + 1
             context_id, context_start = self.context_at(lineno)
             while bodies and lineno > bodies[-1][2]:
@@ -464,22 +546,10 @@ class JavaParser(BaseParser):
             # Call scanning starts past a name declared on the line.
             call_scan_start = 0
 
-            # Block comments (/* ... */ or /** ... */) are removed so
-            # annotations / method signatures inside Javadoc don't leak into
-            # the graph.
-            raw_line, in_block_comment = strip_block_comments(
-                raw_line, in_block_comment
-            )
-
             # Declarations are matched on `line`, which has no trailing
-            # `// comment`; calls are read from `code`, which also has its
-            # string literals blanked.
-            line = strip_line_comment(raw_line, backticks=True)
-            was_in_text_block = in_text_block
-            code, in_text_block = blank_strings(raw_line, in_text_block, ('"""',))
-            if was_in_text_block or in_text_block:
-                # The text of a text block declares nothing.
-                line = code
+            # `// comment`, and calls read from `code`. The text of a text
+            # block declares nothing.
+            line = code if texts[i] else strip_line_comment(raw_line, backticks=True)
 
             # 1. Type declarations (class/interface/enum/record/@interface)
             m_type = _RE_TYPE_DECL.match(line)
@@ -565,6 +635,8 @@ class JavaParser(BaseParser):
                             None if varargs or written is None else len(written),
                             written and [" ".join(w.split()) for w in written],
                         ]
+                        head = m_method[0]
+                        private = bool(re.search(r"\bprivate\b", head))
                         declared = self._node(method_id)
                         # A field of the same name moves to `<type>::field_<name>`.
                         if declared and declared["type"] == "Constant":
@@ -582,7 +654,8 @@ class JavaParser(BaseParser):
                                 known = agreed.pop() if len(agreed) == 1 else None
                             declared["metadata"]["return_type"] = known
                             declared["metadata"]["parameters"].append(counts)
-                        head = m_method[0]
+                            # The node is private where every overload is.
+                            declared["metadata"]["private"] &= private
                         self.builder.add_node(
                             method_id,
                             "Method",
@@ -595,7 +668,7 @@ class JavaParser(BaseParser):
                             params=written or (),
                             parameters=[counts],
                             static=bool(re.search(r"\bstatic\b", head)),
-                            private=bool(re.search(r"\bprivate\b", head)),
+                            private=private,
                             default=bool(re.search(r"\bdefault\b", head)),
                             body=has_body,
                         )
@@ -758,10 +831,9 @@ class JavaParser(BaseParser):
                         paren,
                         origin,
                     )
-                    if close := self._pairs.get(paren):
-                        self.builder.edges[-1]["metadata"]["args"] = argument_count(
-                            code[paren + 1 : close + 1], raw_line[paren + 1 : close + 1]
-                        )
+                    passed = argument_count(code_lines, raw_lines, i, paren + 1)
+                    if passed is not None:
+                        self.builder.edges[-1]["metadata"]["args"] = passed
                 self._bind_closures(code, i, lines, len(code))
                 references = "::" in code and _RE_METHOD_REFERENCE.finditer(code)
                 for reference in references or ():

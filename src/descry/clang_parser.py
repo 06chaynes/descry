@@ -55,17 +55,23 @@ def _parameter_entry(parameters):
     # `...`, or a parameter pack, `T&&... args`
     variadic = bool(listed) and "..." in listed[-1]
     fixed = listed[:-1] if variadic else listed
-    types = []
-    for part in fixed:
-        written = part.partition("=")[0].strip()
-        declared = _RE_PARAMETER.fullmatch(written)
-        if declared:
-            written = declared["type"] + (declared["pointer"] or "")
-        types.append(
-            re.sub(r"\b(?:const|volatile|struct|class|enum)\b|\s+", "", written)
-        )
     least = sum("=" not in part for part in fixed)
-    return [least, None if variadic else len(fixed), types]
+    return [least, None if variadic else len(fixed), list(map(_parameter_type, fixed))]
+
+
+def _parameter_type(part):
+    """The type the parameter declaration ``part`` is written with, without
+    its name, default, qualifiers or spaces; a pointer to a function with
+    its parameters' types."""
+    written = part.partition("=")[0].strip()
+    if declared := _RE_PARAMETER.fullmatch(written):
+        written = declared["type"] + (declared["pointer"] or "")
+    elif function := re.fullmatch(
+        r"(.*?\(\s*[*&]+)\s*(?:[A-Za-z_]\w*)?\s*(\)\s*\()(.*)\)", written, re.DOTALL
+    ):
+        listed = ",".join(_parameter_entry(_bracketed_parts(function[3]))[2])
+        written = f"{function[1]}{function[2]}{listed})"
+    return re.sub(r"\b(?:const|volatile|struct|class|enum)\b|\s+", "", written)
 
 
 _RE_OPENED_NAMESPACE = re.compile(r"\bnamespace\s+([A-Za-z_]\w*)\s*\{")
@@ -210,18 +216,39 @@ _HEAD_LIMIT = 2000
 _RE_INVOCATIONS = re.compile(
     r"(?:\s*(?:[A-Za-z_]\w*\s*\(\s*\)|[A-Z_][A-Z0-9_]*\b))+\s*"
 )
+# The name of a macro invocation that opens a statement and its line
+_RE_MACRO_STATEMENT = re.compile(r"\s*^[ \t]*[A-Z_][A-Z0-9_]*[ \t]*", re.MULTILINE)
+# The rest of an invocation's line, then the start of a declaration: a
+# name, `::`, `~` or `[[`; neither a word that goes on a function's head
+# and starts no declaration nor a function's name, not in capitals, that a
+# type would stand before
+_RE_DECLARATION_NEXT = re.compile(
+    r"[ \t]*\n\s*(?=[A-Za-z_~]|::|\[\[)"
+    r"(?!(?:noexcept|override|final|requires|throw|try)\b)"
+    r"(?!\w*[a-z]\w*\s*\()"
+)
 # What a statement goes on with behind a braced initialiser
 _RE_GOES_ON = re.compile(r"\s*[;,=(\[.]")
 # The name of an enumerator: what an enum's body or a `,` in it is followed
 # by, unless that is a macro invocation.
 _RE_ENUMERATOR = re.compile(r"(?:^|,)\s*([A-Za-z_]\w*)\b(?!\s*\()")
 _RE_TYPE_KEYWORD = re.compile(r"\b(?:struct|class|union|enum)\s+$")
+# What follows the `(` behind a type in `T (*name)(params)`, `T (*name)[n]`
+# and `T (C::*name)(params)`: a pointer declarator in parentheses, then the
+# parameters or the bound of what it points at; group 1 the name
+_RE_INNER_DECLARATOR = re.compile(
+    r"\s*(?:\w+\s*::\s*)*\*+\s*(?:const\s+)?([A-Za-z_]\w*)\s*\)\s*[(\[]"
+)
 # The name a declarator gives: the last word of those it opens with
 _RE_DECLARED_NAME = re.compile(r"[\s*]*(?:\w+[\s*]+)*([A-Za-z_]\w*)")
 _RE_LOCAL_TYPE = re.compile(
     r"\b(?:struct|class)\s+([A-Za-z_]\w*)\s*(?:final\s*)?(?::(?!:)|\{)"
 )
 _RE_USING = re.compile(r"\s*using\s+(\w+)\s*=")
+# `using Base::name` in a class: the name of the base's members it brings in
+_RE_USING_MEMBER = re.compile(r"\s*using\s+[^=]*::\s*(~?\w+)\s*")
+# An alias declared as a statement, behind what ends the one before it
+_RE_LOCAL_ALIAS = re.compile(r"[;{}]\s*((?:using\s+\w+\s*=|typedef\b)[^;{}]*);")
 _RE_TYPEDEF = re.compile(r"\s*typedef\b")
 _RE_ASSIGNMENT = re.compile(r"(?<![=!<>+\-*/%&|^])=(?!=)")
 
@@ -430,8 +457,8 @@ def _rewrites(text: str) -> list[list]:
     """How the replacement text of the `#define` ``text`` writes each
     parameter it does not leave as it stands, as ``[index, how]``: `::`
     behind the global qualifier, `.` behind another qualifier or a member
-    access, `paste` joined to other text with `##`, and `NAME(n)` passed on
-    as argument n of the macro NAME."""
+    access, `paste` joined to other text with `##` or only made a string
+    with `#`, and `NAME(n)` passed on as argument n of the macro NAME."""
     head = _RE_MACRO_HEAD.match(text)
     body = text[head.end() :] if head else ""
     found = []
@@ -439,7 +466,11 @@ def _rewrites(text: str) -> list[list]:
         param = param.strip()
         if not param.isidentifier():
             continue
-        if re.search(rf"##\s*{param}\b|\b{param}\s*##", body):
+        stringized = rf"#\s*{param}\b"
+        plain = re.search(rf"\b{param}\b", re.sub(stringized, "", body))
+        if re.search(rf"##\s*{param}\b|\b{param}\s*##", body) or (
+            re.search(stringized, body) and not plain
+        ):
             found.append([index, "paste"])
         if re.search(rf"(?<![\w>])::\s*{param}\b", body):
             found.append([index, "::"])
@@ -600,6 +631,7 @@ class ClangParser(BaseParser):
         self._member = False  # the calls being read are a member function's
         self._kr = None  # offsets of a function head with K&R parameters
         self.scan_declarations(self._lines, _DECLARATIONS)
+        self.read_blocks(self._lines)
         self._body(0, len(self._text), file_id, None)
         # A definition that sits inside an `#if` arm is built only in the
         # configurations that pick the arm: that is evidence about the
@@ -618,7 +650,7 @@ class ClangParser(BaseParser):
             for parameter in parameters:
                 self.declared.setdefault(parameter, []).append((first + 1, "?", False))
             for index in range(first, last + 1):
-                code = blank_strings(self._source[index], None, ())[0]
+                code = blank_strings(self._source[index], None, ("R",))[0]
                 head = _RE_MACRO_NAME.match(code) if index == first else None
                 code = " " * head.end() + code[head.end() :] if head else code
                 ends = [found.start() for found in re.finditer(r"[;{}]", code)]
@@ -654,7 +686,7 @@ class ClangParser(BaseParser):
         closed = []  # (open line, arms, close line) of each ended `#if`
         defined_here = set()  # macros the file defines (include guards)
         for index, raw in enumerate(self._source):
-            code, inside = blank_strings(raw, inside, ())
+            code, inside = blank_strings(raw, inside, ("R",))
             directive = None if continued else _RE_DIRECTIVE.match(code)
             if not continued and not directive:
                 if groups and groups[-1][2]:
@@ -800,8 +832,8 @@ class ClangParser(BaseParser):
         blanked: the text inside each pair of parentheses, attribute lists,
         `template <...>` prefixes, and the symbol of an overloaded
         operator, which is turned to U+0001s. Returns it with the offsets
-        of each pair of parentheses and the type parameters the prefixes
-        declare."""
+        of each pair of parentheses, the template parameters the prefixes
+        declare and the default argument of each, "" for none."""
         head = _RE_OPERATOR.sub(
             lambda match: "operator" + "\x01" * (len(match.group()) - 8), head
         )
@@ -820,21 +852,23 @@ class ClangParser(BaseParser):
                     spans.append((opened, kept))
         flat.append(" " * (len(head) - opened - 1) if depth else head[kept:])
         flat = _without_attributes("".join(flat), _blank)
-        parameters = []
+        parameters, defaults = [], []
         while prefix := _RE_TEMPLATE.match(flat):
             end, depth = prefix.end(), 1
             while end < len(flat) and depth:
                 depth += (flat[end] == "<") - (flat[end] == ">")
                 end += 1
             for part in _bracketed_parts(flat[prefix.end() : end - 1]):
-                named = _RE_TEMPLATE_PARAMETER.search(part.partition("=")[0])
+                declared, _, default = part.partition("=")
+                named = _RE_TEMPLATE_PARAMETER.search(declared)
                 parameters.append(named[1] if named else "")
+                defaults.append(" ".join(default.split()))
             # What a type parameter stands for is not known.
             self.builder.type_aliases.update(
                 _RE_TYPE_PARAMETER.findall(flat, prefix.end(), end)
             )
             flat = " " * end + flat[end:]
-        return flat, spans, parameters
+        return flat, spans, parameters, defaults
 
     def _body(self, start, end, parent_id, owner):
         """Read the declarations between offsets ``start`` and ``end``, the
@@ -845,6 +879,13 @@ class ClangParser(BaseParser):
             at = match.start()
             if match.group() == "(":
                 at = self._closers.get(at, end) + 1
+                if _RE_MACRO_STATEMENT.fullmatch(self._text, begin, match.start()) and (
+                    _RE_DECLARATION_NEXT.match(self._text, at, end)
+                ):
+                    # A macro invocation alone on its lines that a declaration
+                    # follows is a statement of its own.
+                    self._declaration(begin, at, parent_id, owner)
+                    begin = at
             elif match.group() == "{":
                 closer = self._closers.get(at, end)
                 resume = self._block(begin, at, closer, end, parent_id, owner)
@@ -873,7 +914,7 @@ class ClangParser(BaseParser):
             # The body of the function whose parameters the statements
             # before it declare.
             begin, head = kr[0], self._text[kr[0] : kr[1]]
-        flat, spans, parameters = self._outline(head)
+        flat, spans, parameters, defaults = self._outline(head)
         space = _RE_NAMESPACE.fullmatch(flat)
         if space or _RE_LINKAGE.fullmatch(flat):
             # `extern "C"` and an unnamed namespace add no scope of their
@@ -918,14 +959,14 @@ class ClangParser(BaseParser):
                 opened = self._text.find("{", local.end() - 1, closer)
                 if local.start() < resume or opened < 0:
                     continue
-                self._calls(function_id, since, resume, local.start())
+                self._statements(function_id, since, resume, local.start())
                 ends = self._closers.get(opened, closer)
                 resume = self._block(
                     local.start(), opened, ends, closer, function_id, None
                 )
                 resume = resume or local.start()
                 self._member = member
-            self._calls(function_id, since, resume, closer)
+            self._statements(function_id, since, resume, closer)
             self._member = False
             self._generic = generic
             return closer + 1
@@ -964,12 +1005,19 @@ class ClangParser(BaseParser):
         type_id = f"{parent_id}::{name}"
         end_lineno = bisect_right(self._starts, closer)
         # A specialization, `Box<T*>`, has its parameters at no position of
-        # the arguments of the template it specializes. It is a type of its
-        # own, named with them, a `::` in them written `.`.
+        # the arguments of the template it specializes: they are deduced from
+        # those of an instance. It is a type of its own, named with them, a
+        # `::` in them written `.`.
         written = re.split(r"(?<!:):(?!:)", flat, maxsplit=1)[0]
+        templated = {}
         if special := re.search(rf"\b{re.escape(name)}\s*<", written):
+            if any(parameters):
+                templated["deduced"] = [p for p in parameters if p]
             parameters = []
             type_id = c_specialization(type_id, written[special.end() :])
+        elif any(defaults):
+            # The default arguments of a primary template
+            templated["defaults"] = defaults
         self._sites.setdefault(type_id, []).append(first)
         if type_id not in self.builder.node_registry:
             self.builder.add_node(
@@ -987,6 +1035,7 @@ class ClangParser(BaseParser):
                         for index, param in enumerate(parameters)
                     }
                 ),
+                **templated,
             )
             self.builder.add_edge(parent_id, type_id, "DEFINES")
         self._kinds[type_id] = kind
@@ -1111,10 +1160,14 @@ class ClangParser(BaseParser):
         prefix = _before(found)
         first = self._first_line(begin, begin + found.start("name"))
         # A specialization in the path is named with its arguments; a
-        # template written with its own parameters is the template.
+        # template written with its own parameters is the template, as is
+        # one a member of which `template <>` specializes.
+        prefixed = _RE_TEMPLATE.match(head)
+        explicit = bool(prefixed) and head[prefixed.end() :].lstrip()[:1] == ">"
         path = [
             c_specialization(name, f"{arguments}>")
             if opened
+            and not explicit
             and not set(map(str.strip, _bracketed_parts(f"{arguments}>")))
             <= self._generic
             else name
@@ -1139,7 +1192,7 @@ class ClangParser(BaseParser):
             # A macro invocation where a definition stands defines what its
             # body is: the function whose head it wraps, else a member of
             # the type one of its arguments names.
-            inner, inner_spans, _ = self._outline(params)
+            inner, inner_spans, *_ = self._outline(params)
             wrapped = _signature(inner)
             if wrapped and wrapped.string[: wrapped.start()].strip():
                 begin += found.start("params") + 1
@@ -1233,9 +1286,19 @@ class ClangParser(BaseParser):
         head = self._text[begin:end]
         if not head.strip():
             return
-        flat, spans, parameters = self._outline(head)
+        flat, spans, parameters, defaults = self._outline(head)
+        declared = any(defaults) and _RE_TYPE.fullmatch(flat)
+        if declared and declared["name"]:
+            # The default arguments a declaration of a primary template gives
+            scope = parent_id.partition("::")[2]
+            path = f"{scope}::{declared['name']}" if scope else declared["name"]
+            self.builder.c_defaults.setdefault(path, []).append(defaults)
+            return
         if alias := _RE_USING.match(flat):
             self._alias(alias[1], flat[alias.end() :], parent_id)
+            return
+        if owner and (used := _RE_USING_MEMBER.fullmatch(flat)):
+            self.builder.c_using.setdefault(parent_id, set()).add(used[1])
             return
         after = spans[0][1] + 1 if spans else 0
         if (
@@ -1275,9 +1338,16 @@ class ClangParser(BaseParser):
             listed = next(
                 (head[a + 1 : b] for a, b in spans if a == found.start("params")), ""
             )
-            self.builder.prototypes.setdefault(name, []).append(
-                _parameter_entry(_bracketed_parts(listed))
-            )
+            # Filed under the path of the function it declares, from the
+            # file's scopes, as the IDs of its definitions name it.
+            path = re.sub(r"\s+", "", found["path"] or "")
+            declared = f"{path}{'<init>' if name == owner else name}"
+            scope = parent_id.partition("::")[2]
+            self.builder.prototypes.setdefault(
+                f"{scope}::{declared}" if scope else declared, []
+            ).append(_parameter_entry(_bracketed_parts(listed)))
+            if owner and not found["path"]:
+                self.builder.c_declared.setdefault(parent_id, set()).add(name)
             if not owner and not found["path"]:
                 # A prototype at file or namespace level declares the
                 # function wherever the file is included: the definition
@@ -1346,6 +1416,14 @@ class ClangParser(BaseParser):
         if assigned:
             self._calls(parent_id, 0, end - len(flat) + assigned.end(), end)
 
+    def _statements(self, function_id, since, start, end):
+        """Read the statements of the body of ``function_id`` between offsets
+        ``start``, just after a `{` or `;`, and ``end``: the aliases they
+        declare, which are the function's, and the calls they make."""
+        for alias in _RE_LOCAL_ALIAS.finditer(self._text, start - 1, end):
+            self._declaration(alias.start(1), alias.end(1), function_id, None)
+        self._calls(function_id, since, start, end)
+
     def _calls(self, source_id, since, start, end, initialisers=False):
         """Record the calls written between offsets ``start`` and ``end``
         as made by ``source_id``, whose definition starts on line ``since``
@@ -1392,9 +1470,20 @@ class ClangParser(BaseParser):
                     held = f"{held}()"
                     outer = self._declared(name, index + 1, since)
                     self._rebind(name, index + 1, held, until, outer)
-        matches = {match.start(1): match for match in _RE_CALL.finditer(code)}
+        # A name whose template arguments close more `>` than they open
+        # stands inside arguments opened before it: what they are followed
+        # by is no call of it.
+        matches = {
+            match.start(1): match
+            for match in _RE_CALL.finditer(code)
+            if (tail := match[0][len(match[1]) :]).count(">") <= tail.count("<")
+        }
         ends = [found.start() for found in re.finditer(r"[;{}]", code)]
-        parens = {match.end() - 1: match[1] for match in matches.values()}
+        parens = {
+            match.end() - 1: match[1]
+            for match in matches.values()
+            if match[1] not in _C_CONTROL_KEYWORDS
+        }
         for column, char in enumerate(code):
             if char == "(":
                 nesting.append([parens.get(column), 0])
@@ -1424,6 +1513,15 @@ class ClangParser(BaseParser):
             if _RE_TYPE_KEYWORD.search(code, max(lead - 6, 0), at):
                 # `struct name (*values)[n];` declares too.
                 continue
+            inner = name == callee and _RE_INNER_DECLARATOR.match(code, match.end())
+            if inner:
+                # `Type (*name)(params);` opening a statement declares `name`.
+                offset = self._starts[index]
+                start = max(self._text.rfind(c, 0, offset) for c in ";{}") + 1
+                written = self._text[start:offset] + code[: match.end() - 1]
+                if _RE_DECLARES.match(f"{re.split(r'[;{}]', written)[-1]} "):
+                    self.add_local(source_id, inner[1])
+                    continue
             declared = name == callee and _declares(code, ends, at)
             if declared:
                 # `Type name(args);` declares `name`.
@@ -1456,19 +1554,27 @@ class ClangParser(BaseParser):
                 match.end() - 1,
                 origin,
             )
-            if close := self._pairs.get(match.end() - 1):
-                self.builder.edges[-1]["metadata"]["args"] = argument_count(
-                    code[match.end() : close + 1],
-                    self._source[index][match.end() : close + 1],
-                )
+            metadata = self.builder.edges[-1]["metadata"]
+            passed = argument_count(self._lines, self._source, index, match.end())
+            if passed is not None:
+                metadata["args"] = passed
+            # The columns of the calls on the line whose parentheses hold it
+            around = [
+                *(self._closes.get(c) for o, c in self._pairs.items() if o < at < c),
+                *(edge for o, edge in self._opens.items() if o < at),
+            ]
+            within = [
+                self.builder.edges[edge]["metadata"]["col"]
+                for edge in around
+                if edge is not None
+            ]
+            if within:
+                metadata["within"] = within
             if given and not std:
                 # `Box<Dog>(`: the template arguments it is called with
-                site = self.builder.edges[-1]["metadata"].setdefault("site", {})
-                site["types"] = given
+                metadata.setdefault("site", {})["types"] = given
             if index in self._guarded:
-                self.builder.edges[-1]["metadata"]["guards"] = sorted(
-                    self._guarded[index]
-                )
+                metadata["guards"] = sorted(self._guarded[index])
         binding = self.binding_re.search(code)
         value = code[binding.end() :].lstrip() if binding else "["
         if value[:1] != "[" and not _casts(value):

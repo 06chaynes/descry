@@ -456,6 +456,14 @@ def test_type_has_the_base(lang, name, base):
     assert base in load(lang)["types"][name]["bases"]
 
 
+def test_a_cpp_specialization_is_its_template_s():
+    """A partial or explicit specialization of a class template is no type
+    of its own: `vector<bool, _Alloc>` is no `std::vector` of one parameter
+    beside the template of two."""
+    types = load("cpp")["types"]
+    assert [k for k in types if k.startswith("std::vector`")] == ["std::vector`2"]
+
+
 @pytest.mark.parametrize("lang", LANGUAGES)
 def test_file_is_as_the_generator_writes_it(lang):
     text = _file(lang).read_text(encoding="utf-8")
@@ -467,7 +475,7 @@ def test_fact(lang, path, expected):
     assert reduce(lambda node, key: node[key], path, load(lang)) == expected
 
 
-@pytest.mark.parametrize("lang", LANGUAGES)
+@pytest.mark.parametrize("lang", (*LANGUAGES, "c", "cpp"))
 def test_generator_reproduces_the_file(lang, tmp_path):
     if lang == "java":
         source = Path(os.environ.get("JAVA_HOME", ""))
@@ -480,6 +488,12 @@ def test_generator_reproduces_the_file(lang, tmp_path):
         source = Path(shell).parent if shell else None
         if not source or not (source / "System.Private.CoreLib.dll").is_file():
             pytest.skip("pwsh is not installed to reflect the .NET runtime with")
+    elif lang in ("c", "cpp"):
+        compiler = shutil.which("clang" if lang == "c" else "clang++")
+        roots = sorted(Path("/usr/include/c++").glob("*")) if lang == "cpp" else []
+        source = roots[-1] if roots else Path("/usr/include")
+        if not compiler or not source.is_dir():
+            pytest.skip(f"Clang and {source} are not installed to read headers from")
     else:
         source = Path(os.environ.get("DESCRY_STDLIB_SOURCES", ""), DOWNLOADS[lang])
         if not source.exists():
@@ -487,10 +501,10 @@ def test_generator_reproduces_the_file(lang, tmp_path):
     out = tmp_path / f"{lang}.json"
     generator = GENERATORS / f"gen_{lang}.py"
     subprocess.run([sys.executable, "-I", generator, source, out], check=True)
-    # The runtime pwsh runs on is named as the generator reads it.
+    # The runtime pwsh runs on, and the toolchain Clang reads headers
+    # from, are named as the generator reads them.
     read_from = load(lang)["source"]
-    if lang == "dotnet" and json.loads(out.read_text("utf-8"))["source"] != read_from:
-        pytest.skip(
-            f"pwsh is not the .NET {read_from.split()[2]} the data was read from"
-        )
+    toolchain = lang in ("dotnet", "c", "cpp")
+    if toolchain and json.loads(out.read_text("utf-8"))["source"] != read_from:
+        pytest.skip(f"this machine's toolchain is not {read_from}")
     assert out.read_bytes() == _file(lang).read_bytes()

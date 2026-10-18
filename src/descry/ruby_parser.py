@@ -1051,7 +1051,9 @@ class RubyParser(BaseParser):
                 # A module is mixed into the class whose body the line is
                 # in, not one that a block around the line stands for.
                 if m_mixin and owner_id != file_id and self._scopes[-1][3] == owner_id:
-                    for base in re.findall(_CONST, m_mixin[2]):
+                    # Ruby mixes the modules of one call in last to first, so
+                    # the first is nearest the class.
+                    for base in reversed(re.findall(_CONST, m_mixin[2])):
                         self.builder.add_edge(
                             owner_id,
                             f"REF:{base.removeprefix('::')}",

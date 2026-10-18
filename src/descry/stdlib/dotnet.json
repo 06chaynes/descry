@@ -6089,7 +6089,7 @@
   "ushort": "System.UInt16",
   "void": "System.Void"
  },
- "source": "the .NET 10.0.12-servicing.26418.102 shared runtime, by reflection",
+ "source": "the .NET 10.0.13-servicing.26466.116 shared runtime, by reflection",
  "types": {
   "System.AccessViolationException": {
    "bases": [
@@ -6773,7 +6773,7 @@
     "CopyTo": null,
     "Count": "System.Int32",
     "Equals": "System.Boolean",
-    "GetEnumerator": "System.ArraySegment`1+Enumerator<T>",
+    "GetEnumerator": "System.ArraySegment`1.Enumerator<T>",
     "GetHashCode": "System.Int32",
     "Item": "T",
     "Offset": "System.Int32",
@@ -7260,7 +7260,7 @@
     "End": "System.SequencePosition",
     "First": "System.ReadOnlyMemory`1<T>",
     "FirstSpan": "System.ReadOnlySpan`1<T>",
-    "GetEnumerator": "System.Buffers.ReadOnlySequence`1+Enumerator<T>",
+    "GetEnumerator": "System.Buffers.ReadOnlySequence`1.Enumerator<T>",
     "GetOffset": "System.Int64",
     "GetPosition": "System.SequencePosition",
     "IsEmpty": "System.Boolean",
@@ -7897,7 +7897,7 @@
     "Comparer": "System.Collections.Generic.IEqualityComparer`1<TKey>",
     "ContainsKey": "System.Boolean",
     "Count": "System.Int32",
-    "GetAlternateLookup": "System.Collections.Concurrent.ConcurrentDictionary`2+AlternateLookup`1<TKey, TValue, TAlternateKey>",
+    "GetAlternateLookup": "System.Collections.Concurrent.ConcurrentDictionary`2.AlternateLookup`1<TKey, TValue, TAlternateKey>",
     "GetEnumerator": "System.Collections.Generic.IEnumerator`1<System.Collections.Generic.KeyValuePair`2[TKey, TValue]>",
     "GetOrAdd": "TValue",
     "IsEmpty": "System.Boolean",
@@ -8118,8 +8118,8 @@
     "ContainsKey": "System.Boolean",
     "CopyTo": null,
     "Count": "System.Int32",
-    "GetAlternateLookup": "System.Collections.Frozen.FrozenDictionary`2+AlternateLookup`1<TKey, TValue, TAlternateKey>",
-    "GetEnumerator": "System.Collections.Frozen.FrozenDictionary`2+Enumerator<TKey, TValue>",
+    "GetAlternateLookup": "System.Collections.Frozen.FrozenDictionary`2.AlternateLookup`1<TKey, TValue, TAlternateKey>",
+    "GetEnumerator": "System.Collections.Frozen.FrozenDictionary`2.Enumerator<TKey, TValue>",
     "GetValueRefOrNullRef": "TValue&",
     "Item": "TValue&",
     "Keys": "System.Collections.Immutable.ImmutableArray`1<TKey>",
@@ -8192,8 +8192,8 @@
     "Contains": "System.Boolean",
     "CopyTo": null,
     "Count": "System.Int32",
-    "GetAlternateLookup": "System.Collections.Frozen.FrozenSet`1+AlternateLookup`1<T, TAlternate>",
-    "GetEnumerator": "System.Collections.Frozen.FrozenSet`1+Enumerator<T>",
+    "GetAlternateLookup": "System.Collections.Frozen.FrozenSet`1.AlternateLookup`1<T, TAlternate>",
+    "GetEnumerator": "System.Collections.Frozen.FrozenSet`1.Enumerator<T>",
     "IsProperSubsetOf": "System.Boolean",
     "IsProperSupersetOf": "System.Boolean",
     "IsSubsetOf": "System.Boolean",
@@ -8299,18 +8299,18 @@
     "ContainsValue": "System.Boolean",
     "Count": "System.Int32",
     "EnsureCapacity": "System.Int32",
-    "GetAlternateLookup": "System.Collections.Generic.Dictionary`2+AlternateLookup`1<TKey, TValue, TAlternateKey>",
-    "GetEnumerator": "System.Collections.Generic.Dictionary`2+Enumerator<TKey, TValue>",
+    "GetAlternateLookup": "System.Collections.Generic.Dictionary`2.AlternateLookup`1<TKey, TValue, TAlternateKey>",
+    "GetEnumerator": "System.Collections.Generic.Dictionary`2.Enumerator<TKey, TValue>",
     "GetObjectData": null,
     "Item": "TValue",
-    "Keys": "System.Collections.Generic.Dictionary`2+KeyCollection<TKey, TValue>",
+    "Keys": "System.Collections.Generic.Dictionary`2.KeyCollection<TKey, TValue>",
     "OnDeserialization": null,
     "Remove": "System.Boolean",
     "TrimExcess": null,
     "TryAdd": "System.Boolean",
     "TryGetAlternateLookup": "System.Boolean",
     "TryGetValue": "System.Boolean",
-    "Values": "System.Collections.Generic.Dictionary`2+ValueCollection<TKey, TValue>"
+    "Values": "System.Collections.Generic.Dictionary`2.ValueCollection<TKey, TValue>"
    },
    "params": [
     "TKey",
@@ -8368,7 +8368,7 @@
     "Contains": "System.Boolean",
     "CopyTo": null,
     "Count": "System.Int32",
-    "GetEnumerator": "System.Collections.Generic.Dictionary`2+KeyCollection+Enumerator<TKey, TValue>"
+    "GetEnumerator": "System.Collections.Generic.Dictionary`2.KeyCollection.Enumerator<TKey, TValue>"
    },
    "params": [
     "TKey",
@@ -8405,7 +8405,7 @@
    "methods": {
     "CopyTo": null,
     "Count": "System.Int32",
-    "GetEnumerator": "System.Collections.Generic.Dictionary`2+ValueCollection+Enumerator<TKey, TValue>"
+    "GetEnumerator": "System.Collections.Generic.Dictionary`2.ValueCollection.Enumerator<TKey, TValue>"
    },
    "params": [
     "TKey",
@@ -8517,8 +8517,8 @@
     "Count": "System.Int32",
     "EnsureCapacity": "System.Int32",
     "ExceptWith": null,
-    "GetAlternateLookup": "System.Collections.Generic.HashSet`1+AlternateLookup`1<T, TAlternate>",
-    "GetEnumerator": "System.Collections.Generic.HashSet`1+Enumerator<T>",
+    "GetAlternateLookup": "System.Collections.Generic.HashSet`1.AlternateLookup`1<T, TAlternate>",
+    "GetEnumerator": "System.Collections.Generic.HashSet`1.Enumerator<T>",
     "GetObjectData": null,
     "IntersectWith": null,
     "IsProperSubsetOf": "System.Boolean",
@@ -9028,7 +9028,7 @@
     "Find": "System.Collections.Generic.LinkedListNode`1<T>",
     "FindLast": "System.Collections.Generic.LinkedListNode`1<T>",
     "First": "System.Collections.Generic.LinkedListNode`1<T>",
-    "GetEnumerator": "System.Collections.Generic.LinkedList`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Generic.LinkedList`1.Enumerator<T>",
     "GetObjectData": null,
     "Last": "System.Collections.Generic.LinkedListNode`1<T>",
     "OnDeserialization": null,
@@ -9090,7 +9090,7 @@
     "FindLast": "T",
     "FindLastIndex": "System.Int32",
     "ForEach": null,
-    "GetEnumerator": "System.Collections.Generic.List`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Generic.List`1.Enumerator<T>",
     "GetRange": "System.Collections.Generic.List`1",
     "IndexOf": "System.Int32",
     "Insert": null,
@@ -9235,18 +9235,18 @@
     "Count": "System.Int32",
     "EnsureCapacity": "System.Int32",
     "GetAt": "System.Collections.Generic.KeyValuePair`2<TKey, TValue>",
-    "GetEnumerator": "System.Collections.Generic.OrderedDictionary`2+Enumerator<TKey, TValue>",
+    "GetEnumerator": "System.Collections.Generic.OrderedDictionary`2.Enumerator<TKey, TValue>",
     "IndexOf": "System.Int32",
     "Insert": null,
     "Item": "TValue",
-    "Keys": "System.Collections.Generic.OrderedDictionary`2+KeyCollection<TKey, TValue>",
+    "Keys": "System.Collections.Generic.OrderedDictionary`2.KeyCollection<TKey, TValue>",
     "Remove": "System.Boolean",
     "RemoveAt": null,
     "SetAt": null,
     "TrimExcess": null,
     "TryAdd": "System.Boolean",
     "TryGetValue": "System.Boolean",
-    "Values": "System.Collections.Generic.OrderedDictionary`2+ValueCollection<TKey, TValue>"
+    "Values": "System.Collections.Generic.OrderedDictionary`2.ValueCollection<TKey, TValue>"
    },
    "params": [
     "TKey",
@@ -9287,7 +9287,7 @@
     "Contains": "System.Boolean",
     "CopyTo": null,
     "Count": "System.Int32",
-    "GetEnumerator": "System.Collections.Generic.OrderedDictionary`2+KeyCollection+Enumerator<TKey, TValue>"
+    "GetEnumerator": "System.Collections.Generic.OrderedDictionary`2.KeyCollection.Enumerator<TKey, TValue>"
    },
    "params": [
     "TKey",
@@ -9326,7 +9326,7 @@
    "methods": {
     "CopyTo": null,
     "Count": "System.Int32",
-    "GetEnumerator": "System.Collections.Generic.OrderedDictionary`2+ValueCollection+Enumerator<TKey, TValue>"
+    "GetEnumerator": "System.Collections.Generic.OrderedDictionary`2.ValueCollection.Enumerator<TKey, TValue>"
    },
    "params": [
     "TKey",
@@ -9369,7 +9369,7 @@
     "TrimExcess": null,
     "TryDequeue": "System.Boolean",
     "TryPeek": "System.Boolean",
-    "UnorderedItems": "System.Collections.Generic.PriorityQueue`2+UnorderedItemsCollection<TElement, TPriority>"
+    "UnorderedItems": "System.Collections.Generic.PriorityQueue`2.UnorderedItemsCollection<TElement, TPriority>"
    },
    "params": [
     "TElement",
@@ -9386,7 +9386,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Collections.Generic.PriorityQueue`2+UnorderedItemsCollection+Enumerator<TElement, TPriority>"
+    "GetEnumerator": "System.Collections.Generic.PriorityQueue`2.UnorderedItemsCollection.Enumerator<TElement, TPriority>"
    },
    "params": [
     "TElement",
@@ -9428,7 +9428,7 @@
     "Dequeue": "T",
     "Enqueue": null,
     "EnsureCapacity": "System.Int32",
-    "GetEnumerator": "System.Collections.Generic.Queue`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Generic.Queue`1.Enumerator<T>",
     "Peek": "T",
     "ToArray": "T<>",
     "TrimExcess": null,
@@ -9490,12 +9490,12 @@
     "ContainsValue": "System.Boolean",
     "CopyTo": null,
     "Count": "System.Int32",
-    "GetEnumerator": "System.Collections.Generic.SortedDictionary`2+Enumerator<TKey, TValue>",
+    "GetEnumerator": "System.Collections.Generic.SortedDictionary`2.Enumerator<TKey, TValue>",
     "Item": "TValue",
-    "Keys": "System.Collections.Generic.SortedDictionary`2+KeyCollection<TKey, TValue>",
+    "Keys": "System.Collections.Generic.SortedDictionary`2.KeyCollection<TKey, TValue>",
     "Remove": "System.Boolean",
     "TryGetValue": "System.Boolean",
-    "Values": "System.Collections.Generic.SortedDictionary`2+ValueCollection<TKey, TValue>"
+    "Values": "System.Collections.Generic.SortedDictionary`2.ValueCollection<TKey, TValue>"
    },
    "params": [
     "TKey",
@@ -9534,7 +9534,7 @@
     "Contains": "System.Boolean",
     "CopyTo": null,
     "Count": "System.Int32",
-    "GetEnumerator": "System.Collections.Generic.SortedDictionary`2+KeyCollection+Enumerator<TKey, TValue>"
+    "GetEnumerator": "System.Collections.Generic.SortedDictionary`2.KeyCollection.Enumerator<TKey, TValue>"
    },
    "params": [
     "TKey",
@@ -9588,7 +9588,7 @@
    "methods": {
     "CopyTo": null,
     "Count": "System.Int32",
-    "GetEnumerator": "System.Collections.Generic.SortedDictionary`2+ValueCollection+Enumerator<TKey, TValue>"
+    "GetEnumerator": "System.Collections.Generic.SortedDictionary`2.ValueCollection.Enumerator<TKey, TValue>"
    },
    "params": [
     "TKey",
@@ -9729,7 +9729,7 @@
     "CopyTo": null,
     "Count": "System.Int32",
     "ExceptWith": null,
-    "GetEnumerator": "System.Collections.Generic.SortedSet`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Generic.SortedSet`1.Enumerator<T>",
     "GetObjectData": null,
     "GetViewBetween": "System.Collections.Generic.SortedSet`1",
     "IntersectWith": null,
@@ -9789,7 +9789,7 @@
     "CopyTo": null,
     "Count": "System.Int32",
     "EnsureCapacity": "System.Int32",
-    "GetEnumerator": "System.Collections.Generic.Stack`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Generic.Stack`1.Enumerator<T>",
     "Peek": "T",
     "Pop": "T",
     "Push": null,
@@ -10124,7 +10124,7 @@
    "params": [],
    "statics": {
     "Create": "System.Collections.Immutable.ImmutableArray`1<T>",
-    "CreateBuilder": "System.Collections.Immutable.ImmutableArray`1+Builder<T>",
+    "CreateBuilder": "System.Collections.Immutable.ImmutableArray`1.Builder<T>",
     "CreateRange": null
    }
   },
@@ -10163,7 +10163,7 @@
     "Equals": "System.Boolean",
     "First": "T",
     "FirstOrDefault": "T",
-    "GetEnumerator": "System.Collections.Immutable.ImmutableArray`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Immutable.ImmutableArray`1.Enumerator<T>",
     "GetHashCode": "System.Int32",
     "IndexOf": "System.Int32",
     "Insert": "System.Collections.Immutable.ImmutableArray`1",
@@ -10192,7 +10192,7 @@
     "Slice": "System.Collections.Immutable.ImmutableArray`1",
     "Sort": "System.Collections.Immutable.ImmutableArray`1",
     "ToArray": "T<>",
-    "ToBuilder": "System.Collections.Immutable.ImmutableArray`1+Builder<T>",
+    "ToBuilder": "System.Collections.Immutable.ImmutableArray`1.Builder<T>",
     "ToDictionary": null,
     "Where": "System.Collections.Generic.IEnumerable`1<T>"
    },
@@ -10265,7 +10265,7 @@
    "params": [],
    "statics": {
     "Create": "System.Collections.Immutable.ImmutableDictionary`2<TKey, TValue>",
-    "CreateBuilder": "System.Collections.Immutable.ImmutableDictionary`2+Builder<TKey, TValue>",
+    "CreateBuilder": "System.Collections.Immutable.ImmutableDictionary`2.Builder<TKey, TValue>",
     "CreateRange": "System.Collections.Immutable.ImmutableDictionary`2<TKey, TValue>",
     "CreateRangeWithOverwrite": "System.Collections.Immutable.ImmutableDictionary`2<TKey, TValue>"
    }
@@ -10290,7 +10290,7 @@
     "ContainsKey": "System.Boolean",
     "ContainsValue": "System.Boolean",
     "Count": "System.Int32",
-    "GetEnumerator": "System.Collections.Immutable.ImmutableDictionary`2+Enumerator<TKey, TValue>",
+    "GetEnumerator": "System.Collections.Immutable.ImmutableDictionary`2.Enumerator<TKey, TValue>",
     "IsEmpty": "System.Boolean",
     "Item": "TValue",
     "KeyComparer": "System.Collections.Generic.IEqualityComparer`1<TKey>",
@@ -10299,7 +10299,7 @@
     "RemoveRange": "System.Collections.Immutable.ImmutableDictionary`2",
     "SetItem": "System.Collections.Immutable.ImmutableDictionary`2",
     "SetItems": "System.Collections.Immutable.ImmutableDictionary`2",
-    "ToBuilder": "System.Collections.Immutable.ImmutableDictionary`2+Builder<TKey, TValue>",
+    "ToBuilder": "System.Collections.Immutable.ImmutableDictionary`2.Builder<TKey, TValue>",
     "TryGetKey": "System.Boolean",
     "TryGetValue": "System.Boolean",
     "ValueComparer": "System.Collections.Generic.IEqualityComparer`1<TValue>",
@@ -10331,7 +10331,7 @@
     "ContainsKey": "System.Boolean",
     "ContainsValue": "System.Boolean",
     "Count": "System.Int32",
-    "GetEnumerator": "System.Collections.Immutable.ImmutableDictionary`2+Enumerator<TKey, TValue>",
+    "GetEnumerator": "System.Collections.Immutable.ImmutableDictionary`2.Enumerator<TKey, TValue>",
     "GetValueOrDefault": "TValue",
     "Item": "TValue",
     "KeyComparer": "System.Collections.Generic.IEqualityComparer`1<TKey>",
@@ -10375,7 +10375,7 @@
    "params": [],
    "statics": {
     "Create": "System.Collections.Immutable.ImmutableHashSet`1<T>",
-    "CreateBuilder": "System.Collections.Immutable.ImmutableHashSet`1+Builder<T>",
+    "CreateBuilder": "System.Collections.Immutable.ImmutableHashSet`1.Builder<T>",
     "CreateRange": "System.Collections.Immutable.ImmutableHashSet`1<T>"
    }
   },
@@ -10396,7 +10396,7 @@
     "Contains": "System.Boolean",
     "Count": "System.Int32",
     "Except": "System.Collections.Immutable.ImmutableHashSet`1",
-    "GetEnumerator": "System.Collections.Immutable.ImmutableHashSet`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Immutable.ImmutableHashSet`1.Enumerator<T>",
     "Intersect": "System.Collections.Immutable.ImmutableHashSet`1",
     "IsEmpty": "System.Boolean",
     "IsProperSubsetOf": "System.Boolean",
@@ -10408,7 +10408,7 @@
     "Remove": "System.Collections.Immutable.ImmutableHashSet`1",
     "SetEquals": "System.Boolean",
     "SymmetricExcept": "System.Collections.Immutable.ImmutableHashSet`1",
-    "ToBuilder": "System.Collections.Immutable.ImmutableHashSet`1+Builder<T>",
+    "ToBuilder": "System.Collections.Immutable.ImmutableHashSet`1.Builder<T>",
     "TryGetValue": "System.Boolean",
     "Union": "System.Collections.Immutable.ImmutableHashSet`1",
     "WithComparer": "System.Collections.Immutable.ImmutableHashSet`1"
@@ -10432,7 +10432,7 @@
     "Contains": "System.Boolean",
     "Count": "System.Int32",
     "ExceptWith": null,
-    "GetEnumerator": "System.Collections.Immutable.ImmutableHashSet`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Immutable.ImmutableHashSet`1.Enumerator<T>",
     "IntersectWith": null,
     "IsProperSubsetOf": "System.Boolean",
     "IsProperSupersetOf": "System.Boolean",
@@ -10496,7 +10496,7 @@
    "params": [],
    "statics": {
     "Create": "System.Collections.Immutable.ImmutableList`1<T>",
-    "CreateBuilder": "System.Collections.Immutable.ImmutableList`1+Builder<T>",
+    "CreateBuilder": "System.Collections.Immutable.ImmutableList`1.Builder<T>",
     "CreateRange": "System.Collections.Immutable.ImmutableList`1<T>"
    }
   },
@@ -10528,7 +10528,7 @@
     "FindLast": "T",
     "FindLastIndex": "System.Int32",
     "ForEach": null,
-    "GetEnumerator": "System.Collections.Immutable.ImmutableList`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Immutable.ImmutableList`1.Enumerator<T>",
     "GetRange": "System.Collections.Immutable.ImmutableList`1",
     "IndexOf": "System.Int32",
     "Insert": "System.Collections.Immutable.ImmutableList`1",
@@ -10545,7 +10545,7 @@
     "Reverse": "System.Collections.Immutable.ImmutableList`1",
     "SetItem": "System.Collections.Immutable.ImmutableList`1",
     "Sort": "System.Collections.Immutable.ImmutableList`1",
-    "ToBuilder": "System.Collections.Immutable.ImmutableList`1+Builder<T>",
+    "ToBuilder": "System.Collections.Immutable.ImmutableList`1.Builder<T>",
     "TrueForAll": "System.Boolean"
    },
    "params": [
@@ -10580,7 +10580,7 @@
     "FindLast": "T",
     "FindLastIndex": "System.Int32",
     "ForEach": null,
-    "GetEnumerator": "System.Collections.Immutable.ImmutableList`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Immutable.ImmutableList`1.Enumerator<T>",
     "GetRange": "System.Collections.Immutable.ImmutableList`1<T>",
     "IndexOf": "System.Int32",
     "Insert": null,
@@ -10640,7 +10640,7 @@
     "Clear": "System.Collections.Immutable.ImmutableQueue`1",
     "Dequeue": "System.Collections.Immutable.ImmutableQueue`1",
     "Enqueue": "System.Collections.Immutable.ImmutableQueue`1",
-    "GetEnumerator": "System.Collections.Immutable.ImmutableQueue`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Immutable.ImmutableQueue`1.Enumerator<T>",
     "IsEmpty": "System.Boolean",
     "Peek": "T",
     "PeekRef": "T&"
@@ -10671,7 +10671,7 @@
    "params": [],
    "statics": {
     "Create": "System.Collections.Immutable.ImmutableSortedDictionary`2<TKey, TValue>",
-    "CreateBuilder": "System.Collections.Immutable.ImmutableSortedDictionary`2+Builder<TKey, TValue>",
+    "CreateBuilder": "System.Collections.Immutable.ImmutableSortedDictionary`2.Builder<TKey, TValue>",
     "CreateRange": "System.Collections.Immutable.ImmutableSortedDictionary`2<TKey, TValue>"
    }
   },
@@ -10695,7 +10695,7 @@
     "ContainsKey": "System.Boolean",
     "ContainsValue": "System.Boolean",
     "Count": "System.Int32",
-    "GetEnumerator": "System.Collections.Immutable.ImmutableSortedDictionary`2+Enumerator<TKey, TValue>",
+    "GetEnumerator": "System.Collections.Immutable.ImmutableSortedDictionary`2.Enumerator<TKey, TValue>",
     "IsEmpty": "System.Boolean",
     "Item": "TValue",
     "KeyComparer": "System.Collections.Generic.IComparer`1<TKey>",
@@ -10704,7 +10704,7 @@
     "RemoveRange": "System.Collections.Immutable.ImmutableSortedDictionary`2",
     "SetItem": "System.Collections.Immutable.ImmutableSortedDictionary`2",
     "SetItems": "System.Collections.Immutable.ImmutableSortedDictionary`2",
-    "ToBuilder": "System.Collections.Immutable.ImmutableSortedDictionary`2+Builder<TKey, TValue>",
+    "ToBuilder": "System.Collections.Immutable.ImmutableSortedDictionary`2.Builder<TKey, TValue>",
     "TryGetKey": "System.Boolean",
     "TryGetValue": "System.Boolean",
     "ValueComparer": "System.Collections.Generic.IEqualityComparer`1<TValue>",
@@ -10737,7 +10737,7 @@
     "ContainsKey": "System.Boolean",
     "ContainsValue": "System.Boolean",
     "Count": "System.Int32",
-    "GetEnumerator": "System.Collections.Immutable.ImmutableSortedDictionary`2+Enumerator<TKey, TValue>",
+    "GetEnumerator": "System.Collections.Immutable.ImmutableSortedDictionary`2.Enumerator<TKey, TValue>",
     "GetValueOrDefault": "TValue",
     "Item": "TValue",
     "KeyComparer": "System.Collections.Generic.IComparer`1<TKey>",
@@ -10782,7 +10782,7 @@
    "params": [],
    "statics": {
     "Create": "System.Collections.Immutable.ImmutableSortedSet`1<T>",
-    "CreateBuilder": "System.Collections.Immutable.ImmutableSortedSet`1+Builder<T>",
+    "CreateBuilder": "System.Collections.Immutable.ImmutableSortedSet`1.Builder<T>",
     "CreateRange": "System.Collections.Immutable.ImmutableSortedSet`1<T>"
    }
   },
@@ -10806,7 +10806,7 @@
     "Contains": "System.Boolean",
     "Count": "System.Int32",
     "Except": "System.Collections.Immutable.ImmutableSortedSet`1",
-    "GetEnumerator": "System.Collections.Immutable.ImmutableSortedSet`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Immutable.ImmutableSortedSet`1.Enumerator<T>",
     "IndexOf": "System.Int32",
     "Intersect": "System.Collections.Immutable.ImmutableSortedSet`1",
     "IsEmpty": "System.Boolean",
@@ -10824,7 +10824,7 @@
     "Reverse": "System.Collections.Generic.IEnumerable`1<T>",
     "SetEquals": "System.Boolean",
     "SymmetricExcept": "System.Collections.Immutable.ImmutableSortedSet`1",
-    "ToBuilder": "System.Collections.Immutable.ImmutableSortedSet`1+Builder<T>",
+    "ToBuilder": "System.Collections.Immutable.ImmutableSortedSet`1.Builder<T>",
     "TryGetValue": "System.Boolean",
     "Union": "System.Collections.Immutable.ImmutableSortedSet`1",
     "WithComparer": "System.Collections.Immutable.ImmutableSortedSet`1"
@@ -10849,7 +10849,7 @@
     "Contains": "System.Boolean",
     "Count": "System.Int32",
     "ExceptWith": null,
-    "GetEnumerator": "System.Collections.Immutable.ImmutableSortedSet`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Immutable.ImmutableSortedSet`1.Enumerator<T>",
     "IndexOf": "System.Int32",
     "IntersectWith": null,
     "IsProperSubsetOf": "System.Boolean",
@@ -10910,7 +10910,7 @@
    ],
    "methods": {
     "Clear": "System.Collections.Immutable.ImmutableStack`1",
-    "GetEnumerator": "System.Collections.Immutable.ImmutableStack`1+Enumerator<T>",
+    "GetEnumerator": "System.Collections.Immutable.ImmutableStack`1.Enumerator<T>",
     "IsEmpty": "System.Boolean",
     "Peek": "T",
     "PeekRef": "T&",
@@ -11112,9 +11112,9 @@
     "Dictionary": "System.Collections.Generic.IDictionary`2<TKey, TValue>",
     "GetEnumerator": "System.Collections.Generic.IEnumerator`1<System.Collections.Generic.KeyValuePair`2[TKey, TValue]>",
     "Item": "TValue",
-    "Keys": "System.Collections.ObjectModel.ReadOnlyDictionary`2+KeyCollection<TKey, TValue>",
+    "Keys": "System.Collections.ObjectModel.ReadOnlyDictionary`2.KeyCollection<TKey, TValue>",
     "TryGetValue": "System.Boolean",
-    "Values": "System.Collections.ObjectModel.ReadOnlyDictionary`2+ValueCollection<TKey, TValue>"
+    "Values": "System.Collections.ObjectModel.ReadOnlyDictionary`2.ValueCollection<TKey, TValue>"
    },
    "params": [
     "TKey",
@@ -11312,14 +11312,14 @@
    "params": [],
    "statics": {
     "CreateMask": "System.Int32",
-    "CreateSection": "System.Collections.Specialized.BitVector32+Section",
+    "CreateSection": "System.Collections.Specialized.BitVector32.Section",
     "ToString": "System.String"
    }
   },
   "System.Collections.Specialized.BitVector32.Section": {
    "bases": [
     "System.ValueType",
-    "System.IEquatable`1<System.Collections.Specialized.BitVector32+Section>"
+    "System.IEquatable`1<System.Collections.Specialized.BitVector32.Section>"
    ],
    "methods": {
     "Equals": "System.Boolean",
@@ -11443,7 +11443,7 @@
     "GetEnumerator": "System.Collections.IEnumerator",
     "GetObjectData": null,
     "IsReadOnly": "System.Boolean",
-    "Keys": "System.Collections.Specialized.NameObjectCollectionBase+KeysCollection",
+    "Keys": "System.Collections.Specialized.NameObjectCollectionBase.KeysCollection",
     "OnDeserialization": null
    },
    "params": [],
@@ -11921,7 +11921,7 @@
    "methods": {
     "CanConvertFrom": "System.Boolean",
     "ConvertFrom": "System.Object",
-    "GetStandardValues": "System.ComponentModel.TypeConverter+StandardValuesCollection",
+    "GetStandardValues": "System.ComponentModel.TypeConverter.StandardValuesCollection",
     "GetStandardValuesExclusive": "System.Boolean",
     "GetStandardValuesSupported": "System.Boolean"
    },
@@ -12175,7 +12175,7 @@
     "ConvertFrom": "System.Object",
     "ConvertTo": "System.Object",
     "GetCultureName": "System.String",
-    "GetStandardValues": "System.ComponentModel.TypeConverter+StandardValuesCollection",
+    "GetStandardValues": "System.ComponentModel.TypeConverter.StandardValuesCollection",
     "GetStandardValuesExclusive": "System.Boolean",
     "GetStandardValuesSupported": "System.Boolean"
    },
@@ -13136,8 +13136,8 @@
     "System.ComponentModel.Design.IDesignerOptionService"
    ],
    "methods": {
-    "CreateOptionCollection": "System.ComponentModel.Design.DesignerOptionService+DesignerOptionCollection",
-    "Options": "System.ComponentModel.Design.DesignerOptionService+DesignerOptionCollection",
+    "CreateOptionCollection": "System.ComponentModel.Design.DesignerOptionService.DesignerOptionCollection",
+    "Options": "System.ComponentModel.Design.DesignerOptionService.DesignerOptionCollection",
     "PopulateOptionCollection": null,
     "ShowDialog": "System.Boolean"
    },
@@ -13155,9 +13155,9 @@
     "Count": "System.Int32",
     "GetEnumerator": "System.Collections.IEnumerator",
     "IndexOf": "System.Int32",
-    "Item": "System.ComponentModel.Design.DesignerOptionService+DesignerOptionCollection",
+    "Item": "System.ComponentModel.Design.DesignerOptionService.DesignerOptionCollection",
     "Name": "System.String",
-    "Parent": "System.ComponentModel.Design.DesignerOptionService+DesignerOptionCollection",
+    "Parent": "System.ComponentModel.Design.DesignerOptionService.DesignerOptionCollection",
     "Properties": "System.ComponentModel.PropertyDescriptorCollection",
     "ShowDialog": "System.Boolean"
    },
@@ -14073,11 +14073,11 @@
     "ConvertFrom": "System.Object",
     "ConvertTo": "System.Object",
     "EnumType": "System.Type",
-    "GetStandardValues": "System.ComponentModel.TypeConverter+StandardValuesCollection",
+    "GetStandardValues": "System.ComponentModel.TypeConverter.StandardValuesCollection",
     "GetStandardValuesExclusive": "System.Boolean",
     "GetStandardValuesSupported": "System.Boolean",
     "IsValid": "System.Boolean",
-    "Values": "System.ComponentModel.TypeConverter+StandardValuesCollection"
+    "Values": "System.ComponentModel.TypeConverter.StandardValuesCollection"
    },
    "params": [],
    "statics": {}
@@ -15016,7 +15016,7 @@
     "GetCreateInstanceSupported": "System.Boolean",
     "GetProperties": "System.ComponentModel.PropertyDescriptorCollection",
     "GetPropertiesSupported": "System.Boolean",
-    "GetStandardValues": "System.ComponentModel.TypeConverter+StandardValuesCollection",
+    "GetStandardValues": "System.ComponentModel.TypeConverter.StandardValuesCollection",
     "GetStandardValuesExclusive": "System.Boolean",
     "GetStandardValuesSupported": "System.Boolean",
     "IsValid": "System.Boolean",
@@ -15261,7 +15261,7 @@
     "CanConvertFrom": "System.Boolean",
     "ConvertFrom": "System.Object",
     "ConvertTo": "System.Object",
-    "GetStandardValues": "System.ComponentModel.TypeConverter+StandardValuesCollection",
+    "GetStandardValues": "System.ComponentModel.TypeConverter.StandardValuesCollection",
     "GetStandardValuesExclusive": "System.Boolean",
     "GetStandardValuesSupported": "System.Boolean",
     "IsValueAllowed": "System.Boolean"
@@ -15623,7 +15623,7 @@
     "CanConvertTo": "System.Boolean",
     "ConvertFrom": "System.Object",
     "ConvertTo": "System.Object",
-    "GetStandardValues": "System.ComponentModel.TypeConverter+StandardValuesCollection",
+    "GetStandardValues": "System.ComponentModel.TypeConverter.StandardValuesCollection",
     "GetStandardValuesExclusive": "System.Boolean",
     "GetStandardValuesSupported": "System.Boolean"
    },
@@ -19731,7 +19731,7 @@
    "statics": {
     "Combine": "System.Delegate",
     "CreateDelegate": "System.Delegate",
-    "EnumerateInvocationList": "System.Delegate+InvocationListEnumerator`1<TDelegate>",
+    "EnumerateInvocationList": "System.Delegate.InvocationListEnumerator`1<TDelegate>",
     "Remove": "System.Delegate",
     "RemoveAll": "System.Delegate",
     "op_Equality": "System.Boolean",
@@ -19744,7 +19744,7 @@
    ],
    "methods": {
     "Current": "TDelegate",
-    "GetEnumerator": "System.Delegate+InvocationListEnumerator`1",
+    "GetEnumerator": "System.Delegate.InvocationListEnumerator`1",
     "MoveNext": "System.Boolean"
    },
    "params": [
@@ -19768,9 +19768,9 @@
     "DisplayName": "System.String",
     "Dispose": null,
     "Duration": "System.TimeSpan",
-    "EnumerateEvents": "System.Diagnostics.Activity+Enumerator`1<System.Diagnostics.ActivityEvent>",
-    "EnumerateLinks": "System.Diagnostics.Activity+Enumerator`1<System.Diagnostics.ActivityLink>",
-    "EnumerateTagObjects": "System.Diagnostics.Activity+Enumerator`1<System.String, System.Object>",
+    "EnumerateEvents": "System.Diagnostics.Activity.Enumerator`1<System.Diagnostics.ActivityEvent>",
+    "EnumerateLinks": "System.Diagnostics.Activity.Enumerator`1<System.Diagnostics.ActivityLink>",
+    "EnumerateTagObjects": "System.Diagnostics.Activity.Enumerator`1<System.String, System.Object>",
     "Events": "System.Collections.Generic.IEnumerable`1<System.Diagnostics.ActivityEvent>",
     "GetBaggageItem": "System.String",
     "GetCustomProperty": "System.Object",
@@ -19822,7 +19822,7 @@
    ],
    "methods": {
     "Current": "T&",
-    "GetEnumerator": "System.Diagnostics.Activity+Enumerator`1",
+    "GetEnumerator": "System.Diagnostics.Activity.Enumerator`1",
     "MoveNext": "System.Boolean"
    },
    "params": [
@@ -19888,7 +19888,7 @@
     "System.ValueType"
    ],
    "methods": {
-    "EnumerateTagObjects": "System.Diagnostics.Activity+Enumerator`1<System.String, System.Object>",
+    "EnumerateTagObjects": "System.Diagnostics.Activity.Enumerator`1<System.String, System.Object>",
     "Name": "System.String",
     "Tags": "System.Collections.Generic.IEnumerable`1<System.String, System.Object>",
     "Timestamp": "System.DateTimeOffset"
@@ -19927,7 +19927,7 @@
    ],
    "methods": {
     "Context": "System.Diagnostics.ActivityContext",
-    "EnumerateTagObjects": "System.Diagnostics.Activity+Enumerator`1<System.String, System.Object>",
+    "EnumerateTagObjects": "System.Diagnostics.Activity.Enumerator`1<System.String, System.Object>",
     "Equals": "System.Boolean",
     "GetHashCode": "System.Int32",
     "Tags": "System.Collections.Generic.IEnumerable`1<System.String, System.Object>"
@@ -20044,7 +20044,7 @@
     "ContainsKey": "System.Boolean",
     "CopyTo": null,
     "Count": "System.Int32",
-    "GetEnumerator": "System.Diagnostics.ActivityTagsCollection+Enumerator",
+    "GetEnumerator": "System.Diagnostics.ActivityTagsCollection.Enumerator",
     "IsReadOnly": "System.Boolean",
     "Item": "System.Object",
     "Keys": "System.Collections.Generic.ICollection`1<System.String>",
@@ -20682,7 +20682,7 @@
     "System.Attribute"
    ],
    "methods": {
-    "DebuggingFlags": "System.Diagnostics.DebuggableAttribute+DebuggingModes",
+    "DebuggingFlags": "System.Diagnostics.DebuggableAttribute.DebuggingModes",
     "IsJITOptimizerDisabled": "System.Boolean",
     "IsJITTrackingEnabled": "System.Boolean"
    },
@@ -22345,7 +22345,7 @@
    "methods": {},
    "params": [],
    "statics": {
-    "op_Implicit": "System.Diagnostics.Tracing.EventSource+EventSourcePrimitive"
+    "op_Implicit": "System.Diagnostics.Tracing.EventSource.EventSourcePrimitive"
    }
   },
   "System.Diagnostics.Tracing.EventSourceAttribute": {
@@ -22879,7 +22879,7 @@
     "CanConvertTo": "System.Boolean",
     "ConvertFrom": "System.Object",
     "ConvertTo": "System.Object",
-    "GetStandardValues": "System.ComponentModel.TypeConverter+StandardValuesCollection",
+    "GetStandardValues": "System.ComponentModel.TypeConverter.StandardValuesCollection",
     "GetStandardValuesSupported": "System.Boolean"
    },
    "params": [],
@@ -23546,7 +23546,7 @@
    "params": [],
    "statics": {
     "CommandLine": "System.String",
-    "CpuUsage": "System.Environment+ProcessCpuUsage",
+    "CpuUsage": "System.Environment.ProcessCpuUsage",
     "CurrentDirectory": "System.String",
     "CurrentManagedThreadId": "System.Int32",
     "Exit": null,
@@ -23895,9 +23895,9 @@
     "PopOctetString": null,
     "PopSequence": null,
     "PopSetOf": null,
-    "PushOctetString": "System.Formats.Asn1.AsnWriter+Scope",
-    "PushSequence": "System.Formats.Asn1.AsnWriter+Scope",
-    "PushSetOf": "System.Formats.Asn1.AsnWriter+Scope",
+    "PushOctetString": "System.Formats.Asn1.AsnWriter.Scope",
+    "PushSequence": "System.Formats.Asn1.AsnWriter.Scope",
+    "PushSetOf": "System.Formats.Asn1.AsnWriter.Scope",
     "Reset": null,
     "RuleSet": "System.Formats.Asn1.AsnEncodingRules",
     "TryEncode": "System.Boolean",
@@ -26506,8 +26506,8 @@
    ],
    "methods": {
     "GetEnumerator": "System.Collections.Generic.IEnumerator`1<TResult>",
-    "ShouldIncludePredicate": "System.IO.Enumeration.FileSystemEnumerable`1+FindPredicate<TResult>",
-    "ShouldRecursePredicate": "System.IO.Enumeration.FileSystemEnumerable`1+FindPredicate<TResult>"
+    "ShouldIncludePredicate": "System.IO.Enumeration.FileSystemEnumerable`1.FindPredicate<TResult>",
+    "ShouldRecursePredicate": "System.IO.Enumeration.FileSystemEnumerable`1.FindPredicate<TResult>"
    },
    "params": [
     "TResult"
@@ -30022,7 +30022,7 @@
    ],
    "methods": {
     "Current": "System.Range",
-    "GetEnumerator": "System.MemoryExtensions+SpanSplitEnumerator`1",
+    "GetEnumerator": "System.MemoryExtensions.SpanSplitEnumerator`1",
     "MoveNext": "System.Boolean",
     "Source": "System.ReadOnlySpan`1<T>"
    },
@@ -30864,7 +30864,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Net.Http.Headers.HeaderStringValues+Enumerator",
+    "GetEnumerator": "System.Net.Http.Headers.HeaderStringValues.Enumerator",
     "ToString": "System.String"
    },
    "params": [],
@@ -30962,7 +30962,7 @@
    "methods": {
     "Contains": "System.Boolean",
     "Count": "System.Int32",
-    "GetEnumerator": "System.Net.Http.Headers.HttpHeadersNonValidated+Enumerator",
+    "GetEnumerator": "System.Net.Http.Headers.HttpHeadersNonValidated.Enumerator",
     "Item": "System.Net.Http.Headers.HeaderStringValues",
     "TryGetValues": "System.Boolean"
    },
@@ -31828,7 +31828,7 @@
     "DefaultServiceNames": "System.Security.Authentication.ExtendedProtection.ServiceNameCollection",
     "EndGetContext": "System.Net.HttpListenerContext",
     "ExtendedProtectionPolicy": "System.Security.Authentication.ExtendedProtection.ExtendedProtectionPolicy",
-    "ExtendedProtectionSelectorDelegate": "System.Net.HttpListener+ExtendedProtectionSelector",
+    "ExtendedProtectionSelectorDelegate": "System.Net.HttpListener.ExtendedProtectionSelector",
     "GetContext": "System.Net.HttpListenerContext",
     "GetContextAsync": "System.Threading.Tasks.Task`1<System.Net.HttpListenerContext>",
     "IgnoreWriteExceptions": "System.Boolean",
@@ -35055,7 +35055,7 @@
     "GetObjectData": null,
     "GetValues": "System.String<>",
     "Item": "System.String",
-    "Keys": "System.Collections.Specialized.NameObjectCollectionBase+KeysCollection",
+    "Keys": "System.Collections.Specialized.NameObjectCollectionBase.KeysCollection",
     "OnDeserialization": null,
     "Remove": null,
     "Set": null,
@@ -37789,7 +37789,7 @@
     "CountAny": "System.Int32",
     "EndsWith": "System.Boolean",
     "Equals": "System.Boolean",
-    "GetEnumerator": "System.ReadOnlySpan`1+Enumerator<T>",
+    "GetEnumerator": "System.ReadOnlySpan`1.Enumerator<T>",
     "GetHashCode": "System.Int32",
     "GetPinnableReference": "T&",
     "IndexOf": "System.Int32",
@@ -37812,8 +37812,8 @@
     "SequenceCompareTo": "System.Int32",
     "SequenceEqual": "System.Boolean",
     "Slice": "System.ReadOnlySpan`1",
-    "Split": "System.MemoryExtensions+SpanSplitEnumerator`1<T>",
-    "SplitAny": "System.MemoryExtensions+SpanSplitEnumerator`1<T>",
+    "Split": "System.MemoryExtensions.SpanSplitEnumerator`1<T>",
+    "SplitAny": "System.MemoryExtensions.SpanSplitEnumerator`1<T>",
     "StartsWith": "System.Boolean",
     "ToArray": "T<>",
     "ToImmutableArray": "System.Collections.Immutable.ImmutableArray`1<T>",
@@ -39335,7 +39335,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.AssemblyFileHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.AssemblyFileHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -39416,7 +39416,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.AssemblyReferenceHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.AssemblyReferenceHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -39459,7 +39459,7 @@
     "Free": null,
     "FreeBytes": "System.Int32",
     "FreeChunk": null,
-    "GetBlobs": "System.Reflection.Metadata.BlobBuilder+Blobs",
+    "GetBlobs": "System.Reflection.Metadata.BlobBuilder.Blobs",
     "LinkPrefix": null,
     "LinkSuffix": null,
     "PadTo": null,
@@ -39510,7 +39510,7 @@
    ],
    "methods": {
     "Current": "System.Reflection.Metadata.Blob",
-    "GetEnumerator": "System.Reflection.Metadata.BlobBuilder+Blobs",
+    "GetEnumerator": "System.Reflection.Metadata.BlobBuilder.Blobs",
     "MoveNext": "System.Boolean",
     "Reset": null
    },
@@ -39729,7 +39729,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.CustomAttributeHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.CustomAttributeHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -39840,7 +39840,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.CustomDebugInformationHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.CustomDebugInformationHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -39908,7 +39908,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.DeclarativeSecurityAttributeHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.DeclarativeSecurityAttributeHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -39967,7 +39967,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.DocumentHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.DocumentHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -40804,7 +40804,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.EventDefinitionHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.EventDefinitionHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -40894,7 +40894,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.ExportedTypeHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.ExportedTypeHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -40959,7 +40959,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.FieldDefinitionHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.FieldDefinitionHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -41033,7 +41033,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.GenericParameterConstraintHandleCollection+Enumerator",
+    "GetEnumerator": "System.Reflection.Metadata.GenericParameterConstraintHandleCollection.Enumerator",
     "Item": "System.Reflection.Metadata.GenericParameterConstraintHandle"
    },
    "params": [],
@@ -41081,7 +41081,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.GenericParameterHandleCollection+Enumerator",
+    "GetEnumerator": "System.Reflection.Metadata.GenericParameterHandleCollection.Enumerator",
     "Item": "System.Reflection.Metadata.GenericParameterHandle"
    },
    "params": [],
@@ -41286,7 +41286,7 @@
     "System.Collections.IEnumerable"
    ],
    "methods": {
-    "GetEnumerator": "System.Reflection.Metadata.ImportDefinitionCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.ImportDefinitionCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -41339,7 +41339,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.ImportScopeCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.ImportScopeCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -41414,7 +41414,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.InterfaceImplementationHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.InterfaceImplementationHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -41471,7 +41471,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.LocalConstantHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.LocalConstantHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -41496,7 +41496,7 @@
    ],
    "methods": {
     "EndOffset": "System.Int32",
-    "GetChildren": "System.Reflection.Metadata.LocalScopeHandleCollection+ChildrenEnumerator",
+    "GetChildren": "System.Reflection.Metadata.LocalScopeHandleCollection.ChildrenEnumerator",
     "GetLocalConstants": "System.Reflection.Metadata.LocalConstantHandleCollection",
     "GetLocalVariables": "System.Reflection.Metadata.LocalVariableHandleCollection",
     "ImportScope": "System.Reflection.Metadata.ImportScopeHandle",
@@ -41534,7 +41534,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.LocalScopeHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.LocalScopeHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -41618,7 +41618,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.LocalVariableHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.LocalVariableHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -41678,7 +41678,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.ManifestResourceHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.ManifestResourceHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -41740,7 +41740,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.MemberReferenceHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.MemberReferenceHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -42003,7 +42003,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.MethodDebugInformationHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.MethodDebugInformationHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -42071,7 +42071,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.MethodDefinitionHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.MethodDefinitionHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -42130,7 +42130,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.MethodImplementationHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.MethodImplementationHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -42350,7 +42350,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.ParameterHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.ParameterHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -42449,7 +42449,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.PropertyDefinitionHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.PropertyDefinitionHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -42508,7 +42508,7 @@
     "System.Collections.IEnumerable"
    ],
    "methods": {
-    "GetEnumerator": "System.Reflection.Metadata.SequencePointCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.SequencePointCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -42739,7 +42739,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.TypeDefinitionHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.TypeDefinitionHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -42853,7 +42853,7 @@
    ],
    "methods": {
     "Count": "System.Int32",
-    "GetEnumerator": "System.Reflection.Metadata.TypeReferenceHandleCollection+Enumerator"
+    "GetEnumerator": "System.Reflection.Metadata.TypeReferenceHandleCollection.Enumerator"
    },
    "params": [],
    "statics": {}
@@ -43411,7 +43411,7 @@
     "System.Reflection.PortableExecutable.PEBuilder"
    ],
    "methods": {
-    "CreateSections": "System.Collections.Immutable.ImmutableArray`1<System.Reflection.PortableExecutable.PEBuilder+Section>",
+    "CreateSections": "System.Collections.Immutable.ImmutableArray`1<System.Reflection.PortableExecutable.PEBuilder.Section>",
     "GetDirectories": "System.Reflection.PortableExecutable.PEDirectoriesBuilder",
     "SerializeSection": "System.Reflection.Metadata.BlobBuilder",
     "Sign": null
@@ -43422,9 +43422,9 @@
   "System.Reflection.PortableExecutable.PEBuilder": {
    "bases": [],
    "methods": {
-    "CreateSections": "System.Collections.Immutable.ImmutableArray`1<System.Reflection.PortableExecutable.PEBuilder+Section>",
+    "CreateSections": "System.Collections.Immutable.ImmutableArray`1<System.Reflection.PortableExecutable.PEBuilder.Section>",
     "GetDirectories": "System.Reflection.PortableExecutable.PEDirectoriesBuilder",
-    "GetSections": "System.Collections.Immutable.ImmutableArray`1<System.Reflection.PortableExecutable.PEBuilder+Section>",
+    "GetSections": "System.Collections.Immutable.ImmutableArray`1<System.Reflection.PortableExecutable.PEBuilder.Section>",
     "Header": "System.Reflection.PortableExecutable.PEHeaderBuilder",
     "IdProvider": "System.Func`2<System.Collections.Generic.IEnumerable`1[[System.Reflection.Metadata.Blob, System.Reflection.Metadata.BlobContentId>",
     "IsDeterministic": "System.Boolean",
@@ -44614,7 +44614,7 @@
    ],
    "methods": {
     "ConfigureAwait": "System.Runtime.CompilerServices.ConfiguredCancelableAsyncEnumerable`1",
-    "GetAsyncEnumerator": "System.Runtime.CompilerServices.ConfiguredCancelableAsyncEnumerable`1+Enumerator<T>",
+    "GetAsyncEnumerator": "System.Runtime.CompilerServices.ConfiguredCancelableAsyncEnumerable`1.Enumerator<T>",
     "WithCancellation": "System.Runtime.CompilerServices.ConfiguredCancelableAsyncEnumerable`1"
    },
    "params": [
@@ -44641,7 +44641,7 @@
     "System.ValueType"
    ],
    "methods": {
-    "GetAwaiter": "System.Runtime.CompilerServices.ConfiguredTaskAwaitable+ConfiguredTaskAwaiter"
+    "GetAwaiter": "System.Runtime.CompilerServices.ConfiguredTaskAwaitable.ConfiguredTaskAwaiter"
    },
    "params": [],
    "statics": {}
@@ -44666,7 +44666,7 @@
     "System.ValueType"
    ],
    "methods": {
-    "GetAwaiter": "System.Runtime.CompilerServices.ConfiguredTaskAwaitable`1+ConfiguredTaskAwaiter<TResult>"
+    "GetAwaiter": "System.Runtime.CompilerServices.ConfiguredTaskAwaitable`1.ConfiguredTaskAwaiter<TResult>"
    },
    "params": [
     "TResult"
@@ -44695,7 +44695,7 @@
     "System.ValueType"
    ],
    "methods": {
-    "GetAwaiter": "System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable+ConfiguredValueTaskAwaiter"
+    "GetAwaiter": "System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable.ConfiguredValueTaskAwaiter"
    },
    "params": [],
    "statics": {}
@@ -44720,7 +44720,7 @@
     "System.ValueType"
    ],
    "methods": {
-    "GetAwaiter": "System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable`1+ConfiguredValueTaskAwaiter<TResult>"
+    "GetAwaiter": "System.Runtime.CompilerServices.ConfiguredValueTaskAwaitable`1.ConfiguredValueTaskAwaiter<TResult>"
    },
    "params": [
     "TResult"
@@ -45934,7 +45934,7 @@
     "System.ValueType"
    ],
    "methods": {
-    "GetAwaiter": "System.Runtime.CompilerServices.YieldAwaitable+YieldAwaiter"
+    "GetAwaiter": "System.Runtime.CompilerServices.YieldAwaitable.YieldAwaiter"
    },
    "params": [],
    "statics": {}
@@ -47153,7 +47153,7 @@
   "System.Runtime.InteropServices.ComWrappers": {
    "bases": [],
    "methods": {
-    "ComputeVtables": "System.Runtime.InteropServices.ComWrappers+ComInterfaceEntry*",
+    "ComputeVtables": "System.Runtime.InteropServices.ComWrappers.ComInterfaceEntry*",
     "CreateObject": "System.Object",
     "GetOrCreateComInterfaceForObject": "System.IntPtr",
     "GetOrCreateObjectForComInstance": "System.Object",
@@ -48237,7 +48237,7 @@
     "System.Runtime.InteropServices.Marshalling.IComExposedDetails"
    ],
    "methods": {
-    "GetComInterfaceEntries": "System.Runtime.InteropServices.ComWrappers+ComInterfaceEntry*"
+    "GetComInterfaceEntries": "System.Runtime.InteropServices.ComWrappers.ComInterfaceEntry*"
    },
    "params": [
     "T"
@@ -48414,13 +48414,13 @@
    "methods": {},
    "params": [],
    "statics": {
-    "GetComInterfaceEntries": "System.Runtime.InteropServices.ComWrappers+ComInterfaceEntry*"
+    "GetComInterfaceEntries": "System.Runtime.InteropServices.ComWrappers.ComInterfaceEntry*"
    }
   },
   "System.Runtime.InteropServices.Marshalling.IComExposedDetails": {
    "bases": [],
    "methods": {
-    "GetComInterfaceEntries": "System.Runtime.InteropServices.ComWrappers+ComInterfaceEntry*"
+    "GetComInterfaceEntries": "System.Runtime.InteropServices.ComWrappers.ComInterfaceEntry*"
    },
    "params": [],
    "statics": {}
@@ -48429,7 +48429,7 @@
    "bases": [],
    "methods": {
     "Clear": null,
-    "ConstructTableInfo": "System.Runtime.InteropServices.Marshalling.IIUnknownCacheStrategy+TableInfo",
+    "ConstructTableInfo": "System.Runtime.InteropServices.Marshalling.IIUnknownCacheStrategy.TableInfo",
     "TryGetTableInfo": "System.Boolean",
     "TrySetTableInfo": "System.Boolean"
    },
@@ -48739,7 +48739,7 @@
     "System.Runtime.InteropServices.ComWrappers"
    ],
    "methods": {
-    "ComputeVtables": "System.Runtime.InteropServices.ComWrappers+ComInterfaceEntry*",
+    "ComputeVtables": "System.Runtime.InteropServices.ComWrappers.ComInterfaceEntry*",
     "CreateCacheStrategy": "System.Runtime.InteropServices.Marshalling.IIUnknownCacheStrategy",
     "CreateObject": "System.Object",
     "GetOrCreateIUnknownStrategy": "System.Runtime.InteropServices.Marshalling.IIUnknownStrategy",
@@ -49930,7 +49930,9 @@
    }
   },
   "System.Runtime.Intrinsics.Arm.AdvSimd.Arm64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.Arm.ArmBase.Arm64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -50133,7 +50135,9 @@
    }
   },
   "System.Runtime.Intrinsics.Arm.Aes.Arm64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.Arm.ArmBase.Arm64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -50176,7 +50180,9 @@
    }
   },
   "System.Runtime.Intrinsics.Arm.Crc32.Arm64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.Arm.ArmBase.Arm64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -50198,7 +50204,9 @@
    }
   },
   "System.Runtime.Intrinsics.Arm.Dp.Arm64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.Arm.AdvSimd.Arm64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -50220,7 +50228,9 @@
    }
   },
   "System.Runtime.Intrinsics.Arm.Rdm.Arm64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.Arm.AdvSimd.Arm64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -50248,7 +50258,9 @@
    }
   },
   "System.Runtime.Intrinsics.Arm.Sha1.Arm64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.Arm.ArmBase.Arm64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -50270,7 +50282,9 @@
    }
   },
   "System.Runtime.Intrinsics.Arm.Sha256.Arm64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.Arm.ArmBase.Arm64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -50578,7 +50592,9 @@
    }
   },
   "System.Runtime.Intrinsics.Arm.Sve.Arm64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.Arm.AdvSimd.Arm64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -50729,7 +50745,9 @@
    }
   },
   "System.Runtime.Intrinsics.Arm.Sve2.Arm64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.Arm.Sve.Arm64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -51637,7 +51655,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Aes.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Sse2.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -51727,7 +51747,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Sse42.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -51905,7 +51927,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx10v1.V512.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx512BW.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -51913,7 +51937,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx10v1.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx2.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -51944,7 +51970,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx10v2.V512": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx10v1.V512"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -51958,7 +51986,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx10v2.V512.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx10v1.V512.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -51966,7 +51996,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx10v2.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx10v1.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52049,7 +52081,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx2.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52118,7 +52152,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx512BW.VL": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx512F.VL"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52147,7 +52183,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx512BW.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx512F.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52167,7 +52205,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx512CD.VL": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx512F.VL"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52177,7 +52217,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx512CD.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx512F.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52220,7 +52262,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx512DQ.VL": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx512F.VL"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52245,7 +52289,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx512DQ.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx512F.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52475,7 +52521,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx512F.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx2.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52501,7 +52549,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx512Vbmi.VL": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx512BW.VL"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52514,7 +52564,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx512Vbmi.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx512BW.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52536,7 +52588,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx512Vbmi2.VL": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx512Vbmi.VL"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52548,7 +52602,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Avx512Vbmi2.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx512Vbmi.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52568,7 +52624,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.AvxVnni.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx2.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52598,7 +52656,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.AvxVnniInt16.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx2.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52628,7 +52688,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.AvxVnniInt8.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx2.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52652,7 +52714,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Bmi1.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.X86Base.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52680,7 +52744,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Bmi2.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.X86Base.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52736,7 +52802,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Fma.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Avx.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52779,7 +52847,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Gfni.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Sse41.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52798,7 +52868,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Lzcnt.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.X86Base.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52836,7 +52908,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Pclmulqdq.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Sse2.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52855,7 +52929,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Popcnt.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Sse42.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -52958,7 +53034,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Sse.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.X86Base.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -53082,7 +53160,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Sse2.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Sse.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -53115,7 +53195,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Sse3.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Sse2.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -53167,7 +53249,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Sse41.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Ssse3.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -53189,7 +53273,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Sse42.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Sse41.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -53218,7 +53304,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.Ssse3.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.Sse3.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -53257,7 +53345,9 @@
    }
   },
   "System.Runtime.Intrinsics.X86.X86Serialize.X64": {
-   "bases": [],
+   "bases": [
+    "System.Runtime.Intrinsics.X86.X86Base.X64"
+   ],
    "methods": {},
    "params": [],
    "statics": {
@@ -53287,7 +53377,7 @@
    "bases": [],
    "methods": {
     "Assemblies": "System.Collections.Generic.IEnumerable`1<System.Reflection.Assembly>",
-    "EnterContextualReflection": "System.Runtime.Loader.AssemblyLoadContext+ContextualReflectionScope",
+    "EnterContextualReflection": "System.Runtime.Loader.AssemblyLoadContext.ContextualReflectionScope",
     "Finalize": null,
     "IsCollectible": "System.Boolean",
     "Load": "System.Reflection.Assembly",
@@ -53308,7 +53398,7 @@
     "All": "System.Collections.Generic.IEnumerable`1<System.Runtime.Loader.AssemblyLoadContext>",
     "CurrentContextualReflectionContext": "System.Runtime.Loader.AssemblyLoadContext",
     "Default": "System.Runtime.Loader.AssemblyLoadContext",
-    "EnterContextualReflection": "System.Runtime.Loader.AssemblyLoadContext+ContextualReflectionScope",
+    "EnterContextualReflection": "System.Runtime.Loader.AssemblyLoadContext.ContextualReflectionScope",
     "GetAssemblyName": "System.Reflection.AssemblyName",
     "GetLoadContext": "System.Runtime.Loader.AssemblyLoadContext"
    }
@@ -59320,7 +59410,7 @@
     "AddRange": null,
     "Contains": "System.Boolean",
     "CopyTo": null,
-    "GetEnumerator": "System.Security.Cryptography.X509Certificates.X509CertificateCollection+X509CertificateEnumerator",
+    "GetEnumerator": "System.Security.Cryptography.X509Certificates.X509CertificateCollection.X509CertificateEnumerator",
     "GetHashCode": "System.Int32",
     "IndexOf": "System.Int32",
     "Insert": null,
@@ -60565,7 +60655,7 @@
     "EndsWith": "System.Boolean",
     "Equals": "System.Boolean",
     "Fill": null,
-    "GetEnumerator": "System.Span`1+Enumerator<T>",
+    "GetEnumerator": "System.Span`1.Enumerator<T>",
     "GetHashCode": "System.Int32",
     "GetPinnableReference": "T&",
     "IndexOf": "System.Int32",
@@ -61241,8 +61331,8 @@
    ],
    "methods": {
     "Clone": "System.Text.Json.JsonElement",
-    "EnumerateArray": "System.Text.Json.JsonElement+ArrayEnumerator",
-    "EnumerateObject": "System.Text.Json.JsonElement+ObjectEnumerator",
+    "EnumerateArray": "System.Text.Json.JsonElement.ArrayEnumerator",
+    "EnumerateObject": "System.Text.Json.JsonElement.ObjectEnumerator",
     "GetArrayLength": "System.Int32",
     "GetBoolean": "System.Boolean",
     "GetByte": "System.Byte",
@@ -61306,7 +61396,7 @@
    "methods": {
     "Current": "System.Text.Json.JsonElement",
     "Dispose": null,
-    "GetEnumerator": "System.Text.Json.JsonElement+ArrayEnumerator",
+    "GetEnumerator": "System.Text.Json.JsonElement.ArrayEnumerator",
     "MoveNext": "System.Boolean",
     "Reset": null
    },
@@ -61325,7 +61415,7 @@
    "methods": {
     "Current": "System.Text.Json.JsonProperty",
     "Dispose": null,
-    "GetEnumerator": "System.Text.Json.JsonElement+ObjectEnumerator",
+    "GetEnumerator": "System.Text.Json.JsonElement.ObjectEnumerator",
     "MoveNext": "System.Boolean",
     "Reset": null
    },
@@ -62659,8 +62749,8 @@
     "CapNames": "System.Collections.IDictionary",
     "Caps": "System.Collections.IDictionary",
     "Count": "System.Int32",
-    "EnumerateMatches": "System.Text.RegularExpressions.Regex+ValueMatchEnumerator",
-    "EnumerateSplits": "System.Text.RegularExpressions.Regex+ValueSplitEnumerator",
+    "EnumerateMatches": "System.Text.RegularExpressions.Regex.ValueMatchEnumerator",
+    "EnumerateSplits": "System.Text.RegularExpressions.Regex.ValueSplitEnumerator",
     "GetGroupNames": "System.String<>",
     "GetGroupNumbers": "System.Int32<>",
     "GroupNameFromNumber": "System.String",
@@ -62683,8 +62773,8 @@
     "CacheSize": "System.Int32",
     "CompileToAssembly": null,
     "Count": "System.Int32",
-    "EnumerateMatches": "System.Text.RegularExpressions.Regex+ValueMatchEnumerator",
-    "EnumerateSplits": "System.Text.RegularExpressions.Regex+ValueSplitEnumerator",
+    "EnumerateMatches": "System.Text.RegularExpressions.Regex.ValueMatchEnumerator",
+    "EnumerateSplits": "System.Text.RegularExpressions.Regex.ValueSplitEnumerator",
     "Escape": "System.String",
     "IsMatch": "System.Boolean",
     "Match": "System.Text.RegularExpressions.Match",
@@ -62704,7 +62794,7 @@
    ],
    "methods": {
     "Current": "System.Text.RegularExpressions.ValueMatch",
-    "GetEnumerator": "System.Text.RegularExpressions.Regex+ValueMatchEnumerator",
+    "GetEnumerator": "System.Text.RegularExpressions.Regex.ValueMatchEnumerator",
     "MoveNext": "System.Boolean"
    },
    "params": [],
@@ -62719,7 +62809,7 @@
    ],
    "methods": {
     "Current": "System.Range",
-    "GetEnumerator": "System.Text.RegularExpressions.Regex+ValueSplitEnumerator",
+    "GetEnumerator": "System.Text.RegularExpressions.Regex.ValueSplitEnumerator",
     "MoveNext": "System.Boolean"
    },
    "params": [],
@@ -62946,7 +63036,7 @@
     "CopyTo": null,
     "EnsureCapacity": "System.Int32",
     "Equals": "System.Boolean",
-    "GetChunks": "System.Text.StringBuilder+ChunkEnumerator",
+    "GetChunks": "System.Text.StringBuilder.ChunkEnumerator",
     "Insert": "System.Text.StringBuilder",
     "Length": "System.Int32",
     "MaxCapacity": "System.Int32",
@@ -62974,7 +63064,7 @@
    ],
    "methods": {
     "Current": "System.ReadOnlyMemory`1<System.Char>",
-    "GetEnumerator": "System.Text.StringBuilder+ChunkEnumerator",
+    "GetEnumerator": "System.Text.StringBuilder.ChunkEnumerator",
     "MoveNext": "System.Boolean"
    },
    "params": [],
@@ -63791,7 +63881,7 @@
    "bases": [],
    "methods": {
     "Enter": null,
-    "EnterScope": "System.Threading.Lock+Scope",
+    "EnterScope": "System.Threading.Lock.Scope",
     "Exit": null,
     "IsHeldByCurrentThread": "System.Boolean",
     "TryEnter": "System.Boolean"
@@ -65489,7 +65579,7 @@
     "DaylightName": "System.String",
     "DisplayName": "System.String",
     "Equals": "System.Boolean",
-    "GetAdjustmentRules": "System.TimeZoneInfo+AdjustmentRule<>",
+    "GetAdjustmentRules": "System.TimeZoneInfo.AdjustmentRule<>",
     "GetAmbiguousTimeOffsets": "System.TimeSpan<>",
     "GetHashCode": "System.Int32",
     "GetUtcOffset": "System.TimeSpan",
@@ -65524,7 +65614,7 @@
   },
   "System.TimeZoneInfo.AdjustmentRule": {
    "bases": [
-    "System.IEquatable`1<System.TimeZoneInfo+AdjustmentRule>",
+    "System.IEquatable`1<System.TimeZoneInfo.AdjustmentRule>",
     "System.Runtime.Serialization.ISerializable",
     "System.Runtime.Serialization.IDeserializationCallback"
    ],
@@ -65533,20 +65623,20 @@
     "DateEnd": "System.DateTime",
     "DateStart": "System.DateTime",
     "DaylightDelta": "System.TimeSpan",
-    "DaylightTransitionEnd": "System.TimeZoneInfo+TransitionTime",
-    "DaylightTransitionStart": "System.TimeZoneInfo+TransitionTime",
+    "DaylightTransitionEnd": "System.TimeZoneInfo.TransitionTime",
+    "DaylightTransitionStart": "System.TimeZoneInfo.TransitionTime",
     "Equals": "System.Boolean",
     "GetHashCode": "System.Int32"
    },
    "params": [],
    "statics": {
-    "CreateAdjustmentRule": "System.TimeZoneInfo+AdjustmentRule"
+    "CreateAdjustmentRule": "System.TimeZoneInfo.AdjustmentRule"
    }
   },
   "System.TimeZoneInfo.TransitionTime": {
    "bases": [
     "System.ValueType",
-    "System.IEquatable`1<System.TimeZoneInfo+TransitionTime>",
+    "System.IEquatable`1<System.TimeZoneInfo.TransitionTime>",
     "System.Runtime.Serialization.ISerializable",
     "System.Runtime.Serialization.IDeserializationCallback"
    ],
@@ -65562,8 +65652,8 @@
    },
    "params": [],
    "statics": {
-    "CreateFixedDateRule": "System.TimeZoneInfo+TransitionTime",
-    "CreateFloatingDateRule": "System.TimeZoneInfo+TransitionTime",
+    "CreateFixedDateRule": "System.TimeZoneInfo.TransitionTime",
+    "CreateFloatingDateRule": "System.TimeZoneInfo.TransitionTime",
     "op_Equality": "System.Boolean",
     "op_Inequality": "System.Boolean"
    }
@@ -68681,8 +68771,8 @@
    "bases": [],
    "methods": {
     "InferSchema": "System.Xml.Schema.XmlSchemaSet",
-    "Occurrence": "System.Xml.Schema.XmlSchemaInference+InferenceOption",
-    "TypeInference": "System.Xml.Schema.XmlSchemaInference+InferenceOption"
+    "Occurrence": "System.Xml.Schema.XmlSchemaInference.InferenceOption",
+    "TypeInference": "System.Xml.Schema.XmlSchemaInference.InferenceOption"
    },
    "params": [],
    "statics": {}

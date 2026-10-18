@@ -408,11 +408,7 @@ def _walk(node, path, build):
         return
     if not _public(name):
         return
-    if kind in (
-        "ClassTemplateDecl",
-        "ClassTemplateSpecializationDecl",
-        "ClassTemplatePartialSpecializationDecl",
-    ):
+    if kind == "ClassTemplateDecl":
         params = [
             i.get("name", "") for i in inner if i.get("kind") == "TemplateTypeParmDecl"
         ]
@@ -420,7 +416,7 @@ def _walk(node, path, build):
         record_node = max(records, key=lambda i: len(i.get("inner", ())), default=node)
         key = f"std::{name}`{len(params)}"
         held = build.types.get(key) or _cpp_type(params)
-        if kind == "ClassTemplateDecl" and any(params):
+        if any(params):
             held["params"] = params
         for base in (
             b["type"]["qualType"]

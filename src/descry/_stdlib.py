@@ -20,6 +20,10 @@
                            None where none does}}}
 
 `variants` and `callbacks` are there only for a language that has them.
+C++ (`cpp.json`, read with `c.json`) keys a class by its name and the number
+of its template parameters, `std::vector`2`, a specialization being its
+template's, and gives each type `aliases`, its member typedefs by name; its
+bases are written as the headers write them.
 
 A return type is written as the language writes it, in terms of the type's
 `params`; None when the method returns nothing or its overloads disagree.

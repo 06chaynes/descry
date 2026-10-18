@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from xml.etree import ElementTree
 
 from descry.scip.adapter import (
     AdapterConfig,
@@ -100,6 +101,17 @@ _GRADLE_SETTINGS = ("settings.gradle", "settings.gradle.kts")
 def _runs_gradle(directory: Path) -> bool:
     """Whether scip-java run in `directory` builds it with Gradle."""
     return _build_tools(directory) == {"Gradle"}
+
+
+def _lists_modules(pom: Path) -> bool:
+    """Whether the Maven POM ``pom`` lists modules outside any profile."""
+    if not pom.is_file():
+        return False
+    try:
+        project = ElementTree.parse(pom).getroot()
+    except (OSError, ElementTree.ParseError):
+        return False
+    return any(len(c) for c in project if c.tag.rpartition("}")[2] == "modules")
 
 
 def _scip_java_runs(directory: Path) -> bool:
@@ -234,9 +246,9 @@ class JavaAdapter:
         """
         runs = _scip_java_runs(root) and _has_jvm_sources(root)
         settings = any((root / name).is_file() for name in _GRADLE_SETTINGS)
-        pom = root / "pom.xml"
-        modules = pom.is_file() and "<modules>" in pom.read_text(errors="replace")
-        aggregates = settings if _runs_gradle(root) else modules
+        aggregates = (
+            settings if _runs_gradle(root) else _lists_modules(root / "pom.xml")
+        )
         if runs and aggregates:
             return [DiscoveredProject(name=root.name, root=root, language=self.name)]
 

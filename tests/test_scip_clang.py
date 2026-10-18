@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from descry.scip.adapter import AdapterConfig, DiscoveredProject
 from descry.scip.adapters.clang import ClangAdapter
 from descry.scip.parser import ScipIndex
@@ -49,6 +51,18 @@ class TestClangAdapterDiscovery:
         projects = ClangAdapter().discover(tmp_path, set())
         assert [p.root for p in projects] == [tmp_path]
 
+    def test_subdirectories_compile_databases_over_a_root_without_one(self, tmp_path):
+        """A root Makefile without a compile database leaves the projects to
+        the subdirectories that have one."""
+        (tmp_path / "Makefile").write_text("all:")
+        for name in ("x", "y"):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "compile_commands.json").write_text("[]")
+            (tmp_path / name / "m.cpp").write_text("int main(){return 0;}")
+
+        projects = ClangAdapter().discover(tmp_path, set())
+        assert [p.root for p in projects] == [tmp_path / "x", tmp_path / "y"]
+
 
 class TestClangAdapterBuildCommand:
     def test_compdb_auto_detected_at_root(self, tmp_path):
@@ -74,11 +88,19 @@ class TestClangAdapterBuildCommand:
         assert "build/compile_commands.json" in compdb_arg
 
     def test_index_output_path_flag(self, tmp_path):
+        (tmp_path / "compile_commands.json").write_text("[]")
         project = DiscoveredProject(name="app", root=tmp_path, language="clang")
         spec = ClangAdapter().build_command(
             project, tmp_path / "app.scip", AdapterConfig()
         )
         assert any(arg.startswith("--index-output-path=") for arg in spec.argv)
+
+    def test_no_command_without_a_compile_database(self, tmp_path):
+        project = DiscoveredProject(name="app", root=tmp_path, language="clang")
+        with pytest.raises(FileNotFoundError):
+            ClangAdapter().build_command(
+                project, tmp_path / "app.scip", AdapterConfig()
+            )
 
 
 class TestScipClangHealthStatus:

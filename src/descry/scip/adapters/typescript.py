@@ -273,15 +273,16 @@ class TypeScriptAdapter:
         """Build the `scip-typescript index` command, run from the package
         directory. A package without a ``tsconfig.json`` (a Vite or SvelteKit
         app, a workspace fixture, plain JavaScript) is indexed with one
-        written beside the index that reads its TypeScript and JavaScript:
-        ``--infer-tsconfig`` would write one into the package.
+        written beside the index that reads its TypeScript and JavaScript
+        with the current standard library: ``--infer-tsconfig`` would write
+        one into the package.
         """
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
         if not (project.root / "tsconfig.json").exists():
             inferred = out_path.with_suffix(".tsconfig.json")
             inferred.unlink(missing_ok=True)
             settings = {
-                "compilerOptions": {"allowJs": True},
+                "compilerOptions": {"allowJs": True, "target": "esnext"},
                 "include": [f"{project.root}/**/*"],
             }
             with open(inferred, "x", encoding="utf-8") as file:

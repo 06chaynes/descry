@@ -239,6 +239,26 @@ class TestJavaAdapterDiscovery:
 
         assert [p.root for p in projects] == [tmp_path]
 
+    def test_modules_are_read_from_the_pom_itself(self, tmp_path):
+        """Modules in a comment or only in a profile are not built by the
+        root, so each is a project of its own."""
+        core = tmp_path / "core"
+        core.mkdir()
+        (core / "pom.xml").write_text("<project></project>")
+        (core / "Main.java").write_text("class Main {}")
+        pom = tmp_path / "pom.xml"
+        pom.write_text(
+            "<project><!-- <modules><module>core</module></modules> -->"
+            "<profiles><profile><modules><module>core</module></modules>"
+            "</profile></profiles></project>"
+        )
+        assert [p.root for p in JavaAdapter().discover(tmp_path, set())] == [core]
+        pom.write_text(
+            '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+            "<modules><module>core</module></modules></project>"
+        )
+        assert [p.root for p in JavaAdapter().discover(tmp_path, set())] == [tmp_path]
+
     def test_wrapper_alone_marks_the_root(self, tmp_path):
         (tmp_path / "gradlew").write_text("#!/bin/sh\n")
         (tmp_path / "Main.java").write_text("class Main {}")

@@ -20,8 +20,11 @@ from descry.generate import (
     _STATEMENT_START_RE,
     BaseParser,
     _bracketed_parts,
+    _closing,
     _generic_metadata,
+    _innermost,
     _strip_generics,
+    _text,
     argument_count,
     is_generated_source,
     source_lines,
@@ -141,6 +144,20 @@ _RE_UNTYPED = re.compile(
     rf"\b(?:var|dynamic)\s+({_NAME})|\bvar\s*\(([^()]*)\)"
     rf"|(?<![\w.])({_NAME})\s*=>|\(\s*({_NAME}(?:\s*,\s*{_NAME})*)\s*\)\s*=>"
     rf"|\b(?:from|let|join|into)\s+({_NAME})\s*(?=in\b|=)"
+)
+# `foreach (var name in path)`, whose variable holds an element of the path
+_RE_FOREACH_VAR = re.compile(rf"\bforeach\s*\(\s*var\s+({_NAME})\s+in\s+({_PATH})\s*\)")
+# What a variable an expression declares follows: `is` and a type, `out var`,
+# whose `var` is group 1, or `out` and a type
+_RE_EXPRESSION_VARIABLE = re.compile(
+    r"\b(?:is(?:\s+not)?|out(\s+var)?)\s+[\w.<>,?\[\]\s]*$"
+)
+# What follows the parameter list of a method, a local function or a
+# constructor
+_RE_AFTER_PARAMETERS = re.compile(r"\s*(?:\{|=>|where\b|:)")
+# A statement whose head scopes what an expression in it declares
+_RE_SCOPING_HEAD = re.compile(
+    r"\s*(?:await\s+)?(?:while|for|foreach|using|lock|fixed|switch|catch\b.*\bwhen)\s*$"
 )
 
 # What opens a comment or a literal: `//`, `/*`, a verbatim string, a raw
@@ -325,11 +342,12 @@ _DECLARATIONS = (
     re.compile(
         r"\bis\s+(?:not\s+)?" + _DECLARED_TYPE + r"\s+" + _DECLARED_NAME + r"\b"
     ),
-    # `var name = new Type(...);` / `var name = new Type {`
+    # `var name = new Type(...);`, `using (var name = new Type(...))` /
+    # `var name = new Type {`
     re.compile(
         rf"\bvar\s+(?P<name>{_NAME})\s*=\s*new\s+(?P<type>{_PATH})"
         rf"(?P<generic>{_GENERIC})?\s*"
-        r"(?:\((?:[^()]|\([^()]*\))*\)\s*(?=[;{])|(?=\{|$))"
+        r"(?:\((?:[^()]|\([^()]*\))*\)\s*(?=[;{)])|(?=\{|$))"
     ),
     # `var name = (Type)value;` / `var name = value as Type;`
     re.compile(
@@ -565,42 +583,11 @@ def _parameter_counts(parameters):
     return [[len(listed) - len(optional), most, types]]
 
 
-def _closing(code_lines, index, column, stops=""):
-    """``(line index, column, character)`` of the first of ``stops`` outside
-    brackets, or else of the bracket that closes what is open, reading on
-    from ``column`` of ``code_lines[index]``. An `=` of a comparison is no
-    stop. None when the file ends first."""
-    depth = 0
-    for at in range(index, len(code_lines)):
-        line = code_lines[at]
-        for col in range(column if at == index else 0, len(line)):
-            char = line[col]
-            if depth == 0 and char in stops:
-                before, after = line[max(col - 1, 0) : col], line[col + 1 : col + 2]
-                if char != "=" or (after != "=" and before not in ("=", "!", "<", ">")):
-                    return at, col, char
-            if char in "([{":
-                depth += 1
-            elif char in ")]}":
-                if depth == 0:
-                    return at, col, char
-                depth -= 1
-    return None
-
-
-def _text(code_lines, index, column, last, end):
-    """The code from ``column`` of line ``index`` up to ``end`` of line
-    ``last``, on one line."""
-    if index == last:
-        return code_lines[index][column:end]
-    parts = [code_lines[index][column:], *code_lines[index + 1 : last]]
-    return " ".join([*parts, code_lines[last][:end]])
-
-
 class DotnetParser(BaseParser):
     """C# parser (VB source contributes only file-level discovery)."""
 
     language = "dotnet"
+    case_scopes_section = True
 
     def _member_id(self, parent_id, name):
         """ID for a member ``name`` of ``parent_id``: `<parent>::<name>`, or
@@ -658,6 +645,28 @@ class DotnetParser(BaseParser):
             # The chain goes on behind the `)` that closes the call.
             self._pending = (*self._pending[:2], depth)
 
+    def _scope_end(self, line, name):
+        """As the base's, but a variable an expression declares, by `is` or
+        as an `out` argument, is in scope to the end of the lambda body, of
+        the loop, `using`, `lock`, `fixed`, `switch` or `catch` statement
+        whose head declares it, else of the block around it."""
+        text, _, _, spans = self._blocks
+        at, head, held, written = self._declaration_site(line, name)
+        before = text[head[0] : at] if head else written
+        found = _RE_EXPRESSION_VARIABLE.search(before)
+        if not found or (
+            head
+            and found[0].startswith("out")
+            and not found[1]
+            and _RE_AFTER_PARAMETERS.match(text, _innermost(spans, at)[1] + 1)
+        ):
+            return super()._scope_end(line, name)
+        if "=>" in before:
+            return self._statement_close(at - len(before) + before.rindex("=>") + 2)
+        if head and _RE_SCOPING_HEAD.match(written):
+            return self._statement_close(head[1] + 1)
+        return held[1] if held else len(text)
+
     def call_origin(self, callee, lineno, since, owner=None):
         root, _, path = callee.partition(".")
         if not path:
@@ -693,6 +702,9 @@ class DotnetParser(BaseParser):
         for untyped in _RE_UNTYPED.finditer(code, start):
             for name in re.findall(_NAME, " ".join(filter(None, untyped.groups()))):
                 self.declared.setdefault(name, []).append((lineno, "?", False))
+        for each in _RE_FOREACH_VAR.finditer(code, start):
+            element = self.call_origin(f"{each[2]}.*", lineno, since)
+            self.declared[each[1]][-1] = (lineno, element, False)
         for created in _RE_CREATION.finditer(code):
             written = created[created.lastgroup]
             if created.end() > start and written not in _NOT_TYPES:
@@ -737,14 +749,9 @@ class DotnetParser(BaseParser):
                 self.builder.edges[-1]["target"] += "<>"
             closed = self._pairs.get(call_match.end() - 1)
             arguments = _flat(code[call_match.end() : closed or len(code)])
-            listed = _closing(code_lines, index, call_match.end())
-            if listed and listed[2] == ")":
-                self.builder.edges[-1]["metadata"]["args"] = argument_count(
-                    _text(
-                        code_lines, index, call_match.end(), listed[0], listed[1] + 1
-                    ),
-                    _text(lines, index, call_match.end(), listed[0], listed[1] + 1),
-                )
+            counted = argument_count(code_lines, lines, index, call_match.end())
+            if counted is not None:
+                self.builder.edges[-1]["metadata"]["args"] = counted
             # `out var name` has the type of that `out` parameter of the
             # call it is an argument of: the result after those before it.
             passed = re.finditer(rf"\bout\s+(?:var\s+({_NAME}))?", arguments)
@@ -801,6 +808,7 @@ class DotnetParser(BaseParser):
             [_RE_ARRAY_TYPE.sub(r"System.Array<\1>", code) for code in code_lines],
             _DECLARATIONS,
         )
+        self.read_blocks(code_lines)
         plain_lines = [_plain(code) for code in code_lines]
 
         # The file and each type are the context of what is declared in

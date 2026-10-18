@@ -269,7 +269,7 @@ The stubs give no parameter types for the callables that functions such as
 
 Source: the .NET shared runtime — the directory that holds
 `System.Private.CoreLib.dll` and the `System.*.dll` beside it. PowerShell
-7.6.6 ships .NET 10.0.12; the generator takes that directory:
+7.6.7 ships .NET 10.0.13; the generator takes that directory:
 
     python -I tools/stdlib/gen_dotnet.py \
         "$(dirname "$(command -v pwsh)")" src/descry/stdlib/dotnet.json
@@ -339,3 +339,22 @@ functions are `functions`. `get` members and `set` members share a name:
 the getter's return type is the member's. A parameter written as a function signature — `T toElement(E
 e)`, `void action(E element)` — records `callbacks` for argument 0, its
 return a type parameter where the signature writes one.
+
+
+## C and C++
+
+Source: the headers of the installed toolchain, read by Clang 22.1.8 —
+glibc 2.44's under `/usr/include` for C, libstdc++ 16's under
+`/usr/include/c++/16` for C++:
+
+    python -I tools/stdlib/gen_c.py /usr/include src/descry/stdlib/c.json
+    python -I tools/stdlib/gen_cpp.py /usr/include/c++/16 \
+        src/descry/stdlib/cpp.json
+
+One translation unit including the public headers is compiled and its AST
+dumped as JSON. `c.json` holds the functions the headers declare; `cpp.json`
+the classes, class templates, functions and aliases `std` puts in them,
+with the conventions `src/descry/_stdlib.py` gives for C++. A partial or
+explicit specialization is its template's, not a type of its own. The
+generated file names the toolchain it was read from; the test regenerates
+it where this machine's is the same.

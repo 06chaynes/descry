@@ -124,12 +124,17 @@ def parts(path):
     return name, args
 
 
+def keyed(full):
+    """One name as the data keys it: `Outer`1.Inner`1`."""
+    return full.replace("+", ".")
+
+
 def written(path, names):
     """The type ``path`` as the data writes it: its generic arguments in
     ``<>`` and the arity its name is keyed by, and a name of ``names`` —
     the parameter names available where it is written — where the
     argument is a parameter."""
-    name, args = parts(path)
+    name, args = parts(keyed(path))
     held = [a if a in names or "." not in a else written(a, names) for a in args]
     return f"{name}<{', '.join(held)}>" if args else name
 
@@ -173,10 +178,6 @@ def build(origin):
     types = {}
     delegates = {}
     deferred_bases = []
-
-    # One name as the data keys it: `Outer`1.Inner`1`.
-    def keyed(full):
-        return full.replace("+", ".")
 
     for t in raw:
         name = keyed(t["name"])

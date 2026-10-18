@@ -539,7 +539,7 @@ class TestScipIndexResolveLineSemantics:
         assert index.definition_at("run", "app/src/main.rs", 5) == (
             self.BETA_NODE,
             "src/beta.rs",
-            1,
+            (1,),
         )
         assert index.definition_at("run", "app/src/main.rs", 40) is None
 
@@ -557,7 +557,7 @@ class TestScipIndexResolveLineSemantics:
         assert index.definition_at("run", "crates/app-dir/src/main.rs", 5) == (
             "FILE:crates/app-dir/src/beta.rs::Beta::run",
             "crates/app-dir/src/beta.rs",
-            1,
+            (1,),
         )
 
     def test_column_is_read_in_the_unit_the_document_states(self, tmp_path):
@@ -602,7 +602,7 @@ class TestScipIndexResolveLineSemantics:
         assert index.definition_at("run", "packages/app/src/main.rs", 5) == (
             "FILE:packages/app/src/beta.rs::Beta::run",
             "packages/app/src/beta.rs",
-            1,
+            (1,),
         )
 
     def test_project_root_outside_the_repository_is_not_used(self, tmp_path):
@@ -612,7 +612,7 @@ class TestScipIndexResolveLineSemantics:
             (tmp_path / "elsewhere" / "app").as_uri(),
         )
         index = ScipIndex([scip_file], root=tmp_path / "repo")
-        assert index.definitions[self.BETA_RUN] == ("src/beta.rs", 1)
+        assert index.definitions[self.BETA_RUN] == {"src/beta.rs": {1}}
 
     def test_column_tells_same_named_references_on_a_line_apart(self, tmp_path):
         """`a.run(); b.run();` on one line: each call gets the symbol whose
@@ -641,14 +641,29 @@ class TestScipIndexResolveLineSemantics:
         # The line's one symbol of the name, elsewhere on it: a declaration,
         # and the macro whose expansion holds the call.
         assert index.definition_at("run", "app/src/beta.rs", 1, 9) is None
-        found = index.definition_at("a.run", "app/src/main.rs", 9, 23)
+        found = index.definition_at("a.run", "app/src/main.rs", 9, 23, within=[2])
         assert found[0] == "FILE:app/src/alpha.rs::Alpha::run"
         # Not where the macro holds another call of the name.
-        assert index.definition_at("a.run", "app/src/main.rs", 9, 23, False) is None
+        assert (
+            index.definition_at("a.run", "app/src/main.rs", 9, 23, False, [2]) is None
+        )
+
+    def test_answer_at_a_macro_is_for_a_call_it_holds(self, tmp_path):
+        """`CALL_RUN(1) + t.run(2)`: what an indexer records at the macro is
+        the call it expands to, not another call of the name on the line."""
+        documents = {
+            "src/alpha.rs": [(0, self.ALPHA_RUN, True)],
+            "src/main.rs": [(4, self.ALPHA_RUN, False, 9, 17)],
+        }
+        index = ScipIndex([_write_scip(tmp_path / "app.scip", documents)])
+        assert index.definition_at("t.run", "app/src/main.rs", 5, 25) is None
+        assert (
+            index.definition_at("t.run", "app/src/main.rs", 5, 25, within=[2]) is None
+        )
 
     def test_symbol_defined_more_than_once(self, tmp_path):
         """A symbol defined in several files is the reference's own file's;
-        one defined at two lines of a file is neither."""
+        one defined at two lines of a file is at both."""
         documents = {
             "src/alpha.rs": [(0, self.BETA_RUN, True), (4, self.BETA_RUN, False)],
             "src/beta.rs": [(0, self.BETA_RUN, True), (4, self.BETA_RUN, False)],
@@ -659,10 +674,13 @@ class TestScipIndexResolveLineSemantics:
         index = ScipIndex([_write_scip(tmp_path / "app.scip", documents)])
         assert index.definition_at("run", "app/src/alpha.rs", 5)[1:] == (
             "src/alpha.rs",
-            1,
+            (1,),
         )
         assert index.definition_at("run", "app/src/main.rs", 5) is None
-        assert index.definition_at("run", "app/src/use.rs", 5) is None
+        assert index.definition_at("run", "app/src/use.rs", 5)[1:] == (
+            "src/twice.rs",
+            (1, 3),
+        )
 
 
 def test_protobuf_runtime_mismatch_loads_nothing(tmp_path, monkeypatch):
@@ -732,7 +750,10 @@ def test_typescript_package_without_tsconfig_gets_one_in_the_cache(tmp_path):
     spec = TypeScriptAdapter().build_command(project, out, AdapterConfig())
 
     assert spec.argv[-1] == str(inferred)
-    assert json.loads(inferred.read_text())["include"] == [f"{root}/**/*"]
+    written = json.loads(inferred.read_text())
+    assert written["include"] == [f"{root}/**/*"]
+    # The current library types `Map`, `Set` and the DOM.
+    assert written["compilerOptions"]["target"] == "esnext"
     assert not (tmp_path / "elsewhere").exists()
     assert list(root.iterdir()) == []
     (root / "tsconfig.json").write_text("{}")
@@ -816,6 +837,7 @@ def test_non_rust_adapters_ignore_adapter_config(tmp_path, lang):
     adapter = ADAPTERS[lang]
     project = DiscoveredProject(name="app", root=tmp_path, language=lang)
     out = tmp_path / "app.scip"
+    (tmp_path / "compile_commands.json").write_text("[]")
 
     plain = adapter.build_command(project, out, AdapterConfig())
     loaded = adapter.build_command(

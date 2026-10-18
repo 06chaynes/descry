@@ -686,7 +686,7 @@ end
 """.strip()
         _parse(builder, src)
         bases = [e["target"] for e in builder.edges if e["relation"] == "INHERITS"]
-        assert bases == ["REF:Env", "REF:Helpers", "REF:Rack::Builder", "REF:Checks"]
+        assert bases == ["REF:Helpers", "REF:Env", "REF:Rack::Builder", "REF:Checks"]
 
 
 class TestCallSites:

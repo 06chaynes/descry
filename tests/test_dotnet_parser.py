@@ -878,7 +878,7 @@ public class Svc(Repo repo)
             ("made.Run<>", "Maker<int>().Run"),
             ("Trim", "string().Trim"),
             ("items.Sort", "System::Array<Item>().Sort"),
-            ("each.Use", "?.Use"),
+            ("each.Use", "System::Array<Item>().*.Use"),
             ("Find", None),
             ("admin.Grant", "Admin().Grant"),
             ("Act", None),

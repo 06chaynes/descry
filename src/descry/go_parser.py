@@ -86,8 +86,7 @@ _RE_CONST_SINGLE = re.compile(
 _RE_VAR_SINGLE = re.compile(r"^var\s+(?!_\b)([A-Za-z_][A-Za-z0-9_]*)\b")
 
 # Grouped const/var block: `const (` / `var (`
-_RE_CONST_BLOCK_START = re.compile(r"^\s*const\s*\(")
-_RE_VAR_BLOCK_START = re.compile(r"^\s*var\s*\(")
+_RE_GROUP_START = re.compile(r"^\s*(const|var)\s*\(")
 
 # Inside a const/var block: `Name = value` or `Name Type = value`
 _RE_BLOCK_ENTRY = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s+[A-Za-z0-9_.\[\]*]*\s*=?")
@@ -107,19 +106,34 @@ _DECLARED_TYPE = (
 )
 
 
-def _declaring_lines(lines):
+def _groups(code_lines):
+    """For each of ``code_lines``, the keyword of the `const (...)` or
+    `var (...)` block it is an entry of; "(" for a line that opens or closes
+    one, None for any other."""
+    kinds, kind = [], None
+    for code in code_lines:
+        if kind and code.strip().startswith(")"):
+            kind = None
+            kinds.append("(")
+        elif kind:
+            kinds.append(kind)
+        elif opened := _RE_GROUP_START.match(code):
+            kind = opened[1]
+            kinds.append("(")
+        else:
+            kinds.append(None)
+    return kinds
+
+
+def _declaring_lines(lines, kinds):
     """``lines`` as declarations are read from them: a variadic `...Type`
     parameter is a `[]Type` in its function, and an entry of a `var (...)`
-    block is written with its `var`."""
-    read, inside = [], False
-    for line in lines:
+    block, by ``kinds``, is written with its `var`."""
+    read = []
+    for line, kind in zip(lines, kinds):
         line = line.replace("...", "[]")
-        if inside and line.strip().startswith(")"):
-            inside = False
-        elif inside:
+        if kind == "var":
             line = re.sub(r"^\s*", lambda m: f"{m[0]}var ", line, count=1)
-        else:
-            inside = bool(_RE_VAR_BLOCK_START.match(line))
         read.append(line)
     return read
 
@@ -141,9 +155,15 @@ _DECLARATIONS = (
     ),
     # `var name Type`
     re.compile(r"\bvar\s+(?P<name>\w+)\s+\*?" + _DECLARED_TYPE),
-    # `name := Type{` / `var name = &Type{`; an assignment keeps the type
-    # its variable is declared with
-    re.compile(_DECLARES + r"\s*&?" + _DECLARED_TYPE + r"\{"),
+    # `name := Type{` / `var name = &Type{` / `name := (B{})`, a composite
+    # literal that is all of the value; an assignment keeps the type its
+    # variable is declared with
+    re.compile(
+        _DECLARES
+        + r"[\s(]*&?[\s(]*"
+        + _DECLARED_TYPE
+        + r"\{(?!(?:[^{}]|\{[^{}]*\})*\}[\s)]*[.\[])"
+    ),
     # `name Type` / `name *Type`, alone on its line: a struct field, or with
     # a `,` a parameter or result of a list written one to a line
     re.compile(
@@ -213,10 +233,13 @@ _RE_INITIALIZER = re.compile(r"(\s*(?:\}\s*else\s+)?(?:if|switch|for)\s)([^;{]*)
 # `name := func(`, a variable that holds a function literal
 _RE_LITERAL = re.compile(r"\s*(?P<name>\w+)\s*:?=\s*func\s*\(")
 
-# `value[i].` or `new(Type).` before a callee: the receiver is an element
-# of `value`, or a `Type`
+# `value[i].`, `new(Type).`, or a composite literal `Type{...}.` or
+# `(&Type{...}).` before a callee: the receiver is an element of `value`,
+# or a `Type`
 _RE_RECEIVER = re.compile(
-    r"(?:(?P<value>[\w.]+(?:\[[^\[\]]*\])+)|\bnew\(\s*(?P<new>[\w.]+)\s*\))\.\s*$"
+    r"(?:(?P<value>[\w.]+(?:\[[^\[\]]*\])+)|\bnew\(\s*(?P<new>[\w.]+)\s*\)"
+    r"|(?P<paren>(?<![\w)\]])\(\s*&?\s*)?(?P<literal>[A-Za-z_][\w.]*)"
+    r"(?:\[[\w.*, ]+\])?\s*\{[^{}]*\}(?(paren)\s*\)))\.\s*$"
 )
 
 # Go keywords and built-in functions that would spuriously match the call
@@ -359,7 +382,7 @@ class GoParser(BaseParser):
         binding = self.binding_re.search(self._code)
         if binding:
             self._later = re.findall(r"[\w.]+", binding["later"])
-            self._declares = bool(binding["var"] or binding["short"])
+            self._declares = self.declares(binding)
         name = binding["name"] if binding else self._pending and self._pending[0]
         known = len(self.declared.get(name, ()))
         super()._end_line()
@@ -373,6 +396,9 @@ class GoParser(BaseParser):
                 self.declared.setdefault(bound, []).append(
                     (line, f"{call}.@{position}", False)
                 )
+
+    def declares(self, binding):
+        return bool(binding["var"] or binding["short"])
 
     def call_origin(self, callee, lineno, since, owner=None):
         return self._path_origin(callee, lineno, since) if "." in callee else None
@@ -457,7 +483,8 @@ class GoParser(BaseParser):
             if member or callee not in _GO_CONTROL_KEYWORDS:
                 held = None
                 if receiver := _RE_RECEIVER.search(code, 0, call_match.start(1)):
-                    held = receiver["new"] and f"{receiver['new'].replace('.', '::')}()"
+                    named = receiver["new"] or receiver["literal"]
+                    held = named and f"{named.replace('.', '::')}()"
                     held = held or self._held(receiver["value"], lineno, since)
                 origin = held and f"{held}.{callee}"
                 if not member:
@@ -559,9 +586,10 @@ class GoParser(BaseParser):
 
         # Imports — single and grouped
         in_import_block = False
-        in_const_block = False
-        in_var_block = False
-        self.scan_declarations(_declaring_lines(lines), _DECLARATIONS)
+        code_lines = self.blank_lines(lines, ("`",))
+        kinds = _groups(code_lines)
+        self.scan_declarations(_declaring_lines(lines, kinds), _DECLARATIONS)
+        self.read_blocks(code_lines)
         self.enter_context(file_id, 0, len(lines))
         receivers: dict[str, tuple[str, int]] = {}  # type id -> (name, lineno)
         # The type parameters of each generic type the file declares, which
@@ -618,7 +646,7 @@ class GoParser(BaseParser):
             # `var (...)` block.
             grouped = []
             group = _RE_VAR_GROUP.fullmatch(line)
-            if group and (group["var"] or in_var_block):
+            if group and (group["var"] or kinds[i] == "var"):
                 grouped = re.findall(r"\w+", group["names"])
                 held = f"{group['type'].replace('.', '::')}()"
                 for name in grouped:
@@ -626,21 +654,11 @@ class GoParser(BaseParser):
                         (lineno, held, context_id == file_id)
                     )
 
-            # const / var block state machine
-            if _RE_CONST_BLOCK_START.match(line):
-                in_const_block = True
+            # An entry of a const or var block is a constant.
+            if kinds[i] == "(":
                 i += 1
                 continue
-            if _RE_VAR_BLOCK_START.match(line):
-                in_var_block = True
-                i += 1
-                continue
-            if in_const_block or in_var_block:
-                if line.strip().startswith(")"):
-                    in_const_block = False
-                    in_var_block = False
-                    i += 1
-                    continue
+            if kinds[i]:
                 m_entry = _RE_BLOCK_ENTRY.match(line)
                 if m_entry and not line.strip().startswith("//"):
                     grouped = grouped or [m_entry.group(1)]
