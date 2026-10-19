@@ -27,7 +27,8 @@ paths used below, and the JDK at `$JAVA_HOME`.
   `builtins.object`).
 - A class that a module hands on under its own name (`asyncio.Queue`,
   `os.FileInfo`) is a type whose one base is the class it is.
-- `variants` and `callbacks` are written only by a generator that has them.
+- `variants`, `callbacks`, `extensions` and `functional` are written only by
+  a generator that has them.
 
 ## TypeScript and JavaScript
 
@@ -155,6 +156,8 @@ its own or a base's: that method's parameter types with the type arguments the
 argument is written with, a wildcard as its bound, and as `returns` the type
 parameter of the taking method that stands for the result, null where none
 does. A position where overloads take different callables is left out.
+`functional` gives each functional interface the number of parameters of
+that method, which a lambda converted to it declares.
 
 ## Rust
 
@@ -283,10 +286,14 @@ every argument `this` is written with is a parameter of the method, is a
 method of `T` — `Enumerable.Where` is a method of `IEnumerable`1` —
 written with the parameter names `T` declares; one written with a
 concrete type (`IEnumerable<XElement>`) is left out, for it does not hold
-of every value of the type. `callbacks` has, for a method that takes a
-delegate, the signature its `Invoke` gives the argument, with the
-parameter that stands for its result where one does (`TResult` for
-`Select`'s selector).
+of every value of the type. `extensions` names, for each method a type has
+only from extension methods, the namespaces of the classes that declare
+them: a call reaches one only where a `using` brings its namespace in.
+`functional` gives each delegate type the number of parameters its `Invoke`
+takes, which a lambda converted to it declares.
+`callbacks` has, for a method that takes a delegate, the signature its
+`Invoke` gives the argument, with the parameter that stands for its result
+where one does (`TResult` for `Select`'s selector).
 
 
 ## Ruby

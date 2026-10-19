@@ -10,12 +10,16 @@ the source of the calls in its body.
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 
 from descry.generate import (
     _STATEMENT_START_RE,
     BaseParser,
     _bracketed_parts,
+    _innermost,
     _is_call_chain,
+    _js_brackets,
+    _nested,
     _use_leaves,
     blank_strings,
     is_generated_source,
@@ -237,6 +241,128 @@ _RE_DEFINITION_HEAD = re.compile(
 )
 
 
+# The head of a statement that runs a body only where it allows: an `if`, a
+# loop or a `switch`, up to the `(` of its condition, or a `try`
+_RE_BRANCHING = re.compile(
+    r"(?<![\w$>:\\])(?:(if|while|for|foreach|switch)\s*\(|(try)\s*\{)"
+)
+# What goes on with an `if`: an `elseif` up to its `(`, or an `else`
+_RE_ELSE = re.compile(r"\s*(?:else\s*if\s*\(|elseif\s*\(|else\b)")
+_RE_CATCH = re.compile(r"\s*catch\s*\(")
+# The word a label of a `switch` section starts with
+_RE_LABEL = re.compile(r"(?<![\w$>:\\])(?:case|default)\b")
+# What leaves a statement where a body ends with it; a `continue` or a
+# `break` leaves an `if` or a `try` too
+_LEAVES = "return|throw|exit|die"
+
+
+def _branches(codes: list[str]) -> list:
+    """``(first, end, ways, on, exclusive)`` (see
+    ``BaseParser.read_branches``) of each `if`, loop, `switch` and
+    `try`/`catch` in ``codes``, the code lines."""
+    text, starts, closer = _js_brackets(codes)
+    spans = _nested(sorted(closer.items()))
+
+    def place(offset):
+        line = bisect_right(starts, offset)
+        return line, offset - starts[line - 1]
+
+    def label_end(offset, end):
+        """The offset past the `:` or the `;` that ends the `case` or
+        `default` label at ``offset``, outside brackets and a conditional's
+        `? :` and other than in `::`; ``end`` where none does before it."""
+        open_ = 0  # the `?` of conditionals still to meet their `:`
+        while offset < end:
+            pair = text[offset : offset + 2]
+            if text[offset] in "([{":
+                offset = closer.get(offset, offset)
+            elif pair in ("::", "??", "?:", "?-"):
+                offset += 1
+            elif text[offset] == "?":
+                open_ += 1
+            elif text[offset] == ":" and open_:
+                open_ -= 1
+            elif text[offset] in ":;":
+                return offset + 1
+            offset += 1
+        return end
+
+    def body(offset):
+        """``(start, end)`` offsets of the block or the statement at
+        ``offset``, and the offset past it."""
+        offset = len(text) - len(text[offset:].lstrip())
+        if text[offset : offset + 1] == "{":
+            close = closer.get(offset, len(text))
+            return (offset + 1, close), close + 1
+        end = offset
+        while end < len(text) and text[end] not in ";)]}":
+            end = closer.get(end, end) + 1
+        return (offset, end), end + 1
+
+    branches = []
+    for found in _RE_BRANCHING.finditer(text):
+        word = found[1] or found[2]
+        if word == "if" and re.search(r"else\s*$", text[: found.start()]):
+            continue  # an `else if` goes on with the `if` before it
+        if word == "try":
+            way, after = body(found.end() - 1)
+            ways = [[way]]
+            while catch := _RE_CATCH.match(text, after):
+                way, after = body(closer.get(catch.end() - 1, catch.end()) + 1)
+                ways.append([way])
+            if len(ways) == 1:
+                continue  # a `try` with only a `finally` runs its body
+        else:
+            close = closer.get(found.end() - 1, found.end())
+            if text[close + 1 :].lstrip()[:1] == ":":
+                continue  # the alternative syntax, `if (...):`
+            way, after = body(close + 1)
+            ways = [[way]]
+            if word == "if":
+                while other := _RE_ELSE.match(text, after):
+                    start = other.end()
+                    if other[0].endswith("("):
+                        start = closer.get(start - 1, start) + 1
+                    way, after = body(start)
+                    ways.append([way])
+                    if not other[0].endswith("("):
+                        break
+                else:
+                    ways.append([])
+            elif word == "switch":
+                block = _innermost(spans, way[0])
+                labels = [
+                    m
+                    for m in _RE_LABEL.finditer(text, *way)
+                    if _innermost(spans, m.start()) == block
+                ]
+                ways = [
+                    [(label_end(m.end(), way[1]), n.start() if n else way[1])]
+                    for m, n in zip(labels, [*labels[1:], None])
+                ]
+                if not any(m[0] == "default" for m in labels):
+                    ways.append([])
+            else:
+                ways = [[], [way]]
+        kind = "loop" if word in ("while", "for", "foreach") else word
+        words = _LEAVES + "|continue|break" * (kind in ("if", "try"))
+        leaves = re.compile(rf"(?:^|[;{{}}])\s*(?:{words})\b[^;{{}}]*;?\s*$")
+        on = [w for w in ways if not (w and leaves.search(text[slice(*w[-1])]))]
+        if not any(ways):
+            continue  # no body runs: an empty `switch`
+        first = min(w[0][0] for w in ways if w)
+        branches.append(
+            (
+                place(first),
+                place(after),
+                [[(place(a), place(b)) for a, b in w] for w in ways],
+                [[(place(a), place(b)) for a, b in w] for w in on],
+                kind in ("if", "switch"),
+            )
+        )
+    return branches
+
+
 def _code_lines(lines: list[str]) -> list[str]:
     """``lines`` without their comments and attributes, and with the text
     of every string, heredoc and nowdoc turned to spaces or left out, so
@@ -306,6 +432,7 @@ class PhpParser(BaseParser):
     """Regex-driven PHP parser."""
 
     binding_re = re.compile(r"(?<![\w$>:])\$(?P<name>\w+)\s*=(?![=>])")
+    null_literal = "null"
 
     _namespace = ""  # of the file being parsed, with `::` for `\`
     # Local name -> full name of the classes and namespaces the file
@@ -507,6 +634,7 @@ class PhpParser(BaseParser):
         # Indented, so that no declaration is read as one at file level: a
         # function sees none of the file's variables. Columns are the code's.
         self.scan_declarations([f" {code}" for code in codes], _DECLARATIONS)
+        self.read_branches(_branches(codes))
         for entries in self.declared.values():
             entries[:] = [(line, held, top, at - 1) for line, held, top, at in entries]
 
@@ -744,10 +872,14 @@ class PhpParser(BaseParser):
                 if len(held) == 1 and (asserted or opens_block):
                     entries = self.declared.setdefault(name, [])
                     before = self._declared(name, lineno, since) or "?"
-                    entries.append((lineno, f"{held.pop()}()", False, None))
+                    # From the start of the block, or the `assert`
+                    opened = None if asserted else code.rindex("{") + 1
+                    entries.append((lineno, f"{held.pop()}()", False, opened))
                     if not asserted:
                         end = self._find_block_end(codes, i, code.rindex("{"))
-                        entries.append((end, before, False, None))
+                        # From past the `}` that closes the block
+                        closed = codes[end - 1].find("}") + 1 or None
+                        entries.append((end, before, False, closed))
 
             # Calls (inside any definition — a method, a function, etc.,
             # one on its line too)

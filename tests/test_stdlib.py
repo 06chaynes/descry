@@ -86,6 +86,13 @@ FACTS = [
         ),
         "TResult",
     ),
+    (
+        "dotnet",
+        ("extensions", "System.Collections.Generic.IEnumerable`1", "Skip"),
+        ["System.Linq"],
+    ),
+    ("dotnet", ("functional", "System.Func`3"), 2),
+    ("java", ("functional", "java.util.function.BiFunction"), 2),
     ("typescript", ("types", "Array", "params"), ["T"]),
     ("typescript", ("types", "Array", "methods", "map"), "U[]"),
     ("typescript", ("types", "Array", "methods", "push"), "number"),
@@ -401,7 +408,7 @@ def _base_name(base):
 @pytest.mark.parametrize("lang", LANGUAGES)
 def test_data_has_the_documented_shape(lang):
     data = load(lang)
-    assert set(data) - {"variants", "callbacks"} == {
+    assert set(data) - {"variants", "callbacks", "extensions", "functional"} == {
         "source",
         "types",
         "functions",

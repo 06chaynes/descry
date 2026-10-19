@@ -162,8 +162,31 @@ _RE_NEW = re.compile(
 _RE_LEAVES = re.compile(r"[;{}:]\s*(?:return|rethrow|throw|continue)\b[^;{}]*;\s*$")
 # What a name follows where a statement declares it: a type, `var`, `final`
 _RE_DECLARES = re.compile(
-    r"(?<![\w$])(?!(?:else|return|do|yield|throw)\b)[\w$]+\??$|>\??$"
+    r"(?<![\w$])(?!(?:else|return|do|yield|throw)\b)[\w$]+\??$|(?<!=)>\??$"
 )
+# An `=` that assigns, not `==` or `=>`
+_RE_ASSIGNS = re.compile(r"\s*=(?![=>])")
+# What assigns the result of an operator to the name it follows: `op=`, or
+# `++` or `--`, which add or take 1
+_RE_COMPOUND = re.compile(
+    r"\s*(?:(?P<operator>\?\?|~/|>>>|<<|>>|[-+*/%&|^])=|(?P<step>[-+])(?P=step))"
+)
+# A type written nullable
+_RE_NULLABLE = re.compile(r"[\w$>]\?(?![?.\[])")
+# The type an object pattern names
+_PATTERN_TYPE = r"(?:[a-z_$][\w$]*\.)?[_$]*[A-Z][\w$]*(?:<[^()=;]*>)?\s*"
+# The type and the `(` of an object pattern, and a field pattern's name
+_RE_OBJECT = re.compile(_PATTERN_TYPE + r"\(")
+_RE_FIELD = re.compile(r"\s*([\w$]*)\s*:(?!:)")
+# The type an object pattern names before its `(`
+_RE_PATTERN_NAME = re.compile(r"(?<![\w$])" + _PATTERN_TYPE + "$")
+# A `for` whose head may assign a variable it does not declare, and its `in`
+_RE_FOR = re.compile(r"\bfor\s*$")
+_RE_IN = re.compile(r"\s+in\b")
+# What follows a list of parameters: the body
+_RE_BODY = re.compile(r"\s*(?:async\*?|sync\*)?\s*(?:=>|\{)")
+# What a condition in parentheses follows, which declares no parameters
+_RE_CONTROL = re.compile(r"\b(?:if|while|for|switch)\s*$")
 # What a call that can only be a constructor's follows
 _RE_CREATES = re.compile(r"\b(?:const|new)$")
 
@@ -489,7 +512,8 @@ class DartParser(BaseParser):
             target = origin[1:].isdigit() and self._targets.get(int(origin[1:]))
             if target:
                 entries = self.declared[name]
-                entries[entries.index(bound)] = (at, target, top, column)
+                index = next(i for i, e in enumerate(entries) if e is bound)
+                entries[index] = (at, target, top, column)
         elif binding and not self._typed_declaration(name, binding.start("name")):
             # A literal has its own type.
             literal = _RE_LITERAL.match(code, binding.end())
@@ -644,35 +668,25 @@ class DartParser(BaseParser):
         spans = self._promotions.get((name, declaration))
         return super()._scope_spans(name, declaration) if spans is None else spans
 
-    def _promote(self, name, promotion, spans):
+    def _promote(self, name, promotion, spans, nullable):
         """Put ``promotion``, an entry of ``declared`` for ``name``, in scope
         in ``spans``, but in the code an assignment to it there reaches: from
         past its value, or from the top of the outermost loop in them that
         holds it, which Dart demotes there. Where each assignment that
-        reaches a part is of a new object of a type, declare ``name`` there
-        as `%N`, read as the promoted type where each type derives from it
-        and else as it was before."""
-        text, _, closer, _ = self._blocks
-        assigns = re.compile(rf"(?<![\w$.]){re.escape(name)}\s*=(?![=>])")
-        reached = []  # (offset, the parts it reaches, the type it makes or None)
+        reaches a part is of a value whose origin may be told, declare
+        ``name`` there as `%N`, read as the promoted type where the type of
+        each value derives from it and else as it was before. ``nullable``
+        says the promoted type is written nullable."""
+        # (offset, the parts it reaches, what ``_part`` reads its value from,
+        # or None)
+        reached = []
         for start, end in spans:
-            for found in assigns.finditer(text, start, end):
-                if _RE_DECLARES.search(
-                    text[max(found.start() - 80, 0) : found.start()].rstrip()
-                ):
-                    continue
-                at = found.start()
+            for at, after, value in self._writes(name, start, end, nullable):
                 loop = self._loop_start(at, start)
                 if loop is not None:
                     reached.append((at, self._reached(loop, loop, start), None))
-                    continue
-                after = self._operand_end(found.end())[1]
-                made = _RE_NEW.match(text, found.end(), after)
-                tail = made and text[made.end() - 1 : after].rstrip()
-                if made and closer.get(made.end() - 1) != made.end() - 2 + len(tail):
-                    made = None
-                made = made and made[1].replace(".", "::")
-                reached.append((at, self._reached(at, after, start), made))
+                else:
+                    reached.append((at, self._reached(at, after, start), value))
         # Each piece of the spans by the assignments that reach it last on
         # some path: an assignment alone reaches the first of its parts.
         cuts = sorted(
@@ -692,22 +706,210 @@ class DartParser(BaseParser):
                 )
                 pieces.setdefault(live, []).append((at, until - 1))
         self._promotions[name, promotion] = pieces.get((), [])
-        made = {live: [reached[i][2] for i in live] for live in pieces if live}
-        made = {live: types for live, types in made.items() if all(types)}
-        if made:
+        valued = [live for live in pieces if live and all(reached[i][2] for i in live)]
+        if valued:
             # What it was before, read where the promotion is written
             column = self._column(name, promotion)
             line = promotion[0]
             before = self._read_from(column, self._declared, name, line, self._since)
             before = before or "?"
-        for live, types in made.items():
+        for live in valued:
             origin = f"%{len(self.builder.narrowings)}"
-            self.builder.narrowings[origin] = types, promotion[1], before
-            at = max(reached[i][0] for i in live)
-            line, column = self._place(at)
+            # The origin path of each value, once its line is read
+            values = [None] * len(live)
+            self.builder.narrowings[origin] = values, promotion[1], before
+            for index, write in enumerate(live):
+                value = reached[write][2]
+                line = self._place(value[1][1])[0]
+                self._values.setdefault(line, []).append((values, index, value))
+            line, column = self._place(max(reached[i][0] for i in live))
             narrowed = line, origin, False, column
             self.declared[name].append(narrowed)
             self._promotions[name, narrowed] = pieces[live]
+
+    def _writes(self, name, start, end, nullable):
+        """``(at, after, value)`` of each write to the variable ``name`` from
+        offset ``start`` to ``end`` that Dart's grammar makes: the offset it
+        is at, the one it takes effect from, and, where it assigns a part of
+        a value or what an operator on the name returns, ``(pattern span,
+        value span, at, operator or None)`` for ``_part``. A write
+        assigns the name, a variable of a pattern assigned, or a `for`
+        loop's variable that its head does not declare, or the result of an
+        operator to the name; `??=` assigns none where the name's type,
+        ``nullable`` says, is not nullable. One inside a function or a block
+        that declares the name writes that declaration's variable."""
+        text, _, _, spans = self._blocks
+        out = []
+        named = re.compile(rf"(?<![\w$.]){re.escape(name)}(?![\w$])")
+        for found in named.finditer(text, start, end):
+            at = found.start()
+            if self._shadowed(named, at, start):
+                continue
+            held = _innermost(spans, at) or (0, len(text))
+            plain = _RE_ASSIGNS.match(text, found.end())
+            compound = _RE_COMPOUND.match(text, found.end())
+            pattern = next((a for a in self._assigned if a[0] <= at < a[1]), None)
+            itself = (at, found.end())
+            prefix = re.search(r"(\+\+|--)\s*$", self._line_before(at))
+            if plain and not self._declaring(at):
+                after = self._operand_end(plain.end())[1]
+                out.append((at, after, (itself, (plain.end(), after), at, None)))
+            elif compound and (nullable or compound["operator"] != "??"):
+                operator = compound["operator"] or compound["step"]
+                after = compound.end()
+                if compound["operator"]:
+                    after = self._operand_end(after)[1]
+                called = operator != "??" and (itself, itself, at, operator)
+                out.append((at, after, called or None))
+            elif prefix:
+                out.append((at, found.end(), (itself, itself, at, prefix[1][0])))
+            elif pattern and not _RE_FIELD.match(text, found.end()):
+                after = self._operand_end(pattern[1])[1]
+                part = (pattern[0], at), (pattern[1], after), at, None
+                out.append((at, after, part))
+            elif (
+                text[held[0]] == "("
+                and not text[held[0] + 1 : at].strip()
+                and _RE_FOR.search(self._line_before(held[0]))
+                and _RE_IN.match(text, found.end())
+            ):
+                out.append((at, at, None))
+        return out
+
+    def _part(self, start, value, at):
+        """The origin path of the part of a value that the variable at offset
+        ``at`` of the pattern from offset ``start`` takes, ``value`` the span
+        of the value or its origin path: a field an object pattern names, or
+        the element of a record or list literal in the place a record or
+        list pattern has the variable; None where it is not told."""
+        text = self._blocks[0]
+        while True:
+            start = re.compile(r"\s*").match(text, start).end()
+            if start == at:
+                return self._value_origin(*value) if isinstance(value, tuple) else value
+            named = _RE_OBJECT.match(text, start)
+            opened = named.end() - 1 if named else start
+            if text[opened] not in "([":
+                return None
+            elements = self._elements(opened)
+            index = next(
+                (i for i, e in enumerate(elements) if e[0] <= at <= e[1]), None
+            )
+            if index is None:
+                return None
+            head, tail = elements[index]
+            field = _RE_FIELD.match(text, head, tail)
+            if named:
+                origin = (
+                    self._value_origin(*value) if isinstance(value, tuple) else value
+                )
+                if not field or origin is None:
+                    return None
+                getter = field[1] or re.match(r"[\w$]+", text[at:])[0]
+                start, value = field.end(), f"{origin}.{getter}"
+                continue
+            closed = self._blocks[2].get(opened)
+            if (
+                text[opened] == "("
+                and len(elements) == 1
+                and not field
+                and tail == closed
+            ):
+                start = head
+                continue
+            within = isinstance(value, tuple) and re.compile(r"\s*").match(
+                text, value[0]
+            )
+            if not within or text[within.end()] != text[opened]:
+                return None
+            places = self._places(elements)
+            given = dict(
+                zip(
+                    self._places(self._elements(within.end())),
+                    self._elements(within.end()),
+                )
+            )
+            if places[index] not in given or "..." in places:
+                return None
+            part = given[places[index]]
+            named_part = _RE_FIELD.match(text, *part)
+            start = field.end() if field else head
+            value = (named_part.end() if named_part else part[0], part[1])
+
+    def _places(self, elements):
+        """The place of each of ``elements`` of a record or a list: its name,
+        or its position among those without one; "..." for a rest."""
+        text, places, position = self._blocks[0], [], 0
+        for head, tail in elements:
+            field = _RE_FIELD.match(text, head, tail)
+            if text[head:tail].strip().startswith("..."):
+                places.append("...")
+            elif field:
+                places.append(field[1])
+            else:
+                places.append(position)
+                position += 1
+        return places
+
+    def _elements(self, opened):
+        """The spans of the elements, not blank, that commas part in the
+        brackets that open at offset ``opened``."""
+        text, _, closer, _ = self._blocks
+        closed, out, at = closer.get(opened, len(text)), [], opened + 1
+        while at < closed:
+            end = min(self._operand_end(at, (",", ")", "]", "}", ""))[1], closed)
+            if text[at:end].strip():
+                out.append((at, end))
+            at = end + 1
+        return out
+
+    def _value_origin(self, start, end):
+        """The origin path of the value from offset ``start`` to ``end``,
+        read where it is written: a new object of a type, or a name or a
+        field read; None for any other."""
+        text, _, closer, _ = self._blocks
+        made = _RE_NEW.match(text, start, end)
+        tail = made and text[made.end() - 1 : end].rstrip()
+        if made and closer.get(made.end() - 1) == made.end() - 2 + len(tail):
+            return f"{made[1].replace('.', '::')}()"
+        line, column = self._place(start)
+        first = start - column
+        code = text[first:end]
+        return self._expression_origin(code, column, len(code), line, self._since, None)
+
+    def _line_before(self, at):
+        """The code from the start of the line offset ``at`` is on to it."""
+        return self._blocks[0][at - self._place(at)[1] : at]
+
+    def _declaring(self, at):
+        """Whether the name at offset ``at`` is declared there: after a type,
+        `var` or `final` in its statement."""
+        text, _, _, spans = self._blocks
+        held = _innermost(spans, at) or (0,)
+        start = max(held[0], *(text.rfind(c, held[0], at) + 1 for c in ";{}"))
+        return bool(_RE_DECLARES.search(text[start:at].rstrip()))
+
+    def _shadowed(self, named, at, floor):
+        """Whether the name ``named`` finds at offset ``at`` is a variable
+        declared after offset ``floor``: by a statement, or as a parameter
+        of a function whose body holds ``at``."""
+        text, _, _, spans = self._blocks
+        for declared in named.finditer(text, floor, at):
+            held = _innermost(spans, declared.start())
+            listed = held and text[held[0]] == "("
+            parameter = (
+                listed
+                and _RE_BODY.match(text, held[1] + 1)
+                and not _RE_CONTROL.search(self._line_before(held[0]))
+            )
+            if parameter or self._declaring(declared.start()):
+                if listed:
+                    last = self._statement_close(held[1] + 1, orelse=False)
+                else:
+                    last = held[1] if held else len(text)
+                if at <= last:
+                    return True
+        return False
 
     def _reached(self, at, after, floor):
         """The spans of the code that the statement at offset ``at``, which
@@ -903,8 +1105,18 @@ class DartParser(BaseParser):
                 start, end = opened, closed + 1
         if keyword[0] == "if":
             return out + self._branch_scope(closed, _innermost(spans, opened), promoted)
+        last = self._statement_close(closed + 1, orelse=False)
         if promoted:
-            out.append((closed + 1, self._statement_close(closed + 1, orelse=False)))
+            return [*out, (closed + 1, last)]
+        # Past a loop that only its condition ends, the test holds.
+        body = text[closed:last]
+        prior = head[: keyword.start()].rstrip()
+        done = self._openers.get(len(prior) - 1) if prior.endswith("}") else None
+        if done is not None and re.search(r"\bdo\s*$", self._line_before(done)):
+            body = text[done : len(prior)]
+        if not re.search(r"\bbreak\b", body):
+            block = _innermost(spans, opened)
+            out.append((last + 1, block[1] if block else len(text)))
         return out
 
     def _unguarded(self, start, end):
@@ -950,14 +1162,16 @@ class DartParser(BaseParser):
         tests, and a variable Dart promotes, a local one or a private final
         field, that a `switch` or an if-case there opens on, in each case
         body, arm and matched branch, as the type that every pattern of its
-        heads tests it for, where they agree."""
+        heads tests it for, where they agree; and read the values assigned
+        there that ``_promote`` waits for."""
         text, starts, _, _ = self._blocks
         line = index + 1
         for found in _DECLARATIONS[1].finditer(text, starts[index], starts[line]):
             name, held = found["name"], f"{self._scanned_type(found.groupdict())}()"
             for entry in self.declared.get(name, ()):
                 if entry[:2] == (line, held) and (name, entry) not in self._promotions:
-                    self._promote(name, entry, self._promoted(line, name, held))
+                    spans = self._promoted(line, name, held)
+                    self._promote(name, entry, spans, found[0].endswith("?"))
         for _, name, _, bodies in self._switches.get(index, ()):
             declared = [d for d in self.declared.get(name, ()) if d[0] <= line]
             promotable = [
@@ -979,7 +1193,13 @@ class DartParser(BaseParser):
                 at, column = self._place(spans[0][0])
                 case = at, held, False, column
                 self.declared[name].append(case)
-                self._promote(name, case, spans)
+                nullable = any(_RE_NULLABLE.search(text, *p) for p in patterns)
+                self._promote(name, case, spans, nullable)
+        for values, slot, (pattern, value, at, operator) in self._values.pop(line, ()):
+            origin = self._part(pattern[0], value, at)
+            if origin and operator:
+                origin = f"{origin}.operator{operator}()"
+            values[slot] = origin
 
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
@@ -1038,7 +1258,32 @@ class DartParser(BaseParser):
                 (found.start(), on and on[1], closed, bodies)
             )
             self._patterns += [span for _, patterns in bodies for span in patterns]
+        # (start, `=`) of the pattern of each pattern assignment
+        self._assigned = []
+        for opened, close in closer.items():
+            assigns = text[opened] in "([" and _RE_ASSIGNS.match(text, close + 1)
+            before = assigns and self._line_before(opened)
+            start = opened
+            if not assigns or (
+                text[opened] == "[" and re.search(r"[\w$)\]?]\s*$", before)
+            ):
+                continue
+            if re.search(r"[\w$]\s*$", before):
+                named = _RE_PATTERN_NAME.search(before)
+                if not named:
+                    continue
+                start -= len(before) - named.start()
+            head = self._line_before(start)
+            if re.search(r"\bfactory\s*$", head):
+                continue
+            self._patterns.append((start, close))
+            if not _RE_PATTERN_STARTS.search(head.rstrip()):
+                self._assigned.append((start, assigns.end()))
         self._patterns.sort()
+        # line -> (values, index, part) of each value assigned there that a
+        # promotion waits to read into ``values[index]``, ``part`` what
+        # ``_writes`` gives ``_part``
+        self._values = {}
         # line -> the parameter lists of the function expressions opening there
         blanked = _blank_type_arguments(text)
         self._closure_params = {}

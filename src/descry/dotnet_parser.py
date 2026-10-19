@@ -25,8 +25,9 @@ from descry.generate import (
     _innermost,
     _strip_generics,
     _text,
-    argument_count,
+    call_arguments,
     is_generated_source,
+    record_lambdas,
     source_lines,
 )
 
@@ -155,6 +156,8 @@ _RE_EXPRESSION_VARIABLE = re.compile(
 # What follows the parameter list of a method, a local function or a
 # constructor
 _RE_AFTER_PARAMETERS = re.compile(r"\s*(?:\{|=>|where\b|:)")
+# The head of a `using` statement that declares its resource: `using (var`
+_RE_RESOURCE = re.compile(r"\s*(?:await\s+)?using\s*\((?=\s*var\s)")
 # A statement whose head scopes what an expression in it declares
 _RE_SCOPING_HEAD = re.compile(
     r"\s*(?:await\s+)?(?:while|for|foreach|using|lock|fixed|switch|catch\b.*\bwhen)\s*$"
@@ -630,6 +633,12 @@ class DotnetParser(BaseParser):
     )
 
     def _end_line(self):
+        resource = _RE_RESOURCE.match(self._code)
+        closed = resource and self._pairs.get(resource.end() - 1)
+        if closed:
+            # The resource is bound to what stands before the `)` that
+            # closes the head, as a statement's value before its `;`.
+            self._code = self._code[:closed].ljust(len(self._code))
         binding = self.binding_re.search(self._code)
         name = binding["name"] if binding else self._pending and self._pending[0]
         untyped = binding and (self._line, "?", False, binding.start("name"))
@@ -750,9 +759,10 @@ class DotnetParser(BaseParser):
                 self.builder.edges[-1]["target"] += "<>"
             closed = self._pairs.get(call_match.end() - 1)
             arguments = _flat(code[call_match.end() : closed or len(code)])
-            counted = argument_count(code_lines, lines, index, call_match.end())
-            if counted is not None:
-                self.builder.edges[-1]["metadata"]["args"] = counted
+            passed = call_arguments(code_lines, lines, index, call_match.end())
+            if passed is not None:
+                self.builder.edges[-1]["metadata"]["args"] = len(passed)
+                record_lambdas(self.builder.edges[-1]["metadata"], passed, "=>")
             # `out var name` has the type of that `out` parameter of the
             # call it is an argument of: the result after those before it.
             passed = re.finditer(rf"\bout\s+(?:var\s+({_NAME}))?", arguments)
@@ -958,6 +968,12 @@ class DotnetParser(BaseParser):
                 if opened and opened[2] == "{":
                     last = self._find_block_end(code_lines, *opened[:2])
                 namespaces.append((m_namespace[1], last))
+            m_using = context_id == file_id and _RE_USING.match(code)
+            if m_using and not m_using["global"] and not m_using["alias"]:
+                within = [name for name, last in namespaces if lineno <= last]
+                self.builder.dotnet_usings.setdefault(file_id, []).append(
+                    (m_using["path"], ".".join(within), i in guarded)
+                )
 
             m_type = _RE_CLASS.match(code)
             m_delegate = None if m_type else _RE_DELEGATE.match(code)
@@ -1075,6 +1091,9 @@ class DotnetParser(BaseParser):
                 delegate_id = self._type_id(
                     context_id, name, len(scope), metadata.get("namespace")
                 )
+                paren = code.find("(", m_delegate.end())
+                close = paren >= 0 and _closing(code_lines, i, paren + 1)
+                listed = _text(code_lines, i, paren + 1, *close[:2]) if close else ""
                 declare(
                     delegate_id,
                     "Class",
@@ -1083,6 +1102,8 @@ class DotnetParser(BaseParser):
                     opened[0] + 1,
                     name=name,
                     kind="delegate",
+                    parameters=_parameter_counts(listed),
+                    **_generic_metadata(dict.fromkeys(scope, "")),
                     **metadata,
                 )
                 scan(delegate_id, i, len(code), lineno)

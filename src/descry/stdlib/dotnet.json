@@ -6067,6 +6067,1859 @@
    }
   }
  },
+ "extensions": {
+  "System.ArraySegment`1": {
+   "AsMemory": [
+    "System"
+   ],
+   "AsSpan": [
+    "System"
+   ]
+  },
+  "System.Buffers.IBufferWriter`1": {
+   "Write": [
+    "System.Buffers"
+   ]
+  },
+  "System.Buffers.ReadOnlySequence`1": {
+   "CopyTo": [
+    "System.Buffers"
+   ],
+   "PositionOf": [
+    "System.Buffers"
+   ],
+   "ToArray": [
+    "System.Buffers"
+   ]
+  },
+  "System.Collections.Concurrent.Partitioner`1": {
+   "AsParallel": [
+    "System.Linq"
+   ]
+  },
+  "System.Collections.Generic.IAsyncEnumerable`1": {
+   "AggregateAsync": [
+    "System.Linq"
+   ],
+   "AggregateBy": [
+    "System.Linq"
+   ],
+   "AllAsync": [
+    "System.Linq"
+   ],
+   "AnyAsync": [
+    "System.Linq"
+   ],
+   "Append": [
+    "System.Linq"
+   ],
+   "Chunk": [
+    "System.Linq"
+   ],
+   "Concat": [
+    "System.Linq"
+   ],
+   "ConfigureAwait": [
+    "System.Threading.Tasks"
+   ],
+   "ContainsAsync": [
+    "System.Linq"
+   ],
+   "CountAsync": [
+    "System.Linq"
+   ],
+   "CountBy": [
+    "System.Linq"
+   ],
+   "DefaultIfEmpty": [
+    "System.Linq"
+   ],
+   "Distinct": [
+    "System.Linq"
+   ],
+   "DistinctBy": [
+    "System.Linq"
+   ],
+   "ElementAtAsync": [
+    "System.Linq"
+   ],
+   "ElementAtOrDefaultAsync": [
+    "System.Linq"
+   ],
+   "Except": [
+    "System.Linq"
+   ],
+   "ExceptBy": [
+    "System.Linq"
+   ],
+   "FirstAsync": [
+    "System.Linq"
+   ],
+   "FirstOrDefaultAsync": [
+    "System.Linq"
+   ],
+   "GroupBy": [
+    "System.Linq"
+   ],
+   "GroupJoin": [
+    "System.Linq"
+   ],
+   "Index": [
+    "System.Linq"
+   ],
+   "Intersect": [
+    "System.Linq"
+   ],
+   "IntersectBy": [
+    "System.Linq"
+   ],
+   "Join": [
+    "System.Linq"
+   ],
+   "LastAsync": [
+    "System.Linq"
+   ],
+   "LastOrDefaultAsync": [
+    "System.Linq"
+   ],
+   "LeftJoin": [
+    "System.Linq"
+   ],
+   "LongCountAsync": [
+    "System.Linq"
+   ],
+   "MaxAsync": [
+    "System.Linq"
+   ],
+   "MaxByAsync": [
+    "System.Linq"
+   ],
+   "MinAsync": [
+    "System.Linq"
+   ],
+   "MinByAsync": [
+    "System.Linq"
+   ],
+   "Order": [
+    "System.Linq"
+   ],
+   "OrderBy": [
+    "System.Linq"
+   ],
+   "OrderByDescending": [
+    "System.Linq"
+   ],
+   "OrderDescending": [
+    "System.Linq"
+   ],
+   "Prepend": [
+    "System.Linq"
+   ],
+   "Reverse": [
+    "System.Linq"
+   ],
+   "RightJoin": [
+    "System.Linq"
+   ],
+   "Select": [
+    "System.Linq"
+   ],
+   "SelectMany": [
+    "System.Linq"
+   ],
+   "SequenceEqualAsync": [
+    "System.Linq"
+   ],
+   "Shuffle": [
+    "System.Linq"
+   ],
+   "SingleAsync": [
+    "System.Linq"
+   ],
+   "SingleOrDefaultAsync": [
+    "System.Linq"
+   ],
+   "Skip": [
+    "System.Linq"
+   ],
+   "SkipLast": [
+    "System.Linq"
+   ],
+   "SkipWhile": [
+    "System.Linq"
+   ],
+   "Take": [
+    "System.Linq"
+   ],
+   "TakeLast": [
+    "System.Linq"
+   ],
+   "TakeWhile": [
+    "System.Linq"
+   ],
+   "ToArrayAsync": [
+    "System.Linq"
+   ],
+   "ToBlockingEnumerable": [
+    "System.Threading.Tasks"
+   ],
+   "ToDictionaryAsync": [
+    "System.Linq"
+   ],
+   "ToHashSetAsync": [
+    "System.Linq"
+   ],
+   "ToListAsync": [
+    "System.Linq"
+   ],
+   "ToLookupAsync": [
+    "System.Linq"
+   ],
+   "Union": [
+    "System.Linq"
+   ],
+   "UnionBy": [
+    "System.Linq"
+   ],
+   "Where": [
+    "System.Linq"
+   ],
+   "WithCancellation": [
+    "System.Threading.Tasks"
+   ],
+   "Zip": [
+    "System.Linq"
+   ]
+  },
+  "System.Collections.Generic.IDictionary`2": {
+   "AsReadOnly": [
+    "System.Collections.Generic"
+   ],
+   "TryAdd": [
+    "System.Collections.Generic"
+   ]
+  },
+  "System.Collections.Generic.IEnumerable`1": {
+   "Aggregate": [
+    "System.Linq"
+   ],
+   "AggregateBy": [
+    "System.Linq"
+   ],
+   "All": [
+    "System.Linq"
+   ],
+   "Ancestors": [
+    "System.Xml.Linq"
+   ],
+   "Any": [
+    "System.Linq"
+   ],
+   "Append": [
+    "System.Linq"
+   ],
+   "AsEnumerable": [
+    "System.Linq"
+   ],
+   "AsParallel": [
+    "System.Linq"
+   ],
+   "AsQueryable": [
+    "System.Linq"
+   ],
+   "Average": [
+    "System.Linq"
+   ],
+   "Chunk": [
+    "System.Linq"
+   ],
+   "Concat": [
+    "System.Linq"
+   ],
+   "Contains": [
+    "System.Linq"
+   ],
+   "CopyToDataTable": [
+    "System.Data"
+   ],
+   "Count": [
+    "System.Linq"
+   ],
+   "CountBy": [
+    "System.Linq"
+   ],
+   "DefaultIfEmpty": [
+    "System.Linq"
+   ],
+   "DescendantNodes": [
+    "System.Xml.Linq"
+   ],
+   "Descendants": [
+    "System.Xml.Linq"
+   ],
+   "Distinct": [
+    "System.Linq"
+   ],
+   "DistinctBy": [
+    "System.Linq"
+   ],
+   "ElementAt": [
+    "System.Linq"
+   ],
+   "ElementAtOrDefault": [
+    "System.Linq"
+   ],
+   "Elements": [
+    "System.Xml.Linq"
+   ],
+   "Except": [
+    "System.Linq"
+   ],
+   "ExceptBy": [
+    "System.Linq"
+   ],
+   "First": [
+    "System.Linq"
+   ],
+   "FirstOrDefault": [
+    "System.Linq"
+   ],
+   "GroupBy": [
+    "System.Linq"
+   ],
+   "GroupJoin": [
+    "System.Linq"
+   ],
+   "InDocumentOrder": [
+    "System.Xml.Linq"
+   ],
+   "Index": [
+    "System.Linq"
+   ],
+   "Intersect": [
+    "System.Linq"
+   ],
+   "IntersectBy": [
+    "System.Linq"
+   ],
+   "Join": [
+    "System.Linq"
+   ],
+   "Last": [
+    "System.Linq"
+   ],
+   "LastOrDefault": [
+    "System.Linq"
+   ],
+   "LeftJoin": [
+    "System.Linq"
+   ],
+   "LongCount": [
+    "System.Linq"
+   ],
+   "Max": [
+    "System.Linq"
+   ],
+   "MaxBy": [
+    "System.Linq"
+   ],
+   "Min": [
+    "System.Linq"
+   ],
+   "MinBy": [
+    "System.Linq"
+   ],
+   "Nodes": [
+    "System.Xml.Linq"
+   ],
+   "Order": [
+    "System.Linq"
+   ],
+   "OrderBy": [
+    "System.Linq"
+   ],
+   "OrderByDescending": [
+    "System.Linq"
+   ],
+   "OrderDescending": [
+    "System.Linq"
+   ],
+   "Prepend": [
+    "System.Linq"
+   ],
+   "Remove": [
+    "System.Xml.Linq"
+   ],
+   "Reverse": [
+    "System.Linq"
+   ],
+   "RightJoin": [
+    "System.Linq"
+   ],
+   "Select": [
+    "System.Linq"
+   ],
+   "SelectMany": [
+    "System.Linq"
+   ],
+   "SequenceEqual": [
+    "System.Linq"
+   ],
+   "Shuffle": [
+    "System.Linq"
+   ],
+   "Single": [
+    "System.Linq"
+   ],
+   "SingleOrDefault": [
+    "System.Linq"
+   ],
+   "Skip": [
+    "System.Linq"
+   ],
+   "SkipLast": [
+    "System.Linq"
+   ],
+   "SkipWhile": [
+    "System.Linq"
+   ],
+   "Sum": [
+    "System.Linq"
+   ],
+   "Take": [
+    "System.Linq"
+   ],
+   "TakeLast": [
+    "System.Linq"
+   ],
+   "TakeWhile": [
+    "System.Linq"
+   ],
+   "ToArray": [
+    "System.Linq"
+   ],
+   "ToAsyncEnumerable": [
+    "System.Linq"
+   ],
+   "ToDictionary": [
+    "System.Linq"
+   ],
+   "ToFrozenDictionary": [
+    "System.Collections.Frozen"
+   ],
+   "ToFrozenSet": [
+    "System.Collections.Frozen"
+   ],
+   "ToHashSet": [
+    "System.Linq"
+   ],
+   "ToImmutableArray": [
+    "System.Collections.Immutable"
+   ],
+   "ToImmutableDictionary": [
+    "System.Collections.Immutable"
+   ],
+   "ToImmutableHashSet": [
+    "System.Collections.Immutable"
+   ],
+   "ToImmutableList": [
+    "System.Collections.Immutable"
+   ],
+   "ToImmutableSortedDictionary": [
+    "System.Collections.Immutable"
+   ],
+   "ToImmutableSortedSet": [
+    "System.Collections.Immutable"
+   ],
+   "ToList": [
+    "System.Linq"
+   ],
+   "ToLookup": [
+    "System.Linq"
+   ],
+   "TryGetNonEnumeratedCount": [
+    "System.Linq"
+   ],
+   "Union": [
+    "System.Linq"
+   ],
+   "UnionBy": [
+    "System.Linq"
+   ],
+   "Where": [
+    "System.Linq"
+   ],
+   "Zip": [
+    "System.Linq"
+   ]
+  },
+  "System.Collections.Generic.IList`1": {
+   "AsReadOnly": [
+    "System.Collections.Generic"
+   ]
+  },
+  "System.Collections.Generic.IReadOnlyDictionary`2": {
+   "GetValueOrDefault": [
+    "System.Collections.Generic"
+   ]
+  },
+  "System.Collections.Generic.ISet`1": {
+   "AsReadOnly": [
+    "System.Collections.Generic"
+   ]
+  },
+  "System.Collections.Immutable.IImmutableDictionary`2": {
+   "GetValueOrDefault": [
+    "System.Collections.Immutable"
+   ]
+  },
+  "System.Collections.Immutable.ImmutableArray`1": {
+   "Aggregate": [
+    "System.Linq"
+   ],
+   "All": [
+    "System.Linq"
+   ],
+   "Any": [
+    "System.Linq"
+   ],
+   "BinarySearch": [
+    "System.Collections.Immutable"
+   ],
+   "ElementAt": [
+    "System.Linq"
+   ],
+   "ElementAtOrDefault": [
+    "System.Linq"
+   ],
+   "First": [
+    "System.Linq"
+   ],
+   "FirstOrDefault": [
+    "System.Linq"
+   ],
+   "Last": [
+    "System.Linq"
+   ],
+   "LastOrDefault": [
+    "System.Linq"
+   ],
+   "Select": [
+    "System.Linq"
+   ],
+   "SelectMany": [
+    "System.Linq"
+   ],
+   "SequenceEqual": [
+    "System.Linq"
+   ],
+   "Single": [
+    "System.Linq"
+   ],
+   "SingleOrDefault": [
+    "System.Linq"
+   ],
+   "ToArray": [
+    "System.Linq"
+   ],
+   "ToDictionary": [
+    "System.Linq"
+   ],
+   "Where": [
+    "System.Linq"
+   ]
+  },
+  "System.Data.EnumerableRowCollection`1": {
+   "AsDataView": [
+    "System.Data"
+   ],
+   "OrderBy": [
+    "System.Data"
+   ],
+   "OrderByDescending": [
+    "System.Data"
+   ],
+   "Select": [
+    "System.Data"
+   ],
+   "Where": [
+    "System.Data"
+   ]
+  },
+  "System.Data.OrderedEnumerableRowCollection`1": {
+   "ThenBy": [
+    "System.Data"
+   ],
+   "ThenByDescending": [
+    "System.Data"
+   ]
+  },
+  "System.Data.TypedTableBase`1": {
+   "AsEnumerable": [
+    "System.Data"
+   ],
+   "ElementAtOrDefault": [
+    "System.Data"
+   ],
+   "OrderBy": [
+    "System.Data"
+   ],
+   "OrderByDescending": [
+    "System.Data"
+   ],
+   "Select": [
+    "System.Data"
+   ],
+   "Where": [
+    "System.Data"
+   ]
+  },
+  "System.Linq.IOrderedAsyncEnumerable`1": {
+   "ThenBy": [
+    "System.Linq"
+   ],
+   "ThenByDescending": [
+    "System.Linq"
+   ]
+  },
+  "System.Linq.IOrderedEnumerable`1": {
+   "ThenBy": [
+    "System.Linq"
+   ],
+   "ThenByDescending": [
+    "System.Linq"
+   ]
+  },
+  "System.Linq.IOrderedQueryable`1": {
+   "ThenBy": [
+    "System.Linq"
+   ],
+   "ThenByDescending": [
+    "System.Linq"
+   ]
+  },
+  "System.Linq.IQueryable`1": {
+   "Aggregate": [
+    "System.Linq"
+   ],
+   "AggregateBy": [
+    "System.Linq"
+   ],
+   "All": [
+    "System.Linq"
+   ],
+   "Any": [
+    "System.Linq"
+   ],
+   "Append": [
+    "System.Linq"
+   ],
+   "Average": [
+    "System.Linq"
+   ],
+   "Chunk": [
+    "System.Linq"
+   ],
+   "Concat": [
+    "System.Linq"
+   ],
+   "Contains": [
+    "System.Linq"
+   ],
+   "Count": [
+    "System.Linq"
+   ],
+   "CountBy": [
+    "System.Linq"
+   ],
+   "DefaultIfEmpty": [
+    "System.Linq"
+   ],
+   "Distinct": [
+    "System.Linq"
+   ],
+   "DistinctBy": [
+    "System.Linq"
+   ],
+   "ElementAt": [
+    "System.Linq"
+   ],
+   "ElementAtOrDefault": [
+    "System.Linq"
+   ],
+   "Except": [
+    "System.Linq"
+   ],
+   "ExceptBy": [
+    "System.Linq"
+   ],
+   "First": [
+    "System.Linq"
+   ],
+   "FirstOrDefault": [
+    "System.Linq"
+   ],
+   "GroupBy": [
+    "System.Linq"
+   ],
+   "GroupJoin": [
+    "System.Linq"
+   ],
+   "Index": [
+    "System.Linq"
+   ],
+   "Intersect": [
+    "System.Linq"
+   ],
+   "IntersectBy": [
+    "System.Linq"
+   ],
+   "Join": [
+    "System.Linq"
+   ],
+   "Last": [
+    "System.Linq"
+   ],
+   "LastOrDefault": [
+    "System.Linq"
+   ],
+   "LeftJoin": [
+    "System.Linq"
+   ],
+   "LongCount": [
+    "System.Linq"
+   ],
+   "Max": [
+    "System.Linq"
+   ],
+   "MaxBy": [
+    "System.Linq"
+   ],
+   "Min": [
+    "System.Linq"
+   ],
+   "MinBy": [
+    "System.Linq"
+   ],
+   "Order": [
+    "System.Linq"
+   ],
+   "OrderBy": [
+    "System.Linq"
+   ],
+   "OrderByDescending": [
+    "System.Linq"
+   ],
+   "OrderDescending": [
+    "System.Linq"
+   ],
+   "Prepend": [
+    "System.Linq"
+   ],
+   "Reverse": [
+    "System.Linq"
+   ],
+   "RightJoin": [
+    "System.Linq"
+   ],
+   "Select": [
+    "System.Linq"
+   ],
+   "SelectMany": [
+    "System.Linq"
+   ],
+   "SequenceEqual": [
+    "System.Linq"
+   ],
+   "Shuffle": [
+    "System.Linq"
+   ],
+   "Single": [
+    "System.Linq"
+   ],
+   "SingleOrDefault": [
+    "System.Linq"
+   ],
+   "Skip": [
+    "System.Linq"
+   ],
+   "SkipLast": [
+    "System.Linq"
+   ],
+   "SkipWhile": [
+    "System.Linq"
+   ],
+   "Sum": [
+    "System.Linq"
+   ],
+   "Take": [
+    "System.Linq"
+   ],
+   "TakeLast": [
+    "System.Linq"
+   ],
+   "TakeWhile": [
+    "System.Linq"
+   ],
+   "Union": [
+    "System.Linq"
+   ],
+   "UnionBy": [
+    "System.Linq"
+   ],
+   "Where": [
+    "System.Linq"
+   ],
+   "Zip": [
+    "System.Linq"
+   ]
+  },
+  "System.Linq.OrderedParallelQuery`1": {
+   "ThenBy": [
+    "System.Linq"
+   ],
+   "ThenByDescending": [
+    "System.Linq"
+   ]
+  },
+  "System.Linq.ParallelQuery`1": {
+   "Aggregate": [
+    "System.Linq"
+   ],
+   "All": [
+    "System.Linq"
+   ],
+   "Any": [
+    "System.Linq"
+   ],
+   "AsEnumerable": [
+    "System.Linq"
+   ],
+   "AsOrdered": [
+    "System.Linq"
+   ],
+   "AsSequential": [
+    "System.Linq"
+   ],
+   "AsUnordered": [
+    "System.Linq"
+   ],
+   "Average": [
+    "System.Linq"
+   ],
+   "Concat": [
+    "System.Linq"
+   ],
+   "Contains": [
+    "System.Linq"
+   ],
+   "Count": [
+    "System.Linq"
+   ],
+   "DefaultIfEmpty": [
+    "System.Linq"
+   ],
+   "Distinct": [
+    "System.Linq"
+   ],
+   "ElementAt": [
+    "System.Linq"
+   ],
+   "ElementAtOrDefault": [
+    "System.Linq"
+   ],
+   "Except": [
+    "System.Linq"
+   ],
+   "First": [
+    "System.Linq"
+   ],
+   "FirstOrDefault": [
+    "System.Linq"
+   ],
+   "ForAll": [
+    "System.Linq"
+   ],
+   "GroupBy": [
+    "System.Linq"
+   ],
+   "GroupJoin": [
+    "System.Linq"
+   ],
+   "Intersect": [
+    "System.Linq"
+   ],
+   "Join": [
+    "System.Linq"
+   ],
+   "Last": [
+    "System.Linq"
+   ],
+   "LastOrDefault": [
+    "System.Linq"
+   ],
+   "LongCount": [
+    "System.Linq"
+   ],
+   "Max": [
+    "System.Linq"
+   ],
+   "Min": [
+    "System.Linq"
+   ],
+   "OrderBy": [
+    "System.Linq"
+   ],
+   "OrderByDescending": [
+    "System.Linq"
+   ],
+   "Reverse": [
+    "System.Linq"
+   ],
+   "Select": [
+    "System.Linq"
+   ],
+   "SelectMany": [
+    "System.Linq"
+   ],
+   "SequenceEqual": [
+    "System.Linq"
+   ],
+   "Single": [
+    "System.Linq"
+   ],
+   "SingleOrDefault": [
+    "System.Linq"
+   ],
+   "Skip": [
+    "System.Linq"
+   ],
+   "SkipWhile": [
+    "System.Linq"
+   ],
+   "Sum": [
+    "System.Linq"
+   ],
+   "Take": [
+    "System.Linq"
+   ],
+   "TakeWhile": [
+    "System.Linq"
+   ],
+   "ToArray": [
+    "System.Linq"
+   ],
+   "ToDictionary": [
+    "System.Linq"
+   ],
+   "ToList": [
+    "System.Linq"
+   ],
+   "ToLookup": [
+    "System.Linq"
+   ],
+   "Union": [
+    "System.Linq"
+   ],
+   "Where": [
+    "System.Linq"
+   ],
+   "WithCancellation": [
+    "System.Linq"
+   ],
+   "WithDegreeOfParallelism": [
+    "System.Linq"
+   ],
+   "WithExecutionMode": [
+    "System.Linq"
+   ],
+   "WithMergeOptions": [
+    "System.Linq"
+   ],
+   "Zip": [
+    "System.Linq"
+   ]
+  },
+  "System.Memory`1": {
+   "Trim": [
+    "System"
+   ],
+   "TrimEnd": [
+    "System"
+   ],
+   "TrimStart": [
+    "System"
+   ]
+  },
+  "System.Numerics.Vector`1": {
+   "As": [
+    "System.Numerics"
+   ],
+   "AsVector128": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsVector256": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsVector512": [
+    "System.Runtime.Intrinsics"
+   ],
+   "GetElement": [
+    "System.Numerics"
+   ],
+   "Store": [
+    "System.Numerics"
+   ],
+   "StoreAligned": [
+    "System.Numerics"
+   ],
+   "StoreAlignedNonTemporal": [
+    "System.Numerics"
+   ],
+   "StoreUnsafe": [
+    "System.Numerics"
+   ],
+   "ToScalar": [
+    "System.Numerics"
+   ],
+   "WithElement": [
+    "System.Numerics"
+   ]
+  },
+  "System.ReadOnlyMemory`1": {
+   "Trim": [
+    "System"
+   ],
+   "TrimEnd": [
+    "System"
+   ],
+   "TrimStart": [
+    "System"
+   ]
+  },
+  "System.ReadOnlySpan`1": {
+   "BinarySearch": [
+    "System"
+   ],
+   "CommonPrefixLength": [
+    "System"
+   ],
+   "Contains": [
+    "System"
+   ],
+   "ContainsAny": [
+    "System"
+   ],
+   "ContainsAnyExcept": [
+    "System"
+   ],
+   "ContainsAnyExceptInRange": [
+    "System"
+   ],
+   "ContainsAnyInRange": [
+    "System"
+   ],
+   "Count": [
+    "System"
+   ],
+   "CountAny": [
+    "System"
+   ],
+   "EndsWith": [
+    "System"
+   ],
+   "IndexOf": [
+    "System"
+   ],
+   "IndexOfAny": [
+    "System"
+   ],
+   "IndexOfAnyExcept": [
+    "System"
+   ],
+   "IndexOfAnyExceptInRange": [
+    "System"
+   ],
+   "IndexOfAnyInRange": [
+    "System"
+   ],
+   "LastIndexOf": [
+    "System"
+   ],
+   "LastIndexOfAny": [
+    "System"
+   ],
+   "LastIndexOfAnyExcept": [
+    "System"
+   ],
+   "LastIndexOfAnyExceptInRange": [
+    "System"
+   ],
+   "LastIndexOfAnyInRange": [
+    "System"
+   ],
+   "Overlaps": [
+    "System"
+   ],
+   "Replace": [
+    "System"
+   ],
+   "ReplaceAny": [
+    "System"
+   ],
+   "ReplaceAnyExcept": [
+    "System"
+   ],
+   "SequenceCompareTo": [
+    "System"
+   ],
+   "SequenceEqual": [
+    "System"
+   ],
+   "Split": [
+    "System"
+   ],
+   "SplitAny": [
+    "System"
+   ],
+   "StartsWith": [
+    "System"
+   ],
+   "ToImmutableArray": [
+    "System.Collections.Immutable"
+   ],
+   "Trim": [
+    "System"
+   ],
+   "TrimEnd": [
+    "System"
+   ],
+   "TrimStart": [
+    "System"
+   ]
+  },
+  "System.Runtime.Intrinsics.Vector128`1": {
+   "As": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsByte": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsDouble": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsInt16": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsInt32": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsInt64": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsNInt": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsNUInt": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsSByte": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsSingle": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsUInt16": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsUInt32": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsUInt64": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsVector": [
+    "System.Runtime.Intrinsics"
+   ],
+   "CopyTo": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ExtractMostSignificantBits": [
+    "System.Runtime.Intrinsics"
+   ],
+   "GetElement": [
+    "System.Runtime.Intrinsics"
+   ],
+   "GetLower": [
+    "System.Runtime.Intrinsics"
+   ],
+   "GetUpper": [
+    "System.Runtime.Intrinsics"
+   ],
+   "Store": [
+    "System.Runtime.Intrinsics"
+   ],
+   "StoreAligned": [
+    "System.Runtime.Intrinsics"
+   ],
+   "StoreAlignedNonTemporal": [
+    "System.Runtime.Intrinsics"
+   ],
+   "StoreUnsafe": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ToScalar": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ToVector256": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ToVector256Unsafe": [
+    "System.Runtime.Intrinsics"
+   ],
+   "TryCopyTo": [
+    "System.Runtime.Intrinsics"
+   ],
+   "WithElement": [
+    "System.Runtime.Intrinsics"
+   ],
+   "WithLower": [
+    "System.Runtime.Intrinsics"
+   ],
+   "WithUpper": [
+    "System.Runtime.Intrinsics"
+   ]
+  },
+  "System.Runtime.Intrinsics.Vector256`1": {
+   "As": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsByte": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsDouble": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsInt16": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsInt32": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsInt64": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsNInt": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsNUInt": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsSByte": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsSingle": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsUInt16": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsUInt32": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsUInt64": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsVector": [
+    "System.Runtime.Intrinsics"
+   ],
+   "CopyTo": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ExtractMostSignificantBits": [
+    "System.Runtime.Intrinsics"
+   ],
+   "GetElement": [
+    "System.Runtime.Intrinsics"
+   ],
+   "GetLower": [
+    "System.Runtime.Intrinsics"
+   ],
+   "GetUpper": [
+    "System.Runtime.Intrinsics"
+   ],
+   "Store": [
+    "System.Runtime.Intrinsics"
+   ],
+   "StoreAligned": [
+    "System.Runtime.Intrinsics"
+   ],
+   "StoreAlignedNonTemporal": [
+    "System.Runtime.Intrinsics"
+   ],
+   "StoreUnsafe": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ToScalar": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ToVector512": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ToVector512Unsafe": [
+    "System.Runtime.Intrinsics"
+   ],
+   "TryCopyTo": [
+    "System.Runtime.Intrinsics"
+   ],
+   "WithElement": [
+    "System.Runtime.Intrinsics"
+   ],
+   "WithLower": [
+    "System.Runtime.Intrinsics"
+   ],
+   "WithUpper": [
+    "System.Runtime.Intrinsics"
+   ]
+  },
+  "System.Runtime.Intrinsics.Vector512`1": {
+   "As": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsByte": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsDouble": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsInt16": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsInt32": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsInt64": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsNInt": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsNUInt": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsSByte": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsSingle": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsUInt16": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsUInt32": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsUInt64": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsVector": [
+    "System.Runtime.Intrinsics"
+   ],
+   "CopyTo": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ExtractMostSignificantBits": [
+    "System.Runtime.Intrinsics"
+   ],
+   "GetElement": [
+    "System.Runtime.Intrinsics"
+   ],
+   "GetLower": [
+    "System.Runtime.Intrinsics"
+   ],
+   "GetUpper": [
+    "System.Runtime.Intrinsics"
+   ],
+   "Store": [
+    "System.Runtime.Intrinsics"
+   ],
+   "StoreAligned": [
+    "System.Runtime.Intrinsics"
+   ],
+   "StoreAlignedNonTemporal": [
+    "System.Runtime.Intrinsics"
+   ],
+   "StoreUnsafe": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ToScalar": [
+    "System.Runtime.Intrinsics"
+   ],
+   "TryCopyTo": [
+    "System.Runtime.Intrinsics"
+   ],
+   "WithElement": [
+    "System.Runtime.Intrinsics"
+   ],
+   "WithLower": [
+    "System.Runtime.Intrinsics"
+   ],
+   "WithUpper": [
+    "System.Runtime.Intrinsics"
+   ]
+  },
+  "System.Runtime.Intrinsics.Vector64`1": {
+   "As": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsByte": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsDouble": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsInt16": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsInt32": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsInt64": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsNInt": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsNUInt": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsSByte": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsSingle": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsUInt16": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsUInt32": [
+    "System.Runtime.Intrinsics"
+   ],
+   "AsUInt64": [
+    "System.Runtime.Intrinsics"
+   ],
+   "CopyTo": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ExtractMostSignificantBits": [
+    "System.Runtime.Intrinsics"
+   ],
+   "GetElement": [
+    "System.Runtime.Intrinsics"
+   ],
+   "Store": [
+    "System.Runtime.Intrinsics"
+   ],
+   "StoreAligned": [
+    "System.Runtime.Intrinsics"
+   ],
+   "StoreAlignedNonTemporal": [
+    "System.Runtime.Intrinsics"
+   ],
+   "StoreUnsafe": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ToScalar": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ToVector128": [
+    "System.Runtime.Intrinsics"
+   ],
+   "ToVector128Unsafe": [
+    "System.Runtime.Intrinsics"
+   ],
+   "TryCopyTo": [
+    "System.Runtime.Intrinsics"
+   ],
+   "WithElement": [
+    "System.Runtime.Intrinsics"
+   ]
+  },
+  "System.Span`1": {
+   "BinarySearch": [
+    "System"
+   ],
+   "CommonPrefixLength": [
+    "System"
+   ],
+   "Contains": [
+    "System"
+   ],
+   "ContainsAny": [
+    "System"
+   ],
+   "ContainsAnyExcept": [
+    "System"
+   ],
+   "ContainsAnyExceptInRange": [
+    "System"
+   ],
+   "ContainsAnyInRange": [
+    "System"
+   ],
+   "Count": [
+    "System"
+   ],
+   "EndsWith": [
+    "System"
+   ],
+   "IndexOf": [
+    "System"
+   ],
+   "IndexOfAny": [
+    "System"
+   ],
+   "IndexOfAnyExcept": [
+    "System"
+   ],
+   "IndexOfAnyExceptInRange": [
+    "System"
+   ],
+   "IndexOfAnyInRange": [
+    "System"
+   ],
+   "LastIndexOf": [
+    "System"
+   ],
+   "LastIndexOfAny": [
+    "System"
+   ],
+   "LastIndexOfAnyExcept": [
+    "System"
+   ],
+   "LastIndexOfAnyExceptInRange": [
+    "System"
+   ],
+   "LastIndexOfAnyInRange": [
+    "System"
+   ],
+   "Overlaps": [
+    "System"
+   ],
+   "Replace": [
+    "System"
+   ],
+   "ReplaceAny": [
+    "System"
+   ],
+   "ReplaceAnyExcept": [
+    "System"
+   ],
+   "Reverse": [
+    "System"
+   ],
+   "SequenceCompareTo": [
+    "System"
+   ],
+   "SequenceEqual": [
+    "System"
+   ],
+   "Sort": [
+    "System"
+   ],
+   "StartsWith": [
+    "System"
+   ],
+   "ToImmutableArray": [
+    "System.Collections.Immutable"
+   ],
+   "Trim": [
+    "System"
+   ],
+   "TrimEnd": [
+    "System"
+   ],
+   "TrimStart": [
+    "System"
+   ]
+  },
+  "System.Threading.Tasks.Dataflow.IReceivableSourceBlock`1": {
+   "ReceiveAllAsync": [
+    "System.Threading.Tasks.Dataflow"
+   ]
+  },
+  "System.Threading.Tasks.Dataflow.ISourceBlock`1": {
+   "AsObservable": [
+    "System.Threading.Tasks.Dataflow"
+   ],
+   "OutputAvailableAsync": [
+    "System.Threading.Tasks.Dataflow"
+   ],
+   "Receive": [
+    "System.Threading.Tasks.Dataflow"
+   ],
+   "ReceiveAsync": [
+    "System.Threading.Tasks.Dataflow"
+   ]
+  },
+  "System.Threading.Tasks.Dataflow.ITargetBlock`1": {
+   "AsObserver": [
+    "System.Threading.Tasks.Dataflow"
+   ],
+   "Post": [
+    "System.Threading.Tasks.Dataflow"
+   ],
+   "SendAsync": [
+    "System.Threading.Tasks.Dataflow"
+   ]
+  },
+  "System.Tuple`1": {
+   "Deconstruct": [
+    "System"
+   ],
+   "ToValueTuple": [
+    "System"
+   ]
+  },
+  "System.Tuple`2": {
+   "Deconstruct": [
+    "System"
+   ],
+   "ToValueTuple": [
+    "System"
+   ]
+  },
+  "System.Tuple`3": {
+   "Deconstruct": [
+    "System"
+   ],
+   "ToValueTuple": [
+    "System"
+   ]
+  },
+  "System.Tuple`4": {
+   "Deconstruct": [
+    "System"
+   ],
+   "ToValueTuple": [
+    "System"
+   ]
+  },
+  "System.Tuple`5": {
+   "Deconstruct": [
+    "System"
+   ],
+   "ToValueTuple": [
+    "System"
+   ]
+  },
+  "System.Tuple`6": {
+   "Deconstruct": [
+    "System"
+   ],
+   "ToValueTuple": [
+    "System"
+   ]
+  },
+  "System.Tuple`7": {
+   "Deconstruct": [
+    "System"
+   ],
+   "ToValueTuple": [
+    "System"
+   ]
+  },
+  "System.ValueTuple`1": {
+   "ToTuple": [
+    "System"
+   ]
+  },
+  "System.ValueTuple`2": {
+   "ToTuple": [
+    "System"
+   ]
+  },
+  "System.ValueTuple`3": {
+   "ToTuple": [
+    "System"
+   ]
+  },
+  "System.ValueTuple`4": {
+   "ToTuple": [
+    "System"
+   ]
+  },
+  "System.ValueTuple`5": {
+   "ToTuple": [
+    "System"
+   ]
+  },
+  "System.ValueTuple`6": {
+   "ToTuple": [
+    "System"
+   ]
+  },
+  "System.ValueTuple`7": {
+   "ToTuple": [
+    "System"
+   ]
+  }
+ },
+ "functional": {
+  "System.Action": 0,
+  "System.Action`1": 1,
+  "System.Action`10": 10,
+  "System.Action`11": 11,
+  "System.Action`12": 12,
+  "System.Action`13": 13,
+  "System.Action`14": 14,
+  "System.Action`15": 15,
+  "System.Action`16": 16,
+  "System.Action`2": 2,
+  "System.Action`3": 3,
+  "System.Action`4": 4,
+  "System.Action`5": 5,
+  "System.Action`6": 6,
+  "System.Action`7": 7,
+  "System.Action`8": 8,
+  "System.Action`9": 9,
+  "System.AssemblyLoadEventHandler": 2,
+  "System.AsyncCallback": 1,
+  "System.Buffers.ReadOnlySpanAction`2": 2,
+  "System.Buffers.SpanAction`2": 2,
+  "System.Collections.Specialized.NotifyCollectionChangedEventHandler": 2,
+  "System.Comparison`1": 2,
+  "System.ComponentModel.AddingNewEventHandler": 2,
+  "System.ComponentModel.AsyncCompletedEventHandler": 2,
+  "System.ComponentModel.CancelEventHandler": 2,
+  "System.ComponentModel.CollectionChangeEventHandler": 2,
+  "System.ComponentModel.Design.ActiveDesignerEventHandler": 2,
+  "System.ComponentModel.Design.ComponentChangedEventHandler": 2,
+  "System.ComponentModel.Design.ComponentChangingEventHandler": 2,
+  "System.ComponentModel.Design.ComponentEventHandler": 2,
+  "System.ComponentModel.Design.ComponentRenameEventHandler": 2,
+  "System.ComponentModel.Design.DesignerEventHandler": 2,
+  "System.ComponentModel.Design.DesignerTransactionCloseEventHandler": 2,
+  "System.ComponentModel.Design.Serialization.ResolveNameEventHandler": 2,
+  "System.ComponentModel.Design.ServiceCreatorCallback": 2,
+  "System.ComponentModel.DoWorkEventHandler": 2,
+  "System.ComponentModel.HandledEventHandler": 2,
+  "System.ComponentModel.ListChangedEventHandler": 2,
+  "System.ComponentModel.ProgressChangedEventHandler": 2,
+  "System.ComponentModel.PropertyChangedEventHandler": 2,
+  "System.ComponentModel.PropertyChangingEventHandler": 2,
+  "System.ComponentModel.RefreshEventHandler": 1,
+  "System.ComponentModel.RunWorkerCompletedEventHandler": 2,
+  "System.ConsoleCancelEventHandler": 2,
+  "System.Converter`2": 1,
+  "System.Data.DataColumnChangeEventHandler": 2,
+  "System.Data.DataRowChangeEventHandler": 2,
+  "System.Data.DataTableClearEventHandler": 2,
+  "System.Data.DataTableNewRowEventHandler": 2,
+  "System.Data.FillErrorEventHandler": 2,
+  "System.Data.MergeFailedEventHandler": 2,
+  "System.Data.StateChangeEventHandler": 2,
+  "System.Data.StatementCompletedEventHandler": 2,
+  "System.Diagnostics.DataReceivedEventHandler": 2,
+  "System.Diagnostics.DistributedContextPropagator.PropagatorGetterCallback": 4,
+  "System.Diagnostics.DistributedContextPropagator.PropagatorSetterCallback": 3,
+  "System.Diagnostics.ExceptionRecorder": 3,
+  "System.Diagnostics.Metrics.MeasurementCallback`1": 4,
+  "System.Diagnostics.SampleActivity`1": 1,
+  "System.EventHandler": 2,
+  "System.EventHandler`1": 2,
+  "System.EventHandler`2": 2,
+  "System.Func`1": 0,
+  "System.Func`10": 9,
+  "System.Func`11": 10,
+  "System.Func`12": 11,
+  "System.Func`13": 12,
+  "System.Func`14": 13,
+  "System.Func`15": 14,
+  "System.Func`16": 15,
+  "System.Func`17": 16,
+  "System.Func`2": 1,
+  "System.Func`3": 2,
+  "System.Func`4": 3,
+  "System.Func`5": 4,
+  "System.Func`6": 5,
+  "System.Func`7": 6,
+  "System.Func`8": 7,
+  "System.Func`9": 8,
+  "System.IO.Enumeration.FileSystemEnumerable`1.FindPredicate": 1,
+  "System.IO.Enumeration.FileSystemEnumerable`1.FindTransform": 1,
+  "System.IO.ErrorEventHandler": 2,
+  "System.IO.FileSystemEventHandler": 2,
+  "System.IO.Pipes.PipeStreamImpersonationWorker": 0,
+  "System.IO.RenamedEventHandler": 2,
+  "System.Net.AuthenticationSchemeSelector": 1,
+  "System.Net.BindIPEndPoint": 3,
+  "System.Net.DownloadDataCompletedEventHandler": 2,
+  "System.Net.DownloadProgressChangedEventHandler": 2,
+  "System.Net.DownloadStringCompletedEventHandler": 2,
+  "System.Net.Http.HeaderEncodingSelector`1": 2,
+  "System.Net.HttpContinueDelegate": 2,
+  "System.Net.HttpListener.ExtendedProtectionSelector": 1,
+  "System.Net.Mail.SendCompletedEventHandler": 2,
+  "System.Net.NetworkInformation.NetworkAddressChangedEventHandler": 2,
+  "System.Net.NetworkInformation.NetworkAvailabilityChangedEventHandler": 2,
+  "System.Net.NetworkInformation.PingCompletedEventHandler": 2,
+  "System.Net.OpenReadCompletedEventHandler": 2,
+  "System.Net.OpenWriteCompletedEventHandler": 2,
+  "System.Net.Security.LocalCertificateSelectionCallback": 5,
+  "System.Net.Security.RemoteCertificateValidationCallback": 4,
+  "System.Net.Security.ServerCertificateSelectionCallback": 2,
+  "System.Net.Security.ServerOptionsSelectionCallback": 4,
+  "System.Net.ServerSentEvents.SseItemParser`1": 2,
+  "System.Net.UploadDataCompletedEventHandler": 2,
+  "System.Net.UploadFileCompletedEventHandler": 2,
+  "System.Net.UploadProgressChangedEventHandler": 2,
+  "System.Net.UploadStringCompletedEventHandler": 2,
+  "System.Net.UploadValuesCompletedEventHandler": 2,
+  "System.Net.WriteStreamClosedEventHandler": 2,
+  "System.Predicate`1": 1,
+  "System.Reflection.MemberFilter": 2,
+  "System.Reflection.ModuleResolveEventHandler": 2,
+  "System.Reflection.TypeFilter": 2,
+  "System.ResolveEventHandler": 2,
+  "System.Runtime.CompilerServices.ConditionalWeakTable`2.CreateValueCallback": 1,
+  "System.Runtime.CompilerServices.RuntimeHelpers.CleanupCode": 2,
+  "System.Runtime.CompilerServices.RuntimeHelpers.TryCode": 1,
+  "System.Runtime.InteropServices.DllImportResolver": 3,
+  "System.Runtime.InteropServices.JavaScript.JSMarshalerArgument.ArgumentToJSCallback`1": 2,
+  "System.Runtime.InteropServices.JavaScript.JSMarshalerArgument.ArgumentToManagedCallback`1": 2,
+  "System.Runtime.InteropServices.ObjectiveC.ObjectiveCMarshal.UnhandledExceptionPropagationHandler": 3,
+  "System.Runtime.Serialization.SerializationEventHandler": 1,
+  "System.Security.AccessControl.NativeObjectSecurity.ExceptionFromErrorCode": 4,
+  "System.Text.RegularExpressions.MatchEvaluator": 1,
+  "System.Threading.ContextCallback": 1,
+  "System.Threading.IOCompletionCallback": 3,
+  "System.Threading.ParameterizedThreadStart": 1,
+  "System.Threading.SendOrPostCallback": 1,
+  "System.Threading.ThreadExceptionEventHandler": 2,
+  "System.Threading.ThreadStart": 0,
+  "System.Threading.TimerCallback": 1,
+  "System.Threading.WaitCallback": 1,
+  "System.Threading.WaitOrTimerCallback": 2,
+  "System.Timers.ElapsedEventHandler": 2,
+  "System.Transactions.HostCurrentTransactionCallback": 0,
+  "System.Transactions.TransactionCompletedEventHandler": 2,
+  "System.Transactions.TransactionStartedEventHandler": 2,
+  "System.UnhandledExceptionEventHandler": 2,
+  "System.Xml.OnXmlDictionaryReaderClose": 1,
+  "System.Xml.Schema.ValidationEventHandler": 2,
+  "System.Xml.Schema.XmlValueGetter": 0,
+  "System.Xml.Serialization.UnreferencedObjectEventHandler": 2,
+  "System.Xml.Serialization.XmlAttributeEventHandler": 2,
+  "System.Xml.Serialization.XmlElementEventHandler": 2,
+  "System.Xml.Serialization.XmlNodeEventHandler": 2,
+  "System.Xml.Serialization.XmlSerializationCollectionFixupCallback": 2,
+  "System.Xml.Serialization.XmlSerializationFixupCallback": 1,
+  "System.Xml.Serialization.XmlSerializationReadCallback": 0,
+  "System.Xml.Serialization.XmlSerializationWriteCallback": 1,
+  "System.Xml.XmlNodeChangedEventHandler": 2,
+  "System.Xml.Xsl.XsltMessageEncounteredEventHandler": 2
+ },
  "functions": {},
  "scope": {
   "bool": "System.Boolean",

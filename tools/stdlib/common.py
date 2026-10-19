@@ -53,7 +53,16 @@ def dump_ast(command: list[str], source: Path, headers) -> dict:
     return json.loads(run.stdout)
 
 
-KEYS = ("source", "types", "functions", "scope", "variants", "callbacks")
+KEYS = (
+    "source",
+    "types",
+    "functions",
+    "scope",
+    "variants",
+    "callbacks",
+    "extensions",
+    "functional",
+)
 
 
 def main(build) -> None:

@@ -18,8 +18,14 @@
                {"params": the parameter types of the callable passed there,
                 "returns": the type parameter that stands for its result,
                            None where none does}}}
+    extensions qualified type name -> {name of a method it has only from
+               extension methods -> the namespaces that declare them}
+    functional qualified name of a type a lambda converts to, a C# delegate
+               type or a Java functional interface -> how many parameters
+               the lambda declares
 
-`variants` and `callbacks` are there only for a language that has them.
+`variants`, `callbacks`, `extensions` and `functional` are there only for a
+language that has them.
 C++ (`cpp.json`, read with `c.json`) keys a class by its name and the number
 of its template parameters, `std::vector`2`, a specialization being its
 template's, and gives each type `aliases`, its member typedefs by name; its

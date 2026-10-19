@@ -23,9 +23,9 @@ from descry.generate import (
     _generic_metadata,
     _raw_pointer,
     _strip_generics,
-    argument_count,
     blank_strings,
     c_specialization,
+    call_arguments,
     is_generated_source,
     source_lines,
 )
@@ -1343,7 +1343,7 @@ class ClangParser(BaseParser):
                 (head[a + 1 : b] for a, b in spans if a == found.start("params")), ""
             )
             parts = _bracketed_parts(listed)
-            types = _parameter_entry(parts)[2]
+            _, most, types = _parameter_entry(parts)
             # Filed under the path of the function it declares, from the
             # file's scopes, as the IDs of its definitions name it.
             path = re.sub(r"\s+", "", found["path"] or "")
@@ -1354,6 +1354,7 @@ class ClangParser(BaseParser):
             ).append(
                 [
                     [at for at, part in enumerate(parts[: len(types)]) if "=" in part],
+                    most,
                     types,
                     parent_id,
                 ]
@@ -1572,9 +1573,9 @@ class ClangParser(BaseParser):
                 origin,
             )
             metadata = self.builder.edges[-1]["metadata"]
-            passed = argument_count(self._lines, self._source, index, match.end())
+            passed = call_arguments(self._lines, self._source, index, match.end())
             if passed is not None:
-                metadata["args"] = passed
+                metadata["args"] = len(passed)
             # The columns of the calls on the line whose parentheses hold it
             around = [
                 *(self._closes.get(c) for o, c in self._pairs.items() if o < at < c),

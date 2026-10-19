@@ -178,6 +178,9 @@ def build(origin):
     types = {}
     delegates = {}
     deferred_bases = []
+    # Type -> the names of its own instance members; type -> {name of an
+    # extension method written for it -> the namespaces that declare one}
+    own, extended = {}, {}
 
     for t in raw:
         name = keyed(t["name"])
@@ -199,6 +202,8 @@ def build(origin):
         for p in t["props"]:
             ret = written(p["ret"], params) if p["ret"] else None
             record(kind["statics" if p["is_static"] else "methods"], p["name"], ret)
+            if not p["is_static"]:
+                own.setdefault(name, set()).add(p["name"])
 
     # A base is recorded only where the data holds the type it names.
     for kind, base, params in deferred_bases:
@@ -263,6 +268,9 @@ def build(origin):
                     names = [new if n == old else n for n in names]
                 ret = substitute(m["ret"], renamed, names) if m["ret"] else None
                 record(types[target]["methods"], m["name"], ret)
+                extended.setdefault(target, {}).setdefault(m["name"], set()).add(
+                    name.rpartition(".")[0]
+                )
                 for position, arg in enumerate(args[1:]):
                     held = callback(arg, names)
                     if held:
@@ -281,6 +289,8 @@ def build(origin):
                 m["name"],
                 ret,
             )
+            if not m["is_static"]:
+                own.setdefault(name, set()).add(m["name"])
             for position, arg in enumerate(args):
                 held = arg and callback(arg, names)
                 if held:
@@ -314,6 +324,15 @@ def build(origin):
         )
     }
     version = _runtime_version(origin)
+    # A method a type has of its own is called before an extension.
+    extensions = {
+        target: {
+            method: sorted(spaces)
+            for method, spaces in names.items()
+            if method not in own.get(target, ())
+        }
+        for target, names in extended.items()
+    }
     return (
         f"the .NET {version} shared runtime, by reflection",
         types,
@@ -321,6 +340,8 @@ def build(origin):
         scope,
         None,
         callbacks,
+        {target: names for target, names in extensions.items() if names},
+        {name: len(held["takes"]) for name, held in delegates.items()},
     )
 
 

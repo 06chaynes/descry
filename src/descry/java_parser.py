@@ -26,9 +26,10 @@ from descry.generate import (
     _bracketed_parts,
     _generic_metadata,
     _innermost,
-    argument_count,
     blank_strings,
+    call_arguments,
     is_generated_source,
+    record_lambdas,
     source_lines,
 )
 
@@ -832,9 +833,10 @@ class JavaParser(BaseParser):
                         paren,
                         origin,
                     )
-                    passed = argument_count(code_lines, raw_lines, i, paren + 1)
+                    passed = call_arguments(code_lines, raw_lines, i, paren + 1)
                     if passed is not None:
-                        self.builder.edges[-1]["metadata"]["args"] = passed
+                        self.builder.edges[-1]["metadata"]["args"] = len(passed)
+                        record_lambdas(self.builder.edges[-1]["metadata"], passed, "->")
                 self._bind_closures(code, i, lines, len(code))
                 references = "::" in code and _RE_METHOD_REFERENCE.finditer(code)
                 for reference in references or ():

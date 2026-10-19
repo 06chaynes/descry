@@ -436,6 +436,143 @@ def _blocks(code_lines):
     return opened, levels
 
 
+# A word that opens, goes on with or closes a block, a brace, and a `;`
+_RE_BRANCH_WORD = re.compile(
+    r"(?<![\w.:@$])(?:class|module|def|do|begin|if|unless|while|until|case|for"
+    r"|elsif|else|when|in|then|rescue|ensure|end)(?![\w?!:])|[{};]"
+)
+# What leaves a statement where a body ends with it, by the statement's kind
+_LEAVES = {
+    "loop": "return|raise|throw|exit|abort|fail",
+    "if": "return|raise|next|break|redo|retry|throw|exit|abort|fail",
+}
+
+
+def _branches(code_lines):
+    """``(first, end, ways, on, exclusive)`` (see
+    ``BaseParser.read_branches``) of each `if`, `unless`, `case`, loop and
+    `begin`/`rescue` in ``code_lines``, a statement an `if`, `unless`,
+    `while` or `until` modifies too."""
+    branches, stack = [], []
+
+    def text(start, end):
+        """The code from position ``start`` to ``end``."""
+        lines = code_lines[start[0] - 1 : end[0]]
+        joined = "\n".join(lines)
+        return joined[start[1] : len(joined) - len(lines[-1]) + end[1]]
+
+    def add(kind, ways, end):
+        words = _LEAVES["loop" if kind == "loop" else "if"]
+        leaves = re.compile(rf"(?:^|[;\n])\s*(?:{words})\b[^;\n]*\s*$")
+        on = [w for w in ways if not (w and leaves.search(text(*w[-1])))]
+        first = min(w[0][0] for w in ways if w)
+        branches.append((first, end, ways, on, kind in ("if", "case")))
+
+    def open_way(frame, at):
+        """Start a way of ``frame`` at position ``at``."""
+        frame["awaiting"] = False
+        if frame["kind"] != "case" or frame["ways"] is not None:
+            frame["ways"] = (frame["ways"] or []) + [[[at, None]]]
+
+    def close_way(frame, at):
+        """End the way of ``frame`` going on at position ``at``."""
+        if frame["ways"] and frame["ways"][-1][-1][1] is None:
+            frame["ways"][-1][-1][1] = at
+
+    for index, line in enumerate(code_lines):
+        lineno = index + 1
+        for found in _RE_BRANCH_WORD.finditer(line):
+            word, at, after = (
+                found.group(),
+                (lineno, found.start()),
+                (lineno, found.end()),
+            )
+            top = stack[-1] if stack else None
+            if top and top["awaiting"] and word in ("then", "do", ";"):
+                open_way(top, after)
+            elif word == "{":
+                stack.append({"kind": "{", "awaiting": False})
+            elif word == "}":
+                if top and top["kind"] == "{":
+                    stack.pop()
+            elif word == "end":
+                while stack and stack[-1]["kind"] == "{":
+                    stack.pop()
+                frame = stack.pop() if stack else {"kind": None}
+                kind, ways = frame["kind"], frame.get("ways")
+                if kind in ("if", "case", "loop", "begin") and ways:
+                    close_way(frame, at)
+                    if kind in ("if", "case") and not frame["full"]:
+                        ways.append([])
+                    if kind == "loop":
+                        ways.insert(0, [])
+                    if len(ways) > 1:
+                        add(kind, ways, frame.get("end") or after)
+            elif word in ("if", "unless", "while", "until") and _RE_MODIFIED.search(
+                line[: at[1]]
+            ):
+                statement = line[: at[1]]
+                start = statement.rfind(";") + 1
+                start += len(statement[start:]) - len(statement[start:].lstrip())
+                if not statement.rstrip().endswith("end"):
+                    stop = line.find(";", at[1])
+                    stop = len(line) if stop < 0 else stop
+                    way = [((lineno, start), at)]
+                    add(
+                        "loop" if word in ("while", "until") else "if",
+                        [[], way],
+                        (lineno, stop),
+                    )
+            elif word in ("if", "unless", "while", "until", "for", "case"):
+                kind = {"if": "if", "unless": "if", "case": "case"}.get(word, "loop")
+                stack.append(
+                    {"kind": kind, "awaiting": True, "ways": None, "full": False}
+                )
+            elif word == "begin":
+                stack.append(
+                    {"kind": "begin", "awaiting": False, "ways": [[[after, None]]]}
+                )
+            elif word in ("class", "module", "def", "do"):
+                header = _RE_METHOD.match(line, at[1]) if word == "def" else None
+                if not (header and _RE_ENDLESS.match(line, header.end())):
+                    stack.append({"kind": word, "awaiting": False})
+            elif (
+                not top or top.get("end") or top["kind"] not in ("if", "case", "begin")
+            ):
+                continue
+            elif (
+                word == "elsif"
+                and top["kind"] == "if"
+                or word in ("when", "in")
+                and top["kind"] == "case"
+            ):
+                close_way(top, at)
+                top["ways"] = top["ways"] or []
+                top["awaiting"] = True
+            elif word == "else" and top["kind"] in ("if", "case"):
+                close_way(top, at)
+                top["ways"] = top["ways"] or []
+                top["full"] = True
+                open_way(top, after)
+            elif word == "else":
+                close_way(top, at)
+                top["ways"][0].append([after, None])
+            elif (
+                word == "rescue"
+                and top["kind"] == "begin"
+                and not _RE_MODIFIED.search(line[: at[1]])
+            ):
+                close_way(top, at)
+                top["awaiting"] = True
+            elif word == "ensure" and top["kind"] == "begin":
+                close_way(top, at)
+                top["end"] = at
+        top = stack[-1] if stack else None
+        if top and top["awaiting"]:
+            open_way(top, (lineno + 1, 0))
+    return branches
+
+
 def _continued(code_lines, index, text):
     """``text``, which line ``index`` ends with, and the lines it runs on
     to while it has a parenthesis open or ends with a comma."""
@@ -548,6 +685,7 @@ class RubyParser(BaseParser):
 
     doc_line_prefix = "#"
     doc_strip_chars = "# "
+    null_literal = "nil"
 
     def _add(self, parent_id, name, node_type, lineno, end_lineno, **metadata):
         """Add the node of the definition ``name`` of ``parent_id``, unless
@@ -710,6 +848,7 @@ class RubyParser(BaseParser):
 
         code_lines = _code_lines(lines)
         opened, levels = _blocks(code_lines)
+        self.read_branches(_branches(code_lines))
 
         # Requires — one pass over the file
         for line, code in zip(lines, code_lines):
@@ -1087,7 +1226,7 @@ class RubyParser(BaseParser):
                     assigned.setdefault(name, found.start())
             # `a&.b` calls `b` as `a.b` does.
             code = code.replace("&.", " .")
-            self.begin_line(code, lineno, raw=lines[index])
+            self.begin_line(code, lineno, raw=lines[index], since=since)
             # A line that goes on from a `.` starts with the method called.
             chained = previous.endswith(".") and not previous.endswith("..")
             previous = code.rstrip()
@@ -1195,6 +1334,8 @@ class RubyParser(BaseParser):
 
             bound = _RE_ASSIGNMENT.match(code)
             if bound:
+                if code[bound.end() :].strip() == self.null_literal:
+                    self._nulls.add((lineno, bound.start("name")))
                 value = code[bound.end() :]
                 origin = _constructed(_continued(code_lines, index, value))
                 edge = self._closes.get(len(code.rstrip()) - 1)

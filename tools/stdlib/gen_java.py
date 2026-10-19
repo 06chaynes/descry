@@ -251,7 +251,13 @@ def build(jdk):
         f"java.base {release['JAVA_RUNTIME_VERSION']} ({release['IMPLEMENTOR']}),"
         " exported packages, read with javap"
     )
-    return source, types, {}, scope, None, callbacks
+    # The parameters of a functional interface's one abstract method
+    functional = {
+        module.spell(name): len(signature[1])
+        for name in kept
+        if module.exported(name) and (signature := module.callable(name))
+    }
+    return source, types, {}, scope, None, callbacks, None, functional
 
 
 if __name__ == "__main__":

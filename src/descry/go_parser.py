@@ -21,6 +21,7 @@ from descry._comments import strip_block_comments, strip_line_comment
 from descry.generate import (
     BaseParser,
     _bracketed_parts,
+    _closing,
     _generic_metadata,
     _go_type_parts,
     blank_strings,
@@ -138,8 +139,10 @@ def _declaring_lines(lines, kinds):
     return read
 
 
-# `name :=` or `var name =`, which declare `name` with the value's type
-_DECLARES = r"(?<![\w.])(?P<var>var\s+)?(?P<name>\w+)\s*(?(var)=|:=)"
+# `name :=` or `var name =`, the first name of a statement, which it declares
+# with the first value's type: what is before it, but for whitespace, is no
+# `,`
+_DECLARES = r"(?:^|[^,\s])\s*(?<![\w.])(?P<var>var\s+)?(?P<name>\w+)\s*(?(var)=|:=)"
 
 _DECLARATIONS = (
     # `name Type` / `name *Type` in a receiver or parameter list; the `(`
@@ -223,6 +226,9 @@ _RE_CASE = re.compile(r"\s*case\s+\*?" + _DECLARED_TYPE + r"\s*:")
 
 # The keyword of an `if`, `switch` or `for` header and a space
 _HEADER = r"(?:\}\s*else\s+)?(?:if|switch|for)\s"
+# A value that makes a T: a composite literal, `&T{...}` too, or `new(T)`
+_RE_COMPOSITE = re.compile(r"[\s(]*(?:&[\s(]*)?" + _DECLARED_TYPE + r"\{.*\}[\s)]*")
+_RE_NEW = re.compile(r"\s*new\(\s*" + _DECLARED_TYPE + r"\s*\)\s*")
 # The simple statement a header starts with, in group 2
 _RE_INITIALIZER = re.compile(rf"(\s*{_HEADER})([^;{{]*);")
 
@@ -389,14 +395,15 @@ class GoParser(BaseParser):
             # `a, b := f()` binds each name to the result of the call in its
             # position; an assignment leaves the later variables the types
             # they were declared with.
-            self.declared[name].remove(bound)
             line, call, _, column = bound
-            names = [(name, column), *(self._later if self._declares else ())]
-            for position, (named, at) in enumerate(names):
-                # Where the binding goes on from a line before, at the line's end
-                self.declared.setdefault(named, []).append(
-                    (line, f"{call}.@{position}", False, at if binding else column)
-                )
+            # The call's whole result, bound before the line ended too
+            entries = self.declared[name]
+            entries[:] = [
+                e for e in entries if (e[0], e[1], e[3]) != (line, call, column)
+            ]
+            names = [name, *(n for n, _ in self._later if self._declares)]
+            for position, named in enumerate(names):
+                self._settle(named, line, column, f"{call}.@{position}")
 
     def declares(self, binding):
         return bool(binding["var"] or binding["short"])
@@ -430,11 +437,33 @@ class GoParser(BaseParser):
         return held[:-2].replace("::", ".") if held.endswith("()") else None
 
     def _expression_origin(self, code, start, end, lineno, since, owner):
-        """What ``_held`` reads the expression at columns ``start`` to
-        ``end`` of ``code`` as, where it is written."""
-        return self._read_from(
-            start, self._held, code[start:end].strip(), lineno, since
-        )
+        """The type the expression at columns ``start`` to ``end`` of
+        ``code`` makes, else what ``_held`` reads it as, where it is
+        written."""
+        text = code[start:end].strip()
+        while text[:1] == "(" and _closing([text], 0, 1) == (0, len(text) - 1, ")"):
+            text = text[1:-1].strip()  # what parentheses hold is the value
+        if made := _RE_COMPOSITE.fullmatch(text) or _RE_NEW.fullmatch(text):
+            return f"{self._scanned_type(made.groupdict())}()"
+        return self._read_from(start, self._held, text, lineno, since)
+
+    def _bound_values(self, found, code, end):
+        """As the base's, but `a, b := x, y` binds each name to the value in
+        its position, and `a, b := v` each to the result of `v` in its."""
+        names = [(found["name"], found.start("name"))]
+        later = re.compile(r"\w+").finditer(code, *found.span("later"))
+        names += [(name[0], name.start()) for name in later]
+        values = _bracketed_parts(code[found.end() : end])
+        if len(names) > 1 and len(values) == 1:
+            return [(n, at, found.end(), end, i) for i, (n, at) in enumerate(names)]
+        if len(names) == 1 or len(values) != len(names):
+            return super()._bound_values(found, code, end)
+        bound, start = [], found.end()
+        for (name, at), value in zip(names, values):
+            start = code.index(value, start)
+            bound.append((name, at, start, start + len(value), None))
+            start += len(value)
+        return bound
 
     def _held(self, expression, lineno, since):
         """Origin path of what ``expression`` holds at ``lineno``: a variable

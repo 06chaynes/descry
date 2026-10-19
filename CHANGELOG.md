@@ -64,7 +64,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   import clause, none of them valid source, and for a TypeScript default
   import named `type` (`import type  from "m"`), now read as `type`.
   Dart type arguments left unclosed, `x<a<b>a<b>…(`, took time
-  exponential in their length; they are now read in one pass.
+  exponential in their length; they are now read in one pass, as are
+  JavaScript lines of thousands of chained assignments or nested labelled
+  blocks, which took tens of seconds or exhausted the stack.
 - **Writes into the cache.** The cache directory sits in the indexed
   repository by default, which can ship it. The graph and the embedding
   cache are written through new, randomly named temporaries, so a symlink
@@ -295,63 +297,86 @@ Python SDK v2, and a full-tree review's findings are fixed.
   member's name where a member starts, not a call's arguments before a
   conditional's `:` or a `case`'s; a name before `=>` is a parameter
   unless it ends a return type. A local of no known value is of no known
-  type, whatever the module defines of its name. An assignment is read
-  wherever it is written, in a statement or an expression, a destructuring
-  pattern, `&&=`, `||=` and `??=` or a `for (x of …)` head, and from the
-  end of its value the variable holds what it assigns, a call's or a
-  name's value too, or no type known for a value descry does not read;
-  past an assignment that may not run, in a later case, in a loop that
-  comes round to it, or in a function that reads a variable from around it
-  that other code assigns, the variable holds one of the values written,
-  and where they differ its value is not known, unless it is declared with
-  a type. Two bindings of a name on one line hold what each is given, a
-  conditional's value has the type both its branches give, a member's
-  assignment types no local, and a type parameter's bound holds only in
-  the declaration it is written on, in Java, C#, Dart and Rust too. A file
-  with an `import` or an `export`, a `.mjs`, `.cjs`, `.mts` or `.cts`
-  file, and one that calls `require` or assigns `module.exports` or
+  type, whatever the module defines of its name. A `{` that starts a
+  statement is a block wherever one may start, after a label's, a `case`'s
+  or a `default`'s `:`, a bare `catch`, a class's `static` or a
+  `namespace`, and a block that is no branch runs what it holds. An
+  assignment is read wherever it is written, in a statement or an
+  expression, a `case` label, a template's hole, a destructuring pattern,
+  a parenthesized target, `&&=`, `||=` and `??=` or a `for (x of …)` head,
+  the first `case` label running where the switch does and a `do` body at
+  least once, and from the end of its value the variable holds what it
+  assigns, a call's or a name's value too, each name of a chain `x = y =
+  v` and of an array pattern its own, or no type known for a value descry
+  does not read, and `let x;` holds nothing that gives a type; past an
+  assignment that may not run, in a later case, in a loop that comes round
+  to it, or in a function that reads a variable from around it that other
+  code assigns, the variable holds one of the values written, and where
+  they differ its value is not known, unless it is declared with a type.
+  Two bindings of a name on one line hold what each is given, a
+  conditional's value has the type both its branches give or construct, a
+  member's assignment types no local, and a type parameter's bound holds
+  only in the declaration it is written on, in Java, C#, Dart and Rust
+  too. A file with an `import` or an `export`, a `.mjs`, `.cjs`, `.mts` or
+  `.cts` file, and one that calls `require` or assigns `module.exports` or
   `exports` is a module: what it declares is named in it alone, where it
   was any file's of the name, and an interface or object type is no value
   a call reaches. A specifier naming a directory, the project's root among
   them, is the module the directory's package.json names, else its index;
-  a name an import binds to a project module that cannot be located is no
-  global, and a call on it, or on `this` of a class it is the base of,
-  stays open, as does one of a member a class lacks whose base is a value
-  or an expression. JavaScript members are where the language puts them: a
-  class's `static` members, and one assigned to a class or a function,
-  `F.m = …`, are the constructor's, reached through it, a subclass and
-  `this` or `super` in a static member, never an instance; a function
-  assigned to `F.prototype.name` or listed in `F.prototype = { … }` is a
-  method of `F`'s instances, of `this` in `F` and of a class that `extends
-  F`, `Object.create(G.prototype)` or `new G()` giving it G's; a member
-  assigned a name holds what the name does, one assigned again is each
-  assignment, a call of it open with all of them; a function declared
-  inside `F` is no property of it; and a function called where it is
-  written is no function, its constant holding what it returns. An
+  a CommonJS module exports what Node gives it, `module.exports = { … }`
+  that object's properties, `module.exports = function …` the function and
+  `exports.name = …` each name, and `require` and a destructuring pattern
+  of it bind them; a name an import binds to a project module that cannot
+  be located is no global, and a call on it, or on `this` of a class it is
+  the base of, stays open, as does one of a member a class lacks whose
+  base is a value or an expression. JavaScript members are where the
+  language puts them: a class's `static` members, and one assigned to a
+  class or a function, `F.m = …`, are the constructor's, reached through
+  it, a subclass and `this` or `super` in a static member, never an
+  instance; a function assigned to `F.prototype.name` or listed in
+  `F.prototype = { … }` is a method of `F`'s instances, of `this` in `F`
+  and of a class that `extends F`, `Object.create(G.prototype)` or `new
+  G()` giving it G's; a member assigned a name holds what the name does,
+  one assigned again is each assignment, a call of it open with all of
+  them; a function declared inside `F` is no property of it, a class that
+  extends a function reaches its statics, and a function called where it
+  is written is no function, its constant holding what it returns; a call
+  of what a call returned reaches the function it returns by name. An
   attribute a method assigns to the instance, `this.name`, or `self.name`
   in Python, is found before a method of its name, as a name a Python
-  class body assigns is before a base's, and a call of it reaches what it
-  holds, a member it reads, bound or not, or a definition, or else stays
-  open. In Go, Rust, C, C++, Dart, Java and C#, a declaration in a block,
-  a statement's head or a parameter list is in scope to the end of that
-  block or statement, a Java or C# `case` pattern to the end of its switch
-  section, and no longer types its name after it. Each declaration is in a
-  scope of its own from where it is written, another of its name on the
-  line too, and hides its name from where its statement ends, of no type
-  known until its value is read, its initializer still reading the outer
-  one; one whose value is a name, a field or a borrow holds what that
-  holds, and one whose value starts on the next line that value. Past an
-  `if let`, a `for` or a match arm a name its pattern binds is what it was
-  before, a Rust closure's parameter is in scope to the end of the
-  closure's body, a C++ `catch` parameter has its type in its handler, and
-  a Go statement ends at a line end only where Go would insert a
-  semicolon. A Java `instanceof` variable holds its type only where the
-  test is known to have matched, after a negated test whose branch exits
-  too, an `else` being the nearest `if`'s without one, also after a branch
-  of one statement without braces; a C# `is` or `out` variable to the end
-  of its block, lambda or loop, a C# `using` variable has its
-  initializer's type and a `foreach` variable what iterating gives, and a
-  Go assignment no longer hides a package-level variable.
+  class body binds last by an assignment is before a base's and its own
+  `def`, but for `staticmethod` or `classmethod` of that `def`, and a call
+  of it reaches what it holds, a member it reads, bound or not, or a
+  definition, for a field the class declares as for one it does not, or
+  else stays open, as does a call of a Python variable or parameter of no
+  known value. After an `if`, a loop, a `try`, a `case` or `switch` and a
+  statement an `if` or `unless` modifies, a Python, Ruby or PHP name holds
+  what every way through it that goes on gives, where they agree, a way of
+  an `if` not seeing what another assigns, and `None`, `nil` or `null`
+  holding nothing a call is made on. In Go, Rust, C, C++, Dart, Java and
+  C#, a declaration in a block, a statement's head or a parameter list is
+  in scope to the end of that block or statement, a Java or C# `case`
+  pattern to the end of its switch section, and no longer types its name
+  after it. Each declaration is in a scope of its own from where it is
+  written, another of its name on the line too, and hides its name from
+  where its statement ends, of no type known until its value is read, its
+  initializer still reading the outer one; one whose value is a name, a
+  field or a borrow holds what that holds, and one whose value starts on
+  the next line that value; each name of a Go `x, y := a, b` holds the
+  value in its position, one bound to a call holds its result for a read
+  later on the line, a C# `using` resource included, and a Rust literal's
+  elements give what iterating it gives. Past an `if let`, a `for` or a
+  match arm a name its pattern binds is what it was before, a Rust
+  closure's parameter is in scope to the end of the closure's body, a C++
+  `catch` parameter has its type in its handler, and a Go statement ends
+  at a line end only where Go would insert a semicolon. A Java
+  `instanceof` variable holds its type only where the test is known to
+  have matched, after a negated test whose branch exits too, an `else`
+  being the nearest `if`'s without one, also after a branch of one
+  statement without braces; a C# `is` or `out` variable to the end of its
+  block, lambda or loop, a C# `using` variable has its initializer's type
+  and a `foreach` variable what iterating gives, and a Go assignment no
+  longer hides a package-level variable.
 - **Overloads, mixins and `#if` arms.** A call that several overloads take
   by the number of arguments it passes is left open with them as
   candidates: C# took the first that took as many, and Java and C++ took a
@@ -360,83 +385,96 @@ Python SDK v2, and a full-tree review's findings are fixed.
   class's before an interface's; in C# those of every part of a partial
   type, and of no interface for a class's value; in C++ only those of the
   first class that declares the name, defined or not, a field among them,
-  and its bases' where `using` brings them in. An overload that a type
-  before it declares with the same parameters, the base's type parameters
-  read as the subtype's arguments, does not count, nor does a private one
-  called from outside its type, so a call only a base's overload takes
-  reaches it. C/C++, Java and C# count a call's arguments from its `(` to
-  the `)` that closes it, over lines, braced initialisers and template
-  arguments, and record none where it is not found. A C/C++ function takes
-  as few arguments as its declarations allow, those of the same parameter
-  types however each writes them, through an alias, a using-declaration, a
-  qualifier or a namespace a macro opens, their defaults adding up by
-  position; a member's defaults are no free function's. A C# extension
-  method's receiver, named or a literal's, is its first argument; a method
-  of the type and an extension that both take a call leave it open, but
-  for one that passes nothing to a method that takes nothing; a generic
-  method whose type argument no argument tells is called with it written;
-  a type nested in the enclosing class is meant before one of the
-  namespace, and of a type declared in parts, the caller's file's part.
-  Ruby looks in a prepended module before the class, in an included one
-  after it and before the superclass, the last included first and the
-  first of one `include A, B` nearest, and in a module a class extends for
-  its singleton methods; an `alias_method` inside `class << self` is a
+  ambiguous where two bases find it but as one member of a base they
+  share, and its bases' where `using` brings them in. An overload that a
+  type before it declares with the same parameters, the base's type
+  parameters read as the subtype's arguments, does not count, nor does a
+  private one called from outside its type, so a call only a base's
+  overload takes reaches it. C/C++, Java and C# count a call's arguments
+  from its `(` to the `)` that closes it, over lines, braced initialisers
+  and template arguments, and record none where it is not found. A C/C++
+  function takes as few arguments as its declarations allow, those of the
+  same parameter types however each writes them, through an alias, a
+  using-declaration, a qualifier or a namespace a macro opens, their
+  defaults adding up by position, and a member function the class declares
+  and the project does not define is an overload of its name; a member's
+  defaults are no free function's. A C# or Java lambda converts only to a
+  delegate type or functional interface whose method takes as many
+  parameters as it declares (`dotnet.json` and `java.json` gain
+  `functional`). A C# extension method's receiver, named or a literal's,
+  is its first argument, and one a standard type has only from extension
+  methods is looked up from the namespace around the call outward, with
+  the `using` directives written at each level, so a project extension can
+  be the one called (`dotnet.json` gains `extensions`); a method of the
+  type and an extension that both take a call leave it open, but for one
+  that passes nothing to a method that takes nothing; a generic method
+  whose type argument no argument tells is called with it written; a type
+  nested in the enclosing class is meant before one of the namespace, and
+  of a type declared in parts, the caller's file's part. Ruby looks in a
+  prepended module before the class, in an included one after it and
+  before the superclass, the last included first and the first of one
+  `include A, B` nearest, and in a module a class extends for its
+  singleton methods; an `alias_method` inside `class << self` is a
   singleton method. A Dart mixin applied to a class leaves its `on` types
   to the class's superclass. A Dart `is` test, `switch` case or arm and
   if-case promote only where Dart's flow analysis does: a case whose
   heads, and the alternatives of an `||` pattern, test one type, a local
-  or a private final field, until an assignment reaches it, never in
-  another branch or case nor past one that exits, and not where every
-  assignment reaching it is of a new object of a type deriving from the
-  promoted one; the operands after an `&&` (an `||` for `is!`); the branch
-  of a conditional, `if` or `while` it is true in; past an `if` whose
-  other branch exits. A Dart `when` guard promotes in its case's body or
-  its switch-expression arm, a standard type's members are read from the
-  library's data whether or not the project extends it, a case's variables
-  are in scope through it, and a parameter gives way to an `is` test on
-  its line. No Dart pattern of a `switch` head or arm, a record or
-  multi-line case head or an alternative of `||` among them, is a
-  constructor call, a guard's call before `=>` is one, `:final x` binds
-  `x`, a field pattern's variable has the type of the getter it matches,
-  `for (var x in xs)` what iterating `xs` gives, a standard generic type
-  keeps its type arguments, an extension on a standard type applies to
-  types derived from it and one on a project type to no library type of
-  its name, and a function expression's parameters written over lines are
-  its own. A Go variable is of the type it is declared with whatever is
-  assigned to it later, an entry of a `var (...)` block declares, `x :=
-  (B{})` is a `B`, a literal that goes on to a method call types nothing,
-  and a method called on a composite literal, `T{}.M()`, is `T`'s. A C/C++
-  definition an `#if` arm the call is not under alone builds is a
-  candidate beside one every build has, where the unguarded one was taken;
-  one defined in several arms is built under what they share, where it had
-  the first arm's; `#ifndef X` that opens with `#define X` anywhere in a
-  file, as an amalgamation holds headers, is no arm. A C++ specialization
-  is a type of its own, named with its arguments, `template <> void
-  Box<int>::put()` a member of the template, and an instance of a template
-  is of the most specialized partial or explicit specialization its
-  arguments, completed by default template arguments, match; where a
-  macro, an alias or a type parameter leaves that undecided, the call
-  stays open with each class it may be, unless all reach one member
-  through a base. An override whose function-pointer parameters are named
-  otherwise is an override. An alias declared in a block, class or
-  namespace around a call is found before a definition of its name in a
-  namespace that is not, an alias of a standard type gives its library
-  value, `->` and subscripts on a raw pointer reach what it points at, and
-  a call of an alias whose type is not told stays open. Raw strings are
-  blanked over all their lines, and `T (*name)(…)` declares `name`. A
-  macro invocation without `;` alone on its lines ends its statement, so
-  the declaration after it is read; what a macro stringizes is no call; a
-  member type `X<A>::m` is that member, the one the library's data writes
-  for an instance or a project template's own, never `X<A>`; a name whose
-  template arguments close a list opened before it is not called by the
-  `(` after them; default template arguments of every declaration of a
-  template are merged; and a quoted include that is no file beside the
-  includer is read from a directory of the include path it may climb out
-  of. A C++ caller's function has an overload where a header both files
-  are compiled with declares one, and the call is the one of them that
-  takes it; a conversion operator, `operator fmt::string_view`, is no
-  definition of the name after its `::`. A Rust `impl` in a module is for
-  the type the module declares, before or after it, or imports with
+  or a private final field, until an assignment reaches it, a
+  parenthesized target, a pattern's variable, a `for` loop's variable, a
+  compound assignment, `++`, `--` and a write in an arrow body among them,
+  but not one to a name declared inside, never in another branch or case
+  nor past one that exits, and not where every assignment reaching it
+  gives a value whose type derives from the promoted one, a variable's, a
+  getter's, an operator's result or a pattern's part; past a `while (!(x
+  is T))` only its condition ends; the operands after an `&&` (an `||` for
+  `is!`); the branch of a conditional, `if` or `while` it is true in; past
+  an `if` whose other branch exits. A Dart `when` guard promotes in its
+  case's body or its switch-expression arm, a standard type's members are
+  read from the library's data whether or not the project extends it, a
+  case's variables are in scope through it, and a parameter gives way to
+  an `is` test on its line. No Dart pattern of a `switch` head or arm, a
+  record or multi-line case head, an alternative of `||` or the left of
+  `=` among them, is a constructor call, a guard's call before `=>` is
+  one, `:final x` binds `x`, a field pattern's variable has the type of
+  the getter it matches, `for (var x in xs)` what iterating `xs` gives, a
+  standard generic type keeps its type arguments, an extension on a
+  standard type applies to types derived from it and one on a project type
+  to no library type of its name, and a function expression's parameters
+  written over lines are its own. A Go variable is of the type it is
+  declared with whatever is assigned to it later, an entry of a `var
+  (...)` block declares, `x := (B{})` is a `B`, a literal that goes on to
+  a method call types nothing, and a method called on a composite literal,
+  `T{}.M()`, is `T`'s. A C/C++ definition an `#if` arm the call is not
+  under alone builds is a candidate beside one every build has, where the
+  unguarded one was taken; one defined in several arms is built under what
+  they share, where it had the first arm's; `#ifndef X` that opens with
+  `#define X` anywhere in a file, as an amalgamation holds headers, is no
+  arm. A C++ specialization is a type of its own, named with its
+  arguments, `template <> void Box<int>::put()` a member of the template,
+  and an instance of a template is of the most specialized partial or
+  explicit specialization its arguments, completed by default template
+  arguments, match; where a macro, an alias or a type parameter leaves
+  that undecided, the call stays open with each class it may be, unless
+  all reach one member through a base. An override whose function-pointer
+  parameters are named otherwise is an override. An alias declared in a
+  block, class or namespace around a call is found before a definition of
+  its name in a namespace that is not, an alias of a standard type gives
+  its library value, `->` and subscripts on a raw pointer reach what it
+  points at, and a call of an alias whose type is not told stays open. Raw
+  strings are blanked over all their lines, and `T (*name)(…)` declares
+  `name`. A macro invocation without `;` alone on its lines ends its
+  statement, so the declaration after it is read; what a macro stringizes
+  is no call; a member type `X<A>::m` is that member, the one the
+  library's data writes for an instance or a project template's own, never
+  `X<A>`; a name whose template arguments close a list opened before it is
+  not called by the `(` after them; default template arguments of every
+  declaration of a template are merged; and a quoted include that is no
+  file beside the includer is read from a directory of the include path it
+  may climb out of. A C++ caller's function has an overload where a header
+  both files are compiled with declares one, and the call is the one of
+  them that takes it; a conversion operator, `operator fmt::string_view`,
+  is no definition of the name after its `::`. A Rust `impl` in a module
+  is for the type the module declares, before or after it, or imports with
   `self::`/`super::`; an item after attributes on its line is read; `let b
   = B;` makes `b` an instance of a unit struct `B`; a path from `crate::`,
   `self::` or `super::` is followed through the module tree `mod`
@@ -740,42 +778,42 @@ Python SDK v2, and a full-tree review's findings are fixed.
 - **Indexer.** A parser failure or an unusable `sg` binary no longer
   aborts the whole index, nor does resolving a member of a union one of
   whose alternatives is a standard type, a value a dynamic `import()`
-  gives over several lines, or a Dart variable whose value is a call of
-  a standard type's method. A line holding a form feed, a vertical tab
-  or another character Python's `str.splitlines` ends a line at is one
-  line, as an editor and the source view show it, so the definitions and
-  calls after it are no longer filed a line or more below where they are
-  written. A JavaScript or TypeScript parameter list that names nothing,
-  `(:)`, no longer fails its file. A call after a `.` or a `->` that
-  ends the line before is a member of what that line ends with, no longer
-  a call of the function of its name. `index` no longer encodes every
-  symbol twice.
-  `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project root
-  when given `--project-root` alone, and refuses a path outside it.
-  scip-java no longer passes the Gradle init-script on Maven or sbt
-  projects, where `mvn`/`sbt` rejected it and no index was written; its
-  Kotlin-DSL pre-flight likewise runs only for a Gradle build, which is
-  now recognised by every marker scip-java's own detector accepts
-  (`settings.gradle` and `gradlew` beside the two build files). A Gradle
-  multi-project root is indexed as one build without a build file of its
-  own: by `settings.gradle`, or by `settings.gradle.kts` beside `gradlew`.
-  Where scip-java also detects another build tool at such a root (Maven,
-  sbt, Mill, Bazel or a SCIP config), with or without a build file of its
-  own, it refuses the root, and the root's subprojects are indexed instead.
-  Every JVM project is discovered on the same terms: a directory where
-  scip-java detects exactly one build tool, by the regular files its own
-  detectors read, so it is not run where it would answer "No build tool
-  detected" or "Multiple build tools detected", nor where a
-  `project/build.properties` holds a `\u` escape without four hex digits,
-  on which it aborts. A Rust root package beside
-  its workspace members, or beside nested crates, is indexed too:
-  `rust-analyzer scip` indexes only the crate at the path it is given, so
-  the root package had no index; it is named `.` where a member holds the
-  root directory's name. scip-dart is run on `.`; given `./` it
-  took the package for a nested one, skipped it and wrote an empty index.
-  scip-dart is found under either spelling — `scip-dart` or the
-  `scip_dart` `dart pub global` installs, read from `$PUB_CACHE` when
-  it is set — and its package discovery reaches
+  gives over several lines, or a Dart variable whose value is a call of a
+  standard type's method. A PHP `switch` that is empty, or whose labels
+  are class constants (`case self::A:`), no longer drops its file. A line
+  holding a form feed, a vertical tab or another character Python's
+  `str.splitlines` ends a line at is one line, as an editor and the source
+  view show it, so the definitions and calls after it are no longer filed
+  a line or more below where they are written. A JavaScript or TypeScript
+  parameter list that names nothing, `(:)`, no longer fails its file. A
+  call after a `.` or a `->` that ends the line before is a member of what
+  that line ends with, no longer a call of the function of its name.
+  `index` no longer encodes every symbol twice. `descry-generate` honours
+  `DESCRY_LOG_LEVEL`, walks the project root when given `--project-root`
+  alone, and refuses a path outside it. scip-java no longer passes the
+  Gradle init-script on Maven or sbt projects, where `mvn`/`sbt` rejected
+  it and no index was written; its Kotlin-DSL pre-flight likewise runs
+  only for a Gradle build, which is now recognised by every marker
+  scip-java's own detector accepts (`settings.gradle` and `gradlew` beside
+  the two build files). A Gradle multi-project root is indexed as one
+  build without a build file of its own: by `settings.gradle`, or by
+  `settings.gradle.kts` beside `gradlew`. Where scip-java also detects
+  another build tool at such a root (Maven, sbt, Mill, Bazel or a SCIP
+  config), with or without a build file of its own, it refuses the root,
+  and the root's subprojects are indexed instead. Every JVM project is
+  discovered on the same terms: a directory where scip-java detects
+  exactly one build tool, by the regular files its own detectors read, so
+  it is not run where it would answer "No build tool detected" or
+  "Multiple build tools detected", nor where a `project/build.properties`
+  holds a `\u` escape without four hex digits, on which it aborts. A Rust
+  root package beside its workspace members, or beside nested crates, is
+  indexed too: `rust-analyzer scip` indexes only the crate at the path it
+  is given, so the root package had no index; it is named `.` where a
+  member holds the root directory's name. scip-dart is run on `.`; given
+  `./` it took the package for a nested one, skipped it and wrote an empty
+  index. scip-dart is found under either spelling — `scip-dart` or the
+  `scip_dart` `dart pub global` installs, read from `$PUB_CACHE` when it
+  is set — and its package discovery reaches
   `<collection>/<name>/pubspec.yaml` (`pkgs/`, `apps/`, …), not only
   `packages/`, while a package under an excluded or dot-directory is left
   alone. An index file that parses but carries no symbols is logged, since
