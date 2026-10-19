@@ -350,7 +350,7 @@ return a type parameter where the signature writes one.
 
 ## C and C++
 
-Source: the headers of the installed toolchain, read by Clang 22.1.8 —
+Source: the headers of the installed toolchain, read by Clang 23.1.3 —
 glibc 2.44's under `/usr/include` for C, libstdc++ 16's under
 `/usr/include/c++/16` for C++:
 
