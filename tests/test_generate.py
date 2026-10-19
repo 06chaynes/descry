@@ -11555,6 +11555,19 @@ class TestTypeScriptCallResolution:
         assert time.monotonic() - started < 6
         assert any(n["id"] == "FILE:a.js::f" for n in builder.nodes)
 
+    def test_the_bindings_of_one_name_are_read_in_time_linear_in_the_code(
+        self, tmp_path
+    ):
+        """A line of six thousand assignments of one name in one function
+        is indexed in seconds: a read of the name looks only at the
+        bindings that can be in scope where it is read."""
+        count = 6000
+        line = "function f(){var a;" + "a=1," * count + "}\n"
+        started = time.monotonic()
+        builder = _index(tmp_path, {"a.js": line})
+        assert time.monotonic() - started < 3
+        assert any(n["id"] == "FILE:a.js::f" for n in builder.nodes)
+
     def test_a_block_starts_wherever_a_statement_does(self, tmp_path):
         """A `{` is a block after a label's, a `case`'s or `default`'s `:`,
         a bare `catch` and a class's `static`. A block that is a statement

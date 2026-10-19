@@ -11146,6 +11146,26 @@ class _JsScopes:
             for start, close, names, end, _ in held:
                 for name in names:
                     self._add(name, "param", start, (start, close), (start, end))
+        # Each name's bindings, indexed by their span for a read to find
+        # only those around it, and by the lines they are written over.
+        self._indexed, self._rows = {}, {}
+        for name in self.bindings:
+            self._index(name)
+
+    def _index(self, name):
+        """Index the bindings of ``name`` by position: their spans, nested
+        as the scopes they are, each with the bindings of it in the order
+        they are added, and the lines each is written over, sorted."""
+        by_span = {}
+        for rank, binding in enumerate(self.bindings[name]):
+            by_span.setdefault(binding[3], []).append((rank, binding))
+        self._indexed[name] = (
+            _nested(sorted(by_span, key=lambda s: (s[0], -s[1][0], -s[1][1]))),
+            by_span,
+        )
+        self._rows[name] = sorted(
+            (binding[2][0][0], binding[2][1][0]) for binding in self.bindings[name]
+        )
 
     def _param_regions(self):
         """``{line: [(start, close, names, end, written)]}``: each parameter
@@ -11782,15 +11802,18 @@ class _JsScopes:
         """The assignments of ``name`` in ``span``, of the variable a
         declaration of that span binds: those no declaration inside it
         binds."""
-        inside = [
-            b
-            for b in self.bindings.get(name, ())
-            if span[0] <= b[3][0] <= b[3][1] <= span[1]
-        ]
-        declared = [b[3] for b in inside if b[0] != "=" and b[3] != span]
+        nested, by_span = self._indexed.get(name, ((), {}))
+        # Only the spans inside ``span`` are read: it and what it holds.
+        inside = list(by_span.get(span, ()))
+        at = bisect_left(nested, (*span, -1))
+        end = bisect_left(nested, ((span[1][0], span[1][1] + 1),))
+        for entry in nested[at + 1 : end]:
+            if entry[1] <= span[1]:
+                inside += by_span[entry[:2]]
+        declared = [b[3] for _, b in inside if b[0] != "=" and b[3] != span]
         return [
             b
-            for b in inside
+            for _, b in inside
             if b[0] == "=" and not any(d[0] <= b[1] <= d[1] for d in declared)
         ]
 
@@ -11812,18 +11835,48 @@ class _JsScopes:
             )
         ]
 
+    def binds_again(self, name, lineno):
+        """Whether the lines more than one binding of ``name`` is written
+        over hold line ``lineno``."""
+        rows = self._rows.get(name, ())
+        at = bisect_right(rows, (lineno, 1 << 30))
+        seen = 0
+        while at > 0 and seen < 2:
+            at -= 1
+            if rows[at][1] >= lineno:
+                seen += 1
+        return seen > 1
+
     def visible(self, name, read, last):
         """The bindings of ``name`` in scope where it is read, somewhere from
         ``read`` to ``last``: those whose span holds that, a declaration from
         the start of its span, an assignment written before the read or read
         from a function inside the one it is in."""
         reader = self.function(read)
+        nested, by_span = self._indexed.get(name, ((), {}))
+        # Only the spans that can hold the read are read: those around
+        # where it is, and any that starts between it and the end of what
+        # it covers.
+        held = []
+        at = bisect_left(nested, (read,))
+        index = at - 1
+        while index >= 0:
+            start, end, outer = nested[index]
+            if read <= end:
+                held += by_span[(start, end)]
+            index = outer
+        held += [
+            entry
+            for span in nested[at : bisect_left(nested, ((last[0], last[1] + 1),))]
+            for entry in by_span[span[:2]]
+        ]
+        held.sort()
         return [
-            b
-            for b in self.bindings.get(name, ())
-            if b[3][0] <= last
-            and read <= b[3][1]
-            and (b[1] <= last or b[0] != "=" or self.function(b[1]) != reader)
+            binding
+            for _, binding in held
+            if binding[1] <= last
+            or binding[0] != "="
+            or self.function(binding[1]) != reader
         ]
 
     def unset(self, binding, read):
@@ -13524,14 +13577,12 @@ class TSParser(BaseParser):
         None where the line binds the name again or the scan gives it a
         type of its own, as `new T()` does, and for a variable declared
         with a type, which holds that type."""
-        declared = self._read_from(start, self._declaration, name, lineno)
-        lines = [range(b[2][0][0], b[2][1][0] + 1) for b in self._scopes.bindings[name]]
-        if (
-            declared
-            and self._scopes.typed(name, declared)
-            or sum(lineno in written for written in lines) > 1
-            or any((d[0], d[3]) == at for d in self.declared.get(name, ()))
+        if self._scopes.binds_again(name, lineno) or any(
+            (d[0], d[3]) == at for d in self.declared.get(name, ())
         ):
+            return None
+        declared = self._read_from(start, self._declaration, name, lineno)
+        if declared and self._scopes.typed(name, declared):
             return None
         held = self._expression_origin(code, start, end, lineno, since, owner)
         return None if held and re.search(r"(?:^|\.)[\w$]+$", held) else held

@@ -66,7 +66,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
   Dart type arguments left unclosed, `x<a<b>a<b>…(`, took time
   exponential in their length; they are now read in one pass, as are
   JavaScript lines of thousands of chained assignments or nested labelled
-  blocks, which took tens of seconds or exhausted the stack.
+  blocks, which took tens of seconds or exhausted the stack, and a name
+  assigned thousands of times, whose every read went over all of them.
 - **Writes into the cache.** The cache directory sits in the indexed
   repository by default, which can ship it. The graph and the embedding
   cache are written through new, randomly named temporaries, so a symlink
