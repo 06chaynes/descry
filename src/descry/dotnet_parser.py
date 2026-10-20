@@ -118,8 +118,47 @@ _RE_CALL = re.compile(
 )
 # A keyword and the `.` of a member of the literal blanked behind it
 _RE_KEYWORD_BEFORE_MEMBER = re.compile(
-    r"(?:return|throw|in|is|as|case|else|do|await|out|ref|new|when|and|or|not)\s*\.\s*"
+    r"(?:return|throw|in|is|as|case|else|do|await|out|ref|new|when|and|or|not"
+    r"|true|false|null)\s*\.\s*"
 )
+# A literal that ends just before the `.` of a member call: a character,
+# a number, `true`/`false`/`null`, read on the raw line where `code` has
+# literals blank
+_RE_LITERAL_TAIL = re.compile(
+    r"(?<![\w.])(?:'(?:[^'\\]|\\.)*'|true|false|null"
+    r"|0[xX][0-9a-fA-F_]+[uUlL]*|0[bB][01_]+[uUlL]*"
+    r"|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d[\d_]*)?[uUlLfFdDmM]{0,2})\s*\.$"
+)
+# The integer types in the order C# gives an integer literal the first that
+# holds its value, with the largest value of each
+_INTEGERS = (("int", 2**31 - 1), ("uint", 2**32 - 1), ("long", 2**63 - 1))
+
+
+def _literal_type(literal):
+    """The C# type of ``literal``, None for `null`: a real literal's by its
+    suffix, `double` without one; an integer literal's the first of `int`,
+    `uint`, `long` and `ulong` its suffix allows that holds its value."""
+    low = literal.lower().replace("_", "")
+    if low[0] == "'":
+        return "char"
+    if low in ("true", "false"):
+        return "bool"
+    if low == "null":
+        return None
+    based = low[:2] in ("0x", "0b")
+    real = not based and {"f": "float", "d": "double", "m": "decimal"}.get(low[-1])
+    if real or not based and ("." in low or "e" in low):
+        return real or "double"
+    digits = low.rstrip("ul")
+    suffix = low[len(digits) :]
+    value = int(digits, {"0x": 16, "0b": 2}.get(low[:2], 10))
+    allowed = {"": ("int", "uint", "long"), "u": ("uint",), "l": ("long",)}
+    return next(
+        (t for t, top in _INTEGERS if t in allowed.get(suffix, ()) and value <= top),
+        "ulong",
+    )
+
+
 # The type arguments of a generic name, innermost first: what follows them
 # tells them from two comparisons
 _RE_TYPE_ARGUMENTS = re.compile(
@@ -745,6 +784,12 @@ class DotnetParser(BaseParser):
                 origin = f"{(cast[1] or cast[2]).replace('.', '::')}().{callee}"
             elif lines[index][: len(before)].rstrip().endswith('".'):
                 origin = f"string().{callee}"
+            elif (
+                lit := _RE_LITERAL_TAIL.search(lines[index][: len(before)].rstrip())
+            ) and (kind := _literal_type(lit[0].rstrip()[:-1].rstrip())):
+                # `5.Val()`, `'c'.Ext()`, `true.Ext()`: the literal's own
+                # type is the receiver's.
+                origin = f"{kind}().{callee}"
             self.add_call(
                 source_id,
                 callee,
@@ -1102,6 +1147,8 @@ class DotnetParser(BaseParser):
                     # What follows the `{` on its line is read as a line.
                     i, column = opened[0], opened[1] + 1
                     code_lines[i] = " " * column + code_lines[i][column:]
+                    # The line changed under the index `_find_block_end` reads.
+                    self._braces = None
                     self._attributes = []
                     continue
                 else:

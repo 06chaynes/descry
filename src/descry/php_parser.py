@@ -21,6 +21,7 @@ from descry.generate import (
     _is_call_chain,
     _js_brackets,
     _nested,
+    _run_start,
     _tails,
     _use_leaves,
     blank_strings,
@@ -263,6 +264,8 @@ _ALT_MARKERS = re.compile(
     r"|end(?:if|while|for|foreach|switch)\b"
     r"|elseif\s*\(|else\s*:|case\b|default\b)"
 )
+# An `else` an `if` is written after
+_RE_ELSE_BEFORE = re.compile(r"(?<![\w$])else\Z")
 # The word that closes each alternative-syntax statement's body
 _ALT_END = {
     "if": "endif",
@@ -318,37 +321,12 @@ def _branches(codes: list[str]) -> list:
             end = closer.get(end, end) + 1
         return (offset, end), end + 1
 
-    def alt_ways(word, colon):
-        """``(ways, after)`` for the alternative-syntax body of an `if`,
-        loop or `switch`, from ``colon``, the `:` of its head: the span
-        each of its ways runs and the offset past its `end…`; None where
-        none ends it."""
-        depth, marks, pos = 0, [], colon + 1
-        end = None
-        while marker := _ALT_MARKERS.search(text, pos):
-            token = marker[1]
-            if token.endswith("(") and not token.startswith("elseif"):
-                # A `:` after the head's `)` opens a nested body; an
-                # `elseif` head is the statement's own way.
-                close = closer.get(marker.end() - 1, marker.end())
-                depth += text[close + 1 :].lstrip()[:1] == ":"
-                pos = close + 1
-            elif token.startswith("end"):
-                if depth:
-                    depth -= 1
-                elif token == _ALT_END[word]:
-                    end = marker.start()
-                    break
-                else:
-                    return None
-                pos = marker.end()
-            elif not depth:
-                marks.append(marker)
-                pos = marker.end()
-            else:
-                pos = marker.end()
-        if end is None:
-            return None
+    def alt_ways(word, colon, marks, end):
+        """``(ways, after)`` of an alternative-syntax statement whose body
+        runs from ``colon``, the `:` of its head, to ``end``, the offset of
+        its `end…`: the span each of its ways runs — ``marks`` are its
+        `elseif`/`else`/`case`/`default` boundaries — and the
+        offset past the `end…`."""
         if word == "switch":
             ways = [
                 [(label_end(m.end(), end), n.start() if n else end)]
@@ -361,7 +339,9 @@ def _branches(codes: list[str]) -> list:
             ways, start = [], colon + 1
             for m in marks:
                 ways.append([(start, m.start())])
-                if m[0].startswith("elseif"):
+                if m[0].endswith("("):
+                    # An `elseif (` head ends at the `:` after
+                    # its `)`; `else` ends at its own `:`.
                     start = label_end(closer.get(m.end() - 1, m.end()) + 1, end)
                 else:
                     start = m.end()
@@ -373,10 +353,72 @@ def _branches(codes: list[str]) -> list:
             )
         return [[], [(colon + 1, end)]], end + len(_ALT_END[word])
 
+    def emit(word, ways, after):
+        """File the branch of ``word`` whose ways are ``ways``, ending at
+        ``after``: the ways that go on are those not ending in a `return`,
+        `throw`, `exit` or `die` (plus `continue`/`break` for `if`/`try`)."""
+        kind = "loop" if word in ("while", "for", "foreach") else word
+        words = _LEAVES + "|continue|break" * (kind in ("if", "try"))
+        leaf = re.compile(rf"\s*(?:{words})\b[^;{{}}]*")
+        on = [
+            w for w in ways if not (w and _ends_with(tails, text, *w[-1], leaf, True))
+        ]
+        if not any(ways):
+            return  # no body runs: an empty `switch`
+        first = min(w[0][0] for w in ways if w)
+        branches.append(
+            (
+                place(first),
+                place(after),
+                [[(place(a), place(b)) for a, b in w] for w in ways],
+                [[(place(a), place(b)) for a, b in w] for w in on],
+                kind in ("if", "switch"),
+            )
+        )
+
     branches = []
+    # The alternative-syntax statements in one pass: each head's `(` a `:`
+    # follows pushes a frame, `elseif`/`else`/`case`/`default`
+    # mark the innermost open one, `end…` closes it. Any other statement a
+    # head opens is skipped whole, `else`/`elseif` clauses and all, so its
+    # markers are not taken for the frame's own.
+    stack, pos = [], 0
+    while marker := _ALT_MARKERS.search(text, pos):
+        token = marker[1]
+        while stack and stack[-1][0] == "nonalt" and marker.start() >= stack[-1][1]:
+            stack.pop()
+        if token.endswith("(") and not token.startswith("else"):
+            close = closer.get(marker.end() - 1, marker.end())
+            if text[close + 1 :].lstrip()[:1] == ":":
+                stack.append(["alt", token.split("(")[0].strip(), close + 1, []])
+            else:
+                _, after = body(close + 1)
+                if token.startswith("if"):
+                    while other := _RE_ELSE.match(text, after):
+                        start = other.end()
+                        if other[0].endswith("("):
+                            start = closer.get(start - 1, start) + 1
+                        _, after = body(start)
+                        if not other[0].endswith("("):
+                            break
+                stack.append(["nonalt", after])
+            pos = close + 1
+        elif token.startswith("end"):
+            if stack and stack[-1][0] == "alt":
+                word, colon, marks = stack.pop()[1:]
+                if token == _ALT_END[word]:
+                    emit(word, *alt_ways(word, colon, marks, marker.start()))
+            pos = marker.end()
+        elif stack and stack[-1][0] == "alt":
+            stack[-1][3].append(marker)
+            pos = marker.end()
+        else:
+            pos = marker.end()
+
     for found in _RE_BRANCHING.finditer(text):
         word = found[1] or found[2]
-        if word == "if" and re.search(r"else\s*$", text[: found.start()]):
+        lead = _run_start(text, found.start())
+        if word == "if" and _RE_ELSE_BEFORE.search(text, max(lead - 4, 0), lead):
             continue  # an `else if` goes on with the `if` before it
         if word == "try":
             way, after = body(found.end() - 1)
@@ -389,58 +431,36 @@ def _branches(codes: list[str]) -> list:
         else:
             close = closer.get(found.end() - 1, found.end())
             if text[close + 1 :].lstrip()[:1] == ":":
-                # The alternative syntax, `if (...):`…`endif`
-                result = alt_ways(word, close + 1)
-                if result is None:
-                    continue
-                ways, after = result
-            else:
-                way, after = body(close + 1)
-                ways = [[way]]
-                if word == "if":
-                    while other := _RE_ELSE.match(text, after):
-                        start = other.end()
-                        if other[0].endswith("("):
-                            start = closer.get(start - 1, start) + 1
-                        way, after = body(start)
-                        ways.append([way])
-                        if not other[0].endswith("("):
-                            break
-                    else:
-                        ways.append([])
-                elif word == "switch":
-                    block = _innermost(spans, way[0])
-                    labels = [
-                        m
-                        for m in _RE_LABEL.finditer(text, *way)
-                        if _innermost(spans, m.start()) == block
-                    ]
-                    ways = [
-                        [(label_end(m.end(), way[1]), n.start() if n else way[1])]
-                        for m, n in zip(labels, [*labels[1:], None])
-                    ]
-                    if not any(m[0] == "default" for m in labels):
-                        ways.append([])
+                continue  # the alternative syntax is read by the pass above
+            way, after = body(close + 1)
+            ways = [[way]]
+            if word == "if":
+                while other := _RE_ELSE.match(text, after):
+                    start = other.end()
+                    if other[0].endswith("("):
+                        start = closer.get(start - 1, start) + 1
+                    way, after = body(start)
+                    ways.append([way])
+                    if not other[0].endswith("("):
+                        break
                 else:
-                    ways = [[], [way]]
-        kind = "loop" if word in ("while", "for", "foreach") else word
-        words = _LEAVES + "|continue|break" * (kind in ("if", "try"))
-        leaf = re.compile(rf"\s*(?:{words})\b[^;{{}}]*")
-        on = [
-            w for w in ways if not (w and _ends_with(tails, text, *w[-1], leaf, True))
-        ]
-        if not any(ways):
-            continue  # no body runs: an empty `switch`
-        first = min(w[0][0] for w in ways if w)
-        branches.append(
-            (
-                place(first),
-                place(after),
-                [[(place(a), place(b)) for a, b in w] for w in ways],
-                [[(place(a), place(b)) for a, b in w] for w in on],
-                kind in ("if", "switch"),
-            )
-        )
+                    ways.append([])
+            elif word == "switch":
+                block = _innermost(spans, way[0])
+                labels = [
+                    m
+                    for m in _RE_LABEL.finditer(text, *way)
+                    if _innermost(spans, m.start()) == block
+                ]
+                ways = [
+                    [(label_end(m.end(), way[1]), n.start() if n else way[1])]
+                    for m, n in zip(labels, [*labels[1:], None])
+                ]
+                if not any(m[0] == "default" for m in labels):
+                    ways.append([])
+            else:
+                ways = [[], [way]]
+        emit(word, ways, after)
     return branches
 
 

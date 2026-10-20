@@ -12715,6 +12715,71 @@ class TestTypeScriptCallResolution:
         _index(tmp_path, {"a.js": source})
         assert time.monotonic() - started < 6
 
+    def test_module_member_of_other_name_is_no_exports(self, tmp_path):
+        """`module.foo = function` sets a property of `module`, not the
+        module's exports: the function is filed under its own name and a
+        later `module.exports =` is not shadowed by it."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": """
+                function helper() {}
+                module.foo = function evil() { helper(); };
+                module.exports = function real() { helper(); };
+                """,
+            },
+        )
+        ids = {n["id"]: n["metadata"]["name"] for n in builder.nodes}
+        assert ids["FILE:m.js::module.exports"] != "foo"
+        assert _calls(builder, "FILE:m.js") == ["FILE:m.js::helper"]
+        assert _calls(builder, "FILE:m.js::module.exports") == ["FILE:m.js::helper"]
+
+    def test_a_module_exports_reassignment_orphans_named_exports(self, tmp_path):
+        """`exports.x =` and `module.exports.y =` write properties of the
+        object a later `module.exports =` replaces: they bind an orphaned
+        object and nothing resolves to them. Entries written after the
+        reassignment still count."""
+        builder = _index(
+            tmp_path,
+            {
+                "rep.js": """
+                const A = { use() {} };
+                const B = { use() {} };
+                const C = { use() {} };
+                exports.x = A;
+                module.exports.y = A;
+                module.exports = B;
+                module.exports.z = C;
+                """,
+                "use.js": """
+                const m = require('./rep');
+                function g() { m.x(); m.y(); m.z(); }
+                """,
+            },
+        )
+        calls = _calls(builder, "FILE:use.js::g")
+        assert "FILE:rep.js::A" not in calls
+        assert "FILE:rep.js::C" in calls
+
+    def test_module_exports_name_is_read_in_the_scope_it_is_written(self, tmp_path):
+        """`module.exports = x` inside a function reads the `x` bound
+        there, not a same-named top-level binding."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": """
+                const x = { use() {} };
+                function f() {
+                  const x = { use() {} };
+                  module.exports = x;
+                }
+                f();
+                """,
+                "use.js": "const m = require('./m');\nm.use();\n",
+            },
+        )
+        assert _calls(builder, "FILE:use.js") == ["FILE:m.js::f::x::use"]
+
 
 class TestGoCallResolution:
     def test_bare_call_is_the_function_not_a_method_of_that_name(self, tmp_path):
@@ -18321,6 +18386,27 @@ class TestPhpCallResolution:
         )
         assert "REF:$x->use_" in _calls(builder, "FILE:a.php::f")
 
+    def test_a_coalescing_assign_of_a_name_never_bound_runs_no_crash(self, tmp_path):
+        """`$x ??= v` in a function where `$x` was never bound reads no
+        position to compare against: the file keeps its calls instead of
+        dying to a `None > position` comparison."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """\
+                <?php
+                class A { function use_() {} }
+                function f() {}
+                function a($c) { $x = null; if ($c) { $x = new A(); } }
+                function b() { $x ??= f(); $x->use_(); }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.php::b") == [
+            "FILE:a.php::f",
+            "REF:$x->use_",
+        ]
+
 
 class TestDotnetCallResolution:
     def test_a_name_a_block_declares_is_its_own_to_the_block_s_end(self, tmp_path):
@@ -19803,6 +19889,76 @@ class TestDotnetCallResolution:
             },
         )
         assert _calls(builder, "FILE:b.cs::X::M") == ["FILE:a.cs::Ext::Twice"]
+
+    def test_an_extension_method_of_a_literal_reaches_it(self, tmp_path):
+        """`5.Val()`, `2.5.Ext()`, `'c'.Ext()`, `true.Ext()`, `"abc".Ext()`
+        call a member of the literal's own type — int, double, char, bool,
+        string, and the suffixed uint/long/float/decimal — so an extension
+        method written for it is reached."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cs": """
+                static class Ext {
+                    public static void Val(this int i) { }
+                    public static void Dbl(this double d) { }
+                    public static void Ch(this char c) { }
+                    public static void Bo(this bool b) { }
+                    public static void Str(this string s) { }
+                    public static void Lng(this long l) { }
+                    public static void Uns(this uint u) { }
+                    public static void Flt(this float f) { }
+                    public static void Dec(this decimal d) { }
+                }
+                class P {
+                    void M() {
+                        5.Val();
+                        2.5.Dbl();
+                        'c'.Ch();
+                        true.Bo();
+                        "abc".Str();
+                        5L.Lng();
+                        5u.Uns();
+                        5f.Flt();
+                        5m.Dec();
+                        0xFF.Val();
+                    }
+                    void N(Q x5) { x5.Lng(); }
+                }
+                class Q { }
+                """
+            },
+        )
+        # `x5` is a variable, not the literal `5`.
+        assert "FILE:a.cs::Ext::Lng" not in _calls(builder, "FILE:a.cs::P::N")
+        assert _calls(builder, "FILE:a.cs::P::M") == [
+            "FILE:a.cs::Ext::Bo",
+            "FILE:a.cs::Ext::Ch",
+            "FILE:a.cs::Ext::Dbl",
+            "FILE:a.cs::Ext::Dec",
+            "FILE:a.cs::Ext::Flt",
+            "FILE:a.cs::Ext::Lng",
+            "FILE:a.cs::Ext::Str",
+            "FILE:a.cs::Ext::Uns",
+            "FILE:a.cs::Ext::Val",
+            "FILE:a.cs::Ext::Val",
+        ]
+
+    def test_the_brace_index_follows_a_line_rewritten_in_place(self, tmp_path):
+        """The header of a type whose `{` shares its line is blanked in
+        ``code_lines`` so its tail reads as a line; the brace index cached
+        for it reads the rewritten line, not the text it was built on."""
+        from descry.dotnet_parser import DotnetParser
+
+        builder = CodeGraphBuilder(tmp_path)
+        parser = DotnetParser(builder)
+        parser.parse(
+            tmp_path / "a.cs",
+            "a.cs",
+            "class C { M(() => {});\n}\nclass D { void M2() { N(); } }\n",
+        )
+        data = parser._braces and parser._braces[1]
+        assert data is None or data[0][0].lstrip().startswith("M(")
 
 
 class TestClangCallResolution:
@@ -23239,6 +23395,49 @@ class TestRubyCallResolution:
         started = time.monotonic()
         _index(tmp_path, {"a.rb": source})
         assert time.monotonic() - started < 10
+
+    def test_a_way_leaving_nil_marks_the_name_maybe_null(self, tmp_path):
+        """`x = 5` then `x = nil` in one way of an `if` leaves `x` maybe
+        null past the merge: `x ||= A.new` may not run, so `x.use` is open
+        even though every binding's written value reads `?`."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.rb": """\
+                class A; def use; end; end
+                x = 5
+                if c
+                  x = nil
+                end
+                x ||= A.new
+                x.use
+                """
+            },
+        )
+        assert "REF:x.use" in _calls(builder, "FILE:a.rb")
+
+    def test_a_top_level_merge_is_not_consumed_by_a_def(self, tmp_path):
+        """A top-level `if` whose ways bind `x` differently merges once for
+        every scope: a `def` parsed between it and a top-level read does
+        not swallow the merge with only its own bindings."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.rb": """\
+                class A; def use; end; end
+                class B; def use; end; end
+                x = A.new
+                if c
+                  x = B.new
+                end
+                def m
+                  y = 1
+                end
+                x.use
+                """
+            },
+        )
+        assert "REF:x.use" in _calls(builder, "FILE:a.rb")
 
 
 class TestDartCallResolution:

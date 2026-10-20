@@ -6532,7 +6532,9 @@ class BaseParser:
                 return
             self._next_branch += 1
             # Only a name bound inside can disagree; a way with none of it
-            # holds the last bound before it, as every way's.
+            # holds the last bound before it, as every way's. Each statement
+            # merges once for every scope: a binding of the file level takes
+            # part wherever it is read from, one of another scope not.
             for name in self._bound_names(
                 self._bound_lines, self._bound_order, first[0], end[0]
             ):
@@ -6542,14 +6544,16 @@ class BaseParser:
                 bound = [
                     ((d[0], self._column(name, d) or 0), d[1])
                     for d in entries
-                    if since <= d[0]
+                    if first[0] <= d[0] <= end[0] or since <= d[0] or d[2]
                 ]
                 # A way that leaves the name null is no value a call is made
                 # on, but one an assignment where it is null runs in.
                 valued = [b for b in bound if b[0] not in self._nulls]
                 if _disagree(valued, first, on):
                     entries.append((end[0], "?", False, end[1]))
-                elif _disagree(bound, first, on):
+                elif _disagree(bound, first, on) or _leaves_null(
+                    bound, first, on, self._nulls
+                ):
                     self._maybe_null.setdefault(name, []).append(end)
 
     def enter_context(self, node_id, first_line, last_line, params=frozenset()):
@@ -6719,7 +6723,9 @@ class BaseParser:
         # The statements that end before the line have merged.
         self._merge_branches((lineno, 0), since)
         seen = self._seen(name, lineno, since)
-        at = seen and (seen[0], self._column(name, seen) or 0)
+        if seen is None:
+            return None
+        at = seen[0], self._column(name, seen) or 0
         if any(end > at for end in self._maybe_null.get(name, ())):
             # A merge past the write left it maybe null, maybe an object.
             return None
@@ -11381,6 +11387,20 @@ def _disagree(bound, first, ways):
     return inside and len(held) > 1
 
 
+def _leaves_null(bound, first, ways, nulls):
+    """Whether ``ways``, as ``_disagree`` takes them, leave a name bound
+    null in one of them and not in another: one's last binding in it is in
+    ``nulls``, the positions bound to the null literal, and another's is
+    not. Values do not tell them apart — null binds read ``?``."""
+    leaves = set()
+    for way in ways:
+        within = [b for b in bound if any(s <= b[0] <= e for s, e in way)]
+        seen = within or [b for b in bound if b[0] < first]
+        if seen:
+            leaves.add(max(seen[::-1], key=itemgetter(0))[0] in nulls)
+    return len(leaves) > 1
+
+
 class _BoundEntries(list):
     """The entries ``declared`` maps a name to: each entry's line joins the
     parser's ``_bound_lines`` as it is written."""
@@ -11506,10 +11526,11 @@ class _JsScopes:
         # Each name's bindings, indexed by their span for a read to find
         # only those around it, and by the lines they are written over.
         self._indexed, self._rows = {}, {}
-        # (name, span) -> (``assignments``, their functions) and (name,
-        # span, after) -> the values the ones before a read give, kept as
-        # reads move
-        self._assignments, self._avalues, self._reassigned = {}, {}, {}
+        # name -> the last span's part of ``assignments`` and its functions,
+        # the values the ``value`` reader last gave, and the state of the
+        # last ``reassigned_values`` read: one entry per name keeps what is
+        # retained linear in the input while repeat reads reuse it.
+        self._acache, self._vcache, self._rstate = {}, {}, {}
         for name in self.bindings:
             self._index(name)
 
@@ -12271,49 +12292,51 @@ class _JsScopes:
     def assignments(self, name, span):
         """The assignments of ``name`` in ``span``, of the variable a
         declaration of that span binds: those no declaration inside it
-        binds."""
-        key = name, span
-        held = self._assignments.get(key)
-        if held is None:
-            nested, by_span, at, _ = self._indexed.get(name, ((), {}, {}, {}))
-            # Only the spans inside ``span`` are read: it and what it holds.
-            inside = list(by_span.get(span, ()))
-            at = at.get(span, 0)
-            end = bisect_left(nested, ((span[1][0], span[1][1] + 1),))
-            for entry in nested[at + 1 : end]:
-                if entry[1] <= span[1]:
-                    inside += by_span[entry[:2]]
-            declared = [b[3] for _, b in inside if b[0] != "=" and b[3] != span]
-            inside = [
-                b
-                for _, b in inside
-                if b[0] == "=" and not any(d[0] <= b[1] <= d[1] for d in declared)
-            ]
-            held = inside, frozenset(self.function(b[1]) for b in inside)
-            self._assignments[key] = held
-        return held[0]
+        binds. Only the last span read is kept per name: the reads of a
+        name under one span come together, and what is held stays linear in
+        the input where many nested spans hold the name."""
+        cached = self._acache.get(name)
+        if cached is not None and cached[0] == span:
+            return cached[1]
+        nested, by_span, at, _ = self._indexed.get(name, ((), {}, {}, {}))
+        # Only the spans inside ``span`` are read: it and what it holds.
+        inside = list(by_span.get(span, ()))
+        at = at.get(span, 0)
+        end = bisect_left(nested, ((span[1][0], span[1][1] + 1),))
+        for entry in nested[at + 1 : end]:
+            if entry[1] <= span[1]:
+                inside += by_span[entry[:2]]
+        declared = [b[3] for _, b in inside if b[0] != "=" and b[3] != span]
+        inside = [
+            b
+            for _, b in inside
+            if b[0] == "=" and not any(d[0] <= b[1] <= d[1] for d in declared)
+        ]
+        self._acache[name] = (
+            span,
+            inside,
+            frozenset(self.function(b[1]) for b in inside),
+        )
+        return inside
 
     def assignment_funcs(self, name, span):
         """The functions ``assignments`` of ``name`` in ``span`` are in."""
         self.assignments(name, span)
-        return self._assignments[(name, span)][1]
+        return self._acache[name][2]
 
     def assigned_values(self, name, span, fingerprint, value):
         """The set ``value(b)`` of each assignment of ``name`` in ``span``,
         while what ``value`` reads is unchanged."""
-        key = name, span
-        held = self._avalues.get(key)
-        if held is None or held[0] != fingerprint:
-            held = (
-                fingerprint,
-                {
-                    value(b)
-                    for b in self.assignments(name, span)
-                    if (name, b[1]) not in self.undefined
-                },
-            )
-            self._avalues[key] = held
-        return held[1]
+        cached = self._vcache.get(name)
+        if cached is not None and cached[:2] == (span, fingerprint):
+            return cached[2]
+        values = {
+            value(b)
+            for b in self.assignments(name, span)
+            if (name, b[1]) not in self.undefined
+        }
+        self._vcache[name] = (span, fingerprint, values)
+        return values
 
     def reassigned_values(self, name, span, after, read, fingerprint, value):
         """The set ``value(b)`` over the assignments of ``name`` that
@@ -12322,10 +12345,11 @@ class _JsScopes:
         ``after``, of the variable no declaration in those blocks binds:
         past its block one may have given what the variable holds, and in
         the loop's next run. The bindings are kept by the end of each one's
-        span, so a moving ``read`` adds to or drops from one edge."""
-        key = name, span, after
-        state = self._reassigned.get(key)
-        if state is None:
+        span, so a moving ``read`` adds to or drops from one edge; only the
+        name's last call is kept, so nothing held grows with the spans a
+        name is read under."""
+        state = self._rstate.get(name)
+        if state is None or state[:2] != [span, after] or state[7] != fingerprint:
             bindings = sorted(
                 (
                     b
@@ -12337,19 +12361,17 @@ class _JsScopes:
                 key=lambda b: b[3][1],
             )
             written = sorted(bindings, key=lambda b: b[2][0])
-            state = self._reassigned[key] = [
+            state = self._rstate[name] = [
+                span,
+                after,
                 bindings,
                 written,
                 [b[2][0] for b in written],
                 0,
                 Counter(),
-                None,
+                fingerprint,
             ]
-        bindings, written, ats, at, held, _ = state
-        if state[5] != fingerprint:
-            at = 0
-            held.clear()
-            state[5] = fingerprint
+        bindings, written, ats, at, held = state[2:7]
         while at and bindings[at - 1][3][1] >= read:
             at -= 1
             given = value(bindings[at])
@@ -12360,7 +12382,7 @@ class _JsScopes:
         while at < len(bindings) and bindings[at][3][1] < read:
             held[value(bindings[at])] += 1
             at += 1
-        state[3] = at
+        state[5] = at
         values = set(held)
         for start, end in self._loops:
             if not (after < start <= read <= end):
@@ -14066,6 +14088,9 @@ class TSParser(BaseParser):
         entries = [
             d for d in self.declared.get(name, ()) if (d[0], name) not in self._members
         ]
+        # `value` re-reads `entries`: a set of its results is stale from the
+        # line on which the next one is scanned.
+        fingerprint = tuple(entries)
 
         def value(bound):
             """What the binding ``bound`` gives the name: the last of the
@@ -14088,7 +14113,6 @@ class TSParser(BaseParser):
             if declared and self._scopes.function(declared[1]) != reader
             else None
         )
-        fingerprint = tuple(entries)
         values = set()
         if funcs and funcs != {reader}:
             chosen = [declared]
@@ -15061,23 +15085,20 @@ class TSParser(BaseParser):
             elif exported and written == "module":
                 if assignment[1] == "exports":
                     # `module.exports =` gives the module's exports whole:
-                    # it replaces them, and where the new value is not read
-                    # they are unknown.
-                    kept = [
-                        e
-                        for e in self.builder.reexports.get(file_id, ())
-                        if e[0] != "="
-                    ]
-                    self.builder.reexports[file_id] = kept
+                    # it replaces them — entries written before it, `=` and
+                    # named, bound the object it orphans — and where the new
+                    # value is not read they are unknown.
+                    self.builder.reexports[file_id] = kept = []
                     # `module.exports = function ...`: the module is the
-                    # function, filed as source writes it; `= <name>` is it.
+                    # function, filed as source writes it; `= <name>` is it,
+                    # read in the scope the line is written in.
                     whole = (
                         "module.exports"
                         if holds_function
                         else name_given and name_given[1]
                     )
                     if whole:
-                        kept.append(("=", "", whole))
+                        kept.append(("=", "", whole, parent_id))
                 # `module.exports = { a, b: c }` on its line is the object
                 # the module exports, which holds what the names do.
                 listed = re.fullmatch(r"\s*\{(.*)\}\s*;?\s*", given or "")
@@ -15086,7 +15107,7 @@ class TSParser(BaseParser):
                     and listed
                     and exported_object(lineno, lineno)
                 )
-                if holds_function:
+                if holds_function and assignment[1] == "exports":
                     object_id, object_scope, filed_as = file_id, None, "module.exports"
                 for part in listed[1].split(",") if oid else ():
                     if held := re_held.match(part):
@@ -15108,9 +15129,15 @@ class TSParser(BaseParser):
                             (name, "", name)
                         )
             elif exported and (name_given or holds_function):
-                # A member of the module's exports, `exports.name = value`
+                # A member of the module's exports, `exports.name = value`,
+                # its value read in the scope the line is written in.
                 key = free_key(file_id, assignment[1])
-                entry = (assignment[1], "", name_given[1] if name_given else key)
+                entry = (
+                    assignment[1],
+                    "",
+                    name_given[1] if name_given else key,
+                    parent_id,
+                )
                 self.builder.reexports.setdefault(file_id, []).append(entry)
                 if holds_function:
                     object_id, object_scope, filed_as = file_id, None, key
@@ -18466,9 +18493,13 @@ class CallResolver:
             given = self._assigned(file_id, name)
             return given[0] if len(given) == 1 else None
         entries = self.builder.reexports.get(file_id, ())
-        whole = [original for exported, _, original in entries if exported == "="]
+        whole = [e for e in entries if e[0] == "="]
         if whole:
-            hit = self.members.get(file_id, {}).get(whole[-1])
+            # `module.exports = name`: the name is read in the scope the
+            # line is written in, the entry's fourth element, else the file.
+            original = whole[-1][2]
+            scope = whole[-1][3] if len(whole[-1]) > 3 else file_id
+            hit = self._written(original, scope, seen)
             if name in ("=", "default") or not hit:
                 return hit
             # What is exported whole is a class or a function, whose own
@@ -18482,12 +18513,14 @@ class CallResolver:
         seen.add(file_id)
         # `export *` passes on neither a default nor what is exported whole.
         star = "*" if name not in ("default", "=") else None
-        for exported, specifier, original in entries:
+        for entry in entries:
+            exported, specifier, original = entry[:3]
+            scope = entry[3] if len(entry) > 3 else file_id
             if exported not in (star, name):
                 continue
             if not specifier:
                 # `export { a }`, `export default a`, `{ a }` or `{ ...a }`
-                held = self._written(original, file_id, seen)
+                held = self._written(original, scope, seen)
                 hit = (
                     held
                     if exported == name
@@ -23003,7 +23036,8 @@ class CodeGraphBuilder:
         self.ts_configs = {}
         # JS/TS file or object ID -> [(name exported or held, "*" for each
         # name of what it names or "=" for the file's whole, module specifier
-        # or "" for a name written in the file, the name there)]
+        # or "" for a name written in the file, the name there[, the scope a
+        # CommonJS assignment is written in, where the name is read])]
         self.reexports = {}
         # JS/TS file ID -> {local name: the name its module exports it as},
         # for an import that renames what it binds, ``default`` for one of

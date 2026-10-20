@@ -882,7 +882,7 @@ class RubyParser(BaseParser):
         scopes = self._scopes[:depth]
         if scopes and not self._declared(name, lineno, since):
             scopes[-1][1].setdefault(name, len(entries))
-        entries.append((lineno, origin, False, column))
+        entries.append((lineno, origin, not scopes, column))
 
     def parse(self, _file_path, rel_path, content):
         file_id = self.add_file_node(rel_path, content)
@@ -1417,7 +1417,12 @@ class RubyParser(BaseParser):
                 if not origin and edge is not None and chain:
                     origin = f"#{edge}"
                 given = "?" if runs is None else origin or "?"
-                self.declared[name][slot] = (lineno, given, False, column)
+                self.declared[name][slot] = (
+                    lineno,
+                    given,
+                    self.declared[name][slot][2],
+                    column,
+                )
                 if runs is not None:
                     if value.strip() == self.null_literal:
                         self._nulls.add((lineno, column))

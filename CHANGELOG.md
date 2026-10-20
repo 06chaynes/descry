@@ -334,66 +334,68 @@ Python SDK v2, and a full-tree review's findings are fixed.
   exports what Node gives it, `module.exports = { … }` that object's
   properties, `module.exports = function …` the function and `exports.name
   = …` each name, on one line or over several, unless a declaration of
-  `exports` or `module` shadows it, each `module.exports =` replacing the
-  exports, which are unknown where its value is not read, and `require`
-  and a destructuring pattern of it bind them; a name an import binds to a
-  project module that cannot be located is no global, and a call on it, or
-  on `this` of a class it is the base of, stays open, as does one of a
-  member a class lacks whose base is a value or an expression. JavaScript
-  members are where the language puts them: a class's `static` members,
-  and one assigned to a class or a function, `F.m = …`, are the
-  constructor's, reached through it, a subclass and `this` or `super` in a
-  static member, never an instance; a function assigned to
-  `F.prototype.name` or listed in `F.prototype = { … }` is a method of
-  `F`'s instances, of `this` in `F` and of a class that `extends F`,
-  `Object.create(G.prototype)` or `new G()` giving it G's; a member
-  assigned a name holds what the name does, one assigned again is each
-  assignment, a call of it open with all of them; a function declared
-  inside `F` is no property of it, a class that extends a function reaches
-  its statics, and a function called where it is written is no function,
-  its constant holding what it returns; a call of what a call returned
-  reaches the function it returns by name, a `return` in a one-line body
-  too. An attribute a method assigns to the instance, `this.name`, or
-  `self.name` in Python, is found before a method of its name, what the
-  class and its bases assign counting and a subclass's never, as a name a
-  Python class body binds last by an assignment is before a base's and its
-  own `def`, but for `staticmethod` or `classmethod` of that `def`, and a
-  call of it reaches what it holds, a member it reads, bound or not, or a
-  definition, for a field the class declares as for one it does not, or
-  else stays open, as does a call of a Python variable or parameter of no
-  known value. After an `if`, a loop, a `try`, a `case` or `switch` and a
-  statement an `if` or `unless` modifies, a Python, Ruby or PHP name holds
-  what every way through it that goes on gives, where they agree, a way of
-  an `if` not seeing what another assigns, a `break` skipping a loop's
-  `else`, from a `match` case too, a Ruby block perhaps not running, PHP's
-  `if: … elseif: … endif;` syntax too, and a branch ending on the line of
-  the read counting; `||=`, `&&=` and `??=` assign only where the name may
-  be null, or may hold an object; a Ruby assignment holds from where its
-  value ends, which reads the name's earlier value; and `None`, `nil` or
-  `null` hold nothing a call is made on. In Go, Rust, C, C++, Dart, Java
-  and C#, a declaration in a block, a statement's head or a parameter list
-  is in scope to the end of that block or statement, a Java or C# `case`
-  pattern to the end of its switch section, and no longer types its name
-  after it. Each declaration is in a scope of its own from where it is
-  written, another of its name on the line too, and hides its name from
-  where its statement ends, of no type known until its value is read, its
-  initializer still reading the outer one; one whose value is a name, a
-  field or a borrow holds what that holds, and one whose value starts on
-  the next line that value; each name of a Go `x, y := a, b` holds the
-  value in its position, one bound to a call holds its result for a read
-  later on the line, a C# `using` resource included, and a Rust literal's
-  elements give what iterating it gives. Past an `if let`, a `for` or a
-  match arm a name its pattern binds is what it was before, a Rust
-  closure's parameter is in scope to the end of the closure's body, a C++
-  `catch` parameter has its type in its handler, and a Go statement ends
-  at a line end only where Go would insert a semicolon. A Java
-  `instanceof` variable holds its type only where the test is known to
-  have matched, after a negated test whose branch exits too, an `else`
-  being the nearest `if`'s without one, also after a branch of one
-  statement without braces; a C# `is` or `out` variable to the end of its
-  block, lambda or loop, a C# `using` variable has its initializer's type
-  and a `foreach` variable what iterating gives, and a Go assignment no
-  longer hides a package-level variable.
+  `exports` or `module` shadows it, each `module.exports =` replacing
+  every export before it, which are unknown where its value is not read,
+  and `module.name =` no export at all, a name the exports are given read
+  where it is written, and `require` and a destructuring pattern of it
+  bind them; a name an import binds to a project module that cannot be
+  located is no global, and a call on it, or on `this` of a class it is
+  the base of, stays open, as does one of a member a class lacks whose
+  base is a value or an expression. JavaScript members are where the
+  language puts them: a class's `static` members, and one assigned to a
+  class or a function, `F.m = …`, are the constructor's, reached through
+  it, a subclass and `this` or `super` in a static member, never an
+  instance; a function assigned to `F.prototype.name` or listed in
+  `F.prototype = { … }` is a method of `F`'s instances, of `this` in `F`
+  and of a class that `extends F`, `Object.create(G.prototype)` or `new
+  G()` giving it G's; a member assigned a name holds what the name does,
+  one assigned again is each assignment, a call of it open with all of
+  them; a function declared inside `F` is no property of it, a class that
+  extends a function reaches its statics, and a function called where it
+  is written is no function, its constant holding what it returns; a call
+  of what a call returned reaches the function it returns by name, a
+  `return` in a one-line body too. An attribute a method assigns to the
+  instance, `this.name`, or `self.name` in Python, is found before a
+  method of its name, what the class and its bases assign counting and a
+  subclass's never, as a name a Python class body binds last by an
+  assignment is before a base's and its own `def`, but for `staticmethod`
+  or `classmethod` of that `def`, and a call of it reaches what it holds,
+  a member it reads, bound or not, or a definition, for a field the class
+  declares as for one it does not, or else stays open, as does a call of a
+  Python variable or parameter of no known value. After an `if`, a loop, a
+  `try`, a `case` or `switch` and a statement an `if` or `unless`
+  modifies, a Python, Ruby or PHP name holds what every way through it
+  that goes on gives, where they agree, a way of an `if` not seeing what
+  another assigns, a `break` skipping a loop's `else`, from a `match` case
+  too, a Ruby block perhaps not running, PHP's `if: … elseif: … endif;`
+  syntax too, and a branch ending on the line of the read counting; `||=`,
+  `&&=` and `??=` assign only where the name may be null, or may hold an
+  object, a way that leaves it null counting whatever the others hold; a
+  Ruby assignment holds from where its value ends, which reads the name's
+  earlier value; and `None`, `nil` or `null` hold nothing a call is made
+  on. In Go, Rust, C, C++, Dart, Java and C#, a declaration in a block, a
+  statement's head or a parameter list is in scope to the end of that
+  block or statement, a Java or C# `case` pattern to the end of its switch
+  section, and no longer types its name after it. Each declaration is in a
+  scope of its own from where it is written, another of its name on the
+  line too, and hides its name from where its statement ends, of no type
+  known until its value is read, its initializer still reading the outer
+  one; one whose value is a name, a field or a borrow holds what that
+  holds, and one whose value starts on the next line that value; each name
+  of a Go `x, y := a, b` holds the value in its position, one bound to a
+  call holds its result for a read later on the line, a C# `using`
+  resource included, and a Rust literal's elements give what iterating it
+  gives. Past an `if let`, a `for` or a match arm a name its pattern binds
+  is what it was before, a Rust closure's parameter is in scope to the end
+  of the closure's body, a C++ `catch` parameter has its type in its
+  handler, and a Go statement ends at a line end only where Go would
+  insert a semicolon. A Java `instanceof` variable holds its type only
+  where the test is known to have matched, after a negated test whose
+  branch exits too, an `else` being the nearest `if`'s without one, also
+  after a branch of one statement without braces; a C# `is` or `out`
+  variable to the end of its block, lambda or loop, a C# `using` variable
+  has its initializer's type and a `foreach` variable what iterating
+  gives, and a Go assignment no longer hides a package-level variable.
 - **Overloads, mixins and `#if` arms.** A call that several overloads take
   by the number of arguments it passes is left open with them as
   candidates: C# took the first that took as many, and Java and C++ took a
@@ -419,18 +421,19 @@ Python SDK v2, and a full-tree review's findings are fixed.
   converts only to a delegate type or functional interface whose method
   takes as many parameters as it declares (`dotnet.json` and `java.json`
   gain `functional`, which lists no annotation interface). A C# extension
-  method's receiver, named or a literal's, is its first argument, and one
-  a standard type has only from extension methods is looked up from the
-  namespace around the call outward, with the `using` directives written
-  at each level, each naming the first of its path under the namespaces
-  around it, `global::` the path alone and `using static` a type's
-  members, `global using static` in every file below its directory, so a
-  project extension can be the one called (`dotnet.json` gains
-  `extensions`); a method of the type and an extension that both take a
-  call leave it open, but for one that passes nothing to a method that
-  takes nothing; a generic method whose type argument no argument tells is
-  called with it written; a type nested in the enclosing class is meant
-  before one of the namespace, and of a type declared in parts, the
+  method's receiver, named or a literal's, of the literal's own type (`5`
+  an `int`, `2.5` a `double`, `'c'` a `char`, a suffix's), is its first
+  argument, and one a standard type has only from extension methods is
+  looked up from the namespace around the call outward, with the `using`
+  directives written at each level, each naming the first of its path
+  under the namespaces around it, `global::` the path alone and `using
+  static` a type's members, `global using static` in every file below its
+  directory, so a project extension can be the one called (`dotnet.json`
+  gains `extensions`); a method of the type and an extension that both
+  take a call leave it open, but for one that passes nothing to a method
+  that takes nothing; a generic method whose type argument no argument
+  tells is called with it written; a type nested in the enclosing class is
+  meant before one of the namespace, and of a type declared in parts, the
   caller's file's part. Ruby looks in a prepended module before the class,
   in an included one after it and before the superclass, the last included
   first and the first of one `include A, B` nearest, and in a module a
@@ -801,22 +804,23 @@ Python SDK v2, and a full-tree review's findings are fixed.
   gives over several lines, or a Dart variable whose value is a call of a
   standard type's method. A PHP `switch` that is empty, or whose labels
   are class constants (`case self::A:`), no longer drops its file, nor
-  does a Ruby `begin … rescue … else`, and a C# `using` in a namespace
-  beside the call's no longer aborts the index; a statement a branch
-  reader cannot read merges nothing, with a warning. A line holding a form
-  feed, a vertical tab or another character Python's `str.splitlines` ends
-  a line at is one line, as an editor and the source view show it, so the
-  definitions and calls after it are no longer filed a line or more below
-  where they are written. A JavaScript or TypeScript parameter list that
-  names nothing, `(:)`, no longer fails its file. A call after a `.` or a
-  `->` that ends the line before is a member of what that line ends with,
-  no longer a call of the function of its name. `index` no longer encodes
-  every symbol twice. `descry-generate` honours `DESCRY_LOG_LEVEL`, walks
-  the project root when given `--project-root` alone, and refuses a path
-  outside it. scip-java no longer passes the Gradle init-script on Maven
-  or sbt projects, where `mvn`/`sbt` rejected it and no index was written;
-  its Kotlin-DSL pre-flight likewise runs only for a Gradle build, which
-  is now recognised by every marker scip-java's own detector accepts
+  does a Ruby `begin … rescue … else` or a `??=` or `||=` of a name no
+  scope binds, and a C# `using` in a namespace beside the call's no longer
+  aborts the index; a statement a branch reader cannot read merges
+  nothing, with a warning. A line holding a form feed, a vertical tab or
+  another character Python's `str.splitlines` ends a line at is one line,
+  as an editor and the source view show it, so the definitions and calls
+  after it are no longer filed a line or more below where they are
+  written. A JavaScript or TypeScript parameter list that names nothing,
+  `(:)`, no longer fails its file. A call after a `.` or a `->` that ends
+  the line before is a member of what that line ends with, no longer a
+  call of the function of its name. `index` no longer encodes every symbol
+  twice. `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project
+  root when given `--project-root` alone, and refuses a path outside it.
+  scip-java no longer passes the Gradle init-script on Maven or sbt
+  projects, where `mvn`/`sbt` rejected it and no index was written; its
+  Kotlin-DSL pre-flight likewise runs only for a Gradle build, which is
+  now recognised by every marker scip-java's own detector accepts
   (`settings.gradle` and `gradlew` beside the two build files). A Gradle
   multi-project root is indexed as one build without a build file of its
   own: by `settings.gradle`, or by `settings.gradle.kts` beside `gradlew`.
