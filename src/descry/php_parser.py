@@ -258,9 +258,10 @@ _RE_LABEL = re.compile(r"(?<![\w$>:\\])(?:case|default)\b")
 # `break` leaves an `if` or a `try` too
 _LEAVES = "return|throw|exit|die"
 # A boundary of an alternative-syntax body: a nested `if`/loop/`switch`
-# head, an `end…` closer, an `elseif`/`else`/`case`/`default`
+# head, an `end…` closer, an `elseif`/`else`/`case`/`default`, or a
+# `match` head, whose `default` arms are no `switch` section's
 _ALT_MARKERS = re.compile(
-    r"(?<![\w$>:\\])((?:if|while|for|foreach|switch)\s*\("
+    r"(?<![\w$>:\\])((?:if|while|for|foreach|switch|match)\s*\("
     r"|end(?:if|while|for|foreach|switch)\b"
     r"|elseif\s*\(|else\s*:|case\b|default\b)"
 )
@@ -542,12 +543,22 @@ class PhpParser(BaseParser):
     _imports: dict[str, str]
     _functions: dict[str, str]
 
+    def _binds_file(self, name):
+        """A statement outside every definition binds for the file: its
+        top-level code shares its variables."""
+        return len(self._contexts) == 1
+
+    def _is_local(self, name):
+        """Every variable a function or a method uses is its own: it sees
+        none of the file's unless it takes one by `global`."""
+        return len(self._contexts) > 1
+
     def _unbind(self, name, lineno, column):
         """Leave the variable ``name`` without a known type from ``column``
         of ``lineno`` on, unless a declaration on that line gives it one."""
         entries = self.declared.setdefault(name, [])
         if not any(entry[0] == lineno for entry in entries):
-            entries.append((lineno, "?", False, column))
+            entries.append((lineno, "?", self._binds_file(name), column))
 
     def _class_name(self, written):
         """Full name of the class the file being parsed writes as
@@ -869,7 +880,12 @@ class PhpParser(BaseParser):
                 bound = re.search(r"\$(\w+)\s*=\s*$", code[: m_anonymous.start()])
                 if bound:
                     self.declared.setdefault(bound[1], []).append(
-                        (lineno, f"=class@{lineno}()", False, bound.start(1))
+                        (
+                            lineno,
+                            f"=class@{lineno}()",
+                            self._binds_file(bound[1]),
+                            bound.start(1),
+                        )
                     )
                 # Its header is still code of the member it is created in.
                 self.enter_context(anonymous_id, lineno, end_lineno)
@@ -918,7 +934,9 @@ class PhpParser(BaseParser):
                     entries = self.declared.setdefault(parameter, [])
                     native = [e for e in entries if lineno <= e[0] <= last + 1]
                     if not native:
-                        entries.append((lineno, f"{written}()", False, None))
+                        entries.append(
+                            (lineno, f"{written}()", self._binds_file(parameter), None)
+                        )
                     elif _RE_TYPE_ARGUMENTS.search(written):
                         line, _, _, at = native[0]
                         self._rebind(parameter, line, at, f"{written}()")
@@ -956,7 +974,12 @@ class PhpParser(BaseParser):
             # opens, or from an `assert` on.
             for tag in _RE_VARIABLE_TAG.finditer(lines[i]):
                 self.declared.setdefault(tag["name"], []).append(
-                    (lineno + 1, f"{tag['type']}()", False, None)
+                    (
+                        lineno + 1,
+                        f"{tag['type']}()",
+                        self._binds_file(tag["name"]),
+                        None,
+                    )
                 )
             for rebinding in _REBINDINGS:
                 for found in rebinding.finditer(code):
@@ -976,12 +999,19 @@ class PhpParser(BaseParser):
                     before = self._declared(name, lineno, since) or "?"
                     # From the start of the block, or the `assert`
                     opened = None if asserted else code.rindex("{") + 1
-                    entries.append((lineno, f"{held.pop()}()", False, opened))
+                    entries.append(
+                        (
+                            lineno,
+                            f"{held.pop()}()",
+                            self._binds_file(name),
+                            opened,
+                        )
+                    )
                     if not asserted:
                         end = self._find_block_end(codes, i, code.rindex("{"))
                         # From past the `}` that closes the block
                         closed = codes[end - 1].find("}") + 1 or None
-                        entries.append((end, before, False, closed))
+                        entries.append((end, before, self._binds_file(name), closed))
 
             # Calls (inside any definition — a method, a function, etc.,
             # one on its line too)

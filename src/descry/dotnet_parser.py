@@ -123,11 +123,12 @@ _RE_KEYWORD_BEFORE_MEMBER = re.compile(
 )
 # A literal that ends just before the `.` of a member call: a character,
 # a number, `true`/`false`/`null`, read on the raw line where `code` has
-# literals blank
+# literals blank. `@name` is the identifier `name`, no literal.
 _RE_LITERAL_TAIL = re.compile(
-    r"(?<![\w.])(?:'(?:[^'\\]|\\.)*'|true|false|null"
+    r"(?<![\w.@])(?:'(?:[^'\\]|\\.)*'|true|false|null"
     r"|0[xX][0-9a-fA-F_]+[uUlL]*|0[bB][01_]+[uUlL]*"
-    r"|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d[\d_]*)?[uUlLfFdDmM]{0,2})\s*\.$"
+    r"|(?:\d[\d_]*(?:\.\d[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?\d[\d_]*)?"
+    r"[uUlLfFdDmM]{0,2})\s*\.$"
 )
 # The integer types in the order C# gives an integer literal the first that
 # holds its value, with the largest value of each
@@ -151,7 +152,11 @@ def _literal_type(literal):
         return real or "double"
     digits = low.rstrip("ul")
     suffix = low[len(digits) :]
-    value = int(digits, {"0x": 16, "0b": 2}.get(low[:2], 10))
+    try:
+        value = int(digits, {"0x": 16, "0b": 2}.get(low[:2], 10))
+    except ValueError:
+        # `0x` or `0b` alone, a literal the language rejects: no type.
+        return None
     allowed = {"": ("int", "uint", "long"), "u": ("uint",), "l": ("long",)}
     return next(
         (t for t, top in _INTEGERS if t in allowed.get(suffix, ()) and value <= top),

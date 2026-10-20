@@ -10845,6 +10845,11 @@ _JS_PROTOTYPE_RE = re.compile(
 # to the function, `F.name = value`, or to a CommonJS module's exports,
 # `module.exports.name = value`: the member's name, what it is assigned to
 # and `.prototype` for the first
+# `exports = module.exports = …`: the alias the line also gives the new
+# exports, before the `module.exports` assignment
+_CJS_ALIASED_RE = re.compile(r"\s*exports\s*=\s*(?=module\.exports\s*=(?![=>]))")
+# `exports = …` at the start of a statement, or after `module.exports =`
+_CJS_EXPORTS_RE = re.compile(r"\s*exports\s*=(?![=>])")
 _JS_ASSIGNED_MEMBER_RE = re.compile(
     r"^\s*(?=(?:module\.)?[\w$]+(?:\.prototype)?\.(?!prototype\b)([\w$]+)\s*=(?![=>]))"
     r"((?:module\.(?=exports\.))?[\w$]+)(\.prototype(?=\.))?"
@@ -13051,15 +13056,14 @@ _TS_REEXPORT_RE = re.compile(
     re.MULTILINE,
 )
 # What a module exports as its default, `export default <name>` or a
-# declaration of a name after it, and whole, `export = <name>` or
-# `module.exports = <name>`
+# declaration of a name after it, and whole, `export = <name>`
 _TS_DEFAULT_EXPORT_RE = re.compile(
     r"^[ \t]*(?:export[ \t]+(default)[ \t]+(?:"
     # `cond && function f`, called, is `f`: a function is never falsy.
     r"(?:[\w$.]+\s*&&\s*)*"
     r"(?:(?:async[ \t]+)?function\b[ \t]*\*?|(?:abstract[ \t]+)?class\b|interface\b)"
     r"[ \t]*(?!extends\b|implements\b)([\w$]+)|([\w$]+)(?=[ \t]*;?[ \t]*$))"
-    r"|(?:export|module\.exports)[ \t]*=[ \t]*([\w$]+)(?=[ \t]*;?[ \t]*$))",
+    r"|export[ \t]*=[ \t]*([\w$]+)(?=[ \t]*;?[ \t]*$))",
     re.MULTILINE,
 )
 # `import <clause> from "<specifier>"`, the clause possibly over several lines
@@ -14434,11 +14438,11 @@ class TSParser(BaseParser):
                         ((alias or original).split()[-1], original.split()[-1])
                     )
             self.builder.reexports.setdefault(file_id, []).extend(
-                (exported, specifier, original) for exported, original in names
+                (exported, specifier, original, file_id) for exported, original in names
             )
         for default, *names in _TS_DEFAULT_EXPORT_RE.findall(content):
             exported = "default" if default else "="
-            entry = (exported, "", "".join(names))
+            entry = (exported, "", "".join(names), file_id)
             self.builder.reexports.setdefault(file_id, []).append(entry)
         names = self.builder.import_names.setdefault(file_id, {})
         for clause, specifier in _TS_IMPORT_RE.findall(content):
@@ -14570,6 +14574,11 @@ class TSParser(BaseParser):
         class_at = {}  # class ID -> the column its `class` ends at on its line
         # constants of the file or a callback that hold an object literal
         object_ids = set()
+        # Each name the file's CommonJS exports object holds, in the order
+        # the file writes it: `module.exports =` replaces it and orphans
+        # `exports`, which writes the orphan from there on.
+        cjs = {}
+        cjs_orphan = False
         interface_ids = set()  # interfaces that have the ID `<scope>::<name>`
         type_bodies = set()  # interfaces and object types, whatever their ID
         value_ids = set()  # functions and variables, which always have it
@@ -14664,12 +14673,9 @@ class TSParser(BaseParser):
             """The object that `module.exports` is given on lines ``lineno``
             to ``last``, all a CommonJS module then exports: a name no source
             can write."""
-            oid = self._nameless_owner(
+            return self._nameless_owner(
                 file_id, f"object@{self.source_line(lineno)}", lineno, last, "object"
             )
-            entry = ("=", "", oid.rpartition("::")[2])
-            self.builder.reexports.setdefault(file_id, []).append(entry)
-            return oid
 
         def hold(owner_id, key, name, held, lineno):
             """File the member ``name`` of ``owner_id`` that holds what the
@@ -15066,8 +15072,15 @@ class TSParser(BaseParser):
             # function, or what a name holds. A member assigned again is
             # `name#2` and on. A prototype assigned an object other than a
             # literal has the base the object is read through.
-            assignment = not continuing and _JS_ASSIGNED_MEMBER_RE.match(code_lines[i])
-            given = assignment and code_lines[i][assignment.end() :].partition("=")[2]
+            # `exports = module.exports = v` assigns `module.exports`, and
+            # `exports` with it.
+            aliased = _CJS_ALIASED_RE.match(code_lines[i])
+            view = code_lines[i][aliased.end() :] if aliased else code_lines[i]
+            assignment = not continuing and _JS_ASSIGNED_MEMBER_RE.match(view)
+            given = assignment and view[assignment.end() :].partition("=")[2]
+            if given and (again := _CJS_EXPORTS_RE.match(given)):
+                # `module.exports = exports = v`
+                aliased, given = again, given[again.end() :]
             name_given = given and re.fullmatch(
                 r"\s*(?!(?:true|false|null|undefined|this)\b)([A-Za-z_$][\w$]*)\s*;?\s*",
                 given,
@@ -15080,40 +15093,56 @@ class TSParser(BaseParser):
                 self._declaration(written.partition(".")[0], lineno) is None
             )
             holds_function = given and _function_value(given)
-            if holds_function and invoked(i, value_start(i) or 0):
-                pass
-            elif exported and written == "module":
-                if assignment[1] == "exports":
-                    # `module.exports =` gives the module's exports whole:
-                    # it replaces them — entries written before it, `=` and
-                    # named, bound the object it orphans — and where the new
-                    # value is not read they are unknown.
-                    self.builder.reexports[file_id] = kept = []
-                    # `module.exports = function ...`: the module is the
-                    # function, filed as source writes it; `= <name>` is it,
-                    # read in the scope the line is written in.
-                    whole = (
-                        "module.exports"
-                        if holds_function
-                        else name_given and name_given[1]
-                    )
-                    if whole:
-                        kept.append(("=", "", whole, parent_id))
+            immediate = holds_function and invoked(i, value_start(i) or 0)
+            if (
+                not continuing
+                and not assignment
+                and _CJS_EXPORTS_RE.match(code_lines[i])
+                and self._declaration("exports", lineno) is None
+            ):
+                # `exports = v` rebinds the alias: what it writes from there
+                # on is no export.
+                cjs_orphan = True
+                self.builder.commonjs.add(file_id)
+            if exported and written == "module" and assignment[1] == "exports":
+                # `module.exports =` gives the module's exports whole: it
+                # replaces them — entries written before it, `=` and named,
+                # bound the object it orphans — and where the new value is
+                # not read they are unknown.
+                cjs.clear()
+                cjs_orphan = not aliased
+                self.builder.commonjs.add(file_id)
+                # `module.exports = function ...`: the module is the
+                # function, filed as source writes it; `= <name>` is it,
+                # read in the scope the line is written in.
+                whole = (
+                    "module.exports"
+                    if holds_function and not immediate
+                    else name_given and name_given[1]
+                )
                 # `module.exports = { a, b: c }` on its line is the object
                 # the module exports, which holds what the names do.
                 listed = re.fullmatch(r"\s*\{(.*)\}\s*;?\s*", given or "")
-                oid = (
-                    assignment[1] == "exports"
-                    and listed
-                    and exported_object(lineno, lineno)
+                oid = listed and exported_object(lineno, lineno)
+                # A value not read leaves the exports unknown.
+                cjs["="] = (
+                    "=",
+                    "",
+                    oid.rpartition("::")[2] if oid else whole or None,
+                    parent_id,
                 )
-                if holds_function and assignment[1] == "exports":
-                    object_id, object_scope, filed_as = file_id, None, "module.exports"
+                if holds_function and not immediate:
+                    object_id, object_scope, filed_as = (
+                        file_id,
+                        None,
+                        "module.exports",
+                    )
                 for part in listed[1].split(",") if oid else ():
                     if held := re_held.match(part):
                         spread, key, name = held.groups()
-                        entry = ("*" if spread else key or name, "", name)
-                        self.builder.reexports.setdefault(oid, []).append(entry)
+                        self.builder.reexports.setdefault(oid, []).append(
+                            ("*" if spread else key or name, "", name, parent_id)
+                        )
                         continue
                     method = re.match(
                         r"\s*(?:(?P<key>[\w$]+)\s*:\s*(?:function\b"
@@ -15126,19 +15155,25 @@ class TSParser(BaseParser):
                         self.builder.add_node(mid, "Function", name=name, lineno=lineno)
                         self.builder.add_edge(oid, mid, "DEFINES")
                         self.builder.reexports.setdefault(oid, []).append(
-                            (name, "", name)
+                            (name, "", name, parent_id)
                         )
-            elif exported and (name_given or holds_function):
-                # A member of the module's exports, `exports.name = value`,
-                # its value read in the scope the line is written in.
+            elif immediate:
+                pass
+            elif exported and written != "module" and (name_given or holds_function):
+                # A member of the module's exports, `exports.name = value`
+                # or `module.exports.name = value`, its value read in the
+                # scope the line is written in. `exports` writes the orphan
+                # a `module.exports =` left, `module.exports` the new
+                # exports object.
                 key = free_key(file_id, assignment[1])
-                entry = (
-                    assignment[1],
-                    "",
-                    name_given[1] if name_given else key,
-                    parent_id,
-                )
-                self.builder.reexports.setdefault(file_id, []).append(entry)
+                self.builder.commonjs.add(file_id)
+                if written != "exports" or not cjs_orphan:
+                    cjs[assignment[1]] = (
+                        assignment[1],
+                        "",
+                        name_given[1] if name_given else key,
+                        parent_id,
+                    )
                 if holds_function:
                     object_id, object_scope, filed_as = file_id, None, key
             elif name_given or holds_function:
@@ -15239,8 +15274,14 @@ class TSParser(BaseParser):
                     self.builder.add_edge(parent_id, oid, "DEFINES")
                 elif opened["prototype"]:
                     oid = prototype(opened["prototype"], lineno, member=False)
-                elif opened["commonjs"]:
+                elif opened["commonjs"] and exported:
                     oid = exported_object(lineno, last)
+                    cjs["="] = (
+                        "=",
+                        "",
+                        oid.rpartition("::")[2],
+                        parent_id,
+                    )
                 elif opened["key"] is None and (opened["default"] or array):
                     held = elements_of and lineno <= elements_of[1] and elements_of[0]
                     oid = self._nameless_owner(
@@ -15251,7 +15292,12 @@ class TSParser(BaseParser):
                         "object",
                     )
                     if opened["default"]:
-                        entry = ("default", "", oid.rpartition("::")[2])
+                        entry = (
+                            "default",
+                            "",
+                            oid.rpartition("::")[2],
+                            parent_id,
+                        )
                         self.builder.reexports.setdefault(file_id, []).append(entry)
                 else:
                     oid = None
@@ -15432,9 +15478,14 @@ class TSParser(BaseParser):
                 signature_until = j + 1  # its last line, as a line number
             elif parent_id in object_ids and (match := re_held.match(line)):
                 # The object holds by its key what the name is, and spread
-                # what that holds.
+                # what that holds, read where the object is written.
                 spread, key, name = match.groups()
-                held = ("*" if spread else key or name, "", name)
+                held = (
+                    "*" if spread else key or name,
+                    "",
+                    name,
+                    self.enclosing_scope(parent_id),
+                )
                 if parent_id in prototype_ids and spread:
                     # A prototype spread an object has what that has.
                     self.builder.add_edge(parent_id, f"REF:{name}", "INHERITS")
@@ -16338,6 +16389,8 @@ class TSParser(BaseParser):
                 array = (array[0], depth) if depth > 0 else None
             i += 1
 
+        if cjs:
+            self.builder.reexports.setdefault(file_id, []).extend(cjs.values())
         for node in self.builder.nodes[self._first_node :]:
             if node["id"] in static_ids:
                 node["metadata"]["static"] = True
@@ -18496,26 +18549,28 @@ class CallResolver:
         whole = [e for e in entries if e[0] == "="]
         if whole:
             # `module.exports = name`: the name is read in the scope the
-            # line is written in, the entry's fourth element, else the file.
+            # line is written in, the entry's fourth element.
             original = whole[-1][2]
-            scope = whole[-1][3] if len(whole[-1]) > 3 else file_id
-            hit = self._written(original, scope, seen)
-            if name in ("=", "default") or not hit:
-                return hit
+            held = original and self._written(original, whole[-1][3], seen)
+            if name in ("=", "default"):
+                return held
             # What is exported whole is a class or a function, whose own
             # members are its static ones; a CommonJS module exports what
             # is assigned to `exports.name` besides.
-            hit = self._find_member(hit, name, static=True)[0]
-        else:
+            hit = held and self._find_member(held, name, static=True)[0]
+        elif file_id not in self.builder.commonjs:
             hit = self.members.get(file_id, {}).get(name)
+        else:
+            # A CommonJS module exports what its exports object holds: none
+            # of its own top-level names besides.
+            hit = None
         if hit or file_id in seen:
             return hit
         seen.add(file_id)
         # `export *` passes on neither a default nor what is exported whole.
         star = "*" if name not in ("default", "=") else None
         for entry in entries:
-            exported, specifier, original = entry[:3]
-            scope = entry[3] if len(entry) > 3 else file_id
+            exported, specifier, original, scope = entry
             if exported not in (star, name):
                 continue
             if not specifier:
@@ -23036,9 +23091,11 @@ class CodeGraphBuilder:
         self.ts_configs = {}
         # JS/TS file or object ID -> [(name exported or held, "*" for each
         # name of what it names or "=" for the file's whole, module specifier
-        # or "" for a name written in the file, the name there[, the scope a
-        # CommonJS assignment is written in, where the name is read])]
+        # or "" for a name written in the file, the name there, the scope
+        # the name is read in)]
         self.reexports = {}
+        # JS files that write CommonJS exports, whose `require` gives those
+        self.commonjs = set()
         # JS/TS file ID -> {local name: the name its module exports it as},
         # for an import that renames what it binds, ``default`` for one of
         # the default and ``=`` for one of the module whole

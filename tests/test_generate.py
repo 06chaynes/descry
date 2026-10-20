@@ -12780,6 +12780,152 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:use.js") == ["FILE:m.js::f::x::use"]
 
+    def test_module_exports_replaces_only_commonjs_exports(self, tmp_path):
+        """`module.exports =` replaces what `exports` and `module.exports`
+        gave, not what `export` does: the ESM entries are no CommonJS
+        writes."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": """
+                const a = { use() {} };
+                export { a };
+                const B = { use() {} };
+                module.exports = B;
+                """,
+                "use.js": """
+                import { a } from './m.js';
+                a.use();
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:use.js") == ["FILE:m.js::a::use"]
+
+    def test_a_shadowed_module_gives_no_exports(self, tmp_path):
+        """A `module` a parameter or a `const` binds is no CommonJS module
+        object: `module.exports =` written against it exports nothing."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": """
+                const helper = { use() {} };
+                function f(module) {
+                  module.exports = helper;
+                  module.exports = { member: helper };
+                }
+                f({});
+                """,
+                "use.js": "const m = require('./m');\nm.use();\nm.member.use();\n",
+            },
+        )
+        assert "FILE:m.js::helper::use" not in _calls(builder, "FILE:use.js")
+
+    def test_an_exports_object_reads_names_where_it_is_written(self, tmp_path):
+        """`module.exports = { a: x }` inside a function reads the `x`
+        bound there, not a same-named top-level binding."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": """
+                const f = { use() {} };
+                function g() {
+                  const f = { use() {} };
+                  module.exports = { a: f };
+                }
+                g();
+                """,
+                "use.js": "const m = require('./m');\nm.a.use();\n",
+            },
+        )
+        assert _calls(builder, "FILE:use.js") == ["FILE:m.js::g::f::use"]
+
+    def test_exports_rebound_writes_what_it_is_bound_to(self, tmp_path):
+        """`exports = v` rebinds the alias, so its writes are no exports;
+        `module.exports = exports = v` and `exports = module.exports = v`
+        replace the exports with `v` and keep the alias to it. A CommonJS
+        module's `require` gives its exports object alone, none of its
+        top-level names besides."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": "exports = { y() {} };\nexports.x = function x() {};\n",
+                "b.js": (
+                    "exports = module.exports = function b() {};\n"
+                    "exports.z = function z() {};\n"
+                ),
+                "c.js": (
+                    "exports.old = function old() {};\n"
+                    "module.exports = exports = { w() {} };\n"
+                    "exports.v = function v() {};\n"
+                ),
+                "u.js": (
+                    "const a = require('./a'); const b = require('./b');\n"
+                    "const c = require('./c');\n"
+                    "function run() { a.x(); b.z(); c.old(); c.v(); c.w(); }\n"
+                ),
+            },
+        )
+        assert _calls(builder, "FILE:u.js::run") == [
+            "FILE:b.js::z",
+            "FILE:c.js::object@2::w",
+            "FILE:c.js::v",
+            "REF:a.x",
+            "REF:c.old",
+        ]
+
+    def test_exports_writes_the_orphan_after_a_reassignment(self, tmp_path):
+        """After `module.exports =` replaces the exports object `exports`
+        is its orphan: `exports.x =` written then exports nothing."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": """
+                const A = { use() {} };
+                const B = { use() {} };
+                module.exports = B;
+                exports.x = A;
+                """,
+                "use.js": "const m = require('./m');\nm.x.use();\nm.use();\n",
+            },
+        )
+        calls = _calls(builder, "FILE:use.js")
+        assert "FILE:m.js::A::use" not in calls
+        assert "FILE:m.js::B::use" in calls
+
+    def test_module_exports_of_an_invoked_function_replaces_exports(self, tmp_path):
+        """`module.exports = <IIFE>` replaces the exports object as every
+        `module.exports =` does: named entries written before it are gone,
+        the returned value unknown."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": """
+                const A = { use() {} };
+                exports.a = A;
+                module.exports = function () { return {}; }();
+                """,
+                "use.js": "const m = require('./m');\nm.a.use();\n",
+            },
+        )
+        assert "FILE:m.js::A::use" not in _calls(builder, "FILE:use.js")
+
+    def test_an_export_written_again_holds_the_last(self, tmp_path):
+        """`exports.x = A; exports.x = B` gives `x` what the last write
+        does, as the runtime does."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": """
+                const A = { use() {} };
+                const B = { use() {} };
+                exports.x = A;
+                exports.x = B;
+                """,
+                "use.js": "const m = require('./m');\nm.x.use();\n",
+            },
+        )
+        assert _calls(builder, "FILE:use.js") == ["FILE:m.js::B::use"]
+
 
 class TestGoCallResolution:
     def test_bare_call_is_the_function_not_a_method_of_that_name(self, tmp_path):
@@ -18301,6 +18447,60 @@ class TestPhpCallResolution:
             "REF:$y->use",
         ]
 
+    def test_a_file_level_binding_takes_part_in_a_functions_merge(self, tmp_path):
+        """A binding the file's top level makes takes part in a merge a
+        function's branch makes: `?` there, not the way inside the
+        function alone."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """<?php
+                class A { public function use() {} }
+                class C { public function use() {} }
+                if ($x instanceof A) {
+                    $f = 1;
+                }
+                function g($d) {
+                    if ($d) {
+                        $x = new C();
+                    }
+                    $x->use();
+                }
+                """,
+            },
+        )
+        assert "REF:$x->use" in _calls(builder, "FILE:a.php::g")
+
+    def test_a_match_default_is_no_switch_section(self, tmp_path):
+        """A `match` arm's `default` inside an alternative-syntax `switch:`
+        is no label of it: without a `default` of its own a way runs that
+        keeps what the name held, so the sections' binding is not all it
+        holds."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """<?php
+                class A { public function use() {} }
+                class C { public function use() {} }
+                function g($c) {
+                    $x = new A();
+                    switch ($c):
+                        case 1:
+                            $x = new C();
+                            break;
+                        case 2:
+                            $x = new C();
+                            $y = match($c) { 1 => 0, default => 0 };
+                            $x = new C();
+                            break;
+                    endswitch;
+                    $x->use();
+                }
+                """,
+            },
+        )
+        assert "REF:$x->use" in _calls(builder, "FILE:a.php::g")
+
     def test_null_coalescing_assigns_only_where_null_or_unset(self, tmp_path):
         """`$x ??= v` assigns only where `$x` is null or unset: a variable
         that holds a value keeps it, and one that may hold either is open."""
@@ -19943,6 +20143,66 @@ class TestDotnetCallResolution:
             "FILE:a.cs::Ext::Val",
             "FILE:a.cs::Ext::Val",
         ]
+
+    def test_a_verbatim_identifier_is_no_literal(self, tmp_path):
+        """`@true`/`@false`/`@null` are identifiers a keyword names, not
+        literals: a member call on a variable so written reads the
+        variable's type, not the keyword's."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cs": """
+                static class Ext {
+                    public static void Val(this bool b) { }
+                }
+                class P {
+                    void M() {
+                        string @true = "t";
+                        string @false = "f";
+                        string @null = "n";
+                        @true.Val();
+                        @false.Val();
+                        @null.Val();
+                    }
+                }
+                """
+            },
+        )
+        assert "FILE:a.cs::Ext::Val" not in _calls(builder, "FILE:a.cs::P::M")
+
+    def test_a_malformed_literal_drops_no_following_call(self, tmp_path):
+        """`0x_` is a literal C# rejects: it gives its member call no
+        receiver type and drops nothing of the file parsed after it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cs": """
+                class P {
+                    void M() { 0x_.Val(); N(); }
+                    void N() { }
+                }
+                """
+            },
+        )
+        assert "FILE:a.cs::P::N" in _calls(builder, "FILE:a.cs::P::M")
+
+    def test_a_leading_dot_real_has_its_type(self, tmp_path):
+        """`.5.Val()` calls a member of `double`: a real literal may lead
+        with its `.`, as `arr[..5]` keeps the range."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cs": """
+                static class Ext {
+                    public static void Dbl(this double d) { }
+                }
+                class P {
+                    void M() { .5.Dbl(); }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.cs::P::M") == ["FILE:a.cs::Ext::Dbl"]
 
     def test_the_brace_index_follows_a_line_rewritten_in_place(self, tmp_path):
         """The header of a type whose `{` shares its line is blanked in

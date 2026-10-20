@@ -334,46 +334,51 @@ Python SDK v2, and a full-tree review's findings are fixed.
   exports what Node gives it, `module.exports = { … }` that object's
   properties, `module.exports = function …` the function and `exports.name
   = …` each name, on one line or over several, unless a declaration of
-  `exports` or `module` shadows it, each `module.exports =` replacing
-  every export before it, which are unknown where its value is not read,
-  and `module.name =` no export at all, a name the exports are given read
-  where it is written, and `require` and a destructuring pattern of it
-  bind them; a name an import binds to a project module that cannot be
-  located is no global, and a call on it, or on `this` of a class it is
-  the base of, stays open, as does one of a member a class lacks whose
-  base is a value or an expression. JavaScript members are where the
-  language puts them: a class's `static` members, and one assigned to a
-  class or a function, `F.m = …`, are the constructor's, reached through
-  it, a subclass and `this` or `super` in a static member, never an
-  instance; a function assigned to `F.prototype.name` or listed in
-  `F.prototype = { … }` is a method of `F`'s instances, of `this` in `F`
-  and of a class that `extends F`, `Object.create(G.prototype)` or `new
-  G()` giving it G's; a member assigned a name holds what the name does,
-  one assigned again is each assignment, a call of it open with all of
-  them; a function declared inside `F` is no property of it, a class that
-  extends a function reaches its statics, and a function called where it
-  is written is no function, its constant holding what it returns; a call
-  of what a call returned reaches the function it returns by name, a
-  `return` in a one-line body too. An attribute a method assigns to the
-  instance, `this.name`, or `self.name` in Python, is found before a
-  method of its name, what the class and its bases assign counting and a
-  subclass's never, as a name a Python class body binds last by an
-  assignment is before a base's and its own `def`, but for `staticmethod`
-  or `classmethod` of that `def`, and a call of it reaches what it holds,
-  a member it reads, bound or not, or a definition, for a field the class
-  declares as for one it does not, or else stays open, as does a call of a
-  Python variable or parameter of no known value. After an `if`, a loop, a
-  `try`, a `case` or `switch` and a statement an `if` or `unless`
-  modifies, a Python, Ruby or PHP name holds what every way through it
-  that goes on gives, where they agree, a way of an `if` not seeing what
-  another assigns, a `break` skipping a loop's `else`, from a `match` case
-  too, a Ruby block perhaps not running, PHP's `if: … elseif: … endif;`
-  syntax too, and a branch ending on the line of the read counting; `||=`,
-  `&&=` and `??=` assign only where the name may be null, or may hold an
-  object, a way that leaves it null counting whatever the others hold; a
-  Ruby assignment holds from where its value ends, which reads the name's
-  earlier value; and `None`, `nil` or `null` hold nothing a call is made
-  on. In Go, Rust, C, C++, Dart, Java and C#, a declaration in a block, a
+  `exports` or `module` shadows it, `exports` the alias of
+  `module.exports` until a `module.exports =` replaces the exports, an
+  invoked function's value too, or `exports =` rebinds it, `exports =
+  module.exports = v` keeping it, the last write of a name the one that
+  counts, `module.name =` no export, ESM `export`s apart from all of it,
+  and `require` giving the exports object alone, its names read where they
+  are written; exports are unknown where the value given them is not read,
+  and `require` and a destructuring pattern of it bind them; a name an
+  import binds to a project module that cannot be located is no global,
+  and a call on it, or on `this` of a class it is the base of, stays open,
+  as does one of a member a class lacks whose base is a value or an
+  expression. JavaScript members are where the language puts them: a
+  class's `static` members, and one assigned to a class or a function,
+  `F.m = …`, are the constructor's, reached through it, a subclass and
+  `this` or `super` in a static member, never an instance; a function
+  assigned to `F.prototype.name` or listed in `F.prototype = { … }` is a
+  method of `F`'s instances, of `this` in `F` and of a class that `extends
+  F`, `Object.create(G.prototype)` or `new G()` giving it G's; a member
+  assigned a name holds what the name does, one assigned again is each
+  assignment, a call of it open with all of them; a function declared
+  inside `F` is no property of it, a class that extends a function reaches
+  its statics, and a function called where it is written is no function,
+  its constant holding what it returns; a call of what a call returned
+  reaches the function it returns by name, a `return` in a one-line body
+  too. An attribute a method assigns to the instance, `this.name`, or
+  `self.name` in Python, is found before a method of its name, what the
+  class and its bases assign counting and a subclass's never, as a name a
+  Python class body binds last by an assignment is before a base's and its
+  own `def`, but for `staticmethod` or `classmethod` of that `def`, and a
+  call of it reaches what it holds, a member it reads, bound or not, or a
+  definition, for a field the class declares as for one it does not, or
+  else stays open, as does a call of a Python variable or parameter of no
+  known value. After an `if`, a loop, a `try`, a `case` or `switch` and a
+  statement an `if` or `unless` modifies, a Python, Ruby or PHP name holds
+  what every way through it that goes on gives, where they agree, a way of
+  an `if` not seeing what another assigns, a `break` skipping a loop's
+  `else`, from a `match` case too, a Ruby block perhaps not running, PHP's
+  `if: … elseif: … endif;` syntax too, and a branch ending on the line of
+  the read counting; `||=`, `&&=` and `??=` assign only where the name may
+  be null, or may hold an object, a way that leaves it null counting
+  whatever the others hold; a Ruby assignment holds from where its value
+  ends, which reads the name's earlier value; and `None`, `nil` or `null`
+  hold nothing a call is made on; a PHP function reads none of the file's
+  variables, a `match`'s `default` is no label of a `switch:` around it.
+  In Go, Rust, C, C++, Dart, Java and C#, a declaration in a block, a
   statement's head or a parameter list is in scope to the end of that
   block or statement, a Java or C# `case` pattern to the end of its switch
   section, and no longer types its name after it. Each declaration is in a
@@ -422,55 +427,56 @@ Python SDK v2, and a full-tree review's findings are fixed.
   takes as many parameters as it declares (`dotnet.json` and `java.json`
   gain `functional`, which lists no annotation interface). A C# extension
   method's receiver, named or a literal's, of the literal's own type (`5`
-  an `int`, `2.5` a `double`, `'c'` a `char`, a suffix's), is its first
-  argument, and one a standard type has only from extension methods is
-  looked up from the namespace around the call outward, with the `using`
-  directives written at each level, each naming the first of its path
-  under the namespaces around it, `global::` the path alone and `using
-  static` a type's members, `global using static` in every file below its
-  directory, so a project extension can be the one called (`dotnet.json`
-  gains `extensions`); a method of the type and an extension that both
-  take a call leave it open, but for one that passes nothing to a method
-  that takes nothing; a generic method whose type argument no argument
-  tells is called with it written; a type nested in the enclosing class is
-  meant before one of the namespace, and of a type declared in parts, the
-  caller's file's part. Ruby looks in a prepended module before the class,
-  in an included one after it and before the superclass, the last included
-  first and the first of one `include A, B` nearest, and in a module a
-  class extends for its singleton methods; an `alias_method` inside `class
-  << self` is a singleton method. A Dart mixin applied to a class leaves
-  its `on` types to the class's superclass. A Dart `is` test, `switch`
-  case or arm and if-case promote only where Dart's flow analysis does: a
-  case whose heads, and the alternatives of an `||` pattern, test one
-  type, a local or a private final field, until an assignment reaches it,
-  a parenthesized target, a pattern's variable, a `for` loop's variable, a
-  compound assignment, `++`, `--` and a write in an arrow body among them,
-  but not one to a name declared inside, never in another branch or case
-  nor past one that exits, and not where every assignment reaching it
-  gives a value whose type derives from the promoted one, a variable's, a
-  getter's, an operator's result or a pattern's part; past a `while (!(x
-  is T))` only its condition ends; the operands after an `&&` (an `||` for
-  `is!`); the branch of a conditional, `if` or `while` it is true in; past
-  an `if` whose other branch exits. A Dart `when` guard promotes in its
-  case's body or its switch-expression arm, a standard type's members are
-  read from the library's data whether or not the project extends it, a
-  case's variables are in scope through it, and a parameter gives way to
-  an `is` test on its line. No Dart pattern of a `switch` head or arm, a
-  record or multi-line case head, an alternative of `||` or the left of
-  `=` among them, is a constructor call, a guard's call before `=>` is
-  one, `:final x` binds `x`, a field pattern's variable has the type of
-  the getter it matches, `for (var x in xs)` what iterating `xs` gives, a
-  standard generic type keeps its type arguments, an extension on a
-  standard type applies to types derived from it and one on a project type
-  to no library type of its name, and a function expression's parameters
-  written over lines are its own. A Go variable is of the type it is
-  declared with whatever is assigned to it later, an entry of a `var
-  (...)` block declares, `x := (B{})` is a `B`, a literal that goes on to
-  a method call types nothing, and a method called on a composite literal,
-  `T{}.M()`, is `T`'s. A C/C++ definition an `#if` arm the call is not
-  under alone builds is a candidate beside one every build has, where the
-  unguarded one was taken; one defined in several arms is built under what
-  they share, where it had the first arm's; `#ifndef X` that opens with
+  an `int`, `2.5` or `.5` a `double`, `'c'` a `char`, a suffix's; `@true`
+  an identifier), is its first argument, and one a standard type has only
+  from extension methods is looked up from the namespace around the call
+  outward, with the `using` directives written at each level, each naming
+  the first of its path under the namespaces around it, `global::` the
+  path alone and `using static` a type's members, `global using static` in
+  every file below its directory, so a project extension can be the one
+  called (`dotnet.json` gains `extensions`); a method of the type and an
+  extension that both take a call leave it open, but for one that passes
+  nothing to a method that takes nothing; a generic method whose type
+  argument no argument tells is called with it written; a type nested in
+  the enclosing class is meant before one of the namespace, and of a type
+  declared in parts, the caller's file's part. Ruby looks in a prepended
+  module before the class, in an included one after it and before the
+  superclass, the last included first and the first of one `include A, B`
+  nearest, and in a module a class extends for its singleton methods; an
+  `alias_method` inside `class << self` is a singleton method. A Dart
+  mixin applied to a class leaves its `on` types to the class's
+  superclass. A Dart `is` test, `switch` case or arm and if-case promote
+  only where Dart's flow analysis does: a case whose heads, and the
+  alternatives of an `||` pattern, test one type, a local or a private
+  final field, until an assignment reaches it, a parenthesized target, a
+  pattern's variable, a `for` loop's variable, a compound assignment,
+  `++`, `--` and a write in an arrow body among them, but not one to a
+  name declared inside, never in another branch or case nor past one that
+  exits, and not where every assignment reaching it gives a value whose
+  type derives from the promoted one, a variable's, a getter's, an
+  operator's result or a pattern's part; past a `while (!(x is T))` only
+  its condition ends; the operands after an `&&` (an `||` for `is!`); the
+  branch of a conditional, `if` or `while` it is true in; past an `if`
+  whose other branch exits. A Dart `when` guard promotes in its case's
+  body or its switch-expression arm, a standard type's members are read
+  from the library's data whether or not the project extends it, a case's
+  variables are in scope through it, and a parameter gives way to an `is`
+  test on its line. No Dart pattern of a `switch` head or arm, a record or
+  multi-line case head, an alternative of `||` or the left of `=` among
+  them, is a constructor call, a guard's call before `=>` is one, `:final
+  x` binds `x`, a field pattern's variable has the type of the getter it
+  matches, `for (var x in xs)` what iterating `xs` gives, a standard
+  generic type keeps its type arguments, an extension on a standard type
+  applies to types derived from it and one on a project type to no library
+  type of its name, and a function expression's parameters written over
+  lines are its own. A Go variable is of the type it is declared with
+  whatever is assigned to it later, an entry of a `var (...)` block
+  declares, `x := (B{})` is a `B`, a literal that goes on to a method call
+  types nothing, and a method called on a composite literal, `T{}.M()`, is
+  `T`'s. A C/C++ definition an `#if` arm the call is not under alone
+  builds is a candidate beside one every build has, where the unguarded
+  one was taken; one defined in several arms is built under what they
+  share, where it had the first arm's; `#ifndef X` that opens with
   `#define X` anywhere in a file, as an amalgamation holds headers, is no
   arm. A C++ specialization is a type of its own, named with its
   arguments, `template <> void Box<int>::put()` a member of the template,
