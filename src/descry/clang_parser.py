@@ -246,7 +246,7 @@ _RE_LOCAL_TYPE = re.compile(
 )
 _RE_USING = re.compile(r"\s*using\s+(\w+)\s*=")
 # `using Base::name` in a class: the name of the base's members it brings in
-_RE_USING_MEMBER = re.compile(r"\s*using\s+[^=]*::\s*(~?\w+)\s*")
+_RE_USING_MEMBER = re.compile(r"\s*using\s+(?P<qual>[^=]*?)::\s*(?P<name>~?\w+)\s*")
 # An alias declared as a statement, behind what ends the one before it
 _RE_LOCAL_ALIAS = re.compile(r"[;{}]\s*((?:using\s+\w+\s*=|typedef\b)[^;{}]*);")
 _RE_TYPEDEF = re.compile(r"\s*typedef\b")
@@ -1302,7 +1302,7 @@ class ClangParser(BaseParser):
             self._alias(alias[1], flat[alias.end() :], parent_id)
             return
         if owner and (used := _RE_USING_MEMBER.fullmatch(flat)):
-            self.builder.c_using.setdefault(parent_id, set()).add(used[1])
+            self.builder.c_using.setdefault(parent_id, {})[used["name"]] = used["qual"]
             return
         after = spans[0][1] + 1 if spans else 0
         if (

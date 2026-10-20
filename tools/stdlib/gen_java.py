@@ -126,8 +126,14 @@ class Module:
     def callable(self, name):
         """``(name, parameter types, return type)`` of the one abstract
         method the interface ``name`` has, its own or a base's, that
-        `Object` does not implement; None for any other class."""
+        `Object` does not implement; None for any other class, and for an
+        annotation interface, which is no functional interface."""
         if name not in self.interfaces:
+            return None
+        bases = self.classes[name]["bases"]
+        if name == "java.lang.annotation.Annotation" or any(
+            binary_name(base) == "java.lang.annotation.Annotation" for base in bases
+        ):
             return None
         own = self.signatures.get(name, ())
         found = {

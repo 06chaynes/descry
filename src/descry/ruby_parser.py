@@ -73,12 +73,36 @@ _RE_CONSTRUCTED = re.compile(
 _RE_CHAIN = re.compile(
     rf"\s*(?:{_CONST}|@{{0,2}}[a-z_]\w*[?!]?)(?:\s*\.\s*[a-z_]\w*[?!]?)*\s*"
 )
-# `name = value` / `name ||= value` as a statement
-_RE_ASSIGNMENT = re.compile(r"\s*(?P<name>[a-z_]\w*)\s*(?:\|\|)?=(?![=~>])")
+# `name = value` / `name ||= value` / `name &&= value` as a statement
+_RE_ASSIGNMENT = re.compile(r"\s*(?P<name>[a-z_]\w*)\s*(?P<which>\|\||&&)?=(?![=~>])")
 # A local variable where it is assigned: `name =`, `name +=`
 _RE_ASSIGNED = re.compile(
     r"(?<![\w.@$:])([a-z_]\w*)\s*(?:\|\||&&|\*\*|<<|>>|[-+*/%|&^])?=(?![=~>])"
 )
+
+# What ends an assignment's value: a `;`, a keyword that ends or modifies
+# its statement, or a bracket that closes what holds it
+_RE_VALUE_END = re.compile(
+    r";|(?<![\w.@$:])(?:if|unless|while|until|rescue|then|else|elsif|end|do|and|or)\b"
+    r"|[()\[\]{}]"
+)
+
+
+def _value_end(code, start):
+    """The column where the value of an assignment, read from column
+    ``start`` of ``code``, ends."""
+    depth = 0
+    for found in _RE_VALUE_END.finditer(code, start):
+        token = found[0]
+        if token in "([{":
+            depth += 1
+        elif token in ")]}" and depth:
+            depth -= 1
+        elif not depth:
+            return found.start()
+    return len(code)
+
+
 # `name, @other, *rest = value` as a statement, its targets in group 1
 _RE_MULTIPLE = re.compile(r"\s*((?:[*@\w.\[\]]+\s*,\s*)+[*@\w.\[\]]*)\s*=(?![=~>])")
 # `rescue Error => name`, `for name, other in`
@@ -475,9 +499,11 @@ def _branches(code_lines):
             frame["ways"] = (frame["ways"] or []) + [[[at, None]]]
 
     def close_way(frame, at):
-        """End the way of ``frame`` going on at position ``at``."""
-        if frame["ways"] and frame["ways"][-1][-1][1] is None:
-            frame["ways"][-1][-1][1] = at
+        """End each way of ``frame`` going on at position ``at``: the open
+        way's, and a `begin`'s `else` span the first way runs on in."""
+        for way in frame["ways"] or ():
+            if way and way[-1][1] is None:
+                way[-1][1] = at
 
     for index, line in enumerate(code_lines):
         lineno = index + 1
@@ -491,16 +517,21 @@ def _branches(code_lines):
             if top and top["awaiting"] and word in ("then", "do", ";"):
                 open_way(top, after)
             elif word == "{":
-                stack.append({"kind": "{", "awaiting": False})
+                stack.append({"kind": "{", "awaiting": False, "at": at})
             elif word == "}":
                 if top and top["kind"] == "{":
                     stack.pop()
+                    # A `{…}` block may not run.
+                    add("loop", [[], [[top["at"], after]]], after)
             elif word == "end":
                 while stack and stack[-1]["kind"] == "{":
                     stack.pop()
                 frame = stack.pop() if stack else {"kind": None}
                 kind, ways = frame["kind"], frame.get("ways")
-                if kind in ("if", "case", "loop", "begin") and ways:
+                if kind == "do":
+                    # A `do…end` block may not run.
+                    add("loop", [[], [[frame["at"], after]]], after)
+                elif kind in ("if", "case", "loop", "begin") and ways:
                     close_way(frame, at)
                     if kind in ("if", "case") and not frame["full"]:
                         ways.append([])
@@ -535,7 +566,7 @@ def _branches(code_lines):
             elif word in ("class", "module", "def", "do"):
                 header = _RE_METHOD.match(line, at[1]) if word == "def" else None
                 if not (header and _RE_ENDLESS.match(line, header.end())):
-                    stack.append({"kind": word, "awaiting": False})
+                    stack.append({"kind": word, "awaiting": False, "at": at})
             elif (
                 not top or top.get("end") or top["kind"] not in ("if", "case", "begin")
             ):
@@ -848,7 +879,7 @@ class RubyParser(BaseParser):
 
         code_lines = _code_lines(lines)
         opened, levels = _blocks(code_lines)
-        self.read_branches(_branches(code_lines))
+        self.read_branches(_branches, code_lines)
 
         # Requires — one pass over the file
         for line, code in zip(lines, code_lines):
@@ -1227,6 +1258,21 @@ class RubyParser(BaseParser):
             # `a&.b` calls `b` as `a.b` does.
             code = code.replace("&.", " .")
             self.begin_line(code, lineno, raw=lines[index], since=since)
+            # Each variable the line assigns holds its value from where that
+            # ends, so the value reads what the name held before; one the line
+            # does not start by assigning is of no known value, for the line's
+            # own reads too. A variable is one of the block its assignment is in.
+            effect = {
+                m[1]: _value_end(code, m.end()) for m in _RE_ASSIGNED.finditer(code)
+            }
+            leading = _RE_ASSIGNMENT.match(code)
+            for name, column in list(assigned.items()):
+                if not leading or name != leading["name"]:
+                    depth = outer_scopes + sum(at < column for at in opened_at)
+                    self._declare(
+                        name, lineno, since, "?", depth, effect.get(name, column)
+                    )
+                    del assigned[name]
             # A line that goes on from a `.` starts with the method called.
             chained = previous.endswith(".") and not previous.endswith("..")
             previous = code.rstrip()
@@ -1332,29 +1378,31 @@ class RubyParser(BaseParser):
                 else:
                     body["last"] = self._exit(code, raw, lineno, since, self_id)
 
-            bound = _RE_ASSIGNMENT.match(code)
+            bound = leading
             if bound:
-                if code[bound.end() :].strip() == self.null_literal:
-                    self._nulls.add((lineno, bound.start("name")))
+                at = lineno, effect[bound["name"]]
                 value = code[bound.end() :]
                 origin = _constructed(_continued(code_lines, index, value))
                 edge = self._closes.get(len(code.rstrip()) - 1)
                 chain = _RE_CHAIN.fullmatch(_strip_parens(value))
                 if not origin and edge is not None and chain:
                     origin = f"#{edge}"
-                self._declare(
-                    bound["name"],
-                    lineno,
-                    since,
-                    origin or "?",
-                    outer_scopes,
-                    bound.start("name"),
+                # `name ||= value` assigns only where `name` is nil or
+                # false, `name &&= value` only where it holds an object.
+                runs = not bound["which"] or self._runs(
+                    bound["name"], lineno, since, bound["which"] == "||"
                 )
+                if runs is not False:
+                    if runs is None:
+                        origin = "?"
+                    elif value.strip() == self.null_literal:
+                        self._nulls.add(at)
+                    elif origin:
+                        self._made.add(at)
+                    self._declare(
+                        bound["name"], lineno, since, origin or "?", outer_scopes, at[1]
+                    )
                 del assigned[bound["name"]]
-            for name, column in assigned.items():
-                # A variable is one of the block its assignment is in.
-                depth = outer_scopes + sum(at < column for at in opened_at)
-                self._declare(name, lineno, since, "?", depth, column)
 
         # An instance variable has a type where every value it is assigned
         # in its class is an instance of that one, and its reader returns it.

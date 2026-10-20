@@ -41,8 +41,9 @@ _GENERIC = r"<(?:[^<>]|<(?:[^<>]|<[^<>]*>)*>)*>"
 
 # using System;  /  using static System.Math;  /  using Foo = App.Bar;
 _RE_USING = re.compile(
-    r"^\s*(?P<global>global\s+)?using\s+(?:static\s+)?"
-    rf"(?:(?P<alias>{_NAME})\s*=\s*)?(?P<path>{_PATH})\s*(?:{_GENERIC})?\s*;"
+    r"^\s*(?P<global>global\s+)?using\s+(?P<static>static\s+)?"
+    rf"(?:(?P<alias>{_NAME})\s*=\s*)?(?P<rooted>global::)?"
+    rf"(?P<path>{_PATH})\s*(?:{_GENERIC})?\s*;"
 )
 # A type as written: a possibly qualified name with its type arguments, or a
 # tuple, then any `?`, `*` and array ranks
@@ -802,19 +803,24 @@ class DotnetParser(BaseParser):
         if namespace:
             self.set_file_metadata(file_id, "dotnet_namespace", namespace)
 
-        # An alias is imported under its name; a namespace, or a type whose
-        # static members `using static` brings into scope, as `<path>.*`. A
-        # `global using` holds for every file below the directory.
+        # An alias is imported under its name; a `global using` holds for
+        # every file below the directory. A `using static` imports a type's
+        # members, no namespace; each namespace a file's `using`s name is
+        # recorded with the namespace body it is written in, where it is
+        # resolved.
         directory = posixpath.dirname(rel_path)
         for code in code_lines:
             m = _RE_USING.match(code)
             if m:
                 self.builder.add_edge(file_id, f"MODULE:{m['path']}", "IMPORTS")
-                imports = self.builder.imports.setdefault(file_id, {})
-                if m["global"]:
-                    usings = self.builder.dotnet_global_usings
-                    imports = usings.setdefault(directory, {})
-                imports[m["alias"] or f"{m['path']}.*"] = m["path"]
+                if not m["static"]:
+                    imports = self.builder.imports.setdefault(file_id, {})
+                    if m["global"]:
+                        imports = self.builder.dotnet_global_usings.setdefault(
+                            directory, {}
+                        )
+                    if m["global"] or m["alias"]:
+                        imports[m["alias"] or f"{m['path']}.*"] = m["path"]
 
         self.scan_declarations(
             [_RE_ARRAY_TYPE.sub(r"System.Array<\1>", code) for code in code_lines],
@@ -971,8 +977,18 @@ class DotnetParser(BaseParser):
             m_using = context_id == file_id and _RE_USING.match(code)
             if m_using and not m_using["global"] and not m_using["alias"]:
                 within = [name for name, last in namespaces if lineno <= last]
+                if not within and not m_using["static"]:
+                    self.builder.imports.setdefault(file_id, {})[
+                        f"{m_using['path']}.*"
+                    ] = m_using["path"]
                 self.builder.dotnet_usings.setdefault(file_id, []).append(
-                    (m_using["path"], ".".join(within), i in guarded)
+                    (
+                        m_using["path"],
+                        ".".join(within),
+                        i in guarded,
+                        bool(m_using["static"]),
+                        bool(m_using["rooted"]),
+                    )
                 )
 
             m_type = _RE_CLASS.match(code)

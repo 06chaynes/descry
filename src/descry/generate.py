@@ -6254,6 +6254,13 @@ _FIELD_MODIFIERS_RE = re.compile(
 _TRAILING_PATH_RE = re.compile(r"(?<![\w$.)\]])[A-Za-z_$][\w$]*(?:\.[\w$]+)*$")
 
 
+def _constructs(value):
+    """Whether ``value`` is one construction of an object, `new T(...)`."""
+    found = re.match(r"new\s+[\\\w.$]+\s*\(", value)
+    closed = found and _closing([value], 0, found.end())
+    return bool(closed) and closed[1] == len(value) - 1
+
+
 def _strip_parens(text: str) -> str:
     """``text`` without its parentheses and what they hold."""
     previous = None
@@ -6417,7 +6424,7 @@ class BaseParser:
 
     def __init__(self, builder):
         self.builder = builder
-        self.declared = {}
+        self.declared = _BoundMap(self)
         self.fields = {}  # (declaring type, field name) -> its declared types
         self._line = 0
         self._code = ""
@@ -6451,6 +6458,8 @@ class BaseParser:
         self._unsettled = []  # see ``begin_line``
         self._first_node = 0  # where the nodes and edges of the file being
         self._first_edge = 0  # parsed start in the builder's lists
+        # (first edge of the file, edges read, {type name: base names})
+        self._bases_named = (None, 0, {})
         # (name, unwrap, depth) of a binding still being read. depth is how
         # many calls were open before the one its value starts with, while
         # that call is open; None otherwise.
@@ -6467,43 +6476,81 @@ class BaseParser:
         # (name, entry of ``declared``) of a declaration -> the spans of its
         # scope
         self._scope_extents = {}
-        self.read_branches([])
+        self.read_branches()
 
     def parse(self, file_path, rel_path, content):
         raise NotImplementedError
 
-    def read_branches(self, branches):
-        """Take ``branches``, each ``(first, end, ways, on, exclusive)`` of a
-        statement that runs a body only where its head allows: the
-        ``(line, column)`` its first way starts and it ends at, the spans
-        each way runs, those of the ways that go on past it, and whether its
-        ways exclude each other, as an `if`'s do."""
+    def read_branches(self, reader=None, code_lines=()):
+        """Take the statements ``reader`` reads from ``code_lines``, each
+        ``(first, end, ways, on, exclusive)`` of one that runs a body only
+        where its head allows: the ``(line, column)`` its first way starts
+        and it ends at, the spans each way runs, those of the ways that go
+        on past it, and whether its ways exclude each other, as an `if`'s
+        do. None where the reader fails on a shape it does not know."""
+        try:
+            branches = reader(code_lines) if reader else []
+        except Exception as e:  # noqa: BLE001 — a shape not read merges nothing
+            file_id = self.builder.nodes[self._first_node]["id"]
+            logger.warning(f"Branches of {file_id} not read: {e!r}")
+            branches = []
         inner_first = sorted(branches, key=itemgetter(0), reverse=True)
         self._branchings = sorted(inner_first, key=itemgetter(1))
         self._next_branch = 0
-        self._exclusive = [b[:3] for b in branches if b[4]]
-        # ``(line, column)`` of each binding to ``null_literal``
-        self._nulls = set()
+        self._exclusive = sorted((b[:3] for b in branches if b[4]), key=itemgetter(1))
+        self._exclusive_ends = [b[1] for b in self._exclusive]
+        # ``(line, column)`` of each binding to ``null_literal`` and to an
+        # object constructed
+        self._nulls, self._made = set(), set()
+        # Name -> the ends of the statements whose ways may leave it null
+        self._maybe_null = {}
+        # Line -> the names ``declared`` binds on it, and its keys sorted
+        self._bound_lines = {}
+        for name, entries in self.declared.items():
+            for d in entries:
+                self._bound_lines.setdefault(d[0], set()).add(name)
+        self._bound_order = sorted(self._bound_lines)
 
-    def _merge_branches(self, lineno, since):
-        """Past each statement of ``read_branches`` that ends before line
-        ``lineno``, give each name its ways through bind differently, read
-        from line ``since`` on, no known value."""
+    @staticmethod
+    def _bound_names(lines, order, lo, hi):
+        """The names of ``lines``, the map a binding's line to its names,
+        bound on a line from ``lo`` to ``hi``, and the map's sorted keys."""
+        return {
+            name
+            for line in order[bisect_left(order, lo) : bisect_right(order, hi)]
+            for name in lines[line]
+        }
+
+    def _merge_branches(self, at, since):
+        """Past each statement of ``read_branches`` that ends before
+        position ``at``, give each name its ways through bind differently,
+        read from line ``since`` on, no known value."""
         while self._next_branch < len(self._branchings):
             first, end, _, on, _ = self._branchings[self._next_branch]
-            if end[0] >= lineno:
+            if end >= at:
                 return
             self._next_branch += 1
-            for name, entries in self.declared.items():
-                # A null holds nothing a call is made on.
+            # Only a name bound inside can disagree; a way with none of it
+            # holds the last bound before it, as every way's.
+            for name in self._bound_names(
+                self._bound_lines, self._bound_order, first[0], end[0]
+            ):
+                entries = self.declared.get(name)
+                if not entries:
+                    continue
                 bound = [
                     (at, d[1])
                     for d in entries
                     if since <= d[0]
-                    and (at := (d[0], self._column(name, d) or 0)) not in self._nulls
+                    and (at := (d[0], self._column(name, d) or 0))[1] >= 0
                 ]
-                if _disagree(bound, first, on):
+                # A way that leaves the name null is no value a call is made
+                # on, but one an assignment where it is null runs in.
+                valued = [b for b in bound if b[0] not in self._nulls]
+                if _disagree(valued, first, on):
                     entries.append((end[0], "?", False, end[1]))
+                elif _disagree(bound, first, on):
+                    self._maybe_null.setdefault(name, []).append(end)
 
     def enter_context(self, node_id, first_line, last_line, params=frozenset()):
         """Make ``node_id``, which spans ``first_line`` to ``last_line``, the
@@ -6541,7 +6588,7 @@ class BaseParser:
         # name -> [(lineno, origin of its value, at file level, column)], and
         # <param> -> [(lineno, bound, at file level, column)]; the column of
         # the name on the line, None where the line does not tell
-        self.declared = {}
+        self.declared = _BoundMap(self)
         self._members = set()  # (lineno, name) of members, read on a receiver
         self.fields = {}
         depth = 0  # parentheses open at the start of the line
@@ -6590,18 +6637,24 @@ class BaseParser:
                         top = self.declared.get(queried[1], ())
                         known = [v for _, v, at_top, _ in top if v and at_top]
                         held = known[-1] if known else queried[1]
-                    self.declared.setdefault(key, []).append(
-                        (lineno, held, file_level, named)
+                    before = line[: match.start("name")] if groups.get("name") else None
+                    # `this.name`/`self.name` writes a member of the type the
+                    # line is in, no variable of the name.
+                    written = before is not None and re.search(
+                        rf"(?<![\w$.]){re.escape(self.self_name)}\.$", before.rstrip()
                     )
+                    self.declared.setdefault(
+                        f"{owner or ''}.{key}" if written else key, []
+                    ).append((lineno, held, file_level, named))
                     if self._property(lineno, line, named, match[0], key):
                         self._members.add((lineno, key))
                     # A field is declared at the start of a line, behind
                     # modifiers at most, and not among parameters.
                     if (
-                        groups.get("name")
+                        before is not None
                         and owner
                         and not depth
-                        and _FIELD_MODIFIERS_RE.fullmatch(line[: match.start("name")])
+                        and _FIELD_MODIFIERS_RE.fullmatch(before)
                     ):
                         self.fields.setdefault((owner, key), set()).add(value)
             depth = max(0, depth + line.count("(") - line.count(")"))
@@ -6617,42 +6670,78 @@ class BaseParser:
             declared_type += groups["generic"] if keeps else "<>"
         return declared_type
 
-    def _declared(self, name, lineno, since, anywhere=False):
-        """What ``name`` is declared as at ``lineno``: by its last
-        declaration from line ``since``, the start of the enclosing
-        definition. Failing that what its file-level declarations agree on.
-        ``anywhere`` looks at every declaration instead, for a field."""
-        if not anywhere and lineno == self._line and self._read_at is not None:
+    def _seen(self, name, lineno, since):
+        """The entry of ``declared`` for ``name`` a read at ``lineno`` sees:
+        its last declaration in scope from line ``since``, the start of the
+        enclosing definition, written before the read; None for none."""
+        if lineno == self._line and self._read_at is not None:
             # What a binding before the read on its line is bound to
             self._settle_calls(self._code, self._read_at)
+        if lineno < self._line:
+            # A statement that ends where the finished line does merges for
+            # a read past it; a line being read binds before it merges.
+            self._merge_branches(
+                (lineno, self._read_at if self._read_at is not None else math.inf),
+                since,
+            )
+        read = lineno, self._read_at
+        # Of those in scope, the ones written before the read
+        local = [
+            d
+            for d in self.declared.get(name, ())
+            if (d[0], name) not in self._members
+            and since <= d[0] <= lineno
+            and self._in_scope(name, d, lineno)
+            and (read[1] is None or (d[0], self._column(name, d) or 0) < read)
+            and not _apart(
+                self._exclusive,
+                (d[0], self._column(name, d) or 0),
+                (lineno, read[1] or 0),
+                ends=self._exclusive_ends,
+            )
+        ]
+        if not local:
+            return None
+        line = max(d[0] for d in local)
+        same = [d for d in local if d[0] == line]
+        columns = [self._column(name, d) for d in same]
+        if None not in columns and (line < lineno or read[1] is not None):
+            # The last of the line
+            same = [max(zip(columns, same), key=lambda b: b[0])[1]]
+        return same[0]
+
+    def _runs(self, name, lineno, since, where_null):
+        """Whether an assignment to ``name`` on line ``lineno`` that runs only
+        where the name holds ``null_literal``, if ``where_null``, else only
+        where it holds an object, runs: None where either may be. A binding
+        to an object constructed holds one; a value of any other kind may be
+        null."""
+        # The statements that end before the line have merged.
+        self._merge_branches((lineno, 0), since)
+        seen = self._seen(name, lineno, since)
+        at = seen and (seen[0], self._column(name, seen) or 0)
+        if at in self._nulls:
+            null = True
+        elif at in self._made and not any(
+            end > at for end in self._maybe_null.get(name, ())
+        ):
+            null = False
+        else:
+            return None
+        return null == where_null
+
+    def _declared(self, name, lineno, since, anywhere=False):
+        """What ``name`` is declared as at ``lineno``: by the declaration
+        ``_seen`` gives. Failing that what its file-level declarations agree
+        on. ``anywhere`` looks at every declaration instead, for a field."""
+        seen = None if anywhere else self._seen(name, lineno, since)
+        if seen is not None:
+            return seen[1]
         declarations = [
             d
             for d in self.declared.get(name, ())
             if anywhere or (d[0], name) not in self._members
         ]
-        if not anywhere:
-            read = lineno, self._read_at
-            # Of those in scope, the ones written before the read
-            local = [
-                d
-                for d in declarations
-                if since <= d[0] <= lineno
-                and self._in_scope(name, d, lineno)
-                and (read[1] is None or (d[0], self._column(name, d) or 0) < read)
-                and not _apart(
-                    self._exclusive,
-                    (d[0], self._column(name, d) or 0),
-                    (lineno, read[1] or 0),
-                )
-            ]
-            if local:
-                line = max(d[0] for d in local)
-                same = [d for d in local if d[0] == line]
-                columns = [self._column(name, d) for d in same]
-                if None not in columns and (line < lineno or read[1] is not None):
-                    # The last of the line
-                    same = [max(zip(columns, same), key=lambda b: b[0])[1]]
-                return same[0][1]
         # What a call returned is bound to a variable, never to a field. A
         # parameter or variable of the definition hides a file-level name.
         hidden = self._is_local(name)
@@ -6851,11 +6940,23 @@ class BaseParser:
         member = field != receiver
         # A member read on the receiver, `b.held.meow`, follows it.
         field, _, path = field.partition(".")
-        if member and (owner, field) in self.fields:
-            types = self.fields[owner, field]
-            value = next(iter(types)) if len(types) == 1 else None
+        if member:
+            # `this.field`/`self.field` holds what the type `this` is an
+            # instance of — or one it inherits — declares or assigns it. A
+            # subtype's writes are no instance of its base's.
+            # What the type declares it, else what its code writes to it,
+            # else what a field of the name the scan could not file under its
+            # type holds
+            owners = [owner or "", *self._inherited_names(owner)]
+            types = {t for o in owners for t in self.fields.get((o, field), ())}
+            for read in (f"{o}.{field}" for o in owners) if not types else ():
+                types.add(self._declared(read, lineno, since, True))
+            types.discard(None)
+            if not types and (held := self._declared(field, lineno, since, True)):
+                types.add(held)
+            value = types.pop() if len(types) == 1 else None
         else:
-            value = self._declared(field, lineno, since, member)
+            value = self._declared(field, lineno, since)
         seen = {field}
         while value and value not in seen and value in self.declared:
             # `typeof name` holds what the name is declared as there.
@@ -6868,6 +6969,40 @@ class BaseParser:
             bounds = self._bounds(value[:-2], lineno)
             value = f"{bounds.pop()}()" if len(bounds) == 1 else value
         return f"{value}.{path}.{method}" if path else f"{value}.{method}"
+
+    def _owning_type(self, scope_id):
+        """The name of the type a `self` or `this` written in ``scope_id``
+        is an instance of: the innermost class enclosing it, else None."""
+        while "::" in scope_id:
+            node = self._node(scope_id)
+            if node and node["type"] == "Class":
+                return node["metadata"]["name"]
+            scope_id = scope_id.rpartition("::")[0]
+        return None
+
+    def _inherited_names(self, owner):
+        """The names of the types ``owner`` inherits, direct or not, as the
+        file being parsed names them."""
+        if owner is None:
+            return ()
+        first, read, named = self._bases_named
+        if first != self._first_edge:
+            read, named = self._first_edge, {}
+        for edge in self.builder.edges[read:]:
+            if edge["relation"] == "INHERITS" and edge["target"].startswith("REF:"):
+                base = edge["target"][4:]
+                named.setdefault(edge["source"].rpartition("::")[2], set()).add(
+                    base.rpartition(".")[2] or base
+                )
+        self._bases_named = self._first_edge, len(self.builder.edges), named
+        seen = {owner}
+        queue = [owner]
+        for t in queue:
+            for base in named.get(t, ()):
+                if base not in seen:
+                    seen.add(base)
+                    queue.append(base)
+        return seen - {owner}
 
     def _bounds(self, param, lineno):
         """The bounds of type parameter ``param`` where line ``lineno`` is
@@ -6890,7 +7025,7 @@ class BaseParser:
         finished = self._code
         self._end_line()
         self._settle_calls(finished, math.inf)
-        self._merge_branches(lineno, since)
+        self._merge_branches((lineno, 0), since)
         # (name, end, value's start and end columns, steps from the call's
         # result to the name's) of each binding of the line whose statement
         # ends on it and whose value is not known
@@ -6911,13 +7046,27 @@ class BaseParser:
                 found, code, stop
             ):
                 written = {(lineno, at), end}
-                entries = self.declared.get(name, ())
-                if not self.declares(found) or any(
-                    (e[0], e[3]) in written for e in entries
-                ):
+                if not self.declares(found):
                     continue
-                if code[start:value_end].strip().lower() == self.null_literal:
-                    self._nulls.add(end)
+                if found.groupdict().get("cond"):
+                    # `name ??= value` assigns only where `name` is null or
+                    # unset: one holding an object keeps it, one that may
+                    # be either holds no known value.
+                    runs = self._runs(name, lineno, since, True)
+                    if runs is False:
+                        continue
+                    if runs is None:
+                        self.declared.setdefault(name, []).append(
+                            (end[0], "?", False, end[1])
+                        )
+                        continue
+                value = code[start:value_end].strip()
+                if value.lower() == self.null_literal:
+                    self._nulls.update(written)
+                elif _constructs(value):
+                    self._made.update(written)
+                if any((e[0], e[3]) in written for e in self.declared.get(name, ())):
+                    continue
                 # Of a value that gives several, the first is the value
                 copied = (
                     end[0] == lineno
@@ -7013,8 +7162,11 @@ class BaseParser:
         else:
             self._tail_name = ends_with and ends_with.group()
         binding = self.binding_re.search(self._code) if self.binding_re else None
-        if binding and not self._binds_name(binding["name"]):
-            # A name the file gets from elsewhere is no declaration of it.
+        if binding and (
+            not self._binds_name(binding["name"]) or binding.groupdict().get("cond")
+        ):
+            # A name the file gets from elsewhere is no declaration of it,
+            # and `begin_line` binds what an assignment where null gives.
             binding = None
         closed, self._pending_closed = self._pending_closed, None
         below, self._value_below = self._value_below, False
@@ -7459,7 +7611,7 @@ class BaseParser:
                 )
         if origin is None and (source_id, callee) in self._locals:
             origin = f"={callee}"
-        owner = source_id.split("::")[-2] if source_id.count("::") > 1 else None
+        owner = self._owning_type(source_id)
         self._read_at = start
         origin = origin or self.call_origin(callee, lineno, since, owner)
         self._read_at = None
@@ -7614,11 +7766,7 @@ class BaseParser:
 
     def _node(self, node_id):
         """The node of this file with ID ``node_id``, if there is one."""
-        if node_id in self.builder.node_registry:
-            for node in reversed(self.builder.nodes):
-                if node["id"] == node_id:
-                    return node
-        return None
+        return self.builder.nodes_by_id.get(node_id)
 
     def rename_node(self, old_id, new_id):
         """Give the node ``old_id`` of the file being parsed, and all that
@@ -7632,8 +7780,10 @@ class BaseParser:
         for node in self.builder.nodes[self._first_node :]:
             if node["id"] != moved(node["id"]):
                 self.builder.node_registry.discard(node["id"])
+                self.builder.nodes_by_id.pop(node["id"], None)
                 node["id"] = moved(node["id"])
                 self.builder.node_registry.add(node["id"])
+                self.builder.nodes_by_id[node["id"]] = node
         for edge in self.builder.edges[self._first_edge :]:
             edge["source"] = moved(edge["source"])
             edge["target"] = moved(edge["target"])
@@ -7758,6 +7908,19 @@ def _py_block_statements(node):
         yield from case.body
 
 
+def _py_breaks(body):
+    """Whether a `break` the statements in ``body`` run leaves the loop
+    they are the body of; one inside a nested loop leaves that loop."""
+    todo = list(body)
+    while todo:
+        stmt = todo.pop()
+        if isinstance(stmt, ast.Break):
+            return True
+        if not isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
+            todo += [s for s in ast.iter_child_nodes(stmt) if isinstance(s, ast.stmt)]
+    return False
+
+
 def _py_ways(node):
     """The ways through ``node``, a compound statement that runs a body
     only where its head allows, as the statements each runs; an empty one
@@ -7765,7 +7928,11 @@ def _py_ways(node):
     if isinstance(node, ast.If):
         return [node.body, node.orelse]
     if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
-        return [node.orelse, node.body + node.orelse]
+        ways = [node.orelse, node.body + node.orelse]
+        if _py_breaks(node.body):
+            # A `break` leaves the loop before its `else` runs.
+            ways.append(node.body)
+        return ways
     if isinstance(node, (ast.Try, ast.TryStar)) and node.handlers:
         return [node.body + node.orelse, *(h.body for h in node.handlers)]
     if isinstance(node, ast.Match):
@@ -8483,6 +8650,13 @@ class PythonParser(BaseParser):
         # name holds what each way through it that goes on past it and has
         # the name bound gives, where they agree, else no known value. Inner
         # statements go first.
+        # Line -> the names ``frame`` binds on it, and its keys sorted: only
+        # a name bound inside a branch can disagree through it.
+        frame_lines = {}
+        for name, bound in frame.items():
+            for at, _ in bound:
+                frame_lines.setdefault(at[0], set()).add(name)
+        frame_order = sorted(frame_lines)
         for node, first, ways, spans in sorted(
             branching, key=lambda b: (_py_end(b[0]), -b[1][0])
         ):
@@ -8492,7 +8666,10 @@ class PythonParser(BaseParser):
             on = [
                 s for w, s in zip(ways, spans) if not (w and isinstance(w[-1], leaves))
             ]
-            for bound in frame.values():
+            for name in self._bound_names(
+                frame_lines, frame_order, first[0], _py_end(node)[0]
+            ):
+                bound = frame[name]
                 if _disagree(bound, first, on):
                     bound.append((_py_end(node), "?"))
 
@@ -10052,7 +10229,7 @@ class RustParser(BaseParser):
             # 6. Calls
             if parent_id != file_id:
                 code = codes[lineno - 1][0]
-                owner = parent_id.split("::")[-2] if parent_id.count("::") > 1 else None
+                owner = self._owning_type(parent_id)
                 raw = lines[lineno - 1]
                 self.begin_line(code, lineno, parent_id, raw, fn_start, owner)
                 self._bind_arm(code, i)
@@ -10953,12 +11130,10 @@ _JS_VOID_RE = re.compile(r"(?:null|undefined)\s*")
 _JS_FOLLOWS_RE = re.compile(r"(\s*)(.?)", re.DOTALL)
 # A construction up to the `(` of its arguments: `new T(`, `new T<A>(`
 _JS_CONSTRUCTION_RE = re.compile(r"\s*new\s+([A-Za-z_$][\w$.]*)\s*(?:<[^()]*>)?\s*\(")
-# A statement that leaves a `switch`'s case, which the case ends with
-_JS_EXIT_END_RE = re.compile(
-    r"(?<![\w$.])(?:break|continue|return|throw)\b[^;{}]*;?\s*\Z"
-)
 # A `case` the code before a bracket ends with
 _JS_CASE_END_RE = re.compile(r"(?<![\w$.])case\s*\Z")
+# A head that makes the statement after it a body that may not run
+_JS_BODY_HEAD_RE = re.compile(r"(?<![\w$.])(?:else|case|default)\s*\Z")
 # What a statement holds before the `:` of a label: a `case` and its
 # expression, `default` or the label's name
 _JS_LABELLED_RE = re.compile(r"\s*(?:case\b.*|default|[A-Za-z_$][\w$]*)\s*", re.DOTALL)
@@ -11053,12 +11228,16 @@ def _innermost(nested, at):
     return None
 
 
-def _apart(branches, at, read):
+def _apart(branches, at, read, ends=None):
     """Whether positions ``at`` and ``read`` are in different ways through
     one of ``branches``, each ``(start, end, ways)``: where it is and the
-    spans each of its ways runs."""
+    spans each of its ways runs. ``ends`` is ``branches``' ends in
+    ascending order, where it is sorted."""
+    lo, hi = min(at, read), max(at, read)
+    if ends is not None:
+        branches = branches[bisect_left(ends, hi) :]
     for start, end, ways in branches:
-        if start <= min(at, read) and max(at, read) <= end:
+        if start <= lo and hi <= end:
             made, reads = (
                 [any(s <= p <= e for s, e in way) for way in ways] for p in (at, read)
             )
@@ -11081,6 +11260,65 @@ def _disagree(bound, first, ways):
         if seen:
             held.add(max(seen[::-1], key=itemgetter(0))[1])
     return inside and len(held) > 1
+
+
+class _BoundEntries(list):
+    """The entries ``declared`` maps a name to: each entry's line joins the
+    parser's ``_bound_lines`` as it is written."""
+
+    def __init__(self, parser, name):
+        self._parser, self._name = parser, name
+
+    def _hold(self, entries):
+        lines = self._parser._bound_lines
+        order = self._parser._bound_order
+        for d in entries:
+            if d[0] not in lines:
+                lines[d[0]] = set()
+                order.insert(bisect_right(order, d[0]), d[0])
+            lines[d[0]].add(self._name)
+
+    def append(self, d):
+        super().append(d)
+        self._hold((d,))
+
+    def extend(self, ds):
+        ds = list(ds)
+        super().extend(ds)
+        self._hold(ds)
+
+    def insert(self, i, d):
+        super().insert(i, d)
+        self._hold((d,))
+
+    def __setitem__(self, at, d):
+        super().__setitem__(at, d)
+        self._hold(list(d) if isinstance(at, slice) else (d,))
+
+
+class _BoundMap(dict):
+    """``declared``: each name to ``_BoundEntries``."""
+
+    def __init__(self, parser):
+        self._parser = parser
+
+    def setdefault(self, name, default=None):
+        try:
+            return self[name]
+        except KeyError:
+            self[name] = entries = _BoundEntries(self._parser, name)
+            return entries
+
+    def __missing__(self, name):
+        self[name] = entries = _BoundEntries(self._parser, name)
+        return entries
+
+    def __setitem__(self, name, entries):
+        if not isinstance(entries, _BoundEntries):
+            held = _BoundEntries(self._parser, name)
+            held.extend(entries)
+            entries = held
+        super().__setitem__(name, entries)
 
 
 class _JsScopes:
@@ -11450,9 +11688,20 @@ class _JsScopes:
         while start and text[start - 1] not in ";{}":
             start = self.opener.get(start - 1, start - 1)
         written = text[start : lead - 1]
-        return self._statements(held) and any(
+        if self._statements(held) and any(
             _JS_LABELLED_RE.fullmatch(part)
             for part in (written, written.rpartition("\n")[2])
+        ):
+            return True
+        # A label may prefix any statement: the name before the `:` follows
+        # a controlled body's `)`, an `else`/`do`/`case`/`default`, a `,` or
+        # another label's `:`.
+        label = re.search(r"[A-Za-z_$][\w$]*\s*$", written)
+        prefix = written[: label.start()].rstrip() if label else "x"
+        return self._statements(held) and (
+            not prefix
+            or prefix[-1:] in "),:"
+            or re.search(r"(?<![\w$.])(?:else|do|case|default)\s*$", prefix)
         )
 
     def _bare(self, held):
@@ -11472,9 +11721,18 @@ class _JsScopes:
         if text[lead - 1 : lead] != ":":
             return True
         label = _JS_LABEL_END_RE.search(text, max(lead - 100, 0), lead)
-        breaks = self._breaks.get(label[1], []) if label else []
+        if not label:
+            return False
+        # A label that a control's `)`, an `else`, a `case` or a `default`
+        # prefixes is a body that may not run.
+        lead = _run_start(text, label.start(1))
+        if text[lead - 1 : lead] == ")" and self._control(lead - 1):
+            return False
+        if _JS_BODY_HEAD_RE.search(text, max(lead - 9, 0), lead):
+            return False
+        breaks = self._breaks.get(label[1], [])
         index = bisect_left(breaks, held[0])
-        return bool(label) and not (index < len(breaks) and breaks[index] < held[1])
+        return not (index < len(breaks) and breaks[index] < held[1])
 
     def _switch(self, held):
         """Whether the bracket span ``held`` is a `switch`'s body."""
@@ -11483,9 +11741,11 @@ class _JsScopes:
 
     def _case_label(self, at):
         """Whether the bracket at offset ``at`` follows the `case` of one of a
-        `switch`'s labels, and holds part of its expression."""
+        `switch`'s labels, and holds part of its expression: the token the
+        bracket follows is `case`."""
+        lead = _run_start(self.text, at)
         return bool(
-            _JS_CASE_END_RE.search(self.text, max(at - 12, 0), at)
+            _JS_CASE_END_RE.search(self.text, max(lead - 4, 0), lead)
         ) and self._switch(_innermost(self._brackets, at))
 
     def _reach(self, start, names):
@@ -11545,7 +11805,7 @@ class _JsScopes:
         read = []  # the states read back from, past the first token
         while True:
             if not first:
-                state = at, level, direct, labelled
+                state = at, held, level, direct, labelled
                 if state in self._walks:
                     found = self._walks[state]
                     break
@@ -11654,6 +11914,86 @@ class _JsScopes:
         end = starts[index + 1] if index + 1 < len(starts) else held[1]
         return exits[index] and (self.place(label), self.place(end))
 
+    def _statement_span(self, at, end):
+        """The span of the statement at offset ``at``: to its `;`, or past
+        the `{` it opens, outside brackets."""
+        text, pos = self.text, at
+        while pos < end:
+            char = text[pos]
+            if char == "{":
+                return at, self.closer.get(pos, pos) + 1
+            if char in "([":
+                pos = self.closer.get(pos, pos)
+            elif char == ";":
+                return at, pos + 1
+            pos += 1
+        return at, end
+
+    def _section_exits(self, at, end):
+        """Whether the section of a `switch` from offset ``at`` to ``end``
+        leaves it: its last statement leaves unconditionally, a `break`,
+        `continue`, `return` or `throw` of its own or an `if`/`else` whose
+        branches all do; one inside a loop or a nested `switch` leaves
+        that, not the section."""
+        text, last = self.text, None
+        pos, start = at, at
+        while pos < end:
+            char = text[pos]
+            if char == ";":
+                last = (start, pos + 1)
+                start = pos + 1
+            elif char in "([":
+                pos = self.closer.get(pos, pos)
+            elif char == "{":
+                pos = self.closer.get(pos, pos)
+                if re.match(r"\s*(?:else|catch|finally|while)\b", text[pos + 1 :]):
+                    pos += 1
+                    continue
+                last = (start, pos + 1)
+                start = pos + 1
+            pos += 1
+        if text[start:end].strip():
+            last = (start, end)
+        if last is None:
+            return False
+        written = text[last[0] : last[1]].lstrip()
+        # The last statement's head, past the section's `case`/`default`
+        # label and any before it.
+        head = re.match(
+            r"(?:(?:case\b[^:]*|default|[A-Za-z_$][\w$]*)\s*:\s*)*", written
+        )
+        written = written[head.end() :]
+        if written.startswith("{"):
+            # A bare block is no exit of the section's own.
+            return False
+        word = re.match(r"([A-Za-z_]\w*)", written)
+        word = word[1] if word else ""
+        if word in ("break", "continue", "return", "throw"):
+            return True
+        if word != "if":
+            return False
+        paren = text.find("(", last[0], last[1])
+        if paren < 0 or paren not in self.closer:
+            return False
+        then = self._statement_span(self.closer[paren] + 1, last[1])
+        rest = text[then[1] : last[1]]
+        if not re.match(r"\s*else\b", rest):
+            return False
+        offset = then[1] + rest.index("else") + 4
+        return self._block_exits(*then) and self._block_exits(
+            *self._statement_span(offset, last[1])
+        )
+
+    def _block_exits(self, at, end):
+        """Whether the statement that spans offsets ``at`` to ``end`` exits
+        the `switch` section it is a branch of: into the block for one."""
+        text = self.text
+        written = text[at:end].lstrip()
+        if written.startswith("{"):
+            opened = at + len(text[at:end]) - len(written)
+            return self._section_exits(opened + 1, self.closer.get(opened, end))
+        return self._section_exits(at, end)
+
     def _cases(self, held):
         """``(starts, opening, exits)`` of the `switch` whose body is
         ``held``: the offset of each of its labels, that of its first
@@ -11671,7 +12011,7 @@ class _JsScopes:
             for index, at in enumerate(starts):
                 exits.append(every)
                 end = starts[index + 1] if index + 1 < len(starts) else at
-                every = every and bool(_JS_EXIT_END_RE.search(text, at, end))
+                every = every and self._section_exits(at, end)
             opening = next((lb.start() for lb in labels if lb[0] == "case"), None)
             self._switches[held] = starts, opening, exits
         return self._switches[held]
@@ -12618,7 +12958,7 @@ _TS_TYPED_VALUE_RE = re.compile(
 # A `return` that is a statement of its own, up to its value, and the
 # `new` that the value may start with
 _JS_RETURN_RE = re.compile(
-    r"^\s*(?:(?:\}\s*)?else\s+|if\s*\(.*\)\s*|case\b[^:]*:\s*|default\s*:\s*)*"
+    r"(?:^|[;{}])\s*(?:(?:\}\s*)?else\s+|if\s*\([^;{}]*\)\s*|case\b[^:]*:\s*|default\s*:\s*)*"
     r"return\b\s*(?P<new>new\s+)?"
 )
 # A bracketed group of an object literal's text that holds no other
@@ -13306,7 +13646,7 @@ class TSParser(BaseParser):
             held = None if edge is None else f"#{edge}"
         else:
             path = re.search(r"(?<![\w$.])(?:this\.)?[\w$]+(?:\.[\w$]+)*$", code[:at])
-            owner = source_id.split("::")[-2] if source_id.count("::") > 1 else None
+            owner = self._owning_type(source_id)
             held = path and self.call_origin(f"{path[0]}.x", lineno, since, owner)
             held = held and held[:-2]
         # A literal index reads a tuple's element at it.
@@ -13835,6 +14175,7 @@ class TSParser(BaseParser):
             or rel_path.endswith((".mjs", ".cjs", ".mts", ".cts"))
             or rel_path.endswith((".js", ".jsx"))
             and _JS_COMMONJS_RE.search(scopes.text)
+            and self._declaration("require", len(code_lines)) is None
         ):
             self.builder.js_modules.add(file_id)
         self.scan_declarations(lines, _TS_DECLARATIONS)
@@ -14494,9 +14835,10 @@ class TSParser(BaseParser):
             )
             filed_as = None
             written = assignment and assignment[2]
-            # A CommonJS module's exports, unless the file declares the name
-            exported = written in ("exports", "module.exports", "module") and not (
-                declared(written.partition(".")[0], lineno)
+            # A CommonJS module's exports, unless a binding of the name, a
+            # `const` or a parameter's too, shadows it where the line is
+            exported = written in ("exports", "module.exports", "module") and (
+                self._declaration(written.partition(".")[0], lineno) is None
             )
             holds_function = given and _function_value(given)
             if holds_function and invoked(i, value_start(i) or 0):
@@ -14521,6 +14863,20 @@ class TSParser(BaseParser):
                         spread, key, name = held.groups()
                         entry = ("*" if spread else key or name, "", name)
                         self.builder.reexports.setdefault(oid, []).append(entry)
+                        continue
+                    method = re.match(
+                        r"\s*(?:(?P<key>[\w$]+)\s*:\s*(?:function\b"
+                        r"|(?:\([^)]*\)|[\w$]+)\s*=>)|(?P<short>[\w$]+)\s*\()",
+                        part,
+                    )
+                    if method:
+                        name = method["key"] or method["short"]
+                        mid = f"{oid}::{free_key(oid, name)}"
+                        self.builder.add_node(mid, "Function", name=name, lineno=lineno)
+                        self.builder.add_edge(oid, mid, "DEFINES")
+                        self.builder.reexports.setdefault(oid, []).append(
+                            (name, "", name)
+                        )
             elif exported and (name_given or holds_function):
                 # A member of the module's exports, `exports.name = value`
                 key = free_key(file_id, assignment[1])
@@ -15235,7 +15591,7 @@ class TSParser(BaseParser):
             # The definition the line is in, before it enters those the
             # line opens
             scope = reaching(lineno)[0]
-            owner = parent_id.split("::")[-2] if parent_id.count("::") > 1 else None
+            owner = self._owning_type(parent_id)
             self._closures = [
                 (
                     found.start("closure"),
@@ -15561,9 +15917,28 @@ class TSParser(BaseParser):
                     "("
                 )
             elif returns == 1:
-                found = _JS_RETURN_RE.match(code)
+                found = _JS_RETURN_RE.search(code)
+                if found:
+                    # A `return` in a body written on the line is the
+                    # innermost function's, which `parent_id` may not be.
+                    text, starts = self._scopes.text, self._scopes.starts
+                    absolute = self._blocks[1][lineno - 1] + found.start()
+                    held = self._scopes.function(self._scopes.place(absolute))
+                    lead = held and _run_start(
+                        text, starts[held[0][0] - 1] + held[0][1]
+                    )
+                    named = held and _JS_WORD_END_RE.search(
+                        text, max(lead - 100, 0), lead
+                    )
+                    name = named.group() if named else None
+                    if name != parent_id.rpartition("::")[2] and name:
+                        bound = self._declaration(name, lineno)
+                        if bound and bound[0] == "function":
+                            returned = self._signatures.get(
+                                f"{parent_id}::{name}", [{}]
+                            )[-1].get("returned")
             if returned is not None and (found or returns):
-                value = code[found.end() :].strip(" ;") if found else ""
+                value = code[found.end() :].partition(";")[0].strip() if found else ""
                 first = [
                     index for index, _, start in calls if found and start == found.end()
                 ]
@@ -16413,9 +16788,25 @@ class CallResolver:
                     node["metadata"]["return_type"] = "::".join([*unmacroed, rest])
         # Name -> the C# extension methods declared under it
         self.extensions = {}
+        # The namespaces the C# code declares, each with its ancestors, and
+        # the dotted path of each of its types, which a `using` resolves
+        # its name against
+        self.dotnet_spaces, self.dotnet_paths = set(), set()
         for node_id, node in self.nodes.items():
             if "extends" in node["metadata"]:
                 self.extensions.setdefault(self._name(node_id), []).append(node_id)
+            if self.lang(node_id) != "dotnet":
+                continue
+            space = node["metadata"].get("namespace") or node["metadata"].get(
+                "dotnet_namespace"
+            )
+            if space:
+                parts = space.split(".")
+                self.dotnet_spaces.update(
+                    ".".join(parts[:size]) for size in range(1, len(parts) + 1)
+                )
+            if node["type"] == "Class":
+                self.dotnet_paths.add(self._dotnet_path(node_id))
         # class ID -> base type names, in Python the origin path of each; a
         # Ruby class's included modules, the last first, before its superclass
         self.bases = {}
@@ -17958,7 +18349,12 @@ class CallResolver:
             # no method of another type.
             hit = self._inherited(name, source_id)
             hit = hit and self._overload_by_arity(hit)
-            for target in self._dotnet_imports(file_id).values():
+            types = self.dotnet_paths | set(self.standard["dotnet"].data["types"])
+            targets = [
+                *self._dotnet_imports(file_id).values(),
+                *self._dotnet_imported(source_id, True, types),
+            ]
+            for target in targets:
                 if hit or self._candidates_now:
                     break
                 held = self._type_named(target, file_id)
@@ -19383,6 +19779,7 @@ class CallResolver:
             for size in range(namespace.count(".") + 1)
         ]
         imported = [k[: -len(".*")] for k in imports if k.endswith(".*")]
+        imported += self._dotnet_imported(scope_id, False, self.dotnet_spaces)
         for parent in [*spaces, *imported, ""]:
             key = f"{parent}.{name}".lstrip(".")
             if key in types:
@@ -20026,38 +20423,101 @@ class CallResolver:
         innermost namespace around the call to the file: at each, the
         types of that namespace and of those the `using`s written in its
         body import; the first that has an applicable one is the call's.
-        The candidates are those of ``extensions`` at the first level that
-        has any, none where the library's come first, and they are nearer
-        where they come before the library's. A library namespace the file
-        does not import may be imported for every file, at the outermost
-        level; a file that imports one of them in an `#if` arm is read as
-        any build."""
+        A `using` written in a namespace is in scope only for code it
+        encloses, and names the first of its path under each enclosing
+        namespace that is one the project or the library declares,
+        `global::` the path alone; `using static` names a type's members,
+        extension methods among them. The candidates are those of
+        ``extensions`` at the first level that has any, none where the
+        library's come first, and they are nearer where they come before
+        the library's. A library namespace the file does not import may be
+        imported for every file, at the outermost level; a file that
+        imports one of them in an `#if` arm is read as any build."""
         file_id = source_id.split("::")[0]
         levels = self._dotnet_levels(source_id)
         usings = self.builder.dotnet_usings.get(file_id, ())
         everywhere = set(self._dotnet_imports(file_id).values()) - set(
             self.builder.imports.get(file_id, {}).values()
         )
+        named = {e: self._dotnet_namespace(e) or "" for e in extensions}
+        typed = {e: self._dotnet_path(e.rpartition("::")[0]) for e in extensions}
+        types = self.dotnet_paths | set(self.standard["dotnet"].data["types"])
+        namespaces = self.dotnet_spaces | set(spaces)
+        # The namespace each `using` in scope imports, and the type each
+        # `using static` brings the members of, at the level of the
+        # namespace it is written in.
+        imported, static, armed = {}, {}, []
+        for written, at, arm, is_static, rooted in usings:
+            if at not in levels:
+                continue
+            resolved = self._dotnet_using(
+                written, at, rooted, types if is_static else namespaces
+            )
+            if arm:
+                armed.append(resolved)
+            held = static if is_static else imported
+            held[resolved] = min(levels.index(at), held.get(resolved, len(levels)))
 
         def level(space):
             found = [at for at, name in enumerate(levels) if name == space]
-            found += [levels.index(at) for path, at, _ in usings if path == space]
+            if space in imported:
+                found.append(imported[space])
             return min(found + [len(levels) - 1] * (space in everywhere), default=None)
 
-        named = {e: self._dotnet_namespace(e) or "" for e in extensions}
-        found = {e: level(space) for e, space in named.items()}
-        found = {e: at for e, at in found.items() if at is not None}
+        found = {}
+        for e, space in named.items():
+            given = [level(space), static.get(typed[e])]
+            at = min((a for a in given if a is not None), default=None)
+            if at is not None:
+                found[e] = at
         first = min(found.values(), default=None)
         library = min(
-            [at for at in map(level, spaces) if at is not None], default=len(levels) - 1
+            [
+                *[at for at in map(level, spaces) if at is not None],
+                *(
+                    at
+                    for path, at in static.items()
+                    if path.rpartition(".")[0] in spaces
+                ),
+            ],
+            default=len(levels) - 1,
         )
-        relevant = {*spaces, *named.values()}
-        guarded = any(arm and path in relevant for path, _, arm in usings)
+        relevant = {*spaces, *named.values(), *typed.values()}
+        guarded = any(path in relevant for path in armed)
         if first is None or first > library and not guarded:
             return [], False
         return [e for e, at in found.items() if at == first], (
             first < library and not guarded
         )
+
+    def _dotnet_expands(self, path, at):
+        """The names a path written in the C# namespace ``at`` may name:
+        the path under each enclosing namespace, innermost first, then as
+        written."""
+        parts = at.split(".") if at else []
+        return [".".join([*parts[:size], path]) for size in range(len(parts), -1, -1)]
+
+    def _dotnet_imported(self, scope_id, static, pool):
+        """What the `using`s in scope at ``scope_id`` import, each resolved
+        against ``pool``: namespaces, or with ``static`` the types whose
+        members `using static` brings in."""
+        levels = self._dotnet_levels(scope_id)
+        return [
+            self._dotnet_using(written, at, rooted, pool)
+            for written, at, _, is_static, rooted in self.builder.dotnet_usings.get(
+                scope_id.split("::")[0], ()
+            )
+            if at in levels and is_static == static
+        ]
+
+    def _dotnet_using(self, written, at, rooted, pool):
+        """The name a `using` of ``written`` in the C# namespace ``at``
+        imports: the first of the names it expands to that ``pool`` holds,
+        else the name as written; `global::` names ``written`` itself."""
+        if rooted:
+            return written
+        names = self._dotnet_expands(written, at)
+        return next((name for name in names if name in pool), names[-1])
 
     def _dotnet_path(self, type_id):
         """Dotted name of the C# type ``type_id`` from the global namespace."""
@@ -20099,9 +20559,14 @@ class CallResolver:
                     t for t in nested if self._name(t.rpartition("::")[0]) in owners
                 ]
         if not hits:
+            levels = self._dotnet_levels(scope_id)
+            imported = {
+                *imports.values(),
+                *self._dotnet_imported(scope_id, False, self.dotnet_spaces),
+            }
             outer = {t: p for t, p in paths.items() if self._is_top_level(t)}
-            for space in [*self._dotnet_levels(scope_id), None]:
-                within = {space} if space is not None else {*imports.values()}
+            for space in [*levels, None]:
+                within = {space} if space is not None else imported
                 hits = [
                     t for t, path in outer.items() if path.rpartition(".")[0] in within
                 ]
@@ -21280,6 +21745,27 @@ class CallResolver:
             for d in declarations
         )
 
+    def _c_using(self, declarations, name):
+        """The base a `using` declaration of ``name`` in the C++ class of
+        ``declarations`` names: `using B::f` is `B`'s `f`, none of the other
+        bases'."""
+        return next(
+            (
+                re.sub(r"<.*", "", re.sub(r"\s*::\s*", "::", used))
+                for d in declarations
+                if (used := self.builder.c_using.get(d, {}).get(name))
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _c_used(used, base):
+        """Whether ``used``, the base a `using` declaration names, names
+        ``base``, the base as written."""
+        parts, bare = _split_callee(base)
+        path = "::".join([*parts, bare])
+        return used == bare or path == used or path.endswith(f"::{used}")
+
     def _c_hides(self, declarations, name):
         """Whether the C++ class of ``declarations`` declares ``name``, which
         hides its bases' members of the name unless `using` brings them in."""
@@ -21292,10 +21778,12 @@ class CallResolver:
         which does not declare it, finds it through more than one of its
         bases, other than as one member of a base they share; the members
         found are then the candidates."""
+        used = self._c_using(declarations, name)
         found = [
             self._find_member(t, name, seen=set())[0]
             for d in declarations
             for base in self.bases.get(d, ())
+            if not used or self._c_used(used, base)
             for t in self._base_types(base, d) or ()
             if any(
                 self._c_declares(self._declarations(x), name)
@@ -21589,8 +22077,11 @@ class CallResolver:
         # A type the project only writes impl blocks for is declared outside.
         kinds = {self.nodes[d]["metadata"].get("kind") for d in declarations}
         complete = kinds != {"impl"}
+        used = self._c_using(declarations, name) if lang == "clang" else None
         for declaration in declarations:
             for base in self.bases.get(declaration, ()):
+                if used and not self._c_used(used, base):
+                    continue
                 bare = _split_callee(base)[1]
                 found = self._base_types(base, declaration)
                 if found is None:
@@ -22256,6 +22747,7 @@ class CodeGraphBuilder:
         self.nodes = []
         self.edges = []
         self.node_registry = set()
+        self.nodes_by_id = {}
         self.current_file_id = None
         self.current_scope = SymbolTable()
         # For CallResolver: file ID -> {local name: import target},
@@ -22312,8 +22804,7 @@ class CodeGraphBuilder:
         self.dart_directives = {}
         # C/C++ alias name -> [(ID of the scope that declares it, its type)]
         self.c_aliases = {}
-        # C++ class ID -> the names of members of its bases that its `using`
-        # declarations bring in
+        # C++ class ID -> name -> the base its `using` declaration names
         self.c_using = {}
         # C++ class ID -> the names of the member functions it declares
         self.c_declared = {}
@@ -22353,15 +22844,18 @@ class CodeGraphBuilder:
         # Directory -> the `global using` directives of its C# files, which
         # hold for every file below it, as ``imports`` has a file's own
         self.dotnet_global_usings = {}
-        # C# file ID -> (namespace, the namespace whose body the directive is
-        # written in, "" for the file's, whether it sits in an `#if` arm) of
-        # each `using` of a namespace
+        # C# file ID -> (the path a `using` names, the namespace whose body
+        # it is written in, "" for the file's, whether it sits in an `#if`
+        # arm, whether `static` names a type, whether `global::` roots the
+        # path) of each `using`
         self.dotnet_usings = {}
 
     def add_node(self, node_id, node_type, **metadata):
         if node_id not in self.node_registry:
-            self.nodes.append({"id": node_id, "type": node_type, "metadata": metadata})
+            node = {"id": node_id, "type": node_type, "metadata": metadata}
+            self.nodes.append(node)
             self.node_registry.add(node_id)
+            self.nodes_by_id[node_id] = node
 
     def add_edge(self, source, target, relation, metadata=None):
         edge = {"source": source, "target": target, "relation": relation}

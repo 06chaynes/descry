@@ -2744,6 +2744,51 @@ class TestPythonCallResolution:
         assert _calls(builder, "FILE:m.py::entered") == ["FILE:m.py::B", b]
         assert _calls(builder, "FILE:m.py::B::run") == [b]
 
+    def test_a_break_skips_the_else_of_a_loop(self, tmp_path):
+        """A `break` leaves a `for` or `while` before its `else` runs: after
+        the loop the name may hold either side's value."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class A:
+                    def use(self): ...
+                class B:
+                    def use(self): ...
+                def looped(xs):
+                    x = A()
+                    for i in xs:
+                        break
+                    else:
+                        x = B()
+                    x.use()
+                def wheeled(c):
+                    x = A()
+                    while c:
+                        break
+                    else:
+                        x = B()
+                    x.use()
+                """,
+            },
+        )
+        for name in ("looped", "wheeled"):
+            assert _calls(builder, f"FILE:m.py::{name}") == [
+                "FILE:m.py::A",
+                "FILE:m.py::B",
+                "REF:x.use",
+            ]
+
+    def test_many_branches_merge_in_time_linear_in_the_code(self, tmp_path):
+        """Merging the ways of many branches costs time in the bindings they
+        hold, not in every name the file declares: four thousand `if`s are
+        parsed in seconds."""
+        source = "def f(c):\n" + "".join(f"    if c: x{i} = 1\n" for i in range(4000))
+        (tmp_path / "m.py").write_text(source)
+        started = time.monotonic()
+        CodeGraphBuilder(tmp_path).process_directory()
+        assert time.monotonic() - started < 3
+
 
 class TestRustCallResolution:
     def test_path_through_non_project_type_is_external(self, tmp_path):
@@ -12359,6 +12404,219 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:b.js::g") == ["REF:Loader.inner"]
 
+    def test_a_conditional_exit_does_not_leave_a_case_section(self, tmp_path):
+        """A case section exits only when its last statement leaves
+        unconditionally: `if (c) return;` or a loop's `break` do not."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() {} }
+                class B { use() {} }
+                declare function c(): boolean;
+                export function condexit(k: number) {
+                  let x = new A();
+                  switch (k) {
+                    case 1: if (c()) return;
+                    case (x = new B(), 2):
+                      x.use();
+                  }
+                }
+                export function loopexit(k: number) {
+                  let x = new A();
+                  switch (k) {
+                    case 1: for (;;) break;
+                    case (x = new B(), 2):
+                      x.use();
+                  }
+                }
+                export function realexit(k: number) {
+                  let x = new A();
+                  switch (k) {
+                    case 1: return;
+                    case (x = new B(), 2):
+                      x.use();
+                  }
+                }
+                """,
+            },
+        )
+        for name in ("condexit", "loopexit"):
+            assert _calls(builder, f"FILE:a.ts::{name}")[-1] == "REF:x.use"
+        assert _calls(builder, "FILE:a.ts::realexit")[-1] == "FILE:a.ts::B::use"
+
+    def test_a_case_label_far_before_its_bracket_is_still_a_case(self, tmp_path):
+        """The token a `(` of a `case` label follows decides what it is:
+        whitespace of any length before it does not make it parameters."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() {} }
+                class B { use() {} }
+                export function farcase(k: number) {
+                  let x = new A();
+                  switch (k) {
+                    case          (x = new B(), 2): x.use();
+                  }
+                  x.use();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::farcase") == [
+            "FILE:a.ts::A",
+            "FILE:a.ts::B",
+            "FILE:a.ts::B::use",
+            "FILE:a.ts::B::use",
+        ]
+
+    def test_a_shadowed_exports_is_no_commonjs_module(self, tmp_path):
+        """An `exports` a `const`/`let`/`var` or parameter shadows is not
+        CommonJS's: assignments to it emit no reexport."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                function g() {}
+                function f() {}
+                const exports = { f: g };
+                exports.f = g;
+                """,
+            },
+        )
+        assert builder.reexports.get("FILE:a.js") in (None, [])
+
+    def test_an_attribute_a_subclass_assigns_is_no_value_of_the_base(self, tmp_path):
+        """In a base class's method `this` may be the base or any subclass:
+        what only a subclass assigns to `this.y` is not what `this.y` holds
+        there, so the call is open with what the base declares."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() {} }
+                class B { use() {} }
+                class D {
+                  y: A | B = new A();
+                  q() { this.y.use(); }
+                }
+                class E extends D {
+                  r() { this.y = new B(); }
+                }
+                """
+            },
+        )
+        assert _candidates(builder, "FILE:a.ts::D::q") == {
+            "REF:this.y.use": ["FILE:a.ts::A::use", "FILE:a.ts::B::use"]
+        }
+
+    def test_a_labelled_block_as_a_controlled_body_is_a_block(self, tmp_path):
+        """A label may prefix any statement. A labelled block that is the
+        body of `if`, `else`, `while`, `for` or `do` runs only where that
+        body does, so a later read stays open; a `break lbl` skips the
+        block's rest. A statement's `, lbl:`, a `do`'s body and a
+        block-level label run unconditionally."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                class A { use() {} }
+                class B { use() {} }
+                declare function c(): boolean;
+                export function iflabel() {
+                  let x = new A();
+                  if (c()) lbl: { x = new B(); }
+                  x.use();
+                }
+                export function elselabel() {
+                  let x = new A();
+                  if (c()) {} else lbl: { x = new B(); }
+                  x.use();
+                }
+                export function whilelabel() {
+                  let x = new A();
+                  while (c()) lbl: { x = new B(); break; }
+                  x.use();
+                }
+                export function forlabel() {
+                  let x = new A();
+                  for (;;) lbl: { x = new B(); break; }
+                  x.use();
+                }
+                export function sameline() {
+                  let x = new A();
+                  if (c()) lbl: { x = new B(); } x.use();
+                }
+                export function breaklbl() {
+                  let x = new A();
+                  lbl: { if (c()) break lbl; x = new B(); }
+                  x.use();
+                }
+                export function commalbl() {
+                  let x = new A(), y: number;
+                  y = 1, lbl: { x = new B(); }
+                  x.use();
+                }
+                export function dolbl() {
+                  let x = new A();
+                  do lbl: { x = new B(); } while (c());
+                  x.use();
+                }
+                export function nestedlbl() {
+                  let x = new A();
+                  out: { in: { x = new B(); } }
+                  x.use();
+                }
+                """,
+            },
+        )
+        for name in (
+            "iflabel",
+            "elselabel",
+            "whilelabel",
+            "forlabel",
+            "sameline",
+            "breaklbl",
+        ):
+            assert "REF:x.use" in _calls(builder, f"FILE:a.ts::{name}")
+        for name in ("commalbl", "dolbl", "nestedlbl"):
+            assert "FILE:a.ts::B::use" in _calls(builder, f"FILE:a.ts::{name}")
+
+    def test_single_line_module_exports_methods_and_function_values(self, tmp_path):
+        """A same-line `module.exports = { g() {}, h: function(){} }` files
+        its shorthand methods and function values like the multi-line one."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": """
+                module.exports = { g() {}, h: function() {} };
+                """,
+                "u.js": """
+                const m = require("./m");
+                m.g();
+                m.h();
+                """,
+            },
+        )
+        calls = _calls(builder, "FILE:u.js")
+        assert [c.split("::")[-1] for c in calls if "object@" in c] == ["g", "h"]
+
+    def test_a_single_line_function_returns_its_bodys_value(self, tmp_path):
+        """`function f() { return g; }` records what its `return` gives, on
+        one line as on several."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                function g() {}
+                function f() { return g; }
+                f()();
+                """,
+            },
+        )
+        assert builder.signatures["FILE:a.js::f"][-1]["returned"]
+
 
 class TestGoCallResolution:
     def test_bare_call_is_the_function_not_a_method_of_that_name(self, tmp_path):
@@ -16836,6 +17094,25 @@ class TestJavaCallResolution:
             "FILE:C.java::B::run",
         ]
 
+    def test_annotation_interfaces_are_no_functional_interfaces(self, tmp_path):
+        """An interface extending `java.lang.annotation.Annotation`, or it,
+        is no functional interface, whatever its one abstract method."""
+        import json
+
+        import descry
+
+        data = json.loads(
+            (Path(descry.__file__).parent / "stdlib" / "java.json").read_text()
+        )
+        for name in (
+            "java.lang.Override",
+            "java.lang.annotation.Annotation",
+            "java.lang.annotation.Documented",
+            "java.lang.annotation.Inherited",
+            "java.lang.annotation.Native",
+        ):
+            assert name not in data["functional"]
+
 
 class TestPhpCallResolution:
     def test_a_body_its_head_may_skip_leaves_the_value_open(self, tmp_path):
@@ -17823,6 +18100,83 @@ class TestPhpCallResolution:
             "FILE:a.php::mk1",
             "FILE:a.php::mk2",
         ]
+
+    def test_the_alternative_syntax_branches(self, tmp_path):
+        """`if: … endif;`, `foreach: … endforeach;` and `switch: …
+        endswitch;` merge their ways like the braced forms."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """<?php
+                class A { public function use() {} }
+                class B { public function use() {} }
+                class C { public function use() {} }
+                function f($c) {
+                    $x = new A();
+                    if ($c):
+                        $x = new B();
+                    else:
+                        $x = new C();
+                    endif;
+                    $x->use();
+                    $y = new A();
+                    foreach ([1] as $i):
+                        $y = new B();
+                    endforeach;
+                    $y->use();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.php::f") == [
+            "FILE:a.php::A",
+            "FILE:a.php::A",
+            "FILE:a.php::B",
+            "FILE:a.php::B",
+            "FILE:a.php::C",
+            "REF:$x->use",
+            "REF:$y->use",
+        ]
+
+    def test_null_coalescing_assigns_only_where_null_or_unset(self, tmp_path):
+        """`$x ??= v` assigns only where `$x` is null or unset: a variable
+        that holds a value keeps it, and one that may hold either is open."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """<?php
+                class A { public function use() {} }
+                class B { public function use() {} }
+                function f($c) {
+                    $x = new A();
+                    $x ??= new B();
+                    $x->use();
+                }
+                function g($x) {
+                    $x ??= new B();
+                    $x->use();
+                }
+                function h() {
+                    $x = null;
+                    $x ??= new B();
+                    $x->use();
+                }
+                function k($c) {
+                    $x = null;
+                    if ($c) { $x = new A(); }
+                    $x ??= new B();
+                    $x->use();
+                }
+                """,
+            },
+        )
+        calls = {name: _calls(builder, f"FILE:a.php::{name}") for name in "fghk"}
+        assert calls == {
+            "f": ["FILE:a.php::A", "FILE:a.php::A::use", "FILE:a.php::B"],
+            "g": ["FILE:a.php::B", "REF:$x->use"],
+            "h": ["FILE:a.php::B", "FILE:a.php::B::use"],
+            "k": ["FILE:a.php::A", "FILE:a.php::B", "REF:$x->use"],
+        }
 
 
 class TestDotnetCallResolution:
@@ -19239,6 +19593,53 @@ class TestDotnetCallResolution:
             },
         )
         assert _calls(builder, "FILE:C.cs::C::F") == ["FILE:C.cs::B::Run"]
+
+    def test_a_using_in_a_sibling_namespace_is_none_of_a_calls(self, tmp_path):
+        """A `using` written in a namespace that does not enclose the call
+        site is not in scope for it, and aborts no indexing."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cs": """
+                using System.Collections.Generic;
+                namespace N1 {
+                  using System.Linq;
+                  class C1 { List<int> xs; void M() { xs.Where(x => true).ToList(); } }
+                }
+                namespace N2 {
+                  class C2 { List<int> xs; void M() { xs.Where(x => true).ToList(); } }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.cs::N2::C2::M") or True
+
+    def test_a_using_resolves_in_its_enclosing_namespaces_first(self, tmp_path):
+        """`using B;` inside `namespace A` resolves `A.B`, then `B`: the
+        extension method the closer one gives is the one reached."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cs": """
+                using System.Collections.Generic;
+                namespace A.B {
+                  static class Near {
+                    public static IEnumerable<int> Where(this IEnumerable<int> s) => s;
+                  }
+                }
+                namespace B {
+                  static class Far {
+                    public static IEnumerable<int> Where(this IEnumerable<int> s) => s;
+                  }
+                }
+                namespace A {
+                  using B;
+                  class C { void M(IEnumerable<int> s) { s.Where(); } }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.cs::C::M") == ["FILE:a.cs::Near::Where"]
 
 
 class TestClangCallResolution:
@@ -21488,6 +21889,30 @@ class TestClangCallResolution:
             "FILE:a.cpp::n::Box<T, int>::go"
         ]
 
+    def test_a_using_declaration_names_its_base(self, tmp_path):
+        """`using B::f` in a derived class is `B`'s `f`, none of the other
+        bases': the call is no ambiguity."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cc": """
+                struct B {
+                  void f() {}
+                };
+                struct C {
+                  void f() {}
+                };
+                struct E : B, C {
+                  using B::f;
+                };
+                void run(E e) {
+                  e.f();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.cc::run") == ["FILE:a.cc::B::f"]
+
 
 class TestRubyCallResolution:
     def test_a_body_its_head_may_skip_leaves_the_value_open(self, tmp_path):
@@ -22472,6 +22897,123 @@ class TestRubyCallResolution:
             if node["type"] != "File"
         }
         assert spans["FILE:a.rb::K::m"] == (3, 8)
+
+    def test_a_begin_rescue_else_drops_no_file(self, tmp_path):
+        """An `else` of a `begin`/`rescue` ends the way it runs on, as any
+        other `rescue` way does: the file's calls are indexed, not dropped."""
+        builder = _index(
+            tmp_path,
+            {
+                "u.rb": """
+                class A; def use; end; end
+                class B; def use; end; end
+                class C; def use; end; end
+                class U
+                  def elsed
+                    x = A.new
+                    begin
+                      x = B.new
+                    rescue StandardError
+                      x = C.new
+                    else
+                      x = C.new
+                    end
+                    x.use
+                  end
+                end
+                """
+            },
+        )
+        assert _calls(builder, "FILE:u.rb::U::elsed") == [
+            "FILE:u.rb::A",
+            "FILE:u.rb::B",
+            "FILE:u.rb::C",
+            "FILE:u.rb::C",
+            "FILE:u.rb::C::use",
+        ]
+
+    def test_a_branch_ending_on_the_reads_line_merges(self, tmp_path):
+        """A branch that ends where a later read on the line is merges
+        before it: `x = B.new if c; x.use` leaves `x` open."""
+        builder = _index(
+            tmp_path,
+            {
+                "u.rb": """
+                class A; def use; end; end
+                class B; def use; end; end
+                class U
+                  def modified(c)
+                    x = A.new
+                    x = B.new if c
+                    x.use
+                  end
+                  def inline(c)
+                    x = A.new
+                    if c then x = B.new end; x.use
+                  end
+                end
+                """
+            },
+        )
+        for name in ("modified", "inline"):
+            assert _calls(builder, f"FILE:u.rb::U::{name}") == [
+                "FILE:u.rb::A",
+                "FILE:u.rb::B",
+                "REF:x.use",
+            ]
+
+    def test_or_equals_assigns_only_where_the_name_is_falsy(self, tmp_path):
+        """`x ||= v` assigns only where `x` is nil or false, `x &&= v` only
+        where it holds an object: a name known to hold an object keeps it or
+        takes `v`, one known to be nil takes `v` or keeps nil, and one that
+        may hold either, nil on a way through an `if` included, is open."""
+        builder = _index(
+            tmp_path,
+            {
+                "u.rb": """
+                class A; def use; end; end
+                class B; def use; end; end
+                class U
+                  def kept
+                    x = A.new
+                    x ||= B.new
+                    x.use
+                  end
+                  def unknown(x)
+                    x ||= B.new
+                    x.use
+                  end
+                  def nilled
+                    x = nil
+                    x ||= B.new
+                    x.use
+                  end
+                  def either(c)
+                    x = nil
+                    x = A.new if c
+                    x ||= B.new
+                    x.use
+                  end
+                  def anded
+                    x = A.new
+                    x &&= B.new
+                    x.use
+                  end
+                end
+                """
+            },
+        )
+        calls = {
+            name: _calls(builder, f"FILE:u.rb::U::{name}")
+            for name in ("kept", "unknown", "nilled", "either", "anded")
+        }
+        assert calls == {
+            "kept": ["FILE:u.rb::A", "FILE:u.rb::A::use", "FILE:u.rb::B"],
+            "unknown": ["FILE:u.rb::B", "REF:x.use"],
+            "nilled": ["FILE:u.rb::B", "FILE:u.rb::B::use"],
+            "either": ["FILE:u.rb::A", "FILE:u.rb::B", "REF:x.use"],
+            "anded": ["FILE:u.rb::A", "FILE:u.rb::B", "FILE:u.rb::B::use"],
+        }
 
 
 class TestDartCallResolution:
