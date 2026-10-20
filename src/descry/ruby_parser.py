@@ -872,6 +872,11 @@ class RubyParser(BaseParser):
         origin += "".join(f".{link}()" for link in links[:-1])
         return ("call", links[-1], f"{origin}.{links[-1]}")
 
+    def _sees_file(self):
+        """A `def`, a `class` or a `module` hides the local variables around
+        it; a block does not."""
+        return not any(scope[2] for scope in self._scopes)
+
     def _declare(self, name, lineno, since, origin, depth=None, column=None):
         """Bind the local variable ``name`` at ``column`` of ``lineno``, None
         for a parameter, to a value of origin path ``origin``, `?` for one

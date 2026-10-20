@@ -338,9 +338,15 @@ Python SDK v2, and a full-tree review's findings are fixed.
   `module.exports` until a `module.exports =` replaces the exports, an
   invoked function's value too, or `exports =` rebinds it, `exports =
   module.exports = v` keeping it, the last write of a name the one that
-  counts, `module.name =` no export, ESM `export`s apart from all of it,
-  and `require` giving the exports object alone, its names read where they
-  are written; exports are unknown where the value given them is not read,
+  counts, `module.name =` no export, a write that may not run, in a
+  branch, a function or past a statement's start, leaving what it writes
+  unknown, the module's `export`s written to `exports` as TypeScript
+  compiles them (`export =` last, none past a `module.exports =`, a name
+  both give either), and `require` giving the exports object alone, its
+  names read where they are written, one a block declares no value;
+  exports are unknown where the value given them is not read,
+  `module.exports = require(m)` exports what `m` does, two modules that
+  export each other whole export nothing so and a module is no callee,
   and `require` and a destructuring pattern of it bind them; a name an
   import binds to a project module that cannot be located is no global,
   and a call on it, or on `this` of a class it is the base of, stays open,
@@ -376,8 +382,12 @@ Python SDK v2, and a full-tree review's findings are fixed.
   be null, or may hold an object, a way that leaves it null counting
   whatever the others hold; a Ruby assignment holds from where its value
   ends, which reads the name's earlier value; and `None`, `nil` or `null`
-  hold nothing a call is made on; a PHP function reads none of the file's
-  variables, a `match`'s `default` is no label of a `switch:` around it.
+  hold nothing a call is made on; a PHP function and a Ruby `def` read
+  none of the file's variables, a PHP closure its own and those it takes,
+  by `use`, one by reference holding past it what it held or what the
+  closure binds, an arrow function each, a `@var` tag types its variable
+  as a declaration does, a `match`'s `default` is no label of a `switch:`
+  around it, and an anonymous class on one line has its methods.
   In Go, Rust, C, C++, Dart, Java and C#, a declaration in a block, a
   statement's head or a parameter list is in scope to the end of that
   block or statement, a Java or C# `case` pattern to the end of its switch
@@ -427,8 +437,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   takes as many parameters as it declares (`dotnet.json` and `java.json`
   gain `functional`, which lists no annotation interface). A C# extension
   method's receiver, named or a literal's, of the literal's own type (`5`
-  an `int`, `2.5` or `.5` a `double`, `'c'` a `char`, a suffix's; `@true`
-  an identifier), is its first argument, and one a standard type has only
+  an `int`, `2.5` or `.5` a `double`, `'c'` a `char`, a suffix's, read
+  past a comment or a line break; `@true` an identifier and a literal C#
+  rejects none), is its first argument, and one a standard type has only
   from extension methods is looked up from the namespace around the call
   outward, with the `using` directives written at each level, each naming
   the first of its path under the namespaces around it, `global::` the

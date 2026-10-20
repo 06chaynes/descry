@@ -9,6 +9,7 @@ the source of the calls in its body.
 
 from __future__ import annotations
 
+import math
 import re
 from bisect import bisect_right
 
@@ -227,6 +228,16 @@ _RE_HASH_COMMENT = re.compile(r"#(?!\[)")
 _RE_ATTRIBUTE = re.compile(r"#\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\]")
 _RE_HEREDOC = re.compile(r"<<<[ \t]*(['\"]?)(\w+)\1")
 
+# An anonymous function, `function (…)`, or an arrow function, `fn (…)`, up
+# to the `(` of its parameters; ``function`` for the first
+_RE_CLOSURE = re.compile(r"(?<![\w$\\>:])(?:(function)|fn)\s*&?\s*(?=\()")
+# What an anonymous function's parameters are followed by up to its body's
+# `{`: the variables it takes by `use`, and its return type
+_RE_CLOSURE_BODY = re.compile(
+    r"\s*(?:use\s*\((?P<use>[^()]*)\))?\s*(?::\s*[?\w\\|&]+\s*)?\{"
+)
+# What an arrow function's parameters are followed by up to its `=>`
+_RE_ARROW = re.compile(r"\s*(?::\s*[?\w\\|&]+\s*)?=>")
 # What the shared reader of call chains takes PHP's operators for: `.`
 # reads a member and `:` is part of a path, and neither a concatenation nor
 # a `?:` is a chain.
@@ -238,6 +249,7 @@ _CHAIN_OPERATORS = {"?->": "  .", "->": " .", ".": "+", "?": "|", "\\": ":"}
 # after the end of another
 _RE_TYPE_HEAD = re.compile(
     r"\s*(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum)\b"
+    r"|[^{};]*\bnew\s+(?:readonly\s+)?class\b"
 )
 _RE_DEFINITION_HEAD = re.compile(
     r"(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum|function)\b"
@@ -538,6 +550,7 @@ class PhpParser(BaseParser):
     null_literal = "null"
 
     _namespace = ""  # of the file being parsed, with `::` for `\`
+    _top = True  # whether the line being read is of the file's top level
     # Local name -> full name of the classes and namespaces the file
     # imports, and of the functions it imports
     _imports: dict[str, str]
@@ -546,12 +559,84 @@ class PhpParser(BaseParser):
     def _binds_file(self, name):
         """A statement outside every definition binds for the file: its
         top-level code shares its variables."""
-        return len(self._contexts) == 1
+        return self._top
 
-    def _is_local(self, name):
-        """Every variable a function or a method uses is its own: it sees
+    def _sees_file(self):
+        """A function or a method has variables of its own alone: it sees
         none of the file's unless it takes one by `global`."""
-        return len(self._contexts) > 1
+        return self._top
+
+    def _read_closures(self, codes):
+        """Find the closures of the file, ``codes`` its code lines: the span
+        of each anonymous or arrow function, whose variables are its own,
+        the names of those around it it sees, None for every one, as an
+        arrow function's, and those it takes by reference, which it binds
+        for the code around it too. Returns each closure that takes one as
+        a statement of ``read_branches`` that may run its body or not."""
+        text, starts, closer = _js_brackets(codes)
+        self._starts, self._takes, branches = starts, {}, []
+
+        def place(at):
+            row = bisect_right(starts, at) - 1
+            return row + 1, at - starts[row]
+
+        for found in _RE_CLOSURE.finditer(text):
+            close = closer.get(found.end())
+            if close is None:
+                continue
+            if found[1]:
+                body = _RE_CLOSURE_BODY.match(text, close + 1)
+                end = body and closer.get(body.end() - 1)
+                if end is None:
+                    continue
+                used = re.findall(r"(&?)\s*\$(\w+)", body["use"] or "")
+                taken = {name for _, name in used}
+                by_reference = {name for ref, name in used if ref}
+                if by_reference:
+                    ways = [[(place(body.end()), place(end))], []]
+                    branches.append(
+                        (place(body.end()), place(end + 1), ways, ways, False)
+                    )
+            else:
+                arrow = _RE_ARROW.match(text, close + 1)
+                if not arrow:
+                    continue
+                # Its body is an expression, which a `,`, a `;` or a bracket
+                # it is inside ends.
+                end, taken, by_reference = arrow.end(), None, set()
+                while end < len(text) and text[end] not in ",;)]}":
+                    end = closer.get(end, end) + 1
+            self._takes[found.start(), end] = taken, by_reference
+        self._closures = _nested(sorted(self._takes))
+        self._arounds = {}
+        return branches
+
+    def _around(self, at):
+        """The spans of the closures around offset ``at``, as a set."""
+        if at not in self._arounds:
+            spans, index = set(), bisect_right(self._closures, (at, math.inf)) - 1
+            while index >= 0:
+                start, end, outer = self._closures[index]
+                if at <= end:
+                    spans.add((start, end))
+                index = outer
+            self._arounds[at] = spans
+        return self._arounds[at]
+
+    def _in_scope(self, name, declaration, lineno):
+        """As the base's, and a closure's variables are its own, but those
+        it takes by reference: of those around it, it sees the ones it
+        takes."""
+        if not super()._in_scope(name, declaration, lineno):
+            return False
+        if not self._closures:
+            return True
+        bound = self._around(self._starts[declaration[0] - 1] + (declaration[3] or 0))
+        read = self._around(self._starts[lineno - 1] + (self._read_at or 0))
+        return all(name in self._takes[span][1] for span in bound - read) and all(
+            self._takes[span][0] is None or name in self._takes[span][0]
+            for span in read - bound
+        )
 
     def _unbind(self, name, lineno, column):
         """Leave the variable ``name`` without a known type from ``column``
@@ -747,7 +832,8 @@ class PhpParser(BaseParser):
         # Indented, so that no declaration is read as one at file level: a
         # function sees none of the file's variables. Columns are the code's.
         self.scan_declarations([f" {code}" for code in codes], _DECLARATIONS)
-        self.read_branches(_branches, codes)
+        closures = self._read_closures(codes)
+        self.read_branches(lambda codes: _branches(codes) + closures, codes)
         for entries in self.declared.values():
             entries[:] = [(line, held, top, at - 1) for line, held, top, at in entries]
 
@@ -778,6 +864,7 @@ class PhpParser(BaseParser):
                 type_id = type_id.rpartition("::")[0]
             owner = types.get(type_id)
             source_id, since = context_id, context_start
+            self._top = context_id == file_id
             # Call scanning starts past a name declared on the line.
             call_scan_start = 0
 
@@ -872,7 +959,7 @@ class PhpParser(BaseParser):
                 column = m_anonymous.start() if brace_line_idx == i else 0
                 end_lineno = self._find_block_end(codes, brace_line_idx, column)
                 anonymous_id = self._nameless_owner(
-                    context_id, f"class@{lineno}", lineno, end_lineno
+                    context_id, f"class@{self.source_line(lineno)}", lineno, end_lineno
                 )
                 header = [code[m_anonymous.end() :], *codes[i + 1 : brace_line_idx + 1]]
                 bases[anonymous_id] = self._bases(" ".join(header).partition("{")[0])
@@ -882,7 +969,7 @@ class PhpParser(BaseParser):
                     self.declared.setdefault(bound[1], []).append(
                         (
                             lineno,
-                            f"=class@{lineno}()",
+                            f"={anonymous_id.rpartition('::')[2]}()",
                             self._binds_file(bound[1]),
                             bound.start(1),
                         )
@@ -929,6 +1016,7 @@ class PhpParser(BaseParser):
                 if end_lineno > lineno:
                     self.enter_context(method_id, lineno, end_lineno)
                 source_id, since = method_id, lineno
+                self._top = False
                 told = {t["name"]: t["type"] for t in _RE_PARAM_TAG.finditer(docstring)}
                 for parameter, written in told.items():
                     entries = self.declared.setdefault(parameter, [])
@@ -969,14 +1057,16 @@ class PhpParser(BaseParser):
                     self._add_constant(context_id, m_case.group(1), lineno, owner)
 
             # What the line says of its variables: `/** @var Type $name */`
-            # types the statement below it; a rebinding leaves a variable
+            # types the statement below it, as a declaration of the type
+            # does, `null` of a union no type; a rebinding leaves a variable
             # untyped; `instanceof` types a variable inside the block the line
             # opens, or from an `assert` on.
             for tag in _RE_VARIABLE_TAG.finditer(lines[i]):
+                written = self._type(tag["type"], owner) or tag["type"]
                 self.declared.setdefault(tag["name"], []).append(
                     (
                         lineno + 1,
-                        f"{tag['type']}()",
+                        f"{written}()",
                         self._binds_file(tag["name"]),
                         None,
                     )

@@ -121,24 +121,34 @@ _RE_KEYWORD_BEFORE_MEMBER = re.compile(
     r"(?:return|throw|in|is|as|case|else|do|await|out|ref|new|when|and|or|not"
     r"|true|false|null)\s*\.\s*"
 )
-# A literal that ends just before the `.` of a member call: a character,
-# a number, `true`/`false`/`null`, read on the raw line where `code` has
-# literals blank. `@name` is the identifier `name`, no literal.
+# A literal that ends just before the `.` of a member call, written as C#
+# allows: a character, `true`/`false`/`null`, an integer, its digits apart
+# by `_` and its suffix one `u` and one `l` at most, or a real, its suffix
+# one of `f`, `d` and `m`. `@name` is the identifier `name`, no literal.
+_DIGITS = r"\d(?:[\d_]*\d)?"
 _RE_LITERAL_TAIL = re.compile(
     r"(?<![\w.@])(?:'(?:[^'\\]|\\.)*'|true|false|null"
-    r"|0[xX][0-9a-fA-F_]+[uUlL]*|0[bB][01_]+[uUlL]*"
-    r"|(?:\d[\d_]*(?:\.\d[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?\d[\d_]*)?"
-    r"[uUlLfFdDmM]{0,2})\s*\.$"
+    r"|(?:0[xX](?:_*[0-9a-fA-F])+|0[bB](?:_*[01])+"
+    rf"|{_DIGITS})(?:[uU][lL]?|[lL][uU]?)?"
+    rf"|(?:{_DIGITS})?\.{_DIGITS}(?:[eE][+-]?{_DIGITS})?[fFdDmM]?"
+    rf"|{_DIGITS}(?:[eE][+-]?{_DIGITS})?[fFdDmM]"
+    rf"|{_DIGITS}[eE][+-]?{_DIGITS})\s*\.$"
 )
 # The integer types in the order C# gives an integer literal the first that
 # holds its value, with the largest value of each
-_INTEGERS = (("int", 2**31 - 1), ("uint", 2**32 - 1), ("long", 2**63 - 1))
+_INTEGERS = (
+    ("int", 2**31 - 1),
+    ("uint", 2**32 - 1),
+    ("long", 2**63 - 1),
+    ("ulong", 2**64 - 1),
+)
 
 
 def _literal_type(literal):
     """The C# type of ``literal``, None for `null`: a real literal's by its
     suffix, `double` without one; an integer literal's the first of `int`,
-    `uint`, `long` and `ulong` its suffix allows that holds its value."""
+    `uint`, `long` and `ulong` its suffix allows that holds its value, none
+    for one too large for all, which C# rejects."""
     low = literal.lower().replace("_", "")
     if low[0] == "'":
         return "char"
@@ -152,16 +162,45 @@ def _literal_type(literal):
         return real or "double"
     digits = low.rstrip("ul")
     suffix = low[len(digits) :]
-    try:
-        value = int(digits, {"0x": 16, "0b": 2}.get(low[:2], 10))
-    except ValueError:
-        # `0x` or `0b` alone, a literal the language rejects: no type.
+    significant = (digits[2:] if based else digits).lstrip("0")
+    if len(significant) > 64:
+        # More digits than 64 bits hold in any base
         return None
+    value = int(significant or "0", {"0x": 16, "0b": 2}.get(low[:2], 10))
     allowed = {"": ("int", "uint", "long"), "u": ("uint",), "l": ("long",)}
     return next(
-        (t for t, top in _INTEGERS if t in allowed.get(suffix, ()) and value <= top),
-        "ulong",
+        (
+            t
+            for t, top in _INTEGERS
+            if (t in allowed.get(suffix, ()) or t == "ulong") and value <= top
+        ),
+        None,
     )
+
+
+def _literal_receiver(code_lines, lines, index, column):
+    """The C# type of the literal that a member call written at ``column``
+    of line ``index`` is made on, None for none. A character literal is read
+    on the raw line; any other where comments are blank, past the line's
+    start where the line starts with the call's `.`."""
+    found = _RE_LITERAL_TAIL.search(lines[index][:column].rstrip())
+    if found and found[0][0] == "'":
+        return _literal_type(found[0].rstrip()[:-1].rstrip())
+    row, text = index, code_lines[index][:column]
+    if not text.rstrip().endswith("."):
+        return None
+    while row and not text.rstrip()[:-1].strip():
+        row -= 1
+        text = f"{code_lines[row]}\n{text}"
+    found = _RE_LITERAL_TAIL.search(text.rstrip())
+    if not found:
+        return None
+    # The line the literal starts on and its column there
+    row += text.count("\n", 0, found.start())
+    at = found.start() - text.rfind("\n", 0, found.start()) - 1
+    if lines[row][at - 1 : at] == "@":
+        return None
+    return _literal_type(found[0].rstrip()[:-1].rstrip())
 
 
 # The type arguments of a generic name, innermost first: what follows them
@@ -789,9 +828,7 @@ class DotnetParser(BaseParser):
                 origin = f"{(cast[1] or cast[2]).replace('.', '::')}().{callee}"
             elif lines[index][: len(before)].rstrip().endswith('".'):
                 origin = f"string().{callee}"
-            elif (
-                lit := _RE_LITERAL_TAIL.search(lines[index][: len(before)].rstrip())
-            ) and (kind := _literal_type(lit[0].rstrip()[:-1].rstrip())):
+            elif kind := _literal_receiver(code_lines, lines, index, first):
                 # `5.Val()`, `'c'.Ext()`, `true.Ext()`: the literal's own
                 # type is the receiver's.
                 origin = f"{kind}().{callee}"

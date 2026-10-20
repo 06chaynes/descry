@@ -12761,9 +12761,9 @@ class TestTypeScriptCallResolution:
         assert "FILE:rep.js::A" not in calls
         assert "FILE:rep.js::C" in calls
 
-    def test_module_exports_name_is_read_in_the_scope_it_is_written(self, tmp_path):
-        """`module.exports = x` inside a function reads the `x` bound
-        there, not a same-named top-level binding."""
+    def test_an_export_reads_its_name_in_the_scope_it_is_written(self, tmp_path):
+        """`exports.a = x` inside a function reads the `x` bound there, not
+        a same-named top-level binding."""
         builder = _index(
             tmp_path,
             {
@@ -12771,19 +12771,23 @@ class TestTypeScriptCallResolution:
                 const x = { use() {} };
                 function f() {
                   const x = { use() {} };
-                  module.exports = x;
+                  exports.a = x;
                 }
                 f();
                 """,
-                "use.js": "const m = require('./m');\nm.use();\n",
+                "use.js": "const m = require('./m');\nm.a.use();\n",
             },
         )
         assert _calls(builder, "FILE:use.js") == ["FILE:m.js::f::x::use"]
 
-    def test_module_exports_replaces_only_commonjs_exports(self, tmp_path):
-        """`module.exports =` replaces what `exports` and `module.exports`
-        gave, not what `export` does: the ESM entries are no CommonJS
-        writes."""
+    def test_a_commonjs_module_writes_its_exports_as_typescript_compiles_them(
+        self, tmp_path
+    ):
+        """A module that writes CommonJS exports runs as CommonJS, its
+        `export`s compiled to writes of `exports`: `module.exports =` leaves
+        none of them, wherever they are written, TypeScript's `export =` is
+        written last, an `export` declaration is an export besides the
+        CommonJS writes, and a name both give is either."""
         builder = _index(
             tmp_path,
             {
@@ -12792,14 +12796,42 @@ class TestTypeScriptCallResolution:
                 export { a };
                 const B = { use() {} };
                 module.exports = B;
+                export const c = { use() {} };
+                """,
+                "n.ts": """
+                const a = { use() {} };
+                const b = { use() {} };
+                module.exports = b;
+                export = a;
+                """,
+                "k.js": """
+                export const a = { use() {} };
+                export function f() {}
+                const B = { use() {} };
+                exports.b = B;
+                export const b = { use() {} };
                 """,
                 "use.js": """
-                import { a } from './m.js';
+                import { a, c } from './m.js';
+                import { a as a2, f, b } from './k.js';
+                const n = require('./n');
                 a.use();
+                c.use();
+                n.use();
+                a2.use();
+                f();
+                b.use();
                 """,
             },
         )
-        assert _calls(builder, "FILE:use.js") == ["FILE:m.js::a::use"]
+        assert _calls(builder, "FILE:use.js") == [
+            "FILE:k.js::a::use",
+            "FILE:k.js::f",
+            "FILE:n.ts::a::use",
+            "REF:a.use",
+            "REF:b.use",
+            "REF:c.use",
+        ]
 
     def test_a_shadowed_module_gives_no_exports(self, tmp_path):
         """A `module` a parameter or a `const` binds is no CommonJS module
@@ -12820,24 +12852,25 @@ class TestTypeScriptCallResolution:
         )
         assert "FILE:m.js::helper::use" not in _calls(builder, "FILE:use.js")
 
-    def test_an_exports_object_reads_names_where_it_is_written(self, tmp_path):
-        """`module.exports = { a: x }` inside a function reads the `x`
-        bound there, not a same-named top-level binding."""
+    def test_an_export_of_a_name_a_block_declares_is_unknown(self, tmp_path):
+        """An export holds a name read in the definition around it; one a
+        block declares is in no scope that names it, and holds no value
+        known."""
         builder = _index(
             tmp_path,
             {
                 "m.js": """
                 const f = { use() {} };
-                function g() {
+                {
                   const f = { use() {} };
-                  module.exports = { a: f };
+                  exports.a = f;
+                  module.exports.o = { b: f };
                 }
-                g();
                 """,
-                "use.js": "const m = require('./m');\nm.a.use();\n",
+                "use.js": "const m = require('./m');\nm.a.use();\nm.o.b.use();\n",
             },
         )
-        assert _calls(builder, "FILE:use.js") == ["FILE:m.js::g::f::use"]
+        assert "FILE:m.js::f::use" not in _calls(builder, "FILE:use.js")
 
     def test_exports_rebound_writes_what_it_is_bound_to(self, tmp_path):
         """`exports = v` rebinds the alias, so its writes are no exports;
@@ -12872,6 +12905,146 @@ class TestTypeScriptCallResolution:
             "REF:a.x",
             "REF:c.old",
         ]
+
+    def test_a_commonjs_write_that_may_not_run_leaves_what_it_writes_unknown(
+        self, tmp_path
+    ):
+        """A CommonJS write in a branch, past a statement's start or in a
+        function runs or not, or at a time not known: a rebind of `exports`
+        orphans it, a replacement leaves the exports unknown, and a member
+        another write gives a value is either."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """
+                const A = { use() {} };
+                if (c) { exports = {}; }
+                exports.x = A;
+                """,
+                "b.js": """
+                const A = { use() {} };
+                const B = { use() {} };
+                module.exports = A;
+                if (c) module.exports = B;
+                """,
+                "c.js": """
+                const A = { use() {} };
+                const B = { use() {} };
+                exports.x = A;
+                if (c) {
+                  exports.x = B;
+                }
+                """,
+                "d.js": """
+                const B = { use() {} };
+                function reset() {
+                  module.exports = B;
+                }
+                """,
+                "use.js": """
+                const a = require('./a');
+                const b = require('./b');
+                const c = require('./c');
+                const d = require('./d');
+                a.x.use();
+                b.use();
+                c.x.use();
+                d.use();
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:use.js") == ["REF:b.use", "REF:d.use"]
+
+    def test_an_export_of_a_value_not_read_is_unknown(self, tmp_path):
+        """`exports.x = <a value not read>` is a CommonJS write: the module
+        exports its exports object alone, `x` of a value not known."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": """
+                function top() {}
+                exports.x = (function () { return {}; })();
+                """,
+                "use.js": "const m = require('./m');\nm.top();\nm.x();\n",
+            },
+        )
+        assert "FILE:m.js::top" not in _calls(builder, "FILE:use.js")
+
+    def test_module_exports_of_its_alias_or_over_lines_keeps_the_exports(
+        self, tmp_path
+    ):
+        """`module.exports = exports` keeps what the alias holds, and a
+        chained `module.exports = exports = {` or `exports =
+        module.exports = {` over lines exports the object's members."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": "exports.x = function x() {};\nmodule.exports = exports;\n",
+                "b.js": "module.exports = exports = {\n  w() {},\n};\n",
+                "c.js": "exports = module.exports = {\n  v() {},\n};\n",
+                "use.js": """
+                const a = require('./a');
+                const b = require('./b');
+                const c = require('./c');
+                a.x();
+                b.w();
+                c.v();
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:use.js") == [
+            "FILE:a.js::x",
+            "FILE:b.js::object@1::w",
+            "FILE:c.js::object@1::v",
+        ]
+
+    def test_an_export_of_a_required_module_is_its_exports(self, tmp_path):
+        """`module.exports = require(m)`, `exports.i = require(m)` and the
+        export of a constant a `require` binds give what `m` exports."""
+        builder = _index(
+            tmp_path,
+            {
+                "inner.js": "exports.deep = function deep() {};\n",
+                "m.js": "module.exports = require('./inner');\n",
+                "n.js": "exports.i = require('./inner');\n",
+                "k.js": "const inner = require('./inner');\nmodule.exports = inner;\n",
+                "use.js": """
+                const m = require('./m');
+                const n = require('./n');
+                const k = require('./k');
+                m.deep();
+                n.i.deep();
+                k.deep();
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:use.js") == ["FILE:inner.js::deep"] * 3
+
+    def test_modules_that_export_each_other_whole_export_nothing_so(self, tmp_path):
+        """Two modules each exporting the other whole export no value: the
+        lookup ends."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.ts": "import a = require('./n');\nexport = a;\n",
+                "n.ts": "import b = require('./m');\nexport = b;\n",
+                "use.ts": "class C { use() {} }\nimport m = require('./m');\nm.use();\n",
+            },
+        )
+        assert _calls(builder, "FILE:use.ts") == ["REF:m.use"]
+
+    def test_a_module_takes_no_call(self, tmp_path):
+        """`export * as ns` exports the module itself, which no call can
+        call: `m.ns()` is no call of the module's file."""
+        builder = _index(
+            tmp_path,
+            {
+                "p.js": "export function top() {}\n",
+                "m.js": "export * as ns from './p.js';\n",
+                "use.js": "import * as m from './m.js';\nm.ns();\nm.ns.top();\n",
+            },
+        )
+        assert _calls(builder, "FILE:use.js") == ["FILE:p.js::top", "REF:m.ns"]
 
     def test_exports_writes_the_orphan_after_a_reassignment(self, tmp_path):
         """After `module.exports =` replaces the exports object `exports`
@@ -18447,10 +18620,10 @@ class TestPhpCallResolution:
             "REF:$y->use",
         ]
 
-    def test_a_file_level_binding_takes_part_in_a_functions_merge(self, tmp_path):
-        """A binding the file's top level makes takes part in a merge a
-        function's branch makes: `?` there, not the way inside the
-        function alone."""
+    def test_a_functions_merge_reads_its_own_variables_alone(self, tmp_path):
+        """A function sees none of the file's variables: what a branch of it
+        binds merges with the function's bindings alone, none the file's
+        top level makes."""
         builder = _index(
             tmp_path,
             {
@@ -18469,7 +18642,120 @@ class TestPhpCallResolution:
                 """,
             },
         )
-        assert "REF:$x->use" in _calls(builder, "FILE:a.php::g")
+        assert _calls(builder, "FILE:a.php::g") == [
+            "FILE:a.php::C",
+            "FILE:a.php::C::use",
+        ]
+
+    def test_an_anonymous_class_on_one_line_has_its_methods(self, tmp_path):
+        """An anonymous class written on one line has the methods its body
+        holds, and a variable it is assigned to its instance."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """<?php
+                class A { public function use_() {} }
+                function g() {
+                    $anon = new class { public function use_() {} };
+                    $anon->use_();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.php::g") == ["FILE:a.php::g::class@4::use_"]
+
+    def test_a_doc_comment_types_a_variable_as_its_declaration_does(self, tmp_path):
+        """`/** @var T|null $x */` types `$x` as a declaration of `?T`
+        does: a way of a branch that binds it a `T` agrees with it."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """<?php
+                class T { public function has() {} }
+                class M {
+                    public function m(T $s, $c) {
+                        /** @var T|null $x */
+                        $x = null;
+                        if ($c) {
+                            $x = $s;
+                        }
+                        $x->has();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.php::M::m") == ["FILE:a.php::T::has"]
+
+    def test_a_function_sees_no_variable_its_doc_comment_types(self, tmp_path):
+        """`/** @var T $x */` above a function types the file's `$x`, which
+        the function does not see."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """<?php
+                class T { public function use_() {} }
+                class C { public function use_() {} }
+                /** @var T $x */
+                function g() { $x->use_(); }
+                """,
+            },
+        )
+        assert "FILE:a.php::T::use_" not in _calls(builder, "FILE:a.php::g")
+
+    def test_a_closures_variables_are_its_own(self, tmp_path):
+        """A closure's variables are its own: of those around it, an
+        anonymous function sees the ones it takes by `use`, an arrow
+        function each; what either binds is not seen outside it, but a
+        variable it takes by reference, which past the closure holds what it
+        held or what the closure binds."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """<?php
+                class C { public function use_() {} }
+                class D { public function use_() {} }
+                class M {
+                    public function m($z) {
+                        $a = new C();
+                        $b = new C();
+                        $f = function (D $p) use ($a, $z) {
+                            $a->use_();
+                            $p->use_();
+                            $b->use_();
+                            $z = new D();
+                        };
+                        $g = fn($w) => $a->use_() ?? $w = new C();
+                        $r = new C();
+                        $h = function () use (&$r) { $r = new D(); };
+                        $s = null;
+                        $k = function () use (&$s) { $s = new D(); };
+                        $z->use_();
+                        $w->use_();
+                        $r->use_();
+                        $s->use_();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.php::M::m") == [
+            "FILE:a.php::C",
+            "FILE:a.php::C",
+            "FILE:a.php::C",
+            "FILE:a.php::C",
+            "FILE:a.php::C::use_",
+            "FILE:a.php::C::use_",
+            "FILE:a.php::D",
+            "FILE:a.php::D",
+            "FILE:a.php::D",
+            "FILE:a.php::D::use_",
+            "FILE:a.php::D::use_",
+            "REF:$b->use_",
+            "REF:$r->use_",
+            "REF:$w->use_",
+            "REF:$z->use_",
+        ]
 
     def test_a_match_default_is_no_switch_section(self, tmp_path):
         """A `match` arm's `default` inside an alternative-syntax `switch:`
@@ -20203,6 +20489,55 @@ class TestDotnetCallResolution:
             },
         )
         assert _calls(builder, "FILE:a.cs::P::M") == ["FILE:a.cs::Ext::Dbl"]
+
+    def test_a_literal_csharp_rejects_has_no_type(self, tmp_path):
+        """A literal is typed only as C# writes one: `1_`, `5uu`, `5fd`,
+        `1e5ul` and an integer too large for `ulong` are no literals, and a
+        member call on one has no receiver type."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cs": """
+                static class Ext {
+                    public static void I(this int v) { }
+                    public static void UL(this ulong v) { }
+                    public static void D(this double v) { }
+                }
+                class P {
+                    void M() {
+                        1_.I(); 5uu.UL(); 5fd.D(); 1e5ul.D();
+                        18446744073709551616.UL();
+                    }
+                }
+                """
+            },
+        )
+        assert not [
+            c for c in _calls(builder, "FILE:a.cs::P::M") if c.startswith("FILE:")
+        ]
+
+    def test_a_literal_receiver_is_read_past_a_comment_or_a_line_break(self, tmp_path):
+        """A literal's member call written after a comment, or with its `.`
+        starting the next line, is made on the literal."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cs": """
+                static class Ext {
+                    public static void Dbl(this double d) { }
+                }
+                class D { public void Dbl() { } }
+                class P {
+                    void M() {
+                        5.0 /* c */ .Dbl();
+                        5.0
+                            .Dbl();
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.cs::P::M") == ["FILE:a.cs::Ext::Dbl"] * 2
 
     def test_the_brace_index_follows_a_line_rewritten_in_place(self, tmp_path):
         """The header of a type whose `{` shares its line is blanked in
@@ -22494,6 +22829,34 @@ class TestClangCallResolution:
 
 
 class TestRubyCallResolution:
+    def test_a_def_sees_no_local_of_the_file(self, tmp_path):
+        """A `def` hides the file's local variables: one read there is none
+        of them, and what a branch of it binds merges with its own alone."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.rb": """
+                class A
+                  def use; end
+                end
+                class C
+                  def use; end
+                end
+                x = A.new
+                y = A.new if cond
+                def g
+                  x.use
+                end
+                def h
+                  y = C.new if other
+                  y.use
+                end
+                """,
+            },
+        )
+        assert "FILE:a.rb::A::use" not in _calls(builder, "FILE:a.rb::g")
+        assert _calls(builder, "FILE:a.rb::h") == ["FILE:a.rb::C", "FILE:a.rb::C::use"]
+
     def test_a_body_its_head_may_skip_leaves_the_value_open(self, tmp_path):
         """A variable a body of an `if`, `unless`, `case`, loop or `rescue`
         assigns, or a statement an `if` or `unless` modifies, holds after it
