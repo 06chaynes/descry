@@ -6458,6 +6458,7 @@ class BaseParser:
         self._unsettled = []  # see ``begin_line``
         self._first_node = 0  # where the nodes and edges of the file being
         self._first_edge = 0  # parsed start in the builder's lists
+        self._braces = None  # (lines, what ``_brace_index`` reads of them)
         # (first edge of the file, edges read, {type name: base names})
         self._bases_named = (None, 0, {})
         # (name, unwrap, depth) of a binding still being read. depth is how
@@ -6539,10 +6540,9 @@ class BaseParser:
                 if not entries:
                     continue
                 bound = [
-                    (at, d[1])
+                    ((d[0], self._column(name, d) or 0), d[1])
                     for d in entries
                     if since <= d[0]
-                    and (at := (d[0], self._column(name, d) or 0))[1] >= 0
                 ]
                 # A way that leaves the name null is no value a call is made
                 # on, but one an assignment where it is null runs in.
@@ -6677,9 +6677,9 @@ class BaseParser:
         if lineno == self._line and self._read_at is not None:
             # What a binding before the read on its line is bound to
             self._settle_calls(self._code, self._read_at)
-        if lineno < self._line:
-            # A statement that ends where the finished line does merges for
-            # a read past it; a line being read binds before it merges.
+        if lineno < self._line or self._read_at is not None:
+            # A statement that ends before the read merges for it, on its
+            # line too; a line with no read column binds before it merges.
             self._merge_branches(
                 (lineno, self._read_at if self._read_at is not None else math.inf),
                 since,
@@ -6720,11 +6720,12 @@ class BaseParser:
         self._merge_branches((lineno, 0), since)
         seen = self._seen(name, lineno, since)
         at = seen and (seen[0], self._column(name, seen) or 0)
+        if any(end > at for end in self._maybe_null.get(name, ())):
+            # A merge past the write left it maybe null, maybe an object.
+            return None
         if at in self._nulls:
             null = True
-        elif at in self._made and not any(
-            end > at for end in self._maybe_null.get(name, ())
-        ):
+        elif at in self._made:
             null = False
         else:
             return None
@@ -7834,6 +7835,55 @@ class BaseParser:
                 return ahead
         return None
 
+    def _brace_index(self, lines):
+        """What ``_find_block_end`` reads of ``lines``, once per file: each
+        line without block comments, and without literals too, each line's
+        net count of braces, the count before each line, the first line
+        from each on that holds a `{`, a range-minimum table of the lowest
+        the running count gets on each line, and whether a block comment
+        is open where each line starts."""
+        if self._braces is not None and self._braces[0] is lines:
+            return self._braces[1]
+        stripped, in_comment, in_comment_at = [], False, []
+        for line in lines:
+            in_comment_at.append(in_comment)
+            line, in_comment = strip_block_comments(line, in_comment)
+            stripped.append(line)
+
+        cleaned, net, low, has_open = [], [], [], []
+        for line in stripped:
+            if self._non_code:
+                line = self._non_code.sub("", line)
+            cleaned.append(line)
+            depth, min_depth, opened = 0, 0, False
+            for char in line:
+                depth += (char == "{") - (char == "}")
+                min_depth = min(min_depth, depth)
+                opened = opened or char == "{"
+            net.append(depth)
+            low.append(min_depth)
+            has_open.append(opened)
+        n = len(lines)
+        before, next_open = [0] * (n + 1), [n] * (n + 1)
+        for i in range(n):
+            before[i + 1] = before[i] + net[i]
+        for i in range(n - 1, -1, -1):
+            next_open[i] = i if has_open[i] else next_open[i + 1]
+        # ``score[i]`` is the lowest the running count gets on line ``i``,
+        # relative to before it.
+        score = [before[i] + low[i] for i in range(n)]
+        table = [score]
+        step = 1
+        while step * 2 <= n:
+            prev = table[-1]
+            table.append(
+                [min(prev[i], prev[i + step]) for i in range(n - 2 * step + 1)]
+            )
+            step *= 2
+        data = stripped, cleaned, net, before, next_open, table, in_comment_at
+        self._braces = lines, data
+        return data
+
     def _find_block_end(self, lines, start_idx, column=0):
         """Find the closing brace line for a block starting at start_idx.
 
@@ -7842,32 +7892,74 @@ class BaseParser:
         before ``column`` of it once its block comments are out.
         Returns the 1-indexed line number of the closing brace.
         """
-        brace_depth = 0
-        found_open = False
-        in_comment = False
-
-        for i in range(start_idx, len(lines)):
-            line, in_comment = strip_block_comments(lines[i], in_comment)
-            line = line[column:] if i == start_idx else line
-            if self._non_code:
-                line = self._non_code.sub("", line)
-            for char in line:
+        stripped, cleaned, net, before, next_open, table, in_comment_at = (
+            self._brace_index(lines)
+        )
+        n = len(lines)
+        if in_comment_at[start_idx]:
+            # The index reads comments from the file's start, which a `/*` in
+            # text it does not know as a literal can leave open; the block's
+            # own count starts with none open.
+            brace_depth, found_open, in_comment = 0, False, False
+            for i in range(start_idx, n):
+                line, in_comment = strip_block_comments(lines[i], in_comment)
+                line = line[column:] if i == start_idx else line
+                if self._non_code:
+                    line = self._non_code.sub("", line)
+                for char in line:
+                    if char == "{":
+                        brace_depth += 1
+                        found_open = True
+                    elif char == "}":
+                        brace_depth -= 1
+                        if found_open and brace_depth == 0 and i > start_idx:
+                            return i + 1
+                if found_open and brace_depth <= 0:
+                    return i + 1
+            return min(start_idx + 100, n)
+        # The start line's own counts, on its text from ``column``.
+        cut = stripped[start_idx][column:]
+        if self._non_code:
+            cut = self._non_code.sub("", cut)
+        net_s = sum((char == "{") - (char == "}") for char in cut)
+        found_open = "{" in cut
+        # A block opened and closed on its first line ends there, also
+        # where the line goes on to close what encloses it (`f() {} };`).
+        if found_open and net_s <= 0:
+            return start_idx + 1
+        # The count the lines before the start contribute: the running
+        # count before line ``i`` is ``before[i] - limit`` — the deepest it
+        # gets on the line reaching 0 is ``score[i] <= limit``.
+        limit = before[start_idx] + net[start_idx] - net_s
+        first = start_idx if found_open else next_open[start_idx + 1]
+        if first >= n:
+            return min(start_idx + 100, n)
+        # The line the first `{` is on: where a `}` past it brings the
+        # count to 0, or it ends no higher — `}`s before it do not count.
+        if first > start_idx:
+            depth = before[first] - limit
+            seen_open = False
+            for char in cleaned[first]:
                 if char == "{":
-                    brace_depth += 1
-                    found_open = True
+                    depth += 1
+                    seen_open = True
                 elif char == "}":
-                    brace_depth -= 1
-                    # On the first line a brace pair may belong to the
-                    # signature (`f(opts: { a: T }) {`); only its end counts.
-                    if found_open and brace_depth == 0 and i > start_idx:
-                        return i + 1  # 1-indexed line number
-            # A block opened and closed on its first line ends there, also
-            # where the line goes on to close what encloses it (`f() {} };`).
-            if found_open and brace_depth <= 0:
-                return i + 1
-
+                    depth -= 1
+                    if seen_open and depth == 0:
+                        return first + 1
+            if depth <= 0:
+                return first + 1
+        at = first + 1
+        if at < n:
+            # The first line whose running count can reach 0.
+            pos = at
+            for k in range(len(table) - 1, -1, -1):
+                if pos + (1 << k) <= n and table[k][pos] > limit:
+                    pos += 1 << k
+            if pos < n and table[0][pos] <= limit:
+                return pos + 1
         # If no closing brace found, estimate based on file end
-        return min(start_idx + 100, len(lines))
+        return min(start_idx + 100, n)
 
 
 _PY_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -7917,7 +8009,11 @@ def _py_breaks(body):
         if isinstance(stmt, ast.Break):
             return True
         if not isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
-            todo += [s for s in ast.iter_child_nodes(stmt) if isinstance(s, ast.stmt)]
+            todo += [
+                s
+                for s in ast.iter_child_nodes(stmt)
+                if isinstance(s, (ast.stmt, ast.match_case, ast.ExceptHandler))
+            ]
     return False
 
 
@@ -11246,6 +11342,29 @@ def _apart(branches, at, read, ends=None):
     return False
 
 
+def _tails(text, separators):
+    """For each offset of ``text``, where the whitespace that ends at it
+    starts and the offset after the last of ``separators`` before it: what
+    ``_ends_with`` reads."""
+    back, after = [0] * (len(text) + 1), [0] * (len(text) + 1)
+    for at, char in enumerate(text):
+        back[at + 1] = back[at] if char.isspace() else at + 1
+        after[at + 1] = at + 1 if char in separators else after[at]
+    return back, after
+
+
+def _ends_with(tails, text, start, end, leaf, semicolon=False):
+    """Whether the span ``start`` to ``end`` of ``text`` ends with a
+    statement ``leaf`` matches whole: the text after the last separator in
+    it, without the whitespace after it and, with ``semicolon``, a `;` that
+    ends it. ``tails`` is what ``_tails`` reads of ``text``."""
+    back, after = tails
+    end = max(back[end], start)
+    if semicolon and end > start and text[end - 1] == ";":
+        end = max(back[end - 1], start)
+    return bool(leaf.fullmatch(text, max(after[end], start), end))
+
+
 def _disagree(bound, first, ways):
     """Whether ``ways``, the spans each way through a statement that runs a
     body only where its head allows runs, those that leave it left out,
@@ -11387,19 +11506,30 @@ class _JsScopes:
         # Each name's bindings, indexed by their span for a read to find
         # only those around it, and by the lines they are written over.
         self._indexed, self._rows = {}, {}
+        # (name, span) -> (``assignments``, their functions) and (name,
+        # span, after) -> the values the ones before a read give, kept as
+        # reads move
+        self._assignments, self._avalues, self._reassigned = {}, {}, {}
         for name in self.bindings:
             self._index(name)
 
     def _index(self, name):
         """Index the bindings of ``name`` by position: their spans, nested
         as the scopes they are, each with the bindings of it in the order
-        they are added, and the lines each is written over, sorted."""
+        they hold from, and the lines each is written over, sorted."""
         by_span = {}
         for rank, binding in enumerate(self.bindings[name]):
             by_span.setdefault(binding[3], []).append((rank, binding))
+        positions = {}
+        for span, held in by_span.items():
+            held.sort(key=lambda entry: entry[1][1])
+            positions[span] = [entry[1][1] for entry in held]
+        nested = _nested(sorted(by_span, key=lambda s: (s[0], -s[1][0], -s[1][1])))
         self._indexed[name] = (
-            _nested(sorted(by_span, key=lambda s: (s[0], -s[1][0], -s[1][1]))),
+            nested,
             by_span,
+            {entry[:2]: i for i, entry in enumerate(nested)},
+            positions,
         )
         self._rows[name] = sorted(
             (binding[2][0][0], binding[2][1][0]) for binding in self.bindings[name]
@@ -12142,38 +12272,103 @@ class _JsScopes:
         """The assignments of ``name`` in ``span``, of the variable a
         declaration of that span binds: those no declaration inside it
         binds."""
-        nested, by_span = self._indexed.get(name, ((), {}))
-        # Only the spans inside ``span`` are read: it and what it holds.
-        inside = list(by_span.get(span, ()))
-        at = bisect_left(nested, (*span, -1))
-        end = bisect_left(nested, ((span[1][0], span[1][1] + 1),))
-        for entry in nested[at + 1 : end]:
-            if entry[1] <= span[1]:
-                inside += by_span[entry[:2]]
-        declared = [b[3] for _, b in inside if b[0] != "=" and b[3] != span]
-        return [
-            b
-            for _, b in inside
-            if b[0] == "=" and not any(d[0] <= b[1] <= d[1] for d in declared)
-        ]
+        key = name, span
+        held = self._assignments.get(key)
+        if held is None:
+            nested, by_span, at, _ = self._indexed.get(name, ((), {}, {}, {}))
+            # Only the spans inside ``span`` are read: it and what it holds.
+            inside = list(by_span.get(span, ()))
+            at = at.get(span, 0)
+            end = bisect_left(nested, ((span[1][0], span[1][1] + 1),))
+            for entry in nested[at + 1 : end]:
+                if entry[1] <= span[1]:
+                    inside += by_span[entry[:2]]
+            declared = [b[3] for _, b in inside if b[0] != "=" and b[3] != span]
+            inside = [
+                b
+                for _, b in inside
+                if b[0] == "=" and not any(d[0] <= b[1] <= d[1] for d in declared)
+            ]
+            held = inside, frozenset(self.function(b[1]) for b in inside)
+            self._assignments[key] = held
+        return held[0]
 
-    def reassigned(self, name, span, after, read):
-        """The assignments of ``name`` that blocks inside ``span`` hold,
-        written after ``after`` and closed before ``read`` or in a loop that
-        holds ``read`` and starts after ``after``, of the variable no
-        declaration in those blocks binds: past its block one may have
-        given what the variable holds, and in the loop's next run."""
-        loops = [loop for loop in self._loops if after < loop[0] <= read <= loop[1]]
-        return [
-            b
-            for b in self.assignments(name, span)
-            if b[3] != span
-            and after < b[1]
-            and (
-                b[3][1] < read
-                or any(loop[0] <= b[2][0] and b[2][1] <= loop[1] for loop in loops)
+    def assignment_funcs(self, name, span):
+        """The functions ``assignments`` of ``name`` in ``span`` are in."""
+        self.assignments(name, span)
+        return self._assignments[(name, span)][1]
+
+    def assigned_values(self, name, span, fingerprint, value):
+        """The set ``value(b)`` of each assignment of ``name`` in ``span``,
+        while what ``value`` reads is unchanged."""
+        key = name, span
+        held = self._avalues.get(key)
+        if held is None or held[0] != fingerprint:
+            held = (
+                fingerprint,
+                {
+                    value(b)
+                    for b in self.assignments(name, span)
+                    if (name, b[1]) not in self.undefined
+                },
             )
-        ]
+            self._avalues[key] = held
+        return held[1]
+
+    def reassigned_values(self, name, span, after, read, fingerprint, value):
+        """The set ``value(b)`` over the assignments of ``name`` that
+        blocks inside ``span`` hold, written after ``after`` and closed
+        before ``read`` or in a loop that holds ``read`` and starts after
+        ``after``, of the variable no declaration in those blocks binds:
+        past its block one may have given what the variable holds, and in
+        the loop's next run. The bindings are kept by the end of each one's
+        span, so a moving ``read`` adds to or drops from one edge."""
+        key = name, span, after
+        state = self._reassigned.get(key)
+        if state is None:
+            bindings = sorted(
+                (
+                    b
+                    for b in self.assignments(name, span)
+                    if b[3] != span
+                    and after < b[1]
+                    and (name, b[1]) not in self.undefined
+                ),
+                key=lambda b: b[3][1],
+            )
+            written = sorted(bindings, key=lambda b: b[2][0])
+            state = self._reassigned[key] = [
+                bindings,
+                written,
+                [b[2][0] for b in written],
+                0,
+                Counter(),
+                None,
+            ]
+        bindings, written, ats, at, held, _ = state
+        if state[5] != fingerprint:
+            at = 0
+            held.clear()
+            state[5] = fingerprint
+        while at and bindings[at - 1][3][1] >= read:
+            at -= 1
+            given = value(bindings[at])
+            if held[given] > 1:
+                held[given] -= 1
+            else:
+                del held[given]
+        while at < len(bindings) and bindings[at][3][1] < read:
+            held[value(bindings[at])] += 1
+            at += 1
+        state[3] = at
+        values = set(held)
+        for start, end in self._loops:
+            if not (after < start <= read <= end):
+                continue
+            for b in written[bisect_left(ats, start) : bisect_right(ats, end)]:
+                if b[2][1] <= end:
+                    values.add(value(b))
+        return values
 
     def binds_again(self, name, lineno):
         """Whether the lines more than one binding of ``name`` is written
@@ -12193,31 +12388,36 @@ class _JsScopes:
         the start of its span, an assignment written before the read or read
         from a function inside the one it is in."""
         reader = self.function(read)
-        nested, by_span = self._indexed.get(name, ((), {}))
+        nested, by_span, _, positions = self._indexed.get(name, ((), {}, {}, {}))
         # Only the spans that can hold the read are read: those around
         # where it is, and any that starts between it and the end of what
         # it covers.
         held = []
+
+        def take(span):
+            """The bindings of ``span`` the read can see: each holding from
+            before ``last``, a declaration, or an assignment of another
+            function."""
+            entries = by_span[span]
+            at = bisect_right(positions[span], last)
+            held.extend(entries[:at])
+            held.extend(
+                entry
+                for entry in entries[at:]
+                if entry[1][0] != "=" or self.function(entry[1][1]) != reader
+            )
+
         at = bisect_left(nested, (read,))
         index = at - 1
         while index >= 0:
             start, end, outer = nested[index]
             if read <= end:
-                held += by_span[(start, end)]
+                take((start, end))
             index = outer
-        held += [
-            entry
-            for span in nested[at : bisect_left(nested, ((last[0], last[1] + 1),))]
-            for entry in by_span[span[:2]]
-        ]
+        for span in nested[at : bisect_left(nested, ((last[0], last[1] + 1),))]:
+            take(span[:2])
         held.sort()
-        return [
-            binding
-            for _, binding in held
-            if binding[1] <= last
-            or binding[0] != "="
-            or self.function(binding[1]) != reader
-        ]
+        return [binding for _, binding in held]
 
     def unset(self, binding, read):
         """Whether the declaration ``binding`` holds no value yet where it is
@@ -13883,11 +14083,18 @@ class TSParser(BaseParser):
         reader = self._scopes.function(read)
         # A function reads a variable from around it after any assignment
         # another function makes, or an earlier run of itself made.
-        assigned = []
-        if declared and self._scopes.function(declared[1]) != reader:
-            assigned = self._scopes.assignments(name, declared[3])
-        if any(self._scopes.function(b[1]) != reader for b in assigned):
-            chosen = [declared, *assigned]
+        funcs = (
+            self._scopes.assignment_funcs(name, declared[3])
+            if declared and self._scopes.function(declared[1]) != reader
+            else None
+        )
+        fingerprint = tuple(entries)
+        values = set()
+        if funcs and funcs != {reader}:
+            chosen = [declared]
+            values.update(
+                self._scopes.assigned_values(name, declared[3], fingerprint, value)
+            )
         else:
             chosen = []
             for bound in bindings:
@@ -13897,13 +14104,21 @@ class TSParser(BaseParser):
                     return None
                 chosen.append(bound)
                 if bound[1] <= read:
-                    chosen += self._scopes.reassigned(name, bound[3], bound[1], read)
-                    if bound is declared:
-                        chosen += assigned
+                    values.update(
+                        self._scopes.reassigned_values(
+                            name, bound[3], bound[1], read, fingerprint, value
+                        )
+                    )
+                    if bound is declared and funcs is not None:
+                        values.update(
+                            self._scopes.assigned_values(
+                                name, declared[3], fingerprint, value
+                            )
+                        )
                     break
         # `undefined` has no members a call through the name could reach.
         undefined = self._scopes.undefined
-        values = {value(b) for b in chosen if (name, b[1]) not in undefined}
+        values.update(value(b) for b in chosen if (name, b[1]) not in undefined)
         if len(values) == 1 and None not in values:
             return values.pop()
         # A variable declared with a type holds a value of that type.
@@ -14844,12 +15059,25 @@ class TSParser(BaseParser):
             if holds_function and invoked(i, value_start(i) or 0):
                 pass
             elif exported and written == "module":
-                # `module.exports = function ...`: the module is the function,
-                # filed as source writes it.
-                if assignment[1] == "exports" and holds_function:
-                    object_id, object_scope, filed_as = file_id, None, "module.exports"
-                    entry = ("=", "", filed_as)
-                    self.builder.reexports.setdefault(file_id, []).append(entry)
+                if assignment[1] == "exports":
+                    # `module.exports =` gives the module's exports whole:
+                    # it replaces them, and where the new value is not read
+                    # they are unknown.
+                    kept = [
+                        e
+                        for e in self.builder.reexports.get(file_id, ())
+                        if e[0] != "="
+                    ]
+                    self.builder.reexports[file_id] = kept
+                    # `module.exports = function ...`: the module is the
+                    # function, filed as source writes it; `= <name>` is it.
+                    whole = (
+                        "module.exports"
+                        if holds_function
+                        else name_given and name_given[1]
+                    )
+                    if whole:
+                        kept.append(("=", "", whole))
                 # `module.exports = { a, b: c }` on its line is the object
                 # the module exports, which holds what the names do.
                 listed = re.fullmatch(r"\s*\{(.*)\}\s*;?\s*", given or "")
@@ -14858,6 +15086,8 @@ class TSParser(BaseParser):
                     and listed
                     and exported_object(lineno, lineno)
                 )
+                if holds_function:
+                    object_id, object_scope, filed_as = file_id, None, "module.exports"
                 for part in listed[1].split(",") if oid else ():
                     if held := re_held.match(part):
                         spread, key, name = held.groups()
@@ -20400,6 +20630,16 @@ class CallResolver:
                 imports.update(usings)
         return imports
 
+    def _dotnet_file_usings(self, file_id):
+        """A C# file's `using` directives and the `global using static`
+        ones of the directories above it, as ``dotnet_usings`` entries."""
+        folder = posixpath.dirname(file_id[len("FILE:") :])
+        usings = list(self.builder.dotnet_usings.get(file_id, ()))
+        for directory, entries in self.builder.dotnet_global_statics.items():
+            if not directory or f"{folder}/".startswith(f"{directory}/"):
+                usings += entries
+        return usings
+
     def _dotnet_namespace(self, node_id):
         """The namespace the C# code of ``node_id`` is written in."""
         top = "::".join(node_id.split("::")[:2])
@@ -20435,7 +20675,7 @@ class CallResolver:
         imports one of them in an `#if` arm is read as any build."""
         file_id = source_id.split("::")[0]
         levels = self._dotnet_levels(source_id)
-        usings = self.builder.dotnet_usings.get(file_id, ())
+        usings = self._dotnet_file_usings(file_id)
         everywhere = set(self._dotnet_imports(file_id).values()) - set(
             self.builder.imports.get(file_id, {}).values()
         )
@@ -20504,8 +20744,8 @@ class CallResolver:
         levels = self._dotnet_levels(scope_id)
         return [
             self._dotnet_using(written, at, rooted, pool)
-            for written, at, _, is_static, rooted in self.builder.dotnet_usings.get(
-                scope_id.split("::")[0], ()
+            for written, at, _, is_static, rooted in self._dotnet_file_usings(
+                scope_id.split("::")[0]
             )
             if at in levels and is_static == static
         ]
@@ -22844,6 +23084,9 @@ class CodeGraphBuilder:
         # Directory -> the `global using` directives of its C# files, which
         # hold for every file below it, as ``imports`` has a file's own
         self.dotnet_global_usings = {}
+        # Directory -> `dotnet_usings` entries of each `global using
+        # static` in a C# file of it, which hold for every file below it
+        self.dotnet_global_statics = {}
         # C# file ID -> (the path a `using` names, the namespace whose body
         # it is written in, "" for the file's, whether it sits in an `#if`
         # arm, whether `static` names a type, whether `global::` roots the

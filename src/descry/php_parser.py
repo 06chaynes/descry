@@ -16,10 +16,12 @@ from descry.generate import (
     _STATEMENT_START_RE,
     BaseParser,
     _bracketed_parts,
+    _ends_with,
     _innermost,
     _is_call_chain,
     _js_brackets,
     _nested,
+    _tails,
     _use_leaves,
     blank_strings,
     is_generated_source,
@@ -278,6 +280,8 @@ def _branches(codes: list[str]) -> list:
     text, starts, closer = _js_brackets(codes)
     spans = _nested(sorted(closer.items()))
 
+    tails = _tails(text, ";{}")
+
     def place(offset):
         line = bisect_right(starts, offset)
         return line, offset - starts[line - 1]
@@ -323,8 +327,9 @@ def _branches(codes: list[str]) -> list:
         end = None
         while marker := _ALT_MARKERS.search(text, pos):
             token = marker[1]
-            if token.endswith("("):
-                # A `:` after the head's `)` opens a nested body.
+            if token.endswith("(") and not token.startswith("elseif"):
+                # A `:` after the head's `)` opens a nested body; an
+                # `elseif` head is the statement's own way.
                 close = closer.get(marker.end() - 1, marker.end())
                 depth += text[close + 1 :].lstrip()[:1] == ":"
                 pos = close + 1
@@ -361,7 +366,7 @@ def _branches(codes: list[str]) -> list:
                 else:
                     start = m.end()
             ways.append([(start, end)])
-            if not marks or not marks[-1][0].startswith("else:"):
+            if not marks or not re.match(r"else\s*:", marks[-1][0]):
                 ways.append([])
             return [w for w in ways if not w or w[0][0] < w[0][1]], end + len(
                 _ALT_END[word]
@@ -420,8 +425,10 @@ def _branches(codes: list[str]) -> list:
                     ways = [[], [way]]
         kind = "loop" if word in ("while", "for", "foreach") else word
         words = _LEAVES + "|continue|break" * (kind in ("if", "try"))
-        leaves = re.compile(rf"(?:^|[;{{}}])\s*(?:{words})\b[^;{{}}]*;?\s*$")
-        on = [w for w in ways if not (w and leaves.search(text[slice(*w[-1])]))]
+        leaf = re.compile(rf"\s*(?:{words})\b[^;{{}}]*")
+        on = [
+            w for w in ways if not (w and _ends_with(tails, text, *w[-1], leaf, True))
+        ]
         if not any(ways):
             continue  # no body runs: an empty `switch`
         first = min(w[0][0] for w in ways if w)

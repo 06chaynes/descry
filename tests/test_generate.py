@@ -2789,6 +2789,31 @@ class TestPythonCallResolution:
         CodeGraphBuilder(tmp_path).process_directory()
         assert time.monotonic() - started < 3
 
+    def test_a_break_in_a_match_case_skips_the_else(self, tmp_path):
+        """A `break` inside a `case` body skips the loop's `else`, so `x`
+        may still hold the value from before the loop."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """\
+                class A:
+                    def use(self): pass
+                class B:
+                    def use(self): pass
+                def matched(xs, c):
+                    x = A()
+                    for i in xs:
+                        match c:
+                            case _:
+                                break
+                    else:
+                        x = B()
+                    x.use()
+                """
+            },
+        )
+        assert "REF:x.use" in _calls(builder, "FILE:m.py::matched")
+
 
 class TestRustCallResolution:
     def test_path_through_non_project_type_is_external(self, tmp_path):
@@ -12617,6 +12642,79 @@ class TestTypeScriptCallResolution:
         )
         assert builder.signatures["FILE:a.js::f"][-1]["returned"]
 
+    def test_assignments_whose_spans_start_together_are_each_possible(self, tmp_path):
+        """The `=` bindings of `case` ways all start at the switch's `{`;
+        a read after the switch may hold either case's value."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": """\
+                class A { run() {} }
+                class B { run() {} }
+                function f(v) {
+                  let g;
+                  switch (v) {
+                    case 1:
+                      let x;
+                      x = new A();
+                      break;
+                    case 2:
+                      x = new B();
+                      g = () => x.run();
+                      break;
+                    case 3:
+                      x = new B();
+                      break;
+                  }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:a.js::f") == [
+            "FILE:a.js::A",
+            "FILE:a.js::B",
+            "FILE:a.js::B",
+            "REF:x.run",
+        ]
+
+    def test_a_later_unfiled_module_exports_replaces_the_earlier(self, tmp_path):
+        """A `module.exports =` that cannot be filed still ends the object
+        an earlier one exported."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": "module.exports = { g() {} };\n"
+                "module.exports = { h() {\n} };\n",
+                "u.js": "const m = require('./m'); m.g(); m.h();\n",
+            },
+        )
+        assert _calls(builder, "FILE:u.js") == ["REF:m.g"]
+
+    def test_a_name_written_in_many_functions_is_read_in_linear_time(self, tmp_path):
+        """A read of a name thousands of functions assign looks only at
+        the assignments that can hold where it is read."""
+        count = 4000
+        source = "class A { use() {} }\nvar x = new A();\n" + "".join(
+            f"function f{i}() {{ x = x + {i}; }}\nx.use();\n" for i in range(count)
+        )
+        started = time.monotonic()
+        _index(tmp_path, {"a.js": source})
+        assert time.monotonic() - started < 6
+
+    def test_many_nested_blocks_end_in_time_linear_in_the_code(self, tmp_path):
+        """Finding where each of thousands of nested `{`s ends counts the
+        file's braces once, not once per block."""
+        depth = 6000
+        source = (
+            "function f() {\n"
+            + "".join(f"{{ let x{i};\n" for i in range(depth))
+            + "}" * depth
+            + "}\n"
+        )
+        started = time.monotonic()
+        _index(tmp_path, {"a.js": source})
+        assert time.monotonic() - started < 6
+
 
 class TestGoCallResolution:
     def test_bare_call_is_the_function_not_a_method_of_that_name(self, tmp_path):
@@ -18178,6 +18276,51 @@ class TestPhpCallResolution:
             "k": ["FILE:a.php::A", "FILE:a.php::B", "REF:$x->use"],
         }
 
+    def test_an_alternative_elseif_keeps_the_if_a_branch(self, tmp_path):
+        """`if: … elseif (): … endif;` is a branch like the braced form; a
+        read after it may hold either way's value."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """\
+                <?php
+                class A { function use_() {} }
+                class B { function use_() {} }
+                function f($c) {
+                $x = null;
+                if ($c):
+                    $y = 1;
+                elseif ($c > 1):
+                    $x = new A();
+                else:
+                    $x = new B();
+                endif;
+                $x->use_(); }
+                """
+            },
+        )
+        assert "REF:$x->use_" in _calls(builder, "FILE:a.php::f")
+
+    def test_a_name_null_in_a_branch_may_still_hold_its_value(self, tmp_path):
+        """`$x ??=` runs only where a `null` written in one way ran, so the
+        other way's value stays possible."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """\
+                <?php
+                class A { function use_() {} }
+                class B { function use_() {} }
+                function f($c) {
+                $x = new B();
+                if ($c) { $x = null; }
+                $x ??= new A();
+                $x->use_(); }
+                """
+            },
+        )
+        assert "REF:$x->use_" in _calls(builder, "FILE:a.php::f")
+
 
 class TestDotnetCallResolution:
     def test_a_name_a_block_declares_is_its_own_to_the_block_s_end(self, tmp_path):
@@ -19602,17 +19745,23 @@ class TestDotnetCallResolution:
             {
                 "a.cs": """
                 using System.Collections.Generic;
+                namespace Ext {
+                  static class E {
+                    public static IEnumerable<int> Where(this IEnumerable<int> s) => s;
+                  }
+                }
                 namespace N1 {
-                  using System.Linq;
-                  class C1 { List<int> xs; void M() { xs.Where(x => true).ToList(); } }
+                  using Ext;
+                  class C1 { void M(IEnumerable<int> s) { s.Where(); } }
                 }
                 namespace N2 {
-                  class C2 { List<int> xs; void M() { xs.Where(x => true).ToList(); } }
+                  class C2 { void M(IEnumerable<int> s) { s.Where(); } }
                 }
                 """
             },
         )
-        assert _calls(builder, "FILE:a.cs::N2::C2::M") or True
+        assert _calls(builder, "FILE:a.cs::C1::M") == ["FILE:a.cs::E::Where"]
+        assert _calls(builder, "FILE:a.cs::C2::M") == []
 
     def test_a_using_resolves_in_its_enclosing_namespaces_first(self, tmp_path):
         """`using B;` inside `namespace A` resolves `A.B`, then `B`: the
@@ -19640,6 +19789,20 @@ class TestDotnetCallResolution:
             },
         )
         assert _calls(builder, "FILE:a.cs::C::M") == ["FILE:a.cs::Near::Where"]
+
+    def test_a_global_using_static_brings_the_type_members_in(self, tmp_path):
+        """`global using static E.Ext;` puts `Ext`'s static members in
+        scope in every file of the project."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.cs": "global using static E.Ext;\n"
+                "namespace E { static class Ext {"
+                " public static int Twice(int x) => x*2; } }\n",
+                "b.cs": "namespace W { class X { void M() { int b = Twice(3); } } }\n",
+            },
+        )
+        assert _calls(builder, "FILE:b.cs::X::M") == ["FILE:a.cs::Ext::Twice"]
 
 
 class TestClangCallResolution:
@@ -23014,6 +23177,68 @@ class TestRubyCallResolution:
             "either": ["FILE:u.rb::A", "FILE:u.rb::B", "REF:x.use"],
             "anded": ["FILE:u.rb::A", "FILE:u.rb::B", "FILE:u.rb::B::use"],
         }
+
+    def test_a_read_after_end_on_one_line_sees_the_branch_ways(self, tmp_path):
+        """`end; x.use` on one line reads `x` after the branch's ways
+        merge."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.rb": """\
+                class A; def use; end; end
+                class B; def use; end; end
+                def f(c)
+                  x = A.new
+                  if c
+                    x = B.new
+                  end; x.use
+                end
+                """
+            },
+        )
+        assert "REF:x.use" in _calls(builder, "FILE:a.rb::f")
+
+    def test_a_leading_assignment_takes_effect_on_its_line(self, tmp_path):
+        """The first `x =` of a line is in effect for reads later on that
+        line, and a modifier on it makes it conditional."""
+        builder = _index(
+            tmp_path,
+            {
+                "u.rb": """\
+                class A; def use; end; end
+                class B; def use; end; end
+                class U
+                  def plain
+                    x = A.new
+                    x = B.new; x.use
+                  end
+                  def modified(c)
+                    x = A.new
+                    x = B.new if c; x.use
+                  end
+                end
+                """
+            },
+        )
+        assert "REF:x.use" in _calls(builder, "FILE:u.rb::U::plain")
+        assert "REF:x.use" in _calls(builder, "FILE:u.rb::U::modified")
+
+    def test_many_nested_branches_merge_in_time_linear_in_the_code(self, tmp_path):
+        """The ends of the ways of deeply nested `if`s are read from the
+        file's text once, not rebuilt per way."""
+        depth = 800
+        source = (
+            "def f\n"
+            + "".join(
+                f"{'  ' * (i + 1)}if c{i}\n{'  ' * (i + 2)}x{i} = 1\n"
+                for i in range(depth)
+            )
+            + "  end\n" * depth
+            + "end\nz.use\n"
+        )
+        started = time.monotonic()
+        _index(tmp_path, {"a.rb": source})
+        assert time.monotonic() - started < 10
 
 
 class TestDartCallResolution:

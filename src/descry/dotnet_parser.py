@@ -813,7 +813,11 @@ class DotnetParser(BaseParser):
             m = _RE_USING.match(code)
             if m:
                 self.builder.add_edge(file_id, f"MODULE:{m['path']}", "IMPORTS")
-                if not m["static"]:
+                if m["global"] and m["static"]:
+                    self.builder.dotnet_global_statics.setdefault(directory, []).append(
+                        (m["path"], "", False, True, bool(m["rooted"]))
+                    )
+                elif not m["static"]:
                     imports = self.builder.imports.setdefault(file_id, {})
                     if m["global"]:
                         imports = self.builder.dotnet_global_usings.setdefault(

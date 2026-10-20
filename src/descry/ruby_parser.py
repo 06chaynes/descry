@@ -19,7 +19,14 @@ from __future__ import annotations
 
 import re
 
-from descry.generate import BaseParser, _strip_parens, is_generated_source, source_lines
+from descry.generate import (
+    BaseParser,
+    _ends_with,
+    _strip_parens,
+    _tails,
+    is_generated_source,
+    source_lines,
+)
 
 _CONST = r"(?:::)?[A-Z]\w*(?:::[A-Z]\w*)*"
 # A method name: an identifier, a setter, or an operator
@@ -479,16 +486,22 @@ def _branches(code_lines):
     `while` or `until` modifies too."""
     branches, stack = [], []
 
-    def text(start, end):
-        """The code from position ``start`` to ``end``."""
-        lines = code_lines[start[0] - 1 : end[0]]
-        joined = "\n".join(lines)
-        return joined[start[1] : len(joined) - len(lines[-1]) + end[1]]
+    whole = "\n".join(code_lines)
+    offsets = [0]
+    for line in code_lines:
+        offsets.append(offsets[-1] + len(line) + 1)
+    tails = _tails(whole, ";\n")
 
     def add(kind, ways, end):
         words = _LEAVES["loop" if kind == "loop" else "if"]
-        leaves = re.compile(rf"(?:^|[;\n])\s*(?:{words})\b[^;\n]*\s*$")
-        on = [w for w in ways if not (w and leaves.search(text(*w[-1])))]
+        leaf = re.compile(rf"\s*(?:{words})\b[^;\n]*")
+
+        def ends(way):
+            (line, column), (last, end) = way[-1]
+            start = offsets[line - 1] + column
+            return _ends_with(tails, whole, start, offsets[last - 1] + end, leaf)
+
+        on = [w for w in ways if not (w and ends(w))]
         first = min(w[0][0] for w in ways if w)
         branches.append((first, end, ways, on, kind in ("if", "case")))
 
@@ -1273,6 +1286,21 @@ class RubyParser(BaseParser):
                         name, lineno, since, "?", depth, effect.get(name, column)
                     )
                     del assigned[name]
+            # The line's leading assignment holds for its own reads from its
+            # value's end, of no known value until its calls are read:
+            # (name, column, its entry's index, whether it runs).
+            bound = None
+            if leading:
+                name, column = leading["name"], effect[leading["name"]]
+                # `name ||= value` assigns only where `name` is nil or
+                # false, `name &&= value` only where it holds an object.
+                runs = not leading["which"] or self._runs(
+                    name, lineno, since, leading["which"] == "||"
+                )
+                if runs is not False:
+                    bound = name, column, len(self.declared.get(name, ())), runs
+                    self._declare(name, lineno, since, "?", outer_scopes, column)
+                del assigned[name]
             # A line that goes on from a `.` starts with the method called.
             chained = previous.endswith(".") and not previous.endswith("..")
             previous = code.rstrip()
@@ -1378,31 +1406,23 @@ class RubyParser(BaseParser):
                 else:
                     body["last"] = self._exit(code, raw, lineno, since, self_id)
 
-            bound = leading
             if bound:
-                at = lineno, effect[bound["name"]]
-                value = code[bound.end() :]
+                # The value's own calls are recorded: where it is a chain
+                # the name holds the end's result.
+                name, column, slot, runs = bound
+                value = code[leading.end() :]
                 origin = _constructed(_continued(code_lines, index, value))
                 edge = self._closes.get(len(code.rstrip()) - 1)
                 chain = _RE_CHAIN.fullmatch(_strip_parens(value))
                 if not origin and edge is not None and chain:
                     origin = f"#{edge}"
-                # `name ||= value` assigns only where `name` is nil or
-                # false, `name &&= value` only where it holds an object.
-                runs = not bound["which"] or self._runs(
-                    bound["name"], lineno, since, bound["which"] == "||"
-                )
-                if runs is not False:
-                    if runs is None:
-                        origin = "?"
-                    elif value.strip() == self.null_literal:
-                        self._nulls.add(at)
+                given = "?" if runs is None else origin or "?"
+                self.declared[name][slot] = (lineno, given, False, column)
+                if runs is not None:
+                    if value.strip() == self.null_literal:
+                        self._nulls.add((lineno, column))
                     elif origin:
-                        self._made.add(at)
-                    self._declare(
-                        bound["name"], lineno, since, origin or "?", outer_scopes, at[1]
-                    )
-                del assigned[bound["name"]]
+                        self._made.add((lineno, column))
 
         # An instance variable has a type where every value it is assigned
         # in its class is an instance of that one, and its reader returns it.
