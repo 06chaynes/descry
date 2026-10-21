@@ -3373,6 +3373,46 @@ class TestRustCallResolution:
             "FILE:src/lib.rs::q::b",
         ]
 
+    def test_a_use_s_words_are_parted_by_rust_s_white_space(self, tmp_path):
+        """A left-to-right mark parts `pub`, `use` and the path as a space
+        does; a no-break space, no white space of Rust's, does not."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "x"\n',
+                "src/lib.rs": (
+                    "mod q {\n    pub fn a() {}\n    pub fn b() {}\n}\n"
+                    "pub\u200euse crate::q::a;\npub\xa0use crate::q::b;\n"
+                    "fn m() {\n    a();\n    b();\n}\n"
+                ),
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::m") == ["FILE:src/lib.rs::q::a"]
+
+    def test_a_one_line_match_binds_its_arm_s_names_alone(self, tmp_path):
+        """On a line that opens a `match`, its arm's pattern binds the names
+        it names, not the matched value's: `v` keeps its type."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "x"\n',
+                "src/lib.rs": """
+                pub struct B;
+                impl B {
+                    pub fn m(&self) {}
+                    pub fn k(&self) -> Option<B> { None }
+                }
+                fn f(v: B) {
+                    match v.k() { Some(b) => v.m(), None => () }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::f") == [
+            "FILE:src/lib.rs::B::k",
+            "FILE:src/lib.rs::B::m",
+        ]
+
     def test_use_path_names_the_crate_a_call_goes_to(self, tmp_path):
         """`use store_kit::probe` reaches the `probe` of the crate whose
         package is `store-kit`; a `use` of a crate that is not in the
@@ -13193,6 +13233,45 @@ class TestTypeScriptCallResolution:
             "FILE:q.js::c",
             "FILE:u.js::x",
         ]
+
+    def test_an_import_s_words_are_parted_by_javascript_s_white_space(self, tmp_path):
+        """Any of JavaScript's white space and line breaks parts the words
+        of an import, around `as` too, a BOM among them; white space
+        JavaScript does not have, as U+001C, parts none."""
+        builder = _index(
+            tmp_path,
+            {
+                "b.js": "export function f() {}\nexport function g() {}\n"
+                "export function h() {}\nexport function k() {}\n",
+                "u.js": (
+                    'import *\tas n from "./b.js";\nimport { g\nas m } from "./b.js";\n'
+                    'import\ufeff{ h }\ufefffrom "./b.js";\nimport\x1c{ k } from "./b.js";\n'
+                    "n.f();\nm();\nh();\nk();\n"
+                ),
+            },
+        )
+        assert _calls(builder, "FILE:u.js") == [
+            "FILE:b.js::f",
+            "FILE:b.js::g",
+            "FILE:b.js::h",
+        ]
+
+    def test_a_module_s_import_after_a_bom_or_indentation_keeps_it_a_module(
+        self, tmp_path
+    ):
+        """An `import` outside every block makes a file a module, after a
+        BOM or indentation too: what it declares is no global another file
+        calls."""
+        builder = _index(
+            tmp_path,
+            {
+                "b.js": "export function f() {}\n",
+                "p.js": '\ufeffimport { f } from "./b.js";\nfunction h() { f(); }\n',
+                "q.js": '  import { f } from "./b.js";\nfunction k() { f(); }\n',
+                "u.js": "h();\nk();\n",
+            },
+        )
+        assert _calls(builder, "FILE:u.js") == []
 
     def test_an_import_past_another_statement_on_its_line_binds(self, tmp_path):
         """An `import` past another statement's `;` on its line binds its

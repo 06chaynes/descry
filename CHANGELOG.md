@@ -76,11 +76,13 @@ Python SDK v2, and a full-tree review's findings are fixed.
   starting at each of them: 30,000 took 21 s. So did, in every language
   but C/C++, a name bound again and again or looped over, each binding,
   read and merge of branches going over all its bindings (10,000 took up
-  to a minute and a half), Rust's generic functions, JavaScript's
-  `require`s and object literals, each going over those before it or the
-  rest of the file, Ruby's `a <<-b`, and a C# file of many types, its
-  braces counted again from its start for each (10,000 one-line classes
-  took over five minutes). Each is now read once.
+  to a minute and a half, 10,000 JavaScript `switch`es assigning one
+  over three minutes), Rust's generic functions and field reads,
+  TypeScript interfaces and their fields, functions that read a
+  parameter, JavaScript's `require`s and object literals, each going over
+  those before it or the rest of the file, Ruby's `a <<-b`, and a C# file
+  of many types, its braces counted again from its start for each (10,000
+  one-line classes took over five minutes). Each is now read once.
 - **Writes into the cache.** The cache directory sits in the indexed
   repository by default, which can ship it. The graph and the embedding
   cache are written through new, randomly named temporaries, so a symlink
@@ -335,7 +337,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
   its branches give or construct, a member's assignment types no local,
   and a type parameter's bound holds only in the declaration it is written
   on, in Java, C#, Dart and Rust too. A file with an `import` or an
-  `export`, a `.mjs`, `.cjs`, `.mts` or `.cts` file, and one that calls
+  `export` outside every block, after a BOM or indentation too, a `.mjs`,
+  `.cjs`, `.mts` or `.cts` file, and one that calls
   `require` or assigns `module.exports` or `exports` is a module: what it
   declares is named in it alone, where it was any file's of the name, and
   an interface or object type is no value a call reaches. A specifier
@@ -416,7 +419,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
   call holds its result for a read later on the line, a C# `using`
   resource included, and a Rust literal's elements give what iterating it
   gives. Past an `if let`, a `for` or a match arm a name its pattern binds
-  is what it was before, a Rust closure's parameter is in scope to the end
+  is what it was before, an arm on the line that opens the `match` binding
+  its pattern's names alone, a Rust closure's parameter is in scope to the end
   of the closure's body, a C++ `catch` parameter has its type in its
   handler, and a Go statement ends at a line end only where Go would
   insert a semicolon. A Java `instanceof` variable holds its type only
@@ -580,8 +584,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   it. A JavaScript or TypeScript import, and `export default`, one past
   another statement on its line too and none in a comment or a literal,
   its words parted by any of JavaScript's white space and line breaks, a
-  BOM and a no-break space too, its name the value where the statement
-  ends after it, as JavaScript
+  BOM and a no-break space too, around `as` as well, and by nothing
+  JavaScript does not read as white space, its name the value where the
+  statement ends after it, as JavaScript
   ends one at a line break, binds what its module exports under its kind:
   a default import the module's default (`export default f`, a
   declaration or an object after it), whatever it is named, where

@@ -146,6 +146,19 @@ def test_a_whitespace_run_is_taken_once(find, text):
                 f"fn f{i}<T: Clone>(a: T) -> T {{ a.clone() }}\n" for i in range(12000)
             ),
         ),
+        (
+            "m.js",
+            "function f(v) {\n  let b;\n"
+            + "  switch (v) { case 1: b = g(); break; default: b = h(); }\n  b.x();\n"
+            * 5000
+            + "}\n",
+        ),
+        (
+            "src/lib.rs",
+            "fn f(v: Option<B>) {\n"
+            + "    match v { Some(b) => b.a(), None => () }\n" * 10000
+            + "}\n",
+        ),
     ],
     ids=[
         "js-rebinds",
@@ -162,12 +175,14 @@ def test_a_whitespace_run_is_taken_once(find, text):
         "go-errors",
         "php-loops",
         "rust-generics",
+        "js-switch-reassignments",
+        "rust-matches",
     ],
 )
 def test_a_repeated_line_is_read_in_linear_time(name, source, tmp_path):
-    """A line that binds a name again, loops over it, declares a type or a
-    generic function costs the same time however many came before it:
-    seconds in all, where it took minutes."""
+    """A line that binds a name again, loops over it, matches it, or
+    declares a type or a generic function costs the same time however many
+    came before it: seconds in all, where it took minutes."""
     (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
     (tmp_path / name).write_text(source)
     start = time.perf_counter()

@@ -6465,6 +6465,7 @@ class BaseParser:
         self._first_node = 0  # where the nodes and edges of the file being
         self._first_edge = 0  # parsed start in the builder's lists
         self._braces = None  # (lines, what ``_brace_index`` reads of them)
+        self._defined = None  # see ``_defines``
         # (first edge of the file, edges read, {type name: base names})
         self._bases_named = (None, 0, {})
         # (name, unwrap, depth) of a binding still being read. depth is how
@@ -6785,28 +6786,23 @@ class BaseParser:
         # What a call returned is bound to a variable, never to a field. A
         # parameter or variable of the definition hides a file-level name.
         hidden = self._is_local(name) or not self._sees_file()
-        # Those that can count: the file-level ones but where hidden, and
-        # those before the line where read at the file's level
-        declarations = (
-            entries
-            if anywhere
-            else [
-                d
+        # The values that can count: for a field any known one; the
+        # file-level ones but where hidden; and those before the line where
+        # read at the file's level
+        if anywhere:
+            values = set(entries.valued) | set(() if hidden else entries.top_values)
+            if not since and len(values) < 2:
+                values.update(d[1] for d in entries.between(0, lineno))
+        else:
+            values = {
+                d[1]
                 for d in chain(
                     () if hidden else chain(*entries.lines_down(math.inf, 0, top=True)),
                     () if since else entries.between(0, lineno),
                 )
                 if (d[0], name) not in self._members
-            ]
-        )
-        values = {
-            v
-            for line, v, top, _ in declarations
-            if (anywhere and v and not v.startswith("#"))
-            or (top and not hidden)
-            or not since
-            and line <= lineno
-        }
+                and (d[2] and not hidden or not since and d[0] <= lineno)
+            }
         return values.pop() if len(values) == 1 else None
 
     def read_blocks(self, code_lines, brackets=None):
@@ -7832,6 +7828,19 @@ class BaseParser:
         """The node of this file with ID ``node_id``, if there is one."""
         return self.builder.nodes_by_id.get(node_id)
 
+    def _defines(self, name, lineno):
+        """Whether the file has a node named ``name`` on line ``lineno`` so
+        far: the nodes read since the file's first, or since the last
+        rename, join a set of the two."""
+        nodes = self.builder.nodes
+        if self._defined is None or self._defined[0] != self._first_node:
+            self._defined = self._first_node, self._first_node, set()
+        first, upto, held = self._defined
+        for node in nodes[upto:]:
+            held.add((node["id"].rpartition("::")[2], node["metadata"].get("lineno")))
+        self._defined = first, len(nodes), held
+        return (name, lineno) in held
+
     def rename_node(self, old_id, new_id):
         """Give the node ``old_id`` of the file being parsed, and all that
         is defined inside it, the ID ``new_id``."""
@@ -7841,6 +7850,7 @@ class BaseParser:
                 return new_id + node_id[len(old_id) :]
             return node_id
 
+        self._defined = None
         for node in self.builder.nodes[self._first_node :]:
             if node["id"] != moved(node["id"]):
                 self.builder.node_registry.discard(node["id"])
@@ -8936,7 +8946,8 @@ _RUST_BINDER_RES = (
     re.compile(r"\bfor\s++(.+?)\s+in\b"),
     re.compile(r"\b(?:if|while)\s++let\s++(.+?)=(?!=)"),
     re.compile(r"\blet\s+(?:mut\s+)?([({\[A-Z].*?)=(?!=)"),
-    re.compile(r"^\s*(.+?)=>"),
+    # An arm's pattern, after the `match … {` that opens the arms on its line
+    re.compile(r"^\s*(?:(?:[^=]|=(?!>))*?\bmatch\b[^{]*\{)?\s*(.+?)=>"),
 )
 
 
@@ -9035,9 +9046,17 @@ _JS_SPACE = (
     "\u2008\u2009\u200a\u202f\u205f\u3000"
 )
 _JS_START = rf"(?:^|(?<=[;\r\u2028\u2029]))[{_JS_SPACE}]*"
-_JS_GAP = rf"[{_JS_SPACE}\n\r\u2028\u2029]"
-# Rust's white space, but `\n`
+_JS_WHITE = f"{_JS_SPACE}\n\r\u2028\u2029"
+_JS_GAP = f"[{_JS_WHITE}]"
+# Rust's white space, but `\n`, and all of it
 _RUST_SPACE = "\t\v\f\r \x85\u200e\u200f\u2028\u2029"
+_RUST_GAP = rf"[{_RUST_SPACE}\n]"
+
+
+def _spaced(text, gap):
+    """``text`` with each run of the white space ``gap`` matches one space."""
+    return re.sub(f"{gap}+", " ", text)
+
 
 # A TypeScript alias written on one line: its name, its type parameters
 # and the type it stands for
@@ -9704,9 +9723,12 @@ def _use_leaves(tree: str, prefix: str = ""):
 
 
 # An optional visibility: pub, pub(crate), pub(super), pub(in path)
-_RUST_VIS = r"(?:pub(?:\([^)]*\))?\s+)?"
+_RUST_VIS = rf"(?:pub(?:\([^)]*\))?{_RUST_GAP}+)?"
 # A `use` declaration's tree, which may span lines
-_RUST_USE_RE = re.compile(rf"^[{_RUST_SPACE}]*{_RUST_VIS}use\s+([^;]+);", re.MULTILINE)
+_RUST_USE_RE = re.compile(
+    rf"^[{_RUST_SPACE}]*{_RUST_VIS}use{_RUST_GAP}+((?:[^;\s]|{_RUST_GAP})+);",
+    re.MULTILINE,
+)
 # A type an item declares, and its name
 _RUST_TYPE_DECLARATION_RE = re.compile(
     rf"^[{_RUST_SPACE}]*{_RUST_VIS}(?:struct|enum|union|trait|type)\s+(\w+)",
@@ -9973,7 +9995,7 @@ class RustParser(BaseParser):
         for found in _RUST_USE_RE.finditer(content):
             at += content.count("\n", counted, found.start(1))
             counted = found.start(1)
-            uses_at.setdefault(at, {}).update(_use_leaves(found[1]))
+            uses_at.setdefault(at, {}).update(_use_leaves(_spaced(found[1], _RUST_GAP)))
 
         # The owner of the open `impl` block's items, and its type's name
         impl_id = current_impl_target = impl_bounds = None
@@ -10057,7 +10079,8 @@ class RustParser(BaseParser):
             module_types.setdefault(module_of(found.start()), set()).add(found[1])
         block_uses = []  # (block, names) of each `use` in a block
         for found in _RUST_USE_RE.finditer(text):
-            module, leaves = module_of(found.start()), dict(_use_leaves(found[1]))
+            module = module_of(found.start())
+            leaves = dict(_use_leaves(_spaced(found[1], _RUST_GAP)))
             module_uses.setdefault(module, {}).update(leaves)
             if module is None:
                 block_uses.append((_innermost(spans, found.start()), leaves))
@@ -11374,8 +11397,11 @@ _TS_CAST_TYPE_RE = re.compile(
     r"(?<![\w$.])(?:as|satisfies)\s+[\w$.]+(?:<(?:[^<>()]|<(?:[^<>()]|<[^<>()]*>)*>)*>)?"
     r"(?:\[\])*"
 )
-# A top-level `import` or `export`, which makes a file a module
-_JS_MODULE_RE = re.compile(r"^(?:import(?!\s*[(.])|export)\b", re.MULTILINE)
+# An `import` or an `export` statement, which outside a block makes a file a
+# module
+_JS_MODULE_RE = re.compile(
+    rf"{_JS_START}(?:import(?!{_JS_GAP}*[(.])|export)\b", re.MULTILINE
+)
 # What makes a JavaScript file a CommonJS module, as TypeScript reads one: a
 # `require` call of one argument, no definition of a `require`, or a value
 # given to `module.exports` or to a property of it or of `exports`, by
@@ -11518,6 +11544,14 @@ def _leaves_null(bound, first, ways, nulls):
 _WRITES = count()
 
 
+def _less(counter, key):
+    """Count one ``key`` fewer in ``counter``, which holds no key it counts
+    none of."""
+    counter[key] -= 1
+    if not counter[key]:
+        del counter[key]
+
+
 class _BoundEntries(list):
     """The entries ``declared`` maps a name to: each entry's line joins the
     parser's ``_bound_lines``, where there is a parser, as it is written,
@@ -11526,16 +11560,21 @@ class _BoundEntries(list):
 
     def __init__(self, parser, name):
         self._parser, self._name = parser, name
+        # The line of each entry written or dropped, in turn; 0 for all
+        self.changes = []
         self._reindex()
 
     def _reindex(self):
         """Number the entries in their order and index them by line: the
         numbers in the entries' order, each line's ``(number, entry)`` in
         their order, the lines in order and those that hold an entry at the
-        file's level, and how many entries give a type at the file's
-        level."""
+        file's level, how many entries give a type at the file's level,
+        and how many give each value, of those that give a known one and of
+        those at the file's level."""
         self._numbers, self._at, self._lines, self._tops = [], {}, [], []
         self.typed_top = self._next = 0
+        self.valued, self.top_values = Counter(), Counter()
+        self.changes.append(0)
         self._hold(self)
 
     def _hold(self, entries):
@@ -11554,15 +11593,20 @@ class _BoundEntries(list):
             self._next += 1
 
     def _add(self, number, d):
+        self.changes.append(d[0])
         if d[0] not in self._at:
             self._at[d[0]] = []
             insort(self._lines, d[0])
         insort(self._at[d[0]], (number, d), key=itemgetter(0))
         if d[2]:
             insort(self._tops, d[0])
+            self.top_values[d[1]] += 1
+        if d[1] and not d[1].startswith("#"):
+            self.valued[d[1]] += 1
         self.typed_top += bool(d[1] and d[2])
 
     def _drop(self, number, d):
+        self.changes.append(d[0])
         held = self._at[d[0]]
         del held[bisect_left(held, number, key=itemgetter(0))]
         if not held:
@@ -11570,6 +11614,9 @@ class _BoundEntries(list):
             del self._lines[bisect_left(self._lines, d[0])]
         if d[2]:
             del self._tops[bisect_left(self._tops, d[0])]
+            _less(self.top_values, d[1])
+        if d[1] and not d[1].startswith("#"):
+            _less(self.valued, d[1])
         self.typed_top -= bool(d[1] and d[2])
 
     def append(self, d):
@@ -12587,7 +12634,7 @@ class _JsScopes:
         self._vcache[name] = (span, fingerprint, values)
         return values
 
-    def reassigned_values(self, name, span, after, read, fingerprint, value):
+    def reassigned_values(self, name, span, after, read, changes, value):
         """The set ``value(b)`` over the assignments of ``name`` that
         blocks inside ``span`` hold, written after ``after`` and closed
         before ``read`` or in a loop that holds ``read`` and starts after
@@ -12596,9 +12643,18 @@ class _JsScopes:
         the loop's next run. The bindings are kept by the end of each one's
         span, so a moving ``read`` adds to or drops from one edge; only the
         name's last call is kept, so nothing held grows with the spans a
-        name is read under."""
+        name is read under. ``changes`` is the log of the lines the entries
+        ``value`` reads are written on: what is held stays while no line
+        written since is one a binding held is written on. Of the values
+        held, two stand for all where there are more: what tells one value
+        from several."""
         state = self._rstate.get(name)
-        if state is None or state[:2] != [span, after] or state[7] != fingerprint:
+        if (
+            state is None
+            or state[:2] != [span, after]
+            or state[7] is not changes
+            or any(changes[k] <= state[9] for k in range(state[8], len(changes)))
+        ):
             self.assignments(name, span)
             inner, ats = self._acache[name][3:]
             bindings = sorted(
@@ -12618,7 +12674,9 @@ class _JsScopes:
                 [b[2][0] for b in written],
                 0,
                 Counter(),
-                fingerprint,
+                changes,
+                len(changes),
+                0,
             ]
         bindings, written, ats, at, held = state[2:7]
         while at and bindings[at - 1][3][1] >= read:
@@ -12630,9 +12688,10 @@ class _JsScopes:
                 del held[given]
         while at < len(bindings) and bindings[at][3][1] < read:
             held[value(bindings[at])] += 1
+            state[9] = max(state[9], bindings[at][2][1][0])
             at += 1
-        state[5] = at
-        values = set(held)
+        state[5], state[8] = at, len(changes)
+        values = set(islice(held, 2))
         first, k = (
             bisect_right(self._loop_starts, after),
             bisect_right(self._loop_starts, read),
@@ -13316,16 +13375,18 @@ _TS_TYPEOF_RE = re.compile(r"typeof\s+([\w$]+(?:(?:\.|::)[\w$]+)*)")
 # `const name = require("m")`, `const { a, b: c } = await import("m")`, a
 # `/* */` comment before the module too
 _TS_REQUIRE_RE = re.compile(
-    r"""\b(?:const|let|var|import)\s+([\w$]+|\{[^}]*\})\s*=\s*(?:await\s+)?"""
-    r"""(require|import)\(\s*(?:/\*(?:[^*]|\*(?!/))*\*/\s*)*['"]([^'"]+)['"]\s*\)"""
+    rf"""\b(?:const|let|var|import){_JS_GAP}+([\w$]+|\{{(?:[^}}\s]|{_JS_GAP})*\}})"""
+    rf"""{_JS_GAP}*={_JS_GAP}*(?:await{_JS_GAP}+)?(require|import)\({_JS_GAP}*"""
+    rf"""(?:/\*(?:[^*]|\*(?!/))*\*/{_JS_GAP}*)*['"]([^'"]+)['"]{_JS_GAP}*\)"""
 )
 _TS_PARAM_MODIFIERS = ("...", "public", "private", "protected", "readonly")
 # `export * from "<specifier>"`, `export { <clause> } from "<specifier>"` and,
 # with no specifier, `export { <clause> }`, starting a line or past another
 # statement's `;`
 _TS_REEXPORT_RE = re.compile(
-    rf"""{_JS_START}export\s+(?:type\s+)?"""
-    r"""(?:(\*)(?:\s+as\s+([\w$]+))?\s+from\s+|\{([^}]*)\}(?:\s+from\s+)?)"""
+    rf"""{_JS_START}export{_JS_GAP}+(?:type{_JS_GAP}+)?(?:(\*)(?:{_JS_GAP}+as{_JS_GAP}+"""
+    rf"""([\w$]+))?{_JS_GAP}+from{_JS_GAP}+|\{{((?:[^}}\s]|{_JS_GAP})*)\}}"""
+    rf"""(?:{_JS_GAP}+from{_JS_GAP}+)?)"""
     r"""(?:['"]([^'"]+)['"])?""",
     re.MULTILINE,
 )
@@ -13373,9 +13434,11 @@ def _ends_after(code_lines, row, column):
     and the next line holding code does not go on with the expression.
     U+2028 and U+2029 end a line too."""
     rest, *after = re.split("[\u2028\u2029]", code_lines[row][column:])
-    if rest := rest.strip():
+    if rest := rest.strip(_JS_WHITE):
         return rest.startswith(";")
-    below = (line.strip() for line in chain(after, lines_after(code_lines, row)))
+    below = (
+        line.strip(_JS_WHITE) for line in chain(after, lines_after(code_lines, row))
+    )
     line = next((line for line in below if line), "")
     found = _JS_CONTINUES_RE.match(line)
     # `in` that a character of a name follows starts the name.
@@ -13387,7 +13450,8 @@ def _ends_after(code_lines, row, column):
 # `import <clause> from "<specifier>"`, the clause possibly over several
 # lines, starting a line or past another statement's `;`
 _TS_IMPORT_RE = re.compile(
-    rf"""{_JS_START}import\s++(?:type\s++)?([^;'"]*?)\s+from\s+['"]([^'"]+)['"]""",
+    rf"""{_JS_START}import{_JS_GAP}++(?:type{_JS_GAP}++)?((?:[^;'"\s]|{_JS_GAP})*?)"""
+    rf"""{_JS_GAP}+from{_JS_GAP}+['"]([^'"]+)['"]""",
     re.MULTILINE,
 )
 
@@ -14366,13 +14430,7 @@ class TSParser(BaseParser):
         if origin is None and dot and root not in self._imported:
             inner = list(islice(self._bindings(root, lineno), 1))
             if inner and inner[0][3] != self._scopes.whole:
-                row = inner[0][1][0]
-                defined = any(
-                    node["id"].rpartition("::")[2] == root
-                    and node["metadata"].get("lineno") == row
-                    for node in islice(self.builder.nodes, self._first_node, None)
-                )
-                return None if defined else f"?.{rest}"
+                return None if self._defines(root, inner[0][1][0]) else f"?.{rest}"
         return origin
 
     def _read(self, lineno):
@@ -14452,7 +14510,12 @@ class TSParser(BaseParser):
                 if bound[1] <= read:
                     values.update(
                         self._scopes.reassigned_values(
-                            name, bound[3], bound[1], read, fingerprint, value
+                            name,
+                            bound[3],
+                            bound[1],
+                            read,
+                            entries.changes if entries else (),
+                            value,
                         )
                     )
                     if bound is declared and funcs is not None:
@@ -14744,7 +14807,10 @@ class TSParser(BaseParser):
         # `export`, one its extension makes one, or a JavaScript file that
         # CommonJS does.
         if (
-            _JS_MODULE_RE.search(scopes.text)
+            any(
+                scopes.block(found.end()) == scopes.whole
+                for found in _JS_MODULE_RE.finditer(scopes.text)
+            )
             or rel_path.endswith((".mjs", ".cjs", ".mts", ".cts"))
             or rel_path.endswith((".js", ".jsx"))
             and _JS_COMMONJS_RE.search(scopes.text)
@@ -14761,6 +14827,7 @@ class TSParser(BaseParser):
         es = []
         for found in filter(in_code, _TS_REEXPORT_RE.finditer(content)):
             star, namespace, clause, specifier = found.groups("")
+            clause = _spaced(clause, _JS_GAP)
             # `export * as ns` exports the module itself, under a name.
             names = [(namespace or "*", "*" if namespace else "")] if star else []
             for part in clause.split(","):
@@ -14783,6 +14850,7 @@ class TSParser(BaseParser):
         names = self.builder.import_names.setdefault(file_id, {})
         for found in filter(in_code, _TS_IMPORT_RE.finditer(content)):
             clause, specifier = found.groups("")
+            clause = _spaced(clause, _JS_GAP)
             for part in re.finditer(r"[^{},]+", clause):
                 # `name`, `type name`, `name as alias`, `* as alias`; before
                 # a `{`, the module's default
@@ -14800,6 +14868,7 @@ class TSParser(BaseParser):
         required = set()
         for found in _TS_REQUIRE_RE.finditer(content):
             clause, call, specifier = found.groups()
+            clause = _spaced(clause, _JS_GAP)
             line = self.read_line(bisect_right(source_starts, found.start()))
             required.add(line - 1)
             if "{" not in clause:
@@ -16826,11 +16895,14 @@ class TSParser(BaseParser):
         # What the resolver reads by the ID a node ends up with: its
         # signatures, and each field's type for each class or interface of
         # that name in the file.
+        owned = {}
+        for (owner, field), held in self.fields.items():
+            owned.setdefault(owner, []).append((field, held))
         for node in self.builder.nodes[self._first_node :]:
             if typed := node["metadata"].pop("signatures", None):
                 self.builder.signatures[node["id"]] = typed
-            for (owner, field), held in self.fields.items():
-                if node["metadata"].get("name") == owner and len(held) == 1:
+            for field, held in owned.get(node["metadata"].get("name"), ()):
+                if len(held) == 1:
                     fields = self.builder.fields.setdefault(node["id"], {})
                     fields.setdefault(field, next(iter(held))[:-2])
 
@@ -16989,10 +17061,8 @@ class TSParser(BaseParser):
 
         Used to distinguish class getters/setters from object literal ones.
         """
-        for node in self.builder.nodes:
-            if node["id"] == parent_id:
-                return node["type"] == "Class"
-        return False
+        node = self.builder.nodes_by_id.get(parent_id)
+        return node is not None and node["type"] == "Class"
 
 
 # Languages whose methods are reachable only through an explicit receiver:
