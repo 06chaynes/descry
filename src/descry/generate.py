@@ -6643,9 +6643,11 @@ class BaseParser:
                 for match in pattern.finditer(line):
                     groups = match.groupdict()
                     declared_type = self._scanned_type(groups)
-                    # Unindented and not in a parameter list.
+                    # Unindented and not in a parameter list or a body.
                     named = match.start("name") if groups.get("name") else match.start()
-                    file_level = not line[:1].isspace() and "(" not in line[:named]
+                    file_level = not line[:1].isspace() and not re.search(
+                        r"[({]", line[:named]
+                    )
                     if groups.get("name"):
                         held = _raw_pointer(declared_type, groups.get("pointer"))
                         key, value = groups["name"], f"{held}()"
@@ -6875,10 +6877,15 @@ class BaseParser:
         while held and (
             text[held[0]] in "(["
             or statement(held[0]).rstrip()[-1:] in ("(", ",")
-            or _DECLARING_STATEMENT_RE.match(statement(held[0]))
+            or self._pattern_head(statement(held[0]))
         ):
             head, held = held, _innermost(spans, held[0])
         return at, head, held, statement(head[0] if head else at)
+
+    def _pattern_head(self, statement):
+        """Whether ``statement``, the code of a statement up to a brace,
+        heads a pattern there: the brace opens no block."""
+        return _DECLARING_STATEMENT_RE.match(statement)
 
     def _scope_end(self, name, declaration):
         """The offset in the code where the scope of ``declaration``, an
@@ -8995,6 +9002,11 @@ _RUST_LET_RE = re.compile(
     r"\blet\s+(?P<pattern>[^=]*[(\[{][^=]*?)\s*=(?!=)\s*(?P<value>.+?)"
     r"(?:;|\s+else\s*\{)\s*$"
 )
+# A statement up to the type a struct pattern or literal names: no block
+# follows a type
+_RUST_PATTERN_HEAD_RE = re.compile(
+    r"(?:^\s*(?:for\s+)?|\blet\s+|(?<!\|)[(,|]\s*&?\s*)(?:\w+::)*[A-Z]\w*\s*$"
+)
 _RUST_MATCH_RE = re.compile(r"\bmatch\s++" + _RUST_HEAD_VALUE)
 _RUST_ARM_RE = re.compile(r"^\s*+(?P<pattern>.+?)(?:\s+if\s.+?)?\s*=>")
 # The parameters of a closure passed to a call
@@ -9854,6 +9866,13 @@ class RustParser(BaseParser):
     binding_re = re.compile(r"\blet\s+(?:mut\s+)?(?P<name>\w+)\s*=(?!=)")
     bindings = staticmethod(_rust_bindings)
 
+    def _pattern_head(self, statement):
+        """As the base's, and up to a type a struct pattern or literal
+        names, whose braces open no block."""
+        return super()._pattern_head(statement) or _RUST_PATTERN_HEAD_RE.search(
+            statement
+        )
+
     def _operand(self, text):
         text = re.sub(r"^(?:[&*]\s*(?:mut\s+)?)+", "", text)
         plain = text.rstrip("?")
@@ -9931,7 +9950,7 @@ class RustParser(BaseParser):
                 for name, bound in bindings.items():
                     self._rebind(name, lineno, self._named_from(name, at), bound)
             else:
-                self._bind(bindings, index, at, True)
+                self._bind(bindings, index, at, True, found.end("pattern"))
         if "match " in code and (found := _RUST_MATCH_RE.search(code)):
             span = found.span("value")
             origin = self._expression_origin(code, *span, lineno, since, owner)
@@ -10121,6 +10140,36 @@ class RustParser(BaseParser):
                 index -= 1
             return index
 
+        def add_variant(enum_id, text, lineno):
+            """Add the variant of ``enum_id`` that ``text``, read on line
+            ``lineno``, declares."""
+            match = re_enum_variant.match(text)
+            # Skip common Rust keywords/patterns that match variant regex
+            if not match or match[1] in (
+                "Self",
+                "Some",
+                "None",
+                "Ok",
+                "Err",
+                "Box",
+                "Vec",
+                "Option",
+                "Result",
+            ):
+                return
+            variant_id = f"{enum_id}::{match[1]}"
+            self.builder.add_node(
+                variant_id,
+                "Function",  # Treat as callable for resolution
+                name=match[1],
+                signature=f"{enum_id.split('::')[-1]}::{match[1]}",
+                lineno=lineno,
+                docstring="",
+            )
+            self.builder.add_edge(enum_id, variant_id, "DEFINES")
+            if held := _rust_held(text[match.end(1) :]):
+                self.builder.fields[variant_id] = held
+
         def add_derived(type_id, index):
             """Record the standard traits that a `#[derive(...)]` above line
             ``index`` implements for ``type_id``."""
@@ -10216,8 +10265,7 @@ class RustParser(BaseParser):
                     except (IndexError, ValueError):
                         pass
 
-                # Extract parameter types using lightweight heuristics
-                param_types = self._extract_rust_param_types(full_sig)
+                param_types, params = self._extract_rust_param_types(full_sig)
 
                 sig = f"fn {name}(...) -> {ret}"
                 docstring = self.get_leading_docstring(lines, i)
@@ -10258,14 +10306,20 @@ class RustParser(BaseParser):
                 self.builder.add_edge(parent_id, func_id, "DEFINES")
                 for parameter in _RUST_PARAMETER_RE.findall(full_sig):
                     self.add_local(func_id, parameter)
+                for param in params:
+                    self._bind_parameter(param, codes, i, j)
 
                 if opens_block(lines[j]):
                     current_context.append(func_id)
                     context_indent.append(indent)
                     fn_ids.add(func_id)
-                if j == i and "{" in line:
-                    # A body on the signature's line: its calls are the function's.
+                if "{" in codes[j][0]:
+                    # A body on the signature's last line: its calls are the
+                    # function's.
                     parent_id = func_id
+                    if j > i:
+                        lineno = j + 1
+                        call_scan_start = codes[j][0].find("{") + 1
                 i = j
 
             # 2. Structs/Traits
@@ -10319,35 +10373,15 @@ class RustParser(BaseParser):
                     current_context.append(type_id)
                     context_indent.append(indent)
                     current_enum_id = type_id  # Track enum for variant parsing
+                elif (body := code.find("{", match.end())) >= 0:
+                    # A body on the enum's line
+                    for part in _bracketed_parts(code[body + 1 :]):
+                        add_variant(type_id, part, lineno)
 
             # 2c. Enum variants (when inside an enum)
             elif current_enum_id and (match := re_enum_variant.search(line)):
-                variant_name = match.group(1)
                 call_scan_start = match.end(1)
-                # Skip common Rust keywords/patterns that match variant regex
-                if variant_name not in (
-                    "Self",
-                    "Some",
-                    "None",
-                    "Ok",
-                    "Err",
-                    "Box",
-                    "Vec",
-                    "Option",
-                    "Result",
-                ):
-                    variant_id = f"{current_enum_id}::{variant_name}"
-                    self.builder.add_node(
-                        variant_id,
-                        "Function",  # Treat as callable for resolution
-                        name=variant_name,
-                        signature=f"{current_enum_id.split('::')[-1]}::{variant_name}",
-                        lineno=lineno,
-                        docstring="",
-                    )
-                    self.builder.add_edge(current_enum_id, variant_id, "DEFINES")
-                    if held := _rust_held(line[match.end(1) :]):
-                        self.builder.fields[variant_id] = held
+                add_variant(current_enum_id, line, lineno)
 
             # 3. Impl
             elif (named := impl_at(i, line))[1]:
@@ -10534,8 +10568,34 @@ class RustParser(BaseParser):
             close_p += lines[j].count(")")
         return j, " ".join([ln.strip() for ln in sig_lines])
 
-    def _extract_rust_param_types(self, full_sig: str) -> list:
-        """Extract parameter types from Rust function signature.
+    def _bind_parameter(self, param, codes, first, last):
+        """Type the names that ``param``, a parameter of the signature on
+        lines ``first`` to ``last`` (indices of ``codes``) written as a
+        pattern, binds, from the type it is declared with: `Wrap(inner):
+        Wrap<T>` binds `inner` to what `Wrap<T>` holds first."""
+        found = re.fullmatch(r"(?s)(.*?[)\]}])\s*:(?!:)(.+)", param)
+        for name, steps in self.bindings(found[1]) if found else ():
+            held = _RUST_BORROW_RE.sub("", found[2].strip())
+            # An element of a tuple is of the type the tuple's type writes there.
+            while steps and re.fullmatch(r"@\d+", steps[0]) and held[:1] == "(":
+                elements = _bracketed_parts(held[1:])
+                if int(steps[0][1:]) >= len(elements):
+                    break
+                held = _RUST_BORROW_RE.sub("", elements[int(steps[0][1:])].strip())
+                steps = steps[1:]
+            if re.search(r"[().]", held):
+                # A type no origin path can write
+                continue
+            for index in range(first, last + 1):
+                column = _named(codes[index][0], name, 0)
+                if column is not None:
+                    origin = ".".join([f"{held}()", *steps])
+                    self._rebind(name, index + 1, column, origin)
+                    break
+
+    def _extract_rust_param_types(self, full_sig: str) -> tuple:
+        """Extract parameter types from Rust function signature, with the
+        parameters as written.
 
         Uses lightweight heuristics to extract types without full parsing.
         Handles common patterns like:
@@ -10545,7 +10605,7 @@ class RustParser(BaseParser):
         - name: impl Trait
         - name: Box<T>
         """
-        param_types = []
+        param_types, params = [], []
         try:
             # The parameter list is the first `(` after the type parameters,
             # whose `Fn(...)` bounds type the parameters they name.
@@ -10567,7 +10627,7 @@ class RustParser(BaseParser):
                 bounds = dict(_RUST_FN_BOUND_RE.findall(generics))
             bounds.update(_RUST_FN_BOUND_RE.findall(full_sig.partition(" where ")[2]))
             if paren_start == -1:
-                return []
+                return [], []
 
             # Find matching close paren (handle nested)
             depth = 0
@@ -10582,20 +10642,20 @@ class RustParser(BaseParser):
                         break
 
             if paren_end == -1:
-                return []
+                return [], []
 
             params_str = full_sig[paren_start + 1 : paren_end].strip()
             if not params_str:
-                return []
+                return [], []
 
             # Split on comma, but not inside angle brackets or parens
             params = []
             current = []
             depth = 0
             for c in params_str:
-                if c in "<(":
+                if c in "<([{":
                     depth += 1
-                elif c in ">)":
+                elif c in ">)]}":
                     depth -= 1
                 elif c == "," and depth == 0:
                     params.append("".join(current).strip())
@@ -10648,7 +10708,7 @@ class RustParser(BaseParser):
         except (IndexError, ValueError):
             pass
 
-        return param_types
+        return param_types, params
 
 
 class ProtoParser(BaseParser):
@@ -13941,7 +14001,7 @@ _TS_OBJECT_OPENS_RE = re.compile(
 # What starts a statement after a block's `}` or a statement's `;` in the
 # other brace languages: not a word that goes on with the statement before
 _STATEMENT_START_RE = re.compile(
-    r"(?!(?:else|elseif|catch|finally|while|on)(?![\w$]))[A-Za-z_$@\\[]"
+    r"(?!(?:else|elseif|catch|finally|while|on|in)(?![\w$]))[A-Za-z_$@\\[]"
 )
 # What starts a statement after a block's `}` or a statement's `;`: not a
 # word that goes on with the statement before it, nor a template's `${`
@@ -18404,10 +18464,7 @@ class CallResolver:
             for path in paths:
                 scopes = imported
                 for segment in path:
-                    found = (
-                        self._find_member(scope, segment, static=True)[0]
-                        for scope in scopes
-                    )
+                    found = (self._scope_member(scope, segment) for scope in scopes)
                     scopes = [scope for scope in found if scope]
                 # A Rust `use` names the item itself, under any name.
                 hits = {
@@ -18416,10 +18473,7 @@ class CallResolver:
                     if not qualifier
                     and (lang == "rust" or i.endswith(f"::{looked_up}"))
                 }
-                hits |= {
-                    self._find_member(scope, looked_up, static=True)[0]
-                    for scope in scopes
-                }
+                hits |= {self._scope_member(scope, looked_up) for scope in scopes}
                 hits.discard(None)
                 if hits:
                     break
@@ -18618,6 +18672,16 @@ class CallResolver:
             crate = self._use_crate(target, scope_id)
             if not crate:
                 return None if crate is None else _EXTERNAL
+            # A path from a project crate's name starts at its library.
+            library = f"FILE:{posixpath.join(crate[0], 'src/lib.rs')}"
+            found = (
+                path
+                and path[0] in self.builder.rust_crates
+                and library in self.rust_roots
+                and self._rust_path(["crate", *modules, leaf], library)
+            )
+            if found:
+                return found
             found = [
                 c
                 for c in self.by_name.get((lang, leaf), ())
@@ -18643,6 +18707,15 @@ class CallResolver:
             hit = self._find_member(self.java_types[owner], member)[0]
             return [hit] if hit else []
         return _EXTERNAL
+
+    def _scope_member(self, scope, name):
+        """What ``name`` names in ``scope``, a static member of it: in a Rust
+        module also what a `use` of it binds."""
+        hit = self._find_member(scope, name, static=True)[0]
+        if hit or self.lang(scope) != "rust" or self._rust_module(scope) != scope:
+            return hit
+        found = self._rust_path(["self", name], scope)
+        return found[0] if isinstance(found, list) and len(found) == 1 else None
 
     def result(self, target):
         """Value returned by the call just resolved, to ``target`` if it was."""
@@ -18755,18 +18828,30 @@ class CallResolver:
         for at, segment in enumerate(rest):
             hits = [hit for s in found if (hit := self._find_member(s, segment)[0])]
             if not (hits or at):
-                # What a `use` of the module binds the name to: a path from
-                # the module, or from a crate
-                target = self._uses(module).get(segment, "")
-                if self._rust_child(module, target.split("::")[0]):
-                    target = f"self::{target}"
-                if not target.startswith(_RUST_PATH_ROOTS):
-                    hits = self._imported(segment, module) or []
-                elif (module, segment) not in seen:
-                    followed = seen | {(module, segment)}
-                    hits = self._rust_path(target.split("::"), module, followed)
-                if hits == _EXTERNAL:
-                    return _EXTERNAL
+                # What a `use` of the module binds the name to, a path from
+                # the module or from a crate; else what each glob `use` of
+                # the module's own does.
+                uses = self._uses(module)
+                written = [uses[segment]] if segment in uses else []
+                written = written or [
+                    f"{path[:-1]}{segment}"
+                    for path in uses.values()
+                    if path[-3:] == "::*"
+                ]
+                for target in written:
+                    if self._rust_child(module, target.split("::")[0]):
+                        target = f"self::{target}"
+                    held = None
+                    if segment in uses and not target.startswith(_RUST_PATH_ROOTS):
+                        held = self._imported(segment, module)
+                    elif target.startswith(_RUST_PATH_ROOTS) and (
+                        (module, segment) not in seen
+                    ):
+                        followed = seen | {(module, segment)}
+                        held = self._rust_path(target.split("::"), module, followed)
+                    if held == _EXTERNAL:
+                        return _EXTERNAL
+                    hits += held or []
             found = hits
         return found
 

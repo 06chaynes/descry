@@ -5406,6 +5406,181 @@ class TestRustCallResolution:
                 "FILE:src/lib.rs::B::go",
             ]
 
+    def test_a_parameter_pattern_binds_what_its_type_holds(self, tmp_path):
+        """A parameter written as a pattern binds each name to what the type
+        it is declared with holds there; one of a type the project does not
+        define stays unresolved. The calls on a signature's last line are the
+        function's."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct A;
+                impl A { pub fn go(&self) {} }
+                pub struct B;
+                impl B { pub fn go(&self) {} }
+                pub struct Wrap<S>(pub S);
+                pub struct Pair<X, Y> { pub x: X, pub y: Y }
+                pub struct S;
+
+                pub fn wrapped(Wrap(a): Wrap<A>) { a.go(); }
+                pub fn tuple((a, b): (B, A)) { a.go(); b.go(); }
+                pub fn named(Pair { x, y: other }: Pair<B, A>) { x.go(); other.go(); }
+                pub fn borrowed(&Wrap(ref inner): &Wrap<B>) { inner.go(); }
+                pub fn split(
+                    Wrap(mut held): Wrap<A>,
+                ) { held.go(); }
+                pub fn foreign(State(state): State<A>) { state.go(); }
+                impl S {
+                    pub fn method(&self, Wrap(m): Wrap<B>) { m.go(); }
+                }
+                """
+            },
+        )
+        a, b = "FILE:src/lib.rs::A::go", "FILE:src/lib.rs::B::go"
+        assert _calls(builder, "FILE:src/lib.rs::wrapped") == [a]
+        assert _calls(builder, "FILE:src/lib.rs::tuple") == [a, b]
+        assert _calls(builder, "FILE:src/lib.rs::named") == [a, b]
+        assert _calls(builder, "FILE:src/lib.rs::borrowed") == [b]
+        assert _calls(builder, "FILE:src/lib.rs::split") == [a]
+        assert _calls(builder, "FILE:src/lib.rs::foreign") == ["REF:state.go"]
+        assert _calls(builder, "FILE:src/lib.rs::S::method") == [b]
+
+    def test_a_struct_pattern_s_braces_open_no_block(self, tmp_path):
+        """The names a struct pattern binds in an `if let`, a `for` or an arm
+        are in scope where the pattern's are, past its braces; the braces after a
+        type in a condition open a block."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct A;
+                impl A { pub fn go(&self) {} }
+                pub struct B;
+                impl B { pub fn go(&self) {} }
+                pub struct Pair {
+                    pub x: A,
+                    pub y: B,
+                }
+                fn make() -> Pair { todo!() }
+
+                pub fn iflet() {
+                    if let Pair { x, .. } = make() { x.go(); }
+                }
+                pub fn forin(ps: Vec<Pair>) {
+                    for Pair { y, .. } in ps { y.go(); }
+                }
+                pub fn arm() {
+                    match make() {
+                        Pair { x, .. } => x.go(),
+                    }
+                }
+                const FORCE: bool = true;
+                pub fn block(done: bool) {
+                    let x = A;
+                    if done || FORCE { let x = B; x.go(); }
+                    x.go();
+                }
+                """
+            },
+        )
+        a, b = "FILE:src/lib.rs::A::go", "FILE:src/lib.rs::B::go"
+        assert _calls(builder, "FILE:src/lib.rs::block") == [a, b]
+        assert _calls(builder, "FILE:src/lib.rs::iflet") == [a, "FILE:src/lib.rs::make"]
+        assert _calls(builder, "FILE:src/lib.rs::forin") == [b]
+        assert _calls(builder, "FILE:src/lib.rs::arm") == [a, "FILE:src/lib.rs::make"]
+
+    def test_a_use_from_the_crate_s_name_follows_its_modules(self, tmp_path):
+        """A `use` path from a project crate's name leads from the crate's
+        library through its modules and re-exports, never to a method of the
+        name; a path through a module takes what the module's `use` binds."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "app"\n',
+                "src/lib.rs": "pub mod svc;\nfn rooted() { crate::svc::run(); }\n",
+                "src/svc/mod.rs": """
+                mod batch;
+                pub use batch::run;
+                pub struct S;
+                impl S {
+                    async fn run(&self) { run(); }
+                }
+                """,
+                "src/svc/batch.rs": "pub fn run() {}\n",
+                "tests/t.rs": """
+                use app::svc::run;
+                fn t() { run(); }
+                fn module() {
+                    use app::svc;
+                    svc::run();
+                }
+                """,
+            },
+        )
+        for caller in ("tests/t.rs::t", "tests/t.rs::module", "src/lib.rs::rooted"):
+            assert _calls(builder, f"FILE:{caller}") == ["FILE:src/svc/batch.rs::run"]
+
+    def test_a_glob_use_binds_the_names_of_its_module(self, tmp_path):
+        """A name a module neither defines nor binds by name is what a glob
+        `use` of it binds, not a variant of the name."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": "pub mod payload;\npub mod user;\n",
+                "src/payload/mod.rs": """
+                mod script;
+                pub use script::*;
+                pub enum Kind {
+                    Script,
+                }
+                """,
+                "src/payload/script.rs": """
+                pub struct Script;
+                impl Script { pub fn create() {} }
+                """,
+                "src/user.rs": """
+                pub fn build() {
+                    use crate::payload::Script;
+                    Script::create();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:src/user.rs::build") == [
+            "FILE:src/payload/script.rs::Script::create"
+        ]
+
+    def test_an_enum_on_one_line_has_its_variants(self, tmp_path):
+        """The variants of an enum whose body is on its line are its own."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub enum Kind { Plain, Held(u8), Named { a: u8 } }
+                pub fn f() { let a = Kind::Held(1); }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::f") == ["FILE:src/lib.rs::Kind::Held"]
+        assert builder.fields["FILE:src/lib.rs::Kind::Named"] == {"a": "u8"}
+
+    def test_a_field_on_its_type_s_line_is_no_variable(self, tmp_path):
+        """A field declared on the line of its struct's name is no name the
+        file's functions read."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct A;
+                impl A { pub fn go(&self) {} }
+                pub struct Holder<X> { pub x: X }
+                pub fn bare() { x.go(); }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::bare") == ["REF:x.go"]
+
     def test_a_closure_s_parameter_is_its_own_to_the_body_s_end(self, tmp_path):
         """A closure's parameter shadows the outer binding of its name in
         the closure's body, not after."""
