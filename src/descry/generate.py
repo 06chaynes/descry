@@ -10698,10 +10698,10 @@ class ProtoParser(BaseParser):
                     docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, rid, "DEFINES")
-                if req:
-                    self.builder.add_edge(rid, f"REF:{req}", "CALLS")
-                if res:
-                    self.builder.add_edge(rid, f"REF:{res}", "CALLS")
+                for message in filter(None, (req, res)):
+                    self.builder.add_edge(
+                        rid, f"REF:{message}", "CALLS", {"lineno": lineno}
+                    )
 
             elif match := re_message.search(line):
                 name = match.group(1)

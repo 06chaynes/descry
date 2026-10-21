@@ -26464,6 +26464,26 @@ class TestDartCallResolution:
         ]
 
 
+class TestProtobufCallResolution:
+    def test_an_rpc_s_message_of_two_files_is_left_unresolved(self, tmp_path):
+        """An `rpc` names its request and response messages on its line; a
+        message two files declare is either, so the call is left unresolved
+        with both."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.proto": 'syntax = "proto3";\nmessage Req {}\n',
+                "c.proto": 'syntax = "proto3";\nmessage Req {}\n',
+                "b.proto": (
+                    'syntax = "proto3";\nservice S {\n  rpc Do(Req) returns (Req);\n}\n'
+                ),
+            },
+        )
+        edges = [e for e in builder.edges if e["source"] == "FILE:b.proto::S::Do"]
+        assert [e["metadata"]["lineno"] for e in edges] == [3, 3]
+        assert {e["target"] for e in edges} == {"REF:Req"}
+
+
 class TestModuleAliases:
     """A module specifier that is no relative path and no package."""
 
