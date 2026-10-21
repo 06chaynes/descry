@@ -13081,6 +13081,18 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:u.js") == ["FILE:q.js::c::use", "REF:p.use"]
 
+    def test_a_next_line_number_ends_a_default_export(self, tmp_path):
+        """A next line that starts with a number written from its `.`,
+        `.5`, ends the statement: the default is the name."""
+        builder = _index(
+            tmp_path,
+            {
+                "p.js": "const a = { use() {} };\nexport default a\n.5;\n",
+                "u.js": 'import p from "./p.js";\np.use();\n',
+            },
+        )
+        assert _calls(builder, "FILE:u.js") == ["FILE:p.js::a::use"]
+
     def test_an_import_past_another_statement_on_its_line_binds(self, tmp_path):
         """An `import` past another statement's `;` on its line binds its
         names; one in a comment or a string binds none."""

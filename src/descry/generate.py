@@ -13132,9 +13132,10 @@ _TS_DEFAULT_EXPORT_RE = re.compile(
 # What a line starts with where it goes on with the expression the line
 # before ends with: a member, a call, an index, a template or a binary
 # operator, `!=`, `in` and `instanceof` too; not `++` or `--`, before which
-# the line break ends the statement, nor a name that starts with `in`
+# the line break ends the statement, a number such as `.5`, nor a name
+# that starts with `in`
 _JS_CONTINUES_RE = re.compile(
-    r"(?!\+\+|--)[.(\[`+\-*/%<>=&|^?:,]|!=|in(?:stanceof)?(?![\w$\u200c\u200d])"
+    r"(?!\+\+|--|\.\d)[.(\[`+\-*/%<>=&|^?:,]|!=|in(?:stanceof)?(?![\w$\u200c\u200d])"
 )
 
 
