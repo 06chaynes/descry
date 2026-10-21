@@ -70,7 +70,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   assigned thousands of times, whose every read went over all of them,
   thousands of branches in a Python, Ruby or PHP function, each of whose
   merges went over every name, and thousands of nested blocks, whose ends
-  were each counted from their start.
+  were each counted from their start. A run of blank lines in a
+  JavaScript, TypeScript or Rust file took time quadratic in its length,
+  each line looking back over the run or a pattern over the file
+  starting at each of them: 30,000 took 21 s; it is now read once.
 - **Writes into the cache.** The cache directory sits in the indexed
   repository by default, which can ship it. The graph and the embedding
   cache are written through new, randomly named temporaries, so a symlink

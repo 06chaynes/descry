@@ -13093,6 +13093,46 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:u.js") == ["FILE:p.js::a::use"]
 
+    def test_a_unicode_line_separator_ends_a_default_export(self, tmp_path):
+        """U+2028 and U+2029 end a line as `\\n` does: a default the next
+        statement follows past one is the name, one a member access follows
+        is not."""
+        builder = _index(
+            tmp_path,
+            {
+                "p.js": "const a = { use() {} }; let x;\nexport default a\u2028x;\n",
+                "q.js": "const b = { use() {} };\nexport default b\u2029.use;\n",
+                "u.js": 'import p from "./p.js";\nimport q from "./q.js";\np.use();\nq.use();\n',
+            },
+        )
+        assert _calls(builder, "FILE:u.js") == ["FILE:p.js::a::use", "REF:q.use"]
+
+    def test_a_name_that_starts_with_in_ends_a_default_export(self, tmp_path):
+        """A next line whose `in` a combining mark or a connector follows,
+        as a character of a name can, starts the name: the default is the
+        name. One a space follows is the operator."""
+        builder = _index(
+            tmp_path,
+            {
+                "p.js": "const a = { use() {} };\nexport default a\nin\u0301side();\n",
+                "q.js": "const b = { use() {} };\nexport default b\nin\u203fx();\n",
+                "r.js": "const c = { use() {} }; let o;\nexport default c\nin\u00a0o;\n",
+                "u.js": """
+                import p from "./p.js";
+                import q from "./q.js";
+                import r from "./r.js";
+                p.use();
+                q.use();
+                r.use();
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:u.js") == [
+            "FILE:p.js::a::use",
+            "FILE:q.js::b::use",
+            "REF:r.use",
+        ]
+
     def test_an_import_past_another_statement_on_its_line_binds(self, tmp_path):
         """An `import` past another statement's `;` on its line binds its
         names; one in a comment or a string binds none."""

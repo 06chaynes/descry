@@ -9632,7 +9632,7 @@ def _use_leaves(tree: str, prefix: str = ""):
 # An optional visibility: pub, pub(crate), pub(super), pub(in path)
 _RUST_VIS = r"(?:pub(?:\([^)]*\))?\s+)?"
 # A `use` declaration's tree, which may span lines
-_RUST_USE_RE = re.compile(rf"^\s*{_RUST_VIS}use\s+([^;]+);", re.MULTILINE)
+_RUST_USE_RE = re.compile(rf"^[ \t]*{_RUST_VIS}use\s+([^;]+);", re.MULTILINE)
 # A type an item declares, and its name
 _RUST_TYPE_DECLARATION_RE = re.compile(
     rf"^[ \t]*{_RUST_VIS}(?:struct|enum|union|trait|type)\s+(\w+)", re.MULTILINE
@@ -13104,7 +13104,7 @@ _TS_PARAM_MODIFIERS = ("...", "public", "private", "protected", "readonly")
 # with no specifier, `export { <clause> }`, starting a line or past another
 # statement's `;`
 _TS_REEXPORT_RE = re.compile(
-    r"""(?:^|(?<=;))\s*export\s+(?:type\s+)?"""
+    r"""(?:^|(?<=;))[ \t]*export\s+(?:type\s+)?"""
     r"""(?:(\*)(?:\s+as\s+([\w$]+))?\s+from\s+|\{([^}]*)\}(?:\s+from\s+)?)"""
     r"""(?:['"]([^'"]+)['"])?""",
     re.MULTILINE,
@@ -13132,28 +13132,34 @@ _TS_DEFAULT_EXPORT_RE = re.compile(
 # What a line starts with where it goes on with the expression the line
 # before ends with: a member, a call, an index, a template or a binary
 # operator, `!=`, `in` and `instanceof` too; not `++` or `--`, before which
-# the line break ends the statement, a number such as `.5`, nor a name
-# that starts with `in`
+# the line break ends the statement, nor a number such as `.5`. A name that
+# starts with `in` matches too; ``_ends_after`` tells it from the operator.
 _JS_CONTINUES_RE = re.compile(
-    r"(?!\+\+|--|\.\d)[.(\[`+\-*/%<>=&|^?:,]|!=|in(?:stanceof)?(?![\w$\u200c\u200d])"
+    r"(?!\+\+|--|\.\d)[.(\[`+\-*/%<>=&|^?:,]|!=|in(?:stanceof)?"
 )
 
 
 def _ends_after(code_lines, row, column):
     """Whether a JavaScript statement ends at ``column`` of line ``row`` of
     ``code_lines``, the lines blanked: a `;` or nothing follows on the line,
-    and the next line holding code does not go on with the expression."""
-    rest = code_lines[row][column:].strip()
-    if rest:
+    and the next line holding code does not go on with the expression.
+    U+2028 and U+2029 end a line too."""
+    rest, *after = re.split("[\u2028\u2029]", code_lines[row][column:])
+    if rest := rest.strip():
         return rest.startswith(";")
-    below = (line.strip() for line in code_lines[row + 1 :])
-    return not _JS_CONTINUES_RE.match(next((line for line in below if line), ""))
+    below = (line.strip() for line in [*after, *code_lines[row + 1 :]])
+    line = next((line for line in below if line), "")
+    found = _JS_CONTINUES_RE.match(line)
+    # `in` that a character of a name follows starts the name.
+    tail = found and line[found.end() : found.end() + 1]
+    named = tail and (tail in "$\u200c\u200d" or f"a{tail}".isidentifier())
+    return not found or found[0][0] == "i" and bool(named)
 
 
 # `import <clause> from "<specifier>"`, the clause possibly over several
 # lines, starting a line or past another statement's `;`
 _TS_IMPORT_RE = re.compile(
-    r"""(?:^|(?<=;))\s*import\s++(?:type\s++)?([^;'"]*?)\s+from\s+['"]([^'"]+)['"]""",
+    r"""(?:^|(?<=;))[ \t]*import\s++(?:type\s++)?([^;'"]*?)\s+from\s+['"]([^'"]+)['"]""",
     re.MULTILINE,
 )
 
@@ -14695,7 +14701,7 @@ class TSParser(BaseParser):
         prototype_ids = set()
         # The functions whose prototypes the file writes to
         prototyped = set(
-            re.findall(r"^\s*([\w$]+)\.prototype\b", scopes.text, re.MULTILINE)
+            re.findall(r"^[ \t]*([\w$]+)\.prototype\b", scopes.text, re.MULTILINE)
         )
 
         def declared(name, lineno):
@@ -14966,6 +14972,12 @@ class TSParser(BaseParser):
                 columns.append(at)
             braces_on.append(columns)
 
+        # The last line holding code above each line, -1 for none
+        code_above, last = [], -1
+        for row, code in enumerate(code_lines):
+            code_above.append(last)
+            last = row if code.strip() else last
+
         i = 0
         signature_until = 0  # the last line of a definition's signature
         later_declarators = {}  # line index -> declarators a statement gives it
@@ -15168,9 +15180,7 @@ class TSParser(BaseParser):
             continuing = lineno <= signature_until
             # A `for` or `catch` head the line above leaves open holds the
             # line's binding, and the line declares nothing else.
-            above = i - 1
-            while above >= 0 and not code_lines[above].strip():
-                above -= 1
+            above = code_above[i]
             for_head = above >= 0 and _JS_FOR_HEAD_RE.search(code_lines[above])
             held_open = for_head and not _js_member_name(
                 code_lines, above, for_head.start()
