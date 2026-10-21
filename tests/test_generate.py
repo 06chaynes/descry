@@ -13059,6 +13059,28 @@ class TestTypeScriptCallResolution:
             "REF:q.use",
         ]
 
+    def test_a_next_line_of_not_equal_goes_on_with_a_default_export(self, tmp_path):
+        """A next line that starts with `!==` goes on with the default's
+        expression, as `!=` does; a name that starts with `in` and a
+        zero-width joiner is no `in`."""
+        builder = _index(
+            tmp_path,
+            {
+                "p.js": "const a = { use() {} }; let b = 1;\nexport default a\n!== b;\n",
+                "q.js": (
+                    "const c = { use() {} }; function in\u200cside() {}\n"
+                    "export default c\nin\u200cside();\n"
+                ),
+                "u.js": """
+                import p from "./p.js";
+                import q from "./q.js";
+                p.use();
+                q.use();
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:u.js") == ["FILE:q.js::c::use", "REF:p.use"]
+
     def test_an_import_past_another_statement_on_its_line_binds(self, tmp_path):
         """An `import` past another statement's `;` on its line binds its
         names; one in a comment or a string binds none."""
