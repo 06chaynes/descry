@@ -13118,16 +13118,33 @@ _JS_EXPORTED_DECLARATION_RE = re.compile(
 )
 # What a module exports as its default, `export default <name>` or a
 # declaration of a name after it, and whole, `export = <name>`, starting a
-# line or past another statement's `;`
+# line or past another statement's `;`; a name is the value where its
+# statement ends after it (see ``_ends_after``)
 _TS_DEFAULT_EXPORT_RE = re.compile(
     r"(?:^|(?<=;))[ \t]*(?:export[ \t]+(default)[ \t]+(?:"
     # `cond && function f`, called, is `f`: a function is never falsy.
     r"(?:[\w$.]+\s*&&\s*)*"
     r"(?:(?:async[ \t]+)?function\b[ \t]*\*?|(?:abstract[ \t]+)?class\b|interface\b)"
-    r"[ \t]*(?!extends\b|implements\b)([\w$]+)|([\w$]+)(?=[ \t]*(?:;|$)))"
-    r"|export[ \t]*=[ \t]*([\w$]+)(?=[ \t]*(?:;|$)))",
+    r"[ \t]*(?!extends\b|implements\b)([\w$]+)|([\w$]+)(?![\w$]))"
+    r"|export[ \t]*=[ \t]*([\w$]+)(?![\w$]))",
     re.MULTILINE,
 )
+# What a line starts with where it goes on with the expression the line
+# before ends with: a member, a call, an index, a template or an operator
+_JS_CONTINUES = tuple(".([`+-*/%<>=&|^?:,")
+
+
+def _ends_after(code_lines, row, column):
+    """Whether a JavaScript statement ends at ``column`` of line ``row`` of
+    ``code_lines``, the lines blanked: a `;` or nothing follows on the line,
+    and the next line holding code does not go on with the expression."""
+    rest = code_lines[row][column:].strip()
+    if rest:
+        return rest.startswith(";")
+    below = (line.strip() for line in code_lines[row + 1 :])
+    return not next((line for line in below if line), "").startswith(_JS_CONTINUES)
+
+
 # `import <clause> from "<specifier>"`, the clause possibly over several
 # lines, starting a line or past another statement's `;`
 _TS_IMPORT_RE = re.compile(
@@ -14523,7 +14540,11 @@ class TSParser(BaseParser):
             )
         for found in filter(in_code, _TS_DEFAULT_EXPORT_RE.finditer(content)):
             default, *names = found.groups("")
-            es.append(("default" if default else "=", "", "".join(names), file_id))
+            row = bisect_right(source_starts, found.end()) - 1
+            if names[0] or _ends_after(
+                source_code, row, found.end() - source_starts[row]
+            ):
+                es.append(("default" if default else "=", "", "".join(names), file_id))
         names = self.builder.import_names.setdefault(file_id, {})
         for found in filter(in_code, _TS_IMPORT_RE.finditer(content)):
             clause, specifier = found.groups("")

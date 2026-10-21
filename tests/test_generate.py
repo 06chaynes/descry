@@ -13012,6 +13012,27 @@ class TestTypeScriptCallResolution:
             "REF:c.use",
         ]
 
+    def test_a_default_export_is_the_name_where_its_statement_ends(self, tmp_path):
+        """`export default <name>` exports the name where the statement ends
+        after it, a comment past it too; one that the next line goes on
+        with, `.use()`, exports that expression's value."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": "const a = { use() {} };\nexport default a // the default\n",
+                "n.js": (
+                    "const b = { use() { return {}; } };\nexport default b\n  .use();\n"
+                ),
+                "u.js": """
+                import a from "./m.js";
+                import b from "./n.js";
+                a.use();
+                b.use();
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:u.js") == ["FILE:m.js::a::use", "REF:b.use"]
+
     def test_an_import_past_another_statement_on_its_line_binds(self, tmp_path):
         """An `import` past another statement's `;` on its line binds its
         names; one in a comment or a string binds none."""

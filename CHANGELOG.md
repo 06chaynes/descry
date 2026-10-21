@@ -568,7 +568,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
   next line with another inside a `${...}`, which ended the block around
   it. A JavaScript or TypeScript import, and `export default`, one past
   another statement on its line too and none in a comment or a literal,
-  binds what its module exports under its kind: a default import the module's default (`export default
+  its name the value where the statement ends after it, binds what its
+  module exports under its kind: a default import the module's default (`export default
   f`, a declaration or an object after it), whatever it is named, where
   it was looked up by its own name and its calls were dropped; a named
   import the export of its name, whose members were read from the module
