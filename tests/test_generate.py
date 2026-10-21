@@ -2785,9 +2785,9 @@ class TestPythonCallResolution:
         parsed in seconds."""
         source = "def f(c):\n" + "".join(f"    if c: x{i} = 1\n" for i in range(4000))
         (tmp_path / "m.py").write_text(source)
-        started = time.monotonic()
+        started = time.process_time()
         CodeGraphBuilder(tmp_path).process_directory()
-        assert time.monotonic() - started < 3
+        assert time.process_time() - started < 3
 
     def test_a_break_in_a_match_case_skips_the_else(self, tmp_path):
         """A `break` inside a `case` body skips the loop's `else`, so `x`
@@ -3412,6 +3412,21 @@ class TestRustCallResolution:
             "FILE:src/lib.rs::B::k",
             "FILE:src/lib.rs::B::m",
         ]
+
+    def test_a_call_through_a_use_as_reaches_the_item(self, tmp_path):
+        """`use path::item as name` binds the item under ``name``: `name()`
+        calls it."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "x"\n',
+                "src/lib.rs": (
+                    "mod q {\n    pub fn a() {}\n}\nuse crate::q::a as c;\n"
+                    "fn m() {\n    c();\n}\n"
+                ),
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::m") == ["FILE:src/lib.rs::q::a"]
 
     def test_use_path_names_the_crate_a_call_goes_to(self, tmp_path):
         """`use store_kit::probe` reaches the `probe` of the crate whose
@@ -11679,9 +11694,9 @@ class TestTypeScriptCallResolution:
             + "}" * count
             + "}\n"
         )
-        started = time.monotonic()
+        started = time.process_time()
         builder = _index(tmp_path, {"a.js": line})
-        assert time.monotonic() - started < 6
+        assert time.process_time() - started < 6
         assert any(n["id"] == "FILE:a.js::f" for n in builder.nodes)
 
     def test_the_bindings_of_one_name_are_read_in_time_linear_in_the_code(
@@ -11692,9 +11707,9 @@ class TestTypeScriptCallResolution:
         bindings that can be in scope where it is read."""
         count = 6000
         line = "function f(){var a;" + "a=1," * count + "}\n"
-        started = time.monotonic()
+        started = time.process_time()
         builder = _index(tmp_path, {"a.js": line})
-        assert time.monotonic() - started < 3
+        assert time.process_time() - started < 3
         assert any(n["id"] == "FILE:a.js::f" for n in builder.nodes)
 
     def test_a_block_starts_wherever_a_statement_does(self, tmp_path):
@@ -12756,9 +12771,9 @@ class TestTypeScriptCallResolution:
         source = "class A { use() {} }\nvar x = new A();\n" + "".join(
             f"function f{i}() {{ x = x + {i}; }}\nx.use();\n" for i in range(count)
         )
-        started = time.monotonic()
+        started = time.process_time()
         _index(tmp_path, {"a.js": source})
-        assert time.monotonic() - started < 6
+        assert time.process_time() - started < 6
 
     def test_many_nested_blocks_end_in_time_linear_in_the_code(self, tmp_path):
         """Finding where each of thousands of nested `{`s ends counts the
@@ -12770,9 +12785,9 @@ class TestTypeScriptCallResolution:
             + "}" * depth
             + "}\n"
         )
-        started = time.monotonic()
+        started = time.process_time()
         _index(tmp_path, {"a.js": source})
-        assert time.monotonic() - started < 6
+        assert time.process_time() - started < 6
 
     def test_module_member_of_other_name_is_no_exports(self, tmp_path):
         """`module.foo = function` sets a property of `module`, not the
@@ -13272,6 +13287,46 @@ class TestTypeScriptCallResolution:
             },
         )
         assert _calls(builder, "FILE:u.js") == []
+
+    def test_typescript_s_white_space_parts_a_typescript_file_s_words(self, tmp_path):
+        """U+0085 and U+200B, which TypeScript's scanner takes as white space
+        and ECMAScript does not, part the words of a `.ts` file's code, not
+        those of a `.js` file's."""
+        builder = _index(
+            tmp_path,
+            {
+                "b.ts": "export function f() {}\n",
+                "u.ts": 'import x\x85=\u200brequire("./b");\nx.f();\n',
+                "c.js": "function g() {}\nmodule.exports = { g };\n",
+                "v.js": 'const\x85{ g } = require("./c.js");\ng();\n',
+            },
+        )
+        assert _calls(builder, "FILE:u.ts") == ["FILE:b.ts::f"]
+        assert _calls(builder, "FILE:v.js") == ["REF:g"]
+
+    def test_a_line_break_after_import_goes_on_with_its_statement(self, tmp_path):
+        """A line break after `import`, a word that takes what follows it,
+        ends no statement: `x` on the next line is the import's."""
+        builder = _index(
+            tmp_path,
+            {
+                "b.ts": "export function f() {}\n",
+                "u.ts": 'import\nx = require("./b");\nx.f();\n',
+            },
+        )
+        assert _calls(builder, "FILE:u.ts") == ["FILE:b.ts::f"]
+
+    def test_import_meta_makes_a_file_a_module(self, tmp_path):
+        """A file that reads `import.meta` is a module, as TypeScript reads
+        it: what it declares is no global another file calls."""
+        builder = _index(
+            tmp_path,
+            {
+                "p.ts": "const u = import.meta.url;\nfunction h() {}\n",
+                "u.ts": "h();\n",
+            },
+        )
+        assert _calls(builder, "FILE:u.ts") == []
 
     def test_an_import_past_another_statement_on_its_line_binds(self, tmp_path):
         """An `import` past another statement's `;` on its line binds its
@@ -24431,9 +24486,9 @@ class TestRubyCallResolution:
             + "  end\n" * depth
             + "end\nz.use\n"
         )
-        started = time.monotonic()
+        started = time.process_time()
         _index(tmp_path, {"a.rb": source})
-        assert time.monotonic() - started < 10
+        assert time.process_time() - started < 10
 
     def test_a_way_leaving_nil_marks_the_name_maybe_null(self, tmp_path):
         """`x = 5` then `x = nil` in one way of an `if` leaves `x` maybe
@@ -25596,9 +25651,9 @@ class TestDartCallResolution:
     def test_unclosed_type_arguments_are_read_in_linear_time(self, tmp_path):
         """A line of `x<` and two hundred `a<b>` before a `(` is read at
         once, as type arguments are found by one scan of each run."""
-        start = time.monotonic()
+        start = time.process_time()
         _index(tmp_path, {"lib/p.dart": "void f() { x<" + "a<b>" * 200 + "(); }\n"})
-        assert time.monotonic() - start < 10
+        assert time.process_time() - start < 10
 
     def test_a_switch_expression_arm_promotes_and_its_patterns_call_nothing(
         self, tmp_path

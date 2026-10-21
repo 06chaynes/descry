@@ -337,8 +337,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
   its branches give or construct, a member's assignment types no local,
   and a type parameter's bound holds only in the declaration it is written
   on, in Java, C#, Dart and Rust too. A file with an `import` or an
-  `export` outside every block, after a BOM or indentation too, a `.mjs`,
-  `.cjs`, `.mts` or `.cts` file, and one that calls
+  `export` outside every block, after a BOM or indentation too, or with
+  `import.meta`, a `.mjs`, `.cjs`, `.mts` or `.cts` file, and one that calls
   `require` or assigns `module.exports` or `exports` is a module: what it
   declares is named in it alone, where it was any file's of the name, and
   an interface or object type is no value a call reaches. A specifier
@@ -418,7 +418,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
   of a Go `x, y := a, b` holds the value in its position, one bound to a
   call holds its result for a read later on the line, a C# `using`
   resource included, and a Rust literal's elements give what iterating it
-  gives. Past an `if let`, a `for` or a match arm a name its pattern binds
+  gives. A `use path::item as name` binds the item under the name. Past
+  an `if let`, a `for` or a match arm a name its pattern binds
   is what it was before, an arm on the line that opens the `match` binding
   its pattern's names alone, a Rust closure's parameter is in scope to the end
   of the closure's body, a C++ `catch` parameter has its type in its
@@ -585,8 +586,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   another statement on its line too and none in a comment or a literal,
   its words parted by any of JavaScript's white space and line breaks, a
   BOM and a no-break space too, around `as` as well, and by nothing
-  JavaScript does not read as white space, its name the value where the
-  statement ends after it, as JavaScript
+  JavaScript does not read as white space, a TypeScript file's by
+  TypeScript's, which takes U+0085 and U+200B too, a line break after
+  `import` ending no statement, its name the value where the statement
+  ends after it, as JavaScript
   ends one at a line break, binds what its module exports under its kind:
   a default import the module's default (`export default f`, a
   declaration or an object after it), whatever it is named, where

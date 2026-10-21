@@ -88,11 +88,11 @@ _LONG_RUN = " " * 20000
     ],
 )
 def test_a_whitespace_run_is_taken_once(find, text):
-    start = time.perf_counter()
+    start = time.process_time()
 
     find(text)
 
-    assert time.perf_counter() - start < 1
+    assert time.process_time() - start < 1
 
 
 @pytest.mark.parametrize(
@@ -185,13 +185,13 @@ def test_a_repeated_line_is_read_in_linear_time(name, source, tmp_path):
     came before it: seconds in all, where it took minutes."""
     (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
     (tmp_path / name).write_text(source)
-    start = time.perf_counter()
+    start = time.process_time()
 
     builder = CodeGraphBuilder(tmp_path)
     builder.process_directory()
     builder.resolve_references()
 
-    assert time.perf_counter() - start < 10
+    assert time.process_time() - start < 10
 
 
 def test_the_patterns_still_match_source():

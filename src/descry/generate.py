@@ -9047,8 +9047,11 @@ _JS_SPACE = (
 )
 _JS_START = rf"(?:^|(?<=[;\r\u2028\u2029]))[{_JS_SPACE}]*"
 _JS_WHITE = f"{_JS_SPACE}\n\r\u2028\u2029"
+# What TypeScript's scanner takes as white space beyond ECMAScript's
+_TS_ONLY_SPACE_RE = re.compile("[\x85\u200b]")
 _JS_GAP = f"[{_JS_WHITE}]"
-# Rust's white space, but `\n`, and all of it
+# Rust's white space but `\n`, which a line's start may follow, and a class
+# of all of it, which parts two tokens
 _RUST_SPACE = "\t\v\f\r \x85\u200e\u200f\u2028\u2029"
 _RUST_GAP = rf"[{_RUST_SPACE}\n]"
 
@@ -11259,6 +11262,11 @@ def _member_written(
 # What a line ends with, or the line after it starts with, where the
 # expression goes on from the one to the other
 _JS_CONTINUES_EXPRESSION = tuple(".?:+-*/%&|^=<>")
+# A reserved word that takes what follows it, after which a line break ends
+# no statement
+_JS_TAKES_NEXT_RE = re.compile(
+    r"(?<![\w$.])(?:import|export|new|typeof|void|delete|in|instanceof|case|extends)$"
+)
 
 
 def _statement_end(lines: list[str], index: int, column: int = 0) -> int:
@@ -11398,10 +11406,11 @@ _TS_CAST_TYPE_RE = re.compile(
     r"(?:\[\])*"
 )
 # An `import` or an `export` statement, which outside a block makes a file a
-# module
+# module, as `import.meta` does anywhere
 _JS_MODULE_RE = re.compile(
     rf"{_JS_START}(?:import(?!{_JS_GAP}*[(.])|export)\b", re.MULTILINE
 )
+_JS_IMPORT_META_RE = re.compile(rf"(?<![\w$.])import{_JS_GAP}*\.{_JS_GAP}*meta\b")
 # What makes a JavaScript file a CommonJS module, as TypeScript reads one: a
 # `require` call of one argument, no definition of a `require`, or a value
 # given to `module.exports` or to a property of it or of `exports`, by
@@ -12258,6 +12267,7 @@ class _JsScopes:
                 "\n" in text[end:at]
                 and self._statements(held)
                 and not text.endswith(_JS_CONTINUES_EXPRESSION + (",",), 0, end)
+                and not _JS_TAKES_NEXT_RE.search(text, max(end - 12, 0), end)
                 and not text.startswith(_JS_CONTINUES_EXPRESSION, at)
             ):
                 found = False, (at, held, direct)
@@ -14720,6 +14730,19 @@ class TSParser(BaseParser):
         source_starts = [0]
         for line in lines:
             source_starts.append(source_starts[-1] + len(line) + 1)
+        if rel_path.endswith((".ts", ".tsx", ".mts", ".cts")) and (
+            spaces := list(_TS_ONLY_SPACE_RE.finditer(content))
+        ):
+            # A TypeScript file's code reads that white space as spaces.
+            text = list(content)
+            for found in spaces:
+                row = bisect_right(source_starts, found.start()) - 1
+                code = source_code[row][found.start() - source_starts[row] :]
+                if code[:1] == found[0]:
+                    text[found.start()] = " "
+            content = "".join(text)
+            lines = source_lines(content)
+            source_code = _blank_js_lines(lines, jsx=jsx)
 
         def in_code(found):
             """Whether the statement ``found``, a match in ``content``,
@@ -14811,6 +14834,7 @@ class TSParser(BaseParser):
                 scopes.block(found.end()) == scopes.whole
                 for found in _JS_MODULE_RE.finditer(scopes.text)
             )
+            or _JS_IMPORT_META_RE.search(scopes.text)
             or rel_path.endswith((".mjs", ".cjs", ".mts", ".cts"))
             or rel_path.endswith((".js", ".jsx"))
             and _JS_COMMONJS_RE.search(scopes.text)
@@ -18356,6 +18380,9 @@ class CallResolver:
                 head = self._exported_as(qualifier[0], source_id)
                 paths = [qualifier[1:] if head == "=" else [head, *qualifier[1:]]]
             looked_up = name if qualifier else self._exported_as(name, source_id)
+            if lang == "rust" and not qualifier:
+                # `use path::item as name` binds the item under another name.
+                looked_up = self._uses(source_id).get(name, name).rpartition("::")[2]
             for path in paths:
                 scopes = imported
                 for segment in path:
