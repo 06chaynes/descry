@@ -18363,7 +18363,9 @@ class CallResolver:
         if imported is None and qualifier:
             # A variable in scope that has a declared type, or members of
             # its own, is a receiver as an imported name is.
-            held = self._lexical(qualifier[0], source_id, skip_classes=True)
+            held = self._aliased(
+                self._lexical(qualifier[0], source_id, skip_classes=True)
+            )
             if held and self.nodes[held]["type"] == "Constant":
                 declared = self._declared_type(held)
                 if declared == _EXTERNAL:
@@ -19422,7 +19424,7 @@ class CallResolver:
             if (
                 self._is_top_level(c)
                 if top_level
-                else self._is_class(c.rpartition("::")[0])
+                else self._has_members(c.rpartition("::")[0])
             )
         ]
         namespace = (
@@ -22345,6 +22347,29 @@ class CallResolver:
                 )
         self._candidates_now = reached
         return ()
+
+    def _has_members(self, owner):
+        """Whether ``owner`` is what a receiver can be: a class, or a
+        constant or a variable that holds an object of members."""
+        return self._is_class(owner) or (
+            owner in self.members
+            and self.nodes.get(owner, {}).get("type") in ("Constant", "Variable")
+        )
+
+    def _aliased(self, held):
+        """``held``, or where it is a constant whose value is the name of
+        another, what that names, in turn: the same value."""
+        seen = set()
+        while held and held not in seen and self.nodes[held]["type"] == "Constant":
+            seen.add(held)
+            value = self.nodes[held]["metadata"].get("value") or ""
+            named = re.fullmatch(r"[\w$]+", value) and self._lexical(
+                value, held, skip_classes=True
+            )
+            if not named:
+                break
+            held = named
+        return held
 
     def _rust_local(self, name, source_id):
         """The item named ``name`` that a function around ``source_id``

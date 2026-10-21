@@ -13050,7 +13050,12 @@ class TestTypeScriptCallResolution:
                 """,
             },
         )
-        assert _calls(builder, "FILE:use.js") == ["REF:b.use", "REF:d.use"]
+        assert _calls(builder, "FILE:use.js") == [
+            "REF:a.x.use",
+            "REF:b.use",
+            "REF:c.x.use",
+            "REF:d.use",
+        ]
 
     def test_a_commonjs_write_of_any_form_marks_the_module(self, tmp_path):
         """`Object.assign(module.exports, …)`, `exports[key] =` and
@@ -13078,7 +13083,12 @@ class TestTypeScriptCallResolution:
                 """,
             },
         )
-        assert _calls(builder, "FILE:use.js") == ["REF:a.top", "REF:b.top", "REF:c.top"]
+        assert _calls(builder, "FILE:use.js") == [
+            "REF:a.top",
+            "REF:b.top",
+            "REF:b.x.use",
+            "REF:c.top",
+        ]
 
     def test_a_default_export_past_another_statement_on_its_line_binds(self, tmp_path):
         """`export default <name>` past another statement's `;`, or with
@@ -13350,6 +13360,28 @@ class TestTypeScriptCallResolution:
             },
         )
         assert _calls(builder, "FILE:u.ts") == []
+
+    def test_an_object_s_member_is_a_candidate_of_an_unknown_receiver(self, tmp_path):
+        """A call on a receiver of no known value whose member only object
+        literals define is left unresolved with them, not dropped as
+        external; a constant that names an object holds that object."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": """
+                const b = { use() {} };
+                const c = b;
+                function f(x) {
+                  x.use();
+                }
+                function g() {
+                  c.use();
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:m.js::f") == ["REF:x.use"]
+        assert _calls(builder, "FILE:m.js::g") == ["FILE:m.js::b::use"]
 
     def test_an_import_past_another_statement_on_its_line_binds(self, tmp_path):
         """An `import` past another statement's `;` on its line binds its
@@ -26434,8 +26466,10 @@ class TestModuleAliases:
     ):
         assert self._load_calls(tmp_path, specifier) == ["REF:store.list"]
 
-    def test_package_that_is_not_declared_stays_outside(self, tmp_path):
-        assert self._load_calls(tmp_path, "some-package/store") == []
+    def test_package_that_is_not_declared_is_not_known(self, tmp_path):
+        """A package the project does not declare may be its own or not:
+        the call is left unresolved, not dropped."""
+        assert self._load_calls(tmp_path, "some-package/store") == ["REF:store.list"]
 
 
 class TestProcessDirectory:

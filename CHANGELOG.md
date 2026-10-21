@@ -601,7 +601,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   a `require`, `import x = require(...)` too, which was read as a call of
   `require`, the module whole; a module that assigns its exports,
   `export =` or `module.exports =`, exports that value's members. An
-  object holds what `{ f }`, `{ key: f }` and `{ ...o }` name; a module
+  object holds what `{ f }`, `{ key: f }` and `{ ...o }` name, and a
+  constant whose value is another's name holds that object; a call on a
+  receiver of no known value whose member only objects define is left
+  unresolved with them, where it was dropped as external; a module
   is located in a declaration file where no other is at its path, a
   package's conditional export is the first that applies to a `require`
   or an import, not to either, and `./index.d.cts` is that file, not
