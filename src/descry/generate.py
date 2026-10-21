@@ -10861,10 +10861,17 @@ _CJS_ALIASED_RE = re.compile(r"\s*exports\s*=\s*(?=module\.exports\s*=(?![=>]))"
 # `exports = …` at the start of a statement, or after `module.exports =`
 _CJS_EXPORTS_RE = re.compile(r"\s*exports\s*=(?![=>])")
 # A write of a CommonJS module's exports anywhere: `module.exports =`,
-# `exports =`, `exports.name =` or `module.exports.name =`; whether it is
-# through `module`, and the member's name
+# `exports =`, `exports.name =`, `module.exports.name =`, each by any
+# assignment operator, a member's of a computed name, `exports[key] =`, or
+# `Object.assign`, `defineProperty` or `defineProperties` of the exports.
+# Groups: `via` the `module.` it is written through, `member` the member's
+# name, `unnamed` where the name is not written.
 _CJS_WRITE_RE = re.compile(
-    r"(?<![\w$.])(module\s*\.\s*)?exports(?:\s*\.\s*([\w$]+))?\s*=(?![=>])"
+    r"(?<![\w$.])(?:Object\s*\.\s*(?:assign|defineProperty|defineProperties)\s*\(\s*"
+    r"(?P<unnamed>(?P<target>module\s*\.\s*)?exports)\b(?!\s*[.\[])"
+    r"|(?P<via>module\s*\.\s*)?exports"
+    r"(?:\s*\.\s*(?P<member>[\w$]+)|\s*(?P<key>\[)[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\])?"
+    r"\s*(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>]))"
 )
 # `require("m")`, a value that is the module's exports
 _JS_REQUIRED_VALUE_RE = re.compile(r"""\s*require\(\s*['"]([^'"]+)['"]\s*\)\s*;?\s*""")
@@ -11329,6 +11336,13 @@ def _js_brackets(lines):
     return text, starts, closer
 
 
+def _place(starts, offset):
+    """``(line, column)`` of ``offset`` in a text whose lines start at the
+    offsets ``starts``; lines count from 1."""
+    row = bisect_right(starts, offset) - 1
+    return row + 1, offset - starts[row]
+
+
 def _nested(spans):
     """``spans``, sorted by start with an outer one first on a tie, each
     with the index of the innermost of them it is inside, or -1."""
@@ -11620,8 +11634,7 @@ class _JsScopes:
         return regions
 
     def place(self, offset):
-        row = bisect_right(self.starts, offset) - 1
-        return row + 1, offset - self.starts[row]
+        return _place(self.starts, offset)
 
     def block(self, offset):
         """The span of the innermost `{`...`}` around ``offset``, else the
@@ -13088,9 +13101,10 @@ _TS_REQUIRE_RE = re.compile(
 )
 _TS_PARAM_MODIFIERS = ("...", "public", "private", "protected", "readonly")
 # `export * from "<specifier>"`, `export { <clause> } from "<specifier>"` and,
-# with no specifier, `export { <clause> }`
+# with no specifier, `export { <clause> }`, starting a line or past another
+# statement's `;`
 _TS_REEXPORT_RE = re.compile(
-    r"""^\s*export\s+(?:type\s+)?"""
+    r"""(?:^|(?<=;))\s*export\s+(?:type\s+)?"""
     r"""(?:(\*)(?:\s+as\s+([\w$]+))?\s+from\s+|\{([^}]*)\}(?:\s+from\s+)?)"""
     r"""(?:['"]([^'"]+)['"])?""",
     re.MULTILINE,
@@ -13113,9 +13127,11 @@ _TS_DEFAULT_EXPORT_RE = re.compile(
     r"|export[ \t]*=[ \t]*([\w$]+)(?=[ \t]*;?[ \t]*$))",
     re.MULTILINE,
 )
-# `import <clause> from "<specifier>"`, the clause possibly over several lines
+# `import <clause> from "<specifier>"`, the clause possibly over several
+# lines, starting a line or past another statement's `;`
 _TS_IMPORT_RE = re.compile(
-    r"""^\s*import\s++(?:type\s++)?([^;'"]*?)\s+from\s+['"]([^'"]+)['"]""", re.MULTILINE
+    r"""(?:^|(?<=;))\s*import\s++(?:type\s++)?([^;'"]*?)\s+from\s+['"]([^'"]+)['"]""",
+    re.MULTILINE,
 )
 
 
@@ -14383,9 +14399,22 @@ class TSParser(BaseParser):
         self.line_count = len(lines)
         # The lines read, a definition after another's end on a line on one
         # of its own, and the source line each is part of
+        # The source lines blanked, and the offset each starts at
+        source_code = _blank_js_lines(lines, jsx=jsx)
+        source_starts = [0]
+        for line in lines:
+            source_starts.append(source_starts[-1] + len(line) + 1)
+
+        def in_code(found):
+            """Whether the statement ``found``, a match in ``content``,
+            starts in code: not in a comment or a literal."""
+            at = found.start() + len(found[0]) - len(found[0].lstrip())
+            row = bisect_right(source_starts, at) - 1
+            return source_code[row][at - source_starts[row] :][:1] == content[at]
+
         lines = self.split_source(
             lines,
-            _blank_js_lines(lines, jsx=jsx),
+            source_code,
             _TS_DEFINITION_HEAD_RE,
             _TS_BODY_HEAD_RE,
             ";,",
@@ -14477,7 +14506,8 @@ class TSParser(BaseParser):
             self.builder.ts_aliases[file_id, name] = params, text.strip()
         # What the file's `export`s give, ``reexports`` entries
         es = []
-        for star, namespace, clause, specifier in _TS_REEXPORT_RE.findall(content):
+        for found in filter(in_code, _TS_REEXPORT_RE.finditer(content)):
+            star, namespace, clause, specifier = found.groups("")
             # `export * as ns` exports the module itself, under a name.
             names = [(namespace or "*", "*" if namespace else "")] if star else []
             for part in clause.split(","):
@@ -14493,7 +14523,8 @@ class TSParser(BaseParser):
         for default, *names in _TS_DEFAULT_EXPORT_RE.findall(content):
             es.append(("default" if default else "=", "", "".join(names), file_id))
         names = self.builder.import_names.setdefault(file_id, {})
-        for clause, specifier in _TS_IMPORT_RE.findall(content):
+        for found in filter(in_code, _TS_IMPORT_RE.finditer(content)):
+            clause, specifier = found.groups("")
             for part in re.finditer(r"[^{},]+", clause):
                 # `name`, `type name`, `name as alias`, `* as alias`; before
                 # a `{`, the module's default
@@ -15296,11 +15327,16 @@ class TSParser(BaseParser):
                 if exported
                 else 0,
             ):
-                via, member = found.groups()
+                via = found["via"] or found["target"]
+                member, unnamed = found["member"], found["unnamed"] or found["key"]
                 if self._declaration("module" if via else "exports", lineno):
                     continue
                 self.builder.commonjs.add(file_id)
-                if member and (via or not cjs_orphan):
+                if unnamed:
+                    # Any member may be the one written.
+                    for name in cjs.keys() - {"="} if via or not cjs_orphan else ():
+                        cjs[name] = (name, "", None, parent_id)
+                elif member and (via or not cjs_orphan):
                     cjs[member] = (member, "", None, parent_id)
                 elif via and not member:
                     cjs.clear()

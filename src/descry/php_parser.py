@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 import re
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 
 from descry.generate import (
     _STATEMENT_START_RE,
@@ -22,6 +22,7 @@ from descry.generate import (
     _is_call_chain,
     _js_brackets,
     _nested,
+    _place,
     _run_start,
     _tails,
     _use_leaves,
@@ -245,8 +246,8 @@ _RE_OPERATOR = re.compile(r"\?->|->|[.?\\]")
 _CHAIN_OPERATORS = {"?->": "  .", "->": " .", ".": "+", "?": "|", "\\": ":"}
 
 
-# What a PHP type's body opens after, and a declaration a line may go on to
-# after the end of another
+# What a PHP type's body opens after, an anonymous class's `new class`
+# too, and a declaration a line may go on to after the end of another
 _RE_TYPE_HEAD = re.compile(
     r"\s*(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum)\b"
     r"|[^{};]*\bnew\s+(?:readonly\s+)?class\b"
@@ -297,10 +298,6 @@ def _branches(codes: list[str]) -> list:
     spans = _nested(sorted(closer.items()))
 
     tails = _tails(text, ";{}")
-
-    def place(offset):
-        line = bisect_right(starts, offset)
-        return line, offset - starts[line - 1]
 
     def label_end(offset, end):
         """The offset past the `:` or the `;` that ends the `case` or
@@ -381,10 +378,10 @@ def _branches(codes: list[str]) -> list:
         first = min(w[0][0] for w in ways if w)
         branches.append(
             (
-                place(first),
-                place(after),
-                [[(place(a), place(b)) for a, b in w] for w in ways],
-                [[(place(a), place(b)) for a, b in w] for w in on],
+                _place(starts, first),
+                _place(starts, after),
+                [[(_place(starts, a), _place(starts, b)) for a, b in w] for w in ways],
+                [[(_place(starts, a), _place(starts, b)) for a, b in w] for w in on],
                 kind in ("if", "switch"),
             )
         )
@@ -575,12 +572,14 @@ class PhpParser(BaseParser):
         a statement of ``read_branches`` that may run its body or not."""
         text, starts, closer = _js_brackets(codes)
         self._starts, self._takes, branches = starts, {}, []
+        # Name -> the body of each closure that takes it by reference, in
+        # order, and the values each binds it to, read once it is past
+        self._by_reference, self._bound_by = {}, {}
 
-        def place(at):
-            row = bisect_right(starts, at) - 1
-            return row + 1, at - starts[row]
-
-        for found in _RE_CLOSURE.finditer(text):
+        # Read last first: an arrow function's body that holds another one
+        # ends where that one ends, which is found already.
+        arrows = {}
+        for found in reversed(list(_RE_CLOSURE.finditer(text))):
             close = closer.get(found.end())
             if close is None:
                 continue
@@ -592,10 +591,20 @@ class PhpParser(BaseParser):
                 used = re.findall(r"(&?)\s*\$(\w+)", body["use"] or "")
                 taken = {name for _, name in used}
                 by_reference = {name for ref, name in used if ref}
+                for name in by_reference:
+                    self._by_reference.setdefault(name, []).append(
+                        (_place(starts, body.end()), _place(starts, end))
+                    )
                 if by_reference:
-                    ways = [[(place(body.end()), place(end))], []]
+                    ways = [[(_place(starts, body.end()), _place(starts, end))], []]
                     branches.append(
-                        (place(body.end()), place(end + 1), ways, ways, False)
+                        (
+                            _place(starts, body.end()),
+                            _place(starts, end + 1),
+                            ways,
+                            ways,
+                            False,
+                        )
                     )
             else:
                 arrow = _RE_ARROW.match(text, close + 1)
@@ -605,8 +614,11 @@ class PhpParser(BaseParser):
                 # it is inside ends.
                 end, taken, by_reference = arrow.end(), None, set()
                 while end < len(text) and text[end] not in ",;)]}":
-                    end = closer.get(end, end) + 1
+                    end = arrows.get(end) or closer.get(end, end) + 1
+                arrows[found.start()] = end
             self._takes[found.start(), end] = taken, by_reference
+        for spans in self._by_reference.values():
+            spans.reverse()
         self._closures = _nested(sorted(self._takes))
         self._arounds = {}
         return branches
@@ -622,6 +634,31 @@ class PhpParser(BaseParser):
                 index = outer
             self._arounds[at] = spans
         return self._arounds[at]
+
+    def _seen(self, name, lineno, since):
+        """As the base's; but a closure that takes the variable by reference
+        may run at any call of it, so a binding written past the closure
+        holds what it gives or what the closure binds: no known value where
+        they differ."""
+        seen = super()._seen(name, lineno, since)
+        closures = self._by_reference.get(name, ()) if seen else ()
+        at = seen and (seen[0], self._column(name, seen) or 0)
+        # The closures written before the binding, the last first, back to
+        # the start of the definition
+        for first, end in reversed(closures[: bisect_left(closures, (at,))]):
+            if first[0] < since:
+                break
+            if end >= at:
+                continue
+            if (first, end) not in self._bound_by:
+                self._bound_by[first, end] = {
+                    d[1]
+                    for d in self.declared.get(name, ())
+                    if first <= (d[0], self._column(name, d) or 0) <= end
+                }
+            if self._bound_by[first, end] - {seen[1]}:
+                return seen[0], "?", seen[2], seen[3]
+        return seen
 
     def _in_scope(self, name, declaration, lineno):
         """As the base's, and a closure's variables are its own, but those
@@ -974,8 +1011,10 @@ class PhpParser(BaseParser):
                             bound.start(1),
                         )
                     )
-                # Its header is still code of the member it is created in.
-                self.enter_context(anonymous_id, lineno, end_lineno)
+                # Its header is still code of the member it is created in, as is
+                # the rest of the statement past the `}` that ends its body.
+                last = end_lineno - codes[end_lineno - 1].lstrip().startswith("}")
+                self.enter_context(anonymous_id, lineno, last)
 
             # Methods (inside a type) or functions
             m_method = (_RE_METHOD if in_type else _RE_FUNCTION).match(code)

@@ -12955,6 +12955,51 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:use.js") == ["REF:b.use", "REF:d.use"]
 
+    def test_a_commonjs_write_of_any_form_marks_the_module(self, tmp_path):
+        """`Object.assign(module.exports, …)`, `exports[key] =` and
+        `exports.x ||=` are CommonJS writes: the module exports its exports
+        object alone, and a member of a name not written may be any one."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.js": "function top() {}\nObject.assign(module.exports, { x: 1 });\n",
+                "b.js": """
+                function top() {}
+                const A = { use() {} };
+                exports.x = A;
+                exports[key] = top;
+                """,
+                "c.js": "function top() {}\nexports.x ||= 1;\n",
+                "use.js": """
+                const a = require('./a');
+                const b = require('./b');
+                const c = require('./c');
+                a.top();
+                c.top();
+                b.top();
+                b.x.use();
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:use.js") == ["REF:a.top", "REF:b.top", "REF:c.top"]
+
+    def test_an_import_past_another_statement_on_its_line_binds(self, tmp_path):
+        """An `import` past another statement's `;` on its line binds its
+        names; one in a comment or a string binds none."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": "export const c = { use() {} };\nexport function f() {}\n",
+                "u.js": """
+                import { c } from "./m.js"; import { f } from "./m.js";
+                // see; import { g } from "./m.js";
+                f();
+                c.use();
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:u.js") == ["FILE:m.js::c::use", "FILE:m.js::f"]
+
     def test_an_export_of_a_value_not_read_is_unknown(self, tmp_path):
         """`exports.x = <a value not read>` is a CommonJS write: the module
         exports its exports object alone, `x` of a value not known."""
@@ -18663,6 +18708,56 @@ class TestPhpCallResolution:
             },
         )
         assert _calls(builder, "FILE:a.php::g") == ["FILE:a.php::g::class@4::use_"]
+
+    def test_a_call_past_an_anonymous_class_body_is_the_members(self, tmp_path):
+        """What a statement holds past the `}` of an anonymous class's body
+        is code of the member the class is created in."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """<?php
+                class D { public function u() {} }
+                function reg($a, $b) {}
+                class M {
+                    public function m(D $q) {
+                        reg(new class { public function k() {} }, $q->u());
+                        reg(new class {
+                            public function k() {}
+                        }, $q->u());
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.php::M::m") == [
+            "FILE:a.php::D::u",
+            "FILE:a.php::D::u",
+            "FILE:a.php::reg",
+            "FILE:a.php::reg",
+        ]
+
+    def test_a_variable_taken_by_reference_holds_what_the_closure_binds(self, tmp_path):
+        """A closure that takes a variable by reference may run at any call
+        of it: past it, a binding of the variable holds what it gives or
+        what the closure binds."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """<?php
+                class C { public function u() {} }
+                class D { public function u() {} }
+                class M {
+                    public function m() {
+                        $f = function () use (&$r) { $r = new D(); };
+                        $r = new C();
+                        $f();
+                        $r->u();
+                    }
+                }
+                """,
+            },
+        )
+        assert "FILE:a.php::C::u" not in _calls(builder, "FILE:a.php::M::m")
 
     def test_a_doc_comment_types_a_variable_as_its_declaration_does(self, tmp_path):
         """`/** @var T|null $x */` types `$x` as a declaration of `?T`
