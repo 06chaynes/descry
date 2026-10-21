@@ -22,8 +22,10 @@ from descry import _stdlib
 from descry._comments import strip_block_comments
 from descry._files import create_sibling
 
-# Configure logging for consistent error reporting
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+# Configure logging for consistent error reporting: other libraries' at
+# WARNING, descry's own at the level DESCRY_LOG_LEVEL gives its logger, so
+# the HTTP requests a model's download makes are not shown as progress.
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 # Named rather than __name__: run with `-m` this module is `__main__`, which
 # the level DESCRY_LOG_LEVEL sets on the "descry" logger would not reach.
 logger = logging.getLogger("descry.generate")

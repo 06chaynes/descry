@@ -870,7 +870,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   the line before is a member of what that line ends with, no longer a
   call of the function of its name. `index` no longer encodes every symbol
   twice. `descry-generate` honours `DESCRY_LOG_LEVEL`, walks the project
-  root when given `--project-root` alone, and refuses a path outside it.
+  root when given `--project-root` alone, and refuses a path outside it;
+  the indexer shows other libraries' messages only from WARNING, where the
+  HTTP requests a model's download makes, a 404 for an optional file
+  among them, read as its progress.
   scip-java no longer passes the Gradle init-script on Maven or sbt
   projects, where `mvn`/`sbt` rejected it and no index was written; its
   Kotlin-DSL pre-flight likewise runs only for a Gradle build, which is

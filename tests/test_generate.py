@@ -26795,6 +26795,27 @@ class TestCommandLine:
         assert "outside the project root" in result.stderr
         assert not cache.exists()
 
+    def test_other_libraries_info_is_not_shown(self):
+        """The indexer's module leaves other libraries at WARNING: the HTTP
+        requests a model's download makes, a 404 for a file a model does
+        not ship among them, are no progress of descry's."""
+        run = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import logging, descry.generate\n"
+                    "logging.getLogger('httpx').info('HTTP Request: HEAD x 404')\n"
+                    "logging.getLogger('httpx').warning('a warning')"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "HTTP Request" not in run.stderr
+        assert "WARNING: a warning" in run.stderr
+
     def test_log_level_comes_from_the_environment(self, root, tmp_path):
         cache = str(tmp_path / "cache")
         default = _run_indexer(
