@@ -15298,6 +15298,7 @@ class TSParser(BaseParser):
         i = 0
         signature_until = 0  # the last line of a definition's signature
         later_declarators = {}  # line index -> declarators a statement gives it
+        constants = {}  # (line, column) of each constant's name -> its ID
         while i < len(lines):
             line = text_lines[i]
             lineno = i + 1
@@ -15734,13 +15735,14 @@ class TSParser(BaseParser):
                     and line[match.start(3) : _value_end(code_lines[i], match.start(3))]
                 )
                 if written and re.fullmatch(r"[\w$]+", written.strip()):
-                    # The binding the name is there, which a nearer one
-                    # without a node may be
+                    # The constant the name is there, where its binding is
+                    # one: a nearer one without a node, a parameter's, is not
                     bound = self._read_from(
                         match.start(3), self._declaration, written.strip(), lineno
                     )
-                    if bound:
-                        self.builder.js_aliases[cid] = self.source_line(bound[1][0])
+                    if bound and bound[1] in constants:
+                        self.builder.js_aliases[cid] = constants[bound[1]]
+                constants[lineno, match.start(1)] = cid
                 self.builder.add_node(
                     cid,
                     "Constant",
@@ -22369,18 +22371,12 @@ class CallResolver:
 
     def _aliased(self, held):
         """``held``, or where it is a constant whose value is the name of
-        another, what that names, in turn: the same value. The name is
-        followed only to the declaration the parser read it as, so a nearer
-        binding without a node, a parameter's, hides an outer constant."""
+        another, the constant the parser read that name as, in turn: the
+        same value."""
         seen = set()
-        while held and held not in seen and self.nodes[held]["type"] == "Constant":
+        while held in self.builder.js_aliases and held not in seen:
             seen.add(held)
-            line = self.builder.js_aliases.get(held)
-            value = self.nodes[held]["metadata"].get("value") or ""
-            named = line and self._lexical(value.strip(), held, skip_classes=True)
-            if not named or self.nodes[named]["metadata"].get("lineno") != line:
-                break
-            held = named
+            held = self.builder.js_aliases[held]
         return held
 
     def _rust_local(self, name, source_id):
@@ -23708,8 +23704,8 @@ class CodeGraphBuilder:
         self.import_names = {}
         # JS/TS file ID -> each name a `require` binds -> the line it does on
         self.required_names = {}
-        # JS/TS constant ID -> the source line of the declaration its value,
-        # a name, names where the constant is declared
+        # JS/TS constant ID -> the ID of the constant its value, a name,
+        # names where the constant is declared
         self.js_aliases = {}
         # (defining file or class ID, fixture name) -> (function ID, origin
         # path of the value the fixture returns or yields, if it has one,

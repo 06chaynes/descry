@@ -13384,9 +13384,9 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:m.js::g") == ["FILE:m.js::b::use"]
 
     def test_a_parameter_hides_the_constant_an_alias_would_name(self, tmp_path):
-        """A constant whose value is a name holds what that name is where it
-        is written: a parameter, a `var` or a `catch` binding of the name
-        hides an outer constant of it."""
+        """A constant whose value is a name holds the constant that name is
+        where it is written: a parameter, a `var` or a `catch` binding of the
+        name hides an outer constant of it, on its line too."""
         builder = _index(
             tmp_path,
             {
@@ -13397,11 +13397,21 @@ class TestTypeScriptCallResolution:
                 function k() { try {} catch (config) { const c = config; c.get(); } }
                 function ok() { const c = config; c.get(); }
                 """,
+                "n.js": "const config = { get() {} }; function s(config) { const c = config; c.get(); }\n",
+                "App.svelte": (
+                    "<div>\n  <p>{x}</p>\n</div>\n<script>\n"
+                    "  const b = { use() {} };\n  const d = b;\n"
+                    "  function g() { d.use(); }\n</script>\n"
+                ),
             },
         )
         for name in ("h", "v", "k"):
             assert _calls(builder, f"FILE:m.js::{name}") == ["REF:c.get"]
         assert _calls(builder, "FILE:m.js::ok") == ["FILE:m.js::config::get"]
+        # One line holding the outer constant and the parameter, and a
+        # `<script>` below a template
+        assert _calls(builder, "FILE:n.js::s") == ["REF:c.get"]
+        assert _calls(builder, "FILE:App.svelte::g") == ["FILE:App.svelte::b::use"]
 
     def test_an_import_past_another_statement_on_its_line_binds(self, tmp_path):
         """An `import` past another statement's `;` on its line binds its
