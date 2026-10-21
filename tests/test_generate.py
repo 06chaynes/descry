@@ -13033,6 +13033,32 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:u.js") == ["FILE:m.js::a::use", "REF:b.use"]
 
+    def test_a_line_break_ends_a_default_export_as_javascript_reads_it(self, tmp_path):
+        """A next line that starts with `in` or `instanceof` goes on with
+        the default's expression; one that starts with `++` or `--`, or a
+        name that starts with `in`, does not."""
+        builder = _index(
+            tmp_path,
+            {
+                "q.js": "const a = { use() {} }; let o = {};\nexport default a\nin o;\n",
+                "r.js": "const b = { use() {} }; let x = 0;\nexport default b\n--x;\n",
+                "s.js": "const c = { use() {} };\nexport default c\ninside();\n",
+                "u.js": """
+                import q from "./q.js";
+                import r from "./r.js";
+                import s from "./s.js";
+                q.use();
+                r.use();
+                s.use();
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:u.js") == [
+            "FILE:r.js::b::use",
+            "FILE:s.js::c::use",
+            "REF:q.use",
+        ]
+
     def test_an_import_past_another_statement_on_its_line_binds(self, tmp_path):
         """An `import` past another statement's `;` on its line binds its
         names; one in a comment or a string binds none."""

@@ -342,11 +342,12 @@ Python SDK v2, and a full-tree review's findings are fixed.
   branch, a function or past a statement's start, leaving what it writes
   unknown, one of a name not written, `exports[key] =` or
   `Object.assign(module.exports, …)`, leaving each member unknown, and one
-  by any assignment operator a write, the module's `export`s written to `exports` as TypeScript
-  compiles them (`export =` last, none past a `module.exports =`, a name
-  both give either), and `require` giving the exports object alone, its
-  names read where they are written, one a block declares no value;
-  exports are unknown where the value given them is not read,
+  by any assignment operator a write, the module's `export`s written to
+  `exports` as TypeScript compiles them (`export =` last, none past a
+  `module.exports =`, a name both give either), and `require` giving the
+  exports object alone, its names read where they are written, one a
+  block declares no value; exports are unknown where the value given them
+  is not read,
   `module.exports = require(m)` exports what `m` does, two modules that
   export each other whole export nothing so and a module is no callee,
   and `require` and a destructuring pattern of it bind them; a name an
@@ -388,10 +389,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   none of the file's variables, a PHP closure its own and those it takes,
   by `use`, one by reference holding past it what it held or what the
   closure binds, and past a rebinding what that gives or what the closure
-  binds that variable to, an arrow function each, a `@var` tag types its variable
-  as a declaration does, a `match`'s `default` is no label of a `switch:`
-  around it, and an anonymous class on one line has its methods, the rest
-  of its statement past its body being the member's.
+  binds that variable to, an arrow function each, a `@var` tag types its
+  variable as a declaration does, a `match`'s `default` is no label of a
+  `switch:` around it, and an anonymous class on one line has its
+  methods, the rest of its statement past its body being the member's.
   In Go, Rust, C, C++, Dart, Java and C#, a declaration in a block, a
   statement's head or a parameter list is in scope to the end of that
   block or statement, a Java or C# `case` pattern to the end of its switch
@@ -568,9 +569,10 @@ Python SDK v2, and a full-tree review's findings are fixed.
   next line with another inside a `${...}`, which ended the block around
   it. A JavaScript or TypeScript import, and `export default`, one past
   another statement on its line too and none in a comment or a literal,
-  its name the value where the statement ends after it, binds what its
-  module exports under its kind: a default import the module's default (`export default
-  f`, a declaration or an object after it), whatever it is named, where
+  its name the value where the statement ends after it, as JavaScript
+  ends one at a line break, binds what its module exports under its kind:
+  a default import the module's default (`export default f`, a
+  declaration or an object after it), whatever it is named, where
   it was looked up by its own name and its calls were dropped; a named
   import the export of its name, whose members were read from the module
   itself, so `a.run()` reached the module's `run`; a namespace import or

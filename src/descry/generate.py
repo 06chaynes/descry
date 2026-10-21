@@ -13130,8 +13130,12 @@ _TS_DEFAULT_EXPORT_RE = re.compile(
     re.MULTILINE,
 )
 # What a line starts with where it goes on with the expression the line
-# before ends with: a member, a call, an index, a template or an operator
-_JS_CONTINUES = tuple(".([`+-*/%<>=&|^?:,")
+# before ends with: a member, a call, an index, a template or a binary
+# operator, `in` and `instanceof` too; not `++` or `--`, before which the
+# line break ends the statement
+_JS_CONTINUES_RE = re.compile(
+    r"(?!\+\+|--)[.(\[`+\-*/%<>=&|^?:,]|in(?:stanceof)?(?![\w$])"
+)
 
 
 def _ends_after(code_lines, row, column):
@@ -13142,7 +13146,7 @@ def _ends_after(code_lines, row, column):
     if rest:
         return rest.startswith(";")
     below = (line.strip() for line in code_lines[row + 1 :])
-    return not next((line for line in below if line), "").startswith(_JS_CONTINUES)
+    return not _JS_CONTINUES_RE.match(next((line for line in below if line), ""))
 
 
 # `import <clause> from "<specifier>"`, the clause possibly over several
