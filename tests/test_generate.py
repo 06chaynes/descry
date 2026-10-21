@@ -3414,19 +3414,24 @@ class TestRustCallResolution:
         ]
 
     def test_a_call_through_a_use_as_reaches_the_item(self, tmp_path):
-        """`use path::item as name` binds the item under ``name``: `name()`
-        calls it."""
+        """`use path::item as name` binds the item under ``name``, as one
+        another module re-exports so does: `name()` calls it."""
         builder = _index(
             tmp_path,
             {
                 "Cargo.toml": '[package]\nname = "x"\n',
                 "src/lib.rs": (
-                    "mod q {\n    pub fn a() {}\n}\nuse crate::q::a as c;\n"
-                    "fn m() {\n    c();\n}\n"
+                    "mod q {\n    pub fn a() {}\n    pub fn b() {}\n}\n"
+                    "mod p {\n    pub use crate::q::b as pb;\n}\n"
+                    "use crate::q::a as c;\nuse crate::p::pb;\n"
+                    "fn m() {\n    c();\n    pb();\n}\n"
                 ),
             },
         )
-        assert _calls(builder, "FILE:src/lib.rs::m") == ["FILE:src/lib.rs::q::a"]
+        assert _calls(builder, "FILE:src/lib.rs::m") == [
+            "FILE:src/lib.rs::q::a",
+            "FILE:src/lib.rs::q::b",
+        ]
 
     def test_use_path_names_the_crate_a_call_goes_to(self, tmp_path):
         """`use store_kit::probe` reaches the `probe` of the crate whose

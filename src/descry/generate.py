@@ -18380,9 +18380,6 @@ class CallResolver:
                 head = self._exported_as(qualifier[0], source_id)
                 paths = [qualifier[1:] if head == "=" else [head, *qualifier[1:]]]
             looked_up = name if qualifier else self._exported_as(name, source_id)
-            if lang == "rust" and not qualifier:
-                # `use path::item as name` binds the item under another name.
-                looked_up = self._uses(source_id).get(name, name).rpartition("::")[2]
             for path in paths:
                 scopes = imported
                 for segment in path:
@@ -18391,8 +18388,12 @@ class CallResolver:
                         for scope in scopes
                     )
                     scopes = [scope for scope in found if scope]
+                # A Rust `use` names the item itself, under any name.
                 hits = {
-                    i for i in scopes if not qualifier and i.endswith(f"::{looked_up}")
+                    i
+                    for i in scopes
+                    if not qualifier
+                    and (lang == "rust" or i.endswith(f"::{looked_up}"))
                 }
                 hits |= {
                     self._find_member(scope, looked_up, static=True)[0]
