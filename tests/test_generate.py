@@ -3433,6 +3433,24 @@ class TestRustCallResolution:
             "FILE:src/lib.rs::q::b",
         ]
 
+    def test_a_function_s_own_item_hides_a_use(self, tmp_path):
+        """A function declared inside a function hides what a `use` outside
+        it binds its name to, an alias's too: the call is the local one's."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "x"\n',
+                "src/lib.rs": (
+                    "mod q {\n    pub fn a() {}\n}\nuse crate::q::a;\n"
+                    "use crate::q::a as z;\n"
+                    "fn f() {\n    fn a() {}\n    a();\n}\n"
+                    "fn g() {\n    fn z() {}\n    z();\n}\n"
+                ),
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::f") == ["FILE:src/lib.rs::f::a"]
+        assert _calls(builder, "FILE:src/lib.rs::g") == ["FILE:src/lib.rs::g::z"]
+
     def test_use_path_names_the_crate_a_call_goes_to(self, tmp_path):
         """`use store_kit::probe` reaches the `probe` of the crate whose
         package is `store-kit`; a `use` of a crate that is not in the

@@ -18348,6 +18348,12 @@ class CallResolver:
         if lang == "php":
             return self._php_function(callee, candidates, source_id)
         rooted = lang == "rust" and callee.startswith(_RUST_PATH_ROOTS)
+        if (
+            lang == "rust"
+            and not qualifier
+            and (item := self._rust_local(name, source_id))
+        ):
+            return item, "regex"
         if rooted:
             imported = self._rust_path(qualifier, source_id)
         else:
@@ -22339,6 +22345,20 @@ class CallResolver:
                 )
         self._candidates_now = reached
         return ()
+
+    def _rust_local(self, name, source_id):
+        """The item named ``name`` that a function around ``source_id``
+        declares, which hides what a `use` outside it binds the name to;
+        None where a `use` in a function nearer binds it, or none
+        declares it."""
+        for scope in self._scopes(source_id):
+            if not self._is_function_scope(scope):
+                return None
+            if hit := self.members.get(scope, {}).get(name):
+                return hit
+            if name in self.builder.imports.get(scope, {}):
+                return None
+        return None
 
     def _scopes(self, node_id):
         """Yield ``node_id`` and each scope enclosing it, out to its file."""

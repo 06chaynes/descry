@@ -419,7 +419,8 @@ Python SDK v2, and a full-tree review's findings are fixed.
   call holds its result for a read later on the line, a C# `using`
   resource included, and a Rust literal's elements give what iterating it
   gives. A `use path::item as name` binds the item under the name, one
-  another module's `pub use` re-exports too. Past
+  another module's `pub use` re-exports too, and a function declared in a
+  function hides it there. Past
   an `if let`, a `for` or a match arm a name its pattern binds
   is what it was before, an arm on the line that opens the `match` binding
   its pattern's names alone, a Rust closure's parameter is in scope to the end
