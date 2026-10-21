@@ -3354,6 +3354,25 @@ class TestRustCallResolution:
             "FILE:lib.rs::make",
         ]
 
+    def test_a_use_after_any_white_space_binds(self, tmp_path):
+        """Rust's white space before a `use`, a form feed or U+2028 as well
+        as a space, leaves it a `use`."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "x"\n',
+                "src/lib.rs": (
+                    "mod q {\n    pub fn a() {}\n    pub fn b() {}\n}\n"
+                    "\fuse crate::q::a;\n\u2028use crate::q::b;\n"
+                    "fn m() {\n    a();\n    b();\n}\n"
+                ),
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::m") == [
+            "FILE:src/lib.rs::q::a",
+            "FILE:src/lib.rs::q::b",
+        ]
+
     def test_use_path_names_the_crate_a_call_goes_to(self, tmp_path):
         """`use store_kit::probe` reaches the `probe` of the crate whose
         package is `store-kit`; a `use` of a crate that is not in the
@@ -13133,6 +13152,48 @@ class TestTypeScriptCallResolution:
             "REF:r.use",
         ]
 
+    def test_a_name_character_python_lacks_ends_a_default_export(self, tmp_path):
+        """A next line whose `in` a character of ECMAScript's names follows
+        that Python's names lack, as U+037A and U+309B, starts the name."""
+        builder = _index(
+            tmp_path,
+            {
+                "p.js": "const a = { use() {} };\nexport default a\nin\u037ax();\n",
+                "q.js": "const b = { use() {} };\nexport default b\nin\u309bx();\n",
+                "u.js": 'import p from "./p.js";\nimport q from "./q.js";\np.use();\nq.use();\n',
+            },
+        )
+        assert _calls(builder, "FILE:u.js") == [
+            "FILE:p.js::a::use",
+            "FILE:q.js::b::use",
+        ]
+
+    def test_white_space_and_line_breaks_part_imports_and_exports(self, tmp_path):
+        """ECMAScript's white space and line terminators, a BOM, a vertical
+        tab, a no-break space, U+2028 and `\\n` among them, start a statement
+        and part the words of an import or an export."""
+        builder = _index(
+            tmp_path,
+            {
+                "b.js": "export function f() {}\nexport function g() {}\n",
+                "r.js": '\vexport { g } from "./b.js";\n',
+                "p.js": "function a() {}\nexport\u00a0default\u2028a;\n",
+                "q.js": "function c() {}\nexport default\nc;\n",
+                "u.js": (
+                    '\ufeffimport { f } from "./b.js";x();\u2028import { g } from "./r.js";\n'
+                    'import p from "./p.js";\nimport q from "./q.js";\n'
+                    "f();\ng();\np();\nq();\nfunction x() {}\n"
+                ),
+            },
+        )
+        assert _calls(builder, "FILE:u.js") == [
+            "FILE:b.js::f",
+            "FILE:b.js::g",
+            "FILE:p.js::a",
+            "FILE:q.js::c",
+            "FILE:u.js::x",
+        ]
+
     def test_an_import_past_another_statement_on_its_line_binds(self, tmp_path):
         """An `import` past another statement's `;` on its line binds its
         names; one in a comment or a string binds none."""
@@ -20819,21 +20880,17 @@ class TestDotnetCallResolution:
         )
         assert _calls(builder, "FILE:a.cs::P::M") == ["FILE:a.cs::Ext::Dbl"] * 2
 
-    def test_the_brace_index_follows_a_line_rewritten_in_place(self, tmp_path):
+    def test_a_block_end_reads_a_line_rewritten_in_place(self, tmp_path):
         """The header of a type whose `{` shares its line is blanked in
-        ``code_lines`` so its tail reads as a line; the brace index cached
-        for it reads the rewritten line, not the text it was built on."""
+        ``code_lines`` so its tail reads as a line; a block found from that
+        line reads it as rewritten, not as the brace index was built on."""
         from descry.dotnet_parser import DotnetParser
 
-        builder = CodeGraphBuilder(tmp_path)
-        parser = DotnetParser(builder)
-        parser.parse(
-            tmp_path / "a.cs",
-            "a.cs",
-            "class C { M(() => {});\n}\nclass D { void M2() { N(); } }\n",
-        )
-        data = parser._braces and parser._braces[1]
-        assert data is None or data[0][0].lstrip().startswith("M(")
+        parser = DotnetParser(CodeGraphBuilder(tmp_path))
+        lines = ["class C { M(() => {", "});", "}"]
+        assert parser._find_block_end(lines, 0) == 3
+        lines[0] = " " * 10 + "M(() => {"
+        assert parser._find_block_end(lines, 0) == 2
 
 
 class TestClangCallResolution:

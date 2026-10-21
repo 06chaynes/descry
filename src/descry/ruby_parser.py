@@ -295,6 +295,7 @@ def _code_lines(lines):
     stack = []
     heredocs = []  # terminators of the heredocs whose bodies come next
     comment = False  # inside `=begin` ... `=end`
+    last = {line.strip(): index for index, line in enumerate(lines)}
     for index, line in enumerate(lines):
         if heredocs:
             if line.strip() == heredocs[0]:
@@ -369,7 +370,7 @@ def _code_lines(lines):
                 char == "<"
                 and (found := _RE_HEREDOC.match(line, k))
                 and (found[1] or found[2] or _opens_literal("".join(code), found[3]))
-                and any(later.strip() == found[3] for later in lines[index + 1 :])
+                and last.get(found[3], -1) > index
             ):
                 heredocs.append(found[3])
                 code.append('""' + " " * (len(found.group()) - 2))

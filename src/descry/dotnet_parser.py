@@ -729,7 +729,9 @@ class DotnetParser(BaseParser):
         # A `.Method(` that goes on a bound chain and is left open.
         opens = self._opens and self._code.lstrip().startswith(".")
         depth = len(self._open_calls)
-        if super()._end_line() and untyped in self.declared[name]:
+        if super()._end_line() and untyped in self.declared[name].between(
+            self._line, self._line
+        ):
             # The call chain bound to the variable types it.
             self.declared[name].remove(untyped)
         if opens and self._pending and self._pending[2] is None:
@@ -1189,8 +1191,6 @@ class DotnetParser(BaseParser):
                     # What follows the `{` on its line is read as a line.
                     i, column = opened[0], opened[1] + 1
                     code_lines[i] = " " * column + code_lines[i][column:]
-                    # The line changed under the index `_find_block_end` reads.
-                    self._braces = None
                     self._attributes = []
                     continue
                 else:

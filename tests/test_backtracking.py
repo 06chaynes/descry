@@ -1,6 +1,7 @@
 """A long run of whitespace is taken once by each parser pattern that meets
 it, not split between the parts that can take it, which made the match time
-cubic in the run's length."""
+cubic in the run's length; and a long file of one line repeated is read in
+time linear in its length."""
 
 import time
 
@@ -8,7 +9,8 @@ import pytest
 
 from descry import dotnet_parser, generate, go_parser, java_parser, ruby_parser
 from descry.clang_parser import _RE_TYPE
-from descry.dart_parser import _RE_LOCAL_FUNCTION, DartParser
+from descry.dart_parser import _RE_CLOSURE, _RE_LOCAL_FUNCTION, DartParser
+from descry.generate import CodeGraphBuilder
 
 _GO_FIELD = next(r for r in go_parser._DECLARATIONS if "(?!(?:return" in r.pattern)
 
@@ -47,6 +49,10 @@ _LONG_RUN = " " * 20000
         (ruby_parser._RE_INLINE_BODY.match, "end" + "\n" * 60000 + "x"),
         (dotnet_parser._RE_PRIMARY_CONSTRUCTOR.match, _LONG_RUN * 3 + "x"),
         (dotnet_parser._RE_PARAMETER.findall, "readonly" + "\t\n " * 20000 + ")"),
+        (_RE_CLOSURE.findall, "\n" * 60000),
+        (generate._TS_IMPORT_RE.findall, "\n" * 60000),
+        (generate._TS_DEFAULT_EXPORT_RE.findall, "\u2028" * 60000),
+        (generate._RUST_USE_RE.findall, "\n" * 60000),
     ],
     ids=[
         "dart-local-function",
@@ -75,6 +81,10 @@ _LONG_RUN = " " * 20000
         "ruby-inline-body-newlines",
         "dotnet-primary-constructor",
         "dotnet-parameter-mixed-run",
+        "dart-closure-blank-lines",
+        "ts-import-blank-lines",
+        "ts-default-export-line-separators",
+        "rust-use-blank-lines",
     ],
 )
 def test_a_whitespace_run_is_taken_once(find, text):
@@ -83,6 +93,90 @@ def test_a_whitespace_run_is_taken_once(find, text):
     find(text)
 
     assert time.perf_counter() - start < 1
+
+
+@pytest.mark.parametrize(
+    ("name", "source"),
+    [
+        ("m.js", "const b = { a: g() };\n" * 20000),
+        ("m.js", "let b = 1;\n" + "b = g();\nb.x();\n" * 10000),
+        (
+            "m.js",
+            "function f(xs) {\n" + "  for (const x of xs) { x.a(); }\n" * 15000 + "}\n",
+        ),
+        ("m.rb", "b = 2\n" * 20000),
+        ("m.rb", "a = []\n" + "a <<-b\n" * 60000),
+        ("m.dart", "void main() {\n" + "  var b = 2;\n" * 20000 + "}\n"),
+        ("m.py", "def f():\n" + "    b = B()\n    b.x()\n" * 20000),
+        ("m.py", "def f(xs):\n" + "    for x in xs:\n        x.a()\n" * 10000),
+        (
+            "M.java",
+            "class M {\n  void m() {\n"
+            + "    B b = new B();\n    b.x();\n" * 10000
+            + "  }\n}\n",
+        ),
+        (
+            "M.cs",
+            "class M {\n  void N() {\n"
+            + "    var b = new B();\n    b.X();\n" * 8000
+            + "  }\n}\n",
+        ),
+        (
+            "M.cs",
+            "".join(
+                f"class C{i} {{ int M() {{ return {i}; }} }}\n" for i in range(3000)
+            ),
+        ),
+        (
+            "m.go",
+            "package m\nfunc f() error {\n"
+            + "\tx, err := g()\n\tif err != nil {\n\t\treturn err\n\t}\n\tx.A()\n"
+            * 10000
+            + "\treturn nil\n}\n",
+        ),
+        (
+            "m.php",
+            "<?php\nfunction f($xs) {\n"
+            + "    foreach ($xs as $x) { $x->a(); }\n" * 8000
+            + "}\n",
+        ),
+        (
+            "src/lib.rs",
+            "".join(
+                f"fn f{i}<T: Clone>(a: T) -> T {{ a.clone() }}\n" for i in range(12000)
+            ),
+        ),
+    ],
+    ids=[
+        "js-rebinds",
+        "js-reassignments",
+        "js-for-of",
+        "ruby-rebinds",
+        "ruby-shifts",
+        "dart-rebinds",
+        "python-rebinds",
+        "python-loops",
+        "java-rebinds",
+        "dotnet-rebinds",
+        "dotnet-types",
+        "go-errors",
+        "php-loops",
+        "rust-generics",
+    ],
+)
+def test_a_repeated_line_is_read_in_linear_time(name, source, tmp_path):
+    """A line that binds a name again, loops over it, declares a type or a
+    generic function costs the same time however many came before it:
+    seconds in all, where it took minutes."""
+    (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / name).write_text(source)
+    start = time.perf_counter()
+
+    builder = CodeGraphBuilder(tmp_path)
+    builder.process_directory()
+    builder.resolve_references()
+
+    assert time.perf_counter() - start < 10
 
 
 def test_the_patterns_still_match_source():

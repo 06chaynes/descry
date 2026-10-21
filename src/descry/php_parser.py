@@ -322,7 +322,7 @@ def _branches(codes: list[str]) -> list:
     def body(offset):
         """``(start, end)`` offsets of the block or the statement at
         ``offset``, and the offset past it."""
-        offset = len(text) - len(text[offset:].lstrip())
+        offset = re.compile(r"\s*").match(text, offset).end()
         if text[offset : offset + 1] == "{":
             close = closer.get(offset, len(text))
             return (offset + 1, close), close + 1
@@ -654,7 +654,7 @@ class PhpParser(BaseParser):
             if (name, first, end) not in self._bound_by:
                 self._bound_by[name, first, end] = {
                     d[1]
-                    for d in self.declared.get(name, ())
+                    for d in self.declared.between(name, first[0], end[0])
                     if first <= (d[0], self._column(name, d) or 0) <= end
                 }
             if self._bound_by[name, first, end] - {seen[1]}:
@@ -680,7 +680,7 @@ class PhpParser(BaseParser):
         """Leave the variable ``name`` without a known type from ``column``
         of ``lineno`` on, unless a declaration on that line gives it one."""
         entries = self.declared.setdefault(name, [])
-        if not any(entry[0] == lineno for entry in entries):
+        if not entries.between(lineno, lineno):
             entries.append((lineno, "?", self._binds_file(name), column))
 
     def _class_name(self, written):
@@ -1060,7 +1060,7 @@ class PhpParser(BaseParser):
                 told = {t["name"]: t["type"] for t in _RE_PARAM_TAG.finditer(docstring)}
                 for parameter, written in told.items():
                     entries = self.declared.setdefault(parameter, [])
-                    native = [e for e in entries if lineno <= e[0] <= last + 1]
+                    native = entries.between(lineno, last + 1)
                     if not native:
                         entries.append(
                             (lineno, f"{written}()", self._binds_file(parameter), None)

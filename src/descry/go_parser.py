@@ -398,9 +398,9 @@ class GoParser(BaseParser):
             line, call, _, column = bound
             # The call's whole result, bound before the line ended too
             entries = self.declared[name]
-            entries[:] = [
-                e for e in entries if (e[0], e[1], e[3]) != (line, call, column)
-            ]
+            for e in entries.between(line, line):
+                if (e[1], e[3]) == (call, column):
+                    entries.remove(e)
             names = [name, *(n for n, _ in self._later if self._declares)]
             for position, named in enumerate(names):
                 self._settle(named, line, column, f"{call}.@{position}")
@@ -432,7 +432,7 @@ class GoParser(BaseParser):
     def _declared_on(self, name, lineno):
         """The type a declaration on line ``lineno`` gives ``name``, as it
         is written there; None where none does."""
-        held = (d[1] for d in self.declared.get(name, ()) if d[0] == lineno)
+        held = (d[1] for d in self.declared.between(name, lineno, lineno))
         held = next(held, "")
         return held[:-2].replace("::", ".") if held.endswith("()") else None
 

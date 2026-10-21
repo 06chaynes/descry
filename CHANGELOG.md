@@ -71,9 +71,16 @@ Python SDK v2, and a full-tree review's findings are fixed.
   thousands of branches in a Python, Ruby or PHP function, each of whose
   merges went over every name, and thousands of nested blocks, whose ends
   were each counted from their start. A run of blank lines in a
-  JavaScript, TypeScript or Rust file took time quadratic in its length,
-  each line looking back over the run or a pattern over the file
-  starting at each of them: 30,000 took 21 s; it is now read once.
+  JavaScript, TypeScript, Rust or Dart file took time quadratic in its
+  length, each line looking back over the run or a pattern over the file
+  starting at each of them: 30,000 took 21 s. So did, in every language
+  but C/C++, a name bound again and again or looped over, each binding,
+  read and merge of branches going over all its bindings (10,000 took up
+  to a minute and a half), Rust's generic functions, JavaScript's
+  `require`s and object literals, each going over those before it or the
+  rest of the file, Ruby's `a <<-b`, and a C# file of many types, its
+  braces counted again from its start for each (10,000 one-line classes
+  took over five minutes). Each is now read once.
 - **Writes into the cache.** The cache directory sits in the indexed
   repository by default, which can ship it. The graph and the embedding
   cache are written through new, randomly named temporaries, so a symlink
@@ -572,7 +579,9 @@ Python SDK v2, and a full-tree review's findings are fixed.
   next line with another inside a `${...}`, which ended the block around
   it. A JavaScript or TypeScript import, and `export default`, one past
   another statement on its line too and none in a comment or a literal,
-  its name the value where the statement ends after it, as JavaScript
+  its words parted by any of JavaScript's white space and line breaks, a
+  BOM and a no-break space too, its name the value where the statement
+  ends after it, as JavaScript
   ends one at a line break, binds what its module exports under its kind:
   a default import the module's default (`export default f`, a
   declaration or an object after it), whatever it is named, where

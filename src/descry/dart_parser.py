@@ -28,6 +28,7 @@ from descry.generate import (
     _bracketed_parts,
     _generic_metadata,
     _innermost,
+    _run_start,
     _strip_generics,
     _strip_parens,
     blank_strings,
@@ -251,7 +252,7 @@ _RE_UNTYPED = re.compile(
 _RE_DESTRUCTURED = re.compile(r"\b(?:var|final)\s*[(\[]([^()\[\]]*)[)\]]\s*=")
 # The parameter list of a function expression: `(a, b) =>`, `(a) async {`
 _RE_CLOSURE = re.compile(
-    r"(?:^|[(,=:?\[{>]|\breturn)\s*\(([^()]*)\)\s*(?:async\*?\s*|sync\*\s*)?(?:=>|\{)",
+    r"(?:^[ \t]*|(?:[(,=:?\[{>]|\breturn)\s*)\(([^()]*)\)\s*(?:async\*?\s*|sync\*\s*)?(?:=>|\{)",
     re.MULTILINE,
 )
 
@@ -1093,10 +1094,14 @@ class DartParser(BaseParser):
                 return out
             if left != "(" or right != ")" or closer.get(opened) != closed:
                 return out
-            head = text[:opened].rstrip()
+            # What ends before the `(`: enough of it for a keyword and the
+            # character before
+            cut = _run_start(text, opened)
+            base = max(cut - 6, 0)
+            head = text[base:cut]
             keyword = re.search(r"(?<![\w$.])(?:if|while)$", head)
             if re.search(r"(?<![\w$)\]])!$", head):
-                start, end, promoted = len(head) - 1, closed + 1, not promoted
+                start, end, promoted = cut - 1, closed + 1, not promoted
             elif keyword:
                 break
             elif re.search(r"[\w$)\]>]$", head):
@@ -1110,10 +1115,10 @@ class DartParser(BaseParser):
             return [*out, (closed + 1, last)]
         # Past a loop that only its condition ends, the test holds.
         body = text[closed:last]
-        prior = head[: keyword.start()].rstrip()
-        done = self._openers.get(len(prior) - 1) if prior.endswith("}") else None
+        prior = _run_start(text, base + keyword.start())
+        done = self._openers.get(prior - 1) if text[prior - 1 : prior] == "}" else None
         if done is not None and re.search(r"\bdo\s*$", self._line_before(done)):
-            body = text[done : len(prior)]
+            body = text[done:prior]
         if not re.search(r"\bbreak\b", body):
             block = _innermost(spans, opened)
             out.append((last + 1, block[1] if block else len(text)))
@@ -1168,8 +1173,8 @@ class DartParser(BaseParser):
         line = index + 1
         for found in _DECLARATIONS[1].finditer(text, starts[index], starts[line]):
             name, held = found["name"], f"{self._scanned_type(found.groupdict())}()"
-            for entry in self.declared.get(name, ()):
-                if entry[:2] == (line, held) and (name, entry) not in self._promotions:
+            for entry in self.declared.between(name, line, line):
+                if entry[1] == held and (name, entry) not in self._promotions:
                     spans = self._promoted(line, name, held)
                     self._promote(name, entry, spans, found[0].endswith("?"))
         for _, name, _, bodies in self._switches.get(index, ()):
@@ -1550,7 +1555,7 @@ class DartParser(BaseParser):
             for param in params:
                 self.add_local(node_id, param)
                 # One the line types, or tests with `is`, holds what that says.
-                if not any(d[0] == index + 1 for d in self.declared.get(param, ())):
+                if not self.declared.between(param, index + 1, index + 1):
                     self.declared.setdefault(param, []).append(
                         (index + 1, "?", False, None)
                     )

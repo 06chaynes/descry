@@ -23,6 +23,7 @@ from descry.generate import (
     _JAVA_BOXES,
     _STATEMENT_START_RE,
     BaseParser,
+    _BoundMap,
     _bracketed_parts,
     _generic_metadata,
     _innermost,
@@ -344,15 +345,23 @@ class JavaParser(BaseParser):
             return f"{self._supers[-1][1] if self._supers else 'super'}().{path}"
         if path.startswith("this."):
             return f"{root}().{path[5:]}"
+        # The last line from ``since`` to the call's that binds the root in
+        # scope with a type, and without one
         typed, bound = (
-            [
-                d[0]
-                for d in table.get(root, ())
-                if since <= d[0] <= lineno and self._in_scope(root, d, lineno)
-            ]
+            next(
+                (
+                    d[0]
+                    for held in table[root].lines_down(lineno, since)
+                    for d in held
+                    if self._in_scope(root, d, lineno)
+                ),
+                0,
+            )
+            if root in table
+            else 0
             for table in (self.declared, self._untyped)
         )
-        if max(bound, default=0) > max(typed, default=0):
+        if bound > typed:
             return f"?.{path}"
         if not typed:
             return f"{root}.{path}"
@@ -485,7 +494,7 @@ class JavaParser(BaseParser):
         )
         # name -> each `(line, None, False, column)` where a `var` or a
         # lambda binds it without a type
-        self._untyped = {}
+        self._untyped = _BoundMap(None)
         for lineno, line in enumerate(lines, 1):
             for found in _RE_UNTYPED.finditer(line):
                 params = found.span(found.lastindex)
