@@ -26466,6 +26466,14 @@ class TestModuleAliases:
     ):
         assert self._load_calls(tmp_path, specifier) == ["REF:store.list"]
 
+    def test_a_node_built_in_module_is_outside(self, tmp_path):
+        """A module Node provides, bare or with `node:`, is outside the
+        project, as Node resolves it before any package; a name it provides
+        only with `node:` is a package's when bare."""
+        assert self._load_calls(tmp_path, "fs") == []
+        assert self._load_calls(tmp_path, "node:test") == []
+        assert self._load_calls(tmp_path, "test") == ["REF:store.list"]
+
     def test_package_that_is_not_declared_is_not_known(self, tmp_path):
         """A package the project does not declare may be its own or not:
         the call is left unresolved, not dropped."""

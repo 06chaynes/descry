@@ -18846,7 +18846,11 @@ class CallResolver:
             return []
         package = "/".join(specifier.split("/")[: 2 if specifier[0] == "@" else 1])
         outside = package in self.builder.js_dependencies
-        if outside or specifier.startswith("node:"):
+        if (
+            outside
+            or specifier.startswith("node:")
+            or specifier in _stdlib.modules("node")
+        ):
             return _EXTERNAL
         # A name no package can have (`$lib`, `#internal`, `@/x`) is an alias
         # of the project's own.

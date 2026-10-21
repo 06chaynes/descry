@@ -62,6 +62,7 @@ KEYS = (
     "callbacks",
     "extensions",
     "functional",
+    "modules",
 )
 
 

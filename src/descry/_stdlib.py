@@ -23,6 +23,10 @@
     functional qualified name of a type a lambda converts to, a C# delegate
                type or a Java functional interface -> how many parameters
                the lambda declares
+    modules    the names of the modules the runtime provides, as an import
+               writes them
+
+`node.json` holds `source` and `modules` alone: Node's built-in modules.
 
 `variants`, `callbacks`, `extensions` and `functional` are there only for a
 language that has them.
@@ -47,6 +51,12 @@ def load(lang: str) -> dict:
     if not path.is_file():
         return {"source": "", "types": {}, "functions": {}, "scope": {}}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@cache
+def modules(lang: str) -> frozenset:
+    """The modules `lang`'s data names as the runtime's own."""
+    return frozenset(load(lang).get("modules", ()))
 
 
 @cache

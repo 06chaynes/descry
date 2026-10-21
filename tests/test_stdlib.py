@@ -36,6 +36,7 @@ DOWNLOADS = {
     "php": "phpstorm-stubs/phpstorm-stubs-e4f5f6c3de39f3bab3e9f3fca4b8cdb8b061e681.tar.gz",
     "ruby": "rbs",
     "dart": "dart-sdk",
+    "node": "types-node/node-26.6.5.tgz",
 }
 
 # (language, path into the loaded data, what is there)
@@ -471,7 +472,16 @@ def test_a_cpp_specialization_is_its_template_s():
     assert [k for k in types if k.startswith("std::vector`")] == ["std::vector`2"]
 
 
-@pytest.mark.parametrize("lang", LANGUAGES)
+def test_node_s_modules_are_named_as_an_import_writes_them():
+    """A built-in module is named bare and with `node:`, but one Node
+    provides only with `node:` is named only so: a bare `test` is a
+    package's."""
+    modules = load("node")["modules"]
+    assert {"fs", "node:fs", "fs/promises", "path", "node:test"} <= set(modules)
+    assert "test" not in modules
+
+
+@pytest.mark.parametrize("lang", (*LANGUAGES, "node"))
 def test_file_is_as_the_generator_writes_it(lang):
     text = _file(lang).read_text(encoding="utf-8")
     assert text == json.dumps(json.loads(text), indent=1, sort_keys=True) + "\n"
@@ -482,7 +492,7 @@ def test_fact(lang, path, expected):
     assert reduce(lambda node, key: node[key], path, load(lang)) == expected
 
 
-@pytest.mark.parametrize("lang", (*LANGUAGES, "c", "cpp"))
+@pytest.mark.parametrize("lang", (*LANGUAGES, "c", "cpp", "node"))
 def test_generator_reproduces_the_file(lang, tmp_path):
     if lang == "java":
         source = Path(os.environ.get("JAVA_HOME", ""))

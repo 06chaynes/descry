@@ -62,6 +62,21 @@ parameters, `unknown` where the signatures differ, and the type parameter of
 the signature that the function returns, where it returns one (`U` for
 `Array.map`); a `this` parameter is left out.
 
+## Node's built-in modules
+
+Source: the `.d.ts` files of the `@types/node` npm package, version 26.6.5.
+`node.json` holds only `modules`: each name a `declare module` there gives,
+bare and with `node:` as the files write them. A module Node provides only
+with `node:` (`node:test`) is named only so.
+
+    mkdir -p "$DESCRY_STDLIB_SOURCES/types-node"
+    curl -fLo "$DESCRY_STDLIB_SOURCES/types-node/node-26.6.5.tgz" \
+        https://registry.npmjs.org/@types/node/-/node-26.6.5.tgz
+    python -I tools/stdlib/gen_node.py \
+        "$DESCRY_STDLIB_SOURCES/types-node/node-26.6.5.tgz" \
+        src/descry/stdlib/node.json
+
+sha256 `e4e47dac860469aa5aa79043a6b83396299d9cd6ee23b30fcb2074625ac8dbdf`.
 ## Python
 
 Source: the `stdlib` stubs of typeshed at commit
