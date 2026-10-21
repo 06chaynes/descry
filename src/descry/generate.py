@@ -13117,14 +13117,15 @@ _JS_EXPORTED_DECLARATION_RE = re.compile(
     re.MULTILINE,
 )
 # What a module exports as its default, `export default <name>` or a
-# declaration of a name after it, and whole, `export = <name>`
+# declaration of a name after it, and whole, `export = <name>`, starting a
+# line or past another statement's `;`
 _TS_DEFAULT_EXPORT_RE = re.compile(
-    r"^[ \t]*(?:export[ \t]+(default)[ \t]+(?:"
+    r"(?:^|(?<=;))[ \t]*(?:export[ \t]+(default)[ \t]+(?:"
     # `cond && function f`, called, is `f`: a function is never falsy.
     r"(?:[\w$.]+\s*&&\s*)*"
     r"(?:(?:async[ \t]+)?function\b[ \t]*\*?|(?:abstract[ \t]+)?class\b|interface\b)"
-    r"[ \t]*(?!extends\b|implements\b)([\w$]+)|([\w$]+)(?=[ \t]*;?[ \t]*$))"
-    r"|export[ \t]*=[ \t]*([\w$]+)(?=[ \t]*;?[ \t]*$))",
+    r"[ \t]*(?!extends\b|implements\b)([\w$]+)|([\w$]+)(?=[ \t]*(?:;|$)))"
+    r"|export[ \t]*=[ \t]*([\w$]+)(?=[ \t]*(?:;|$)))",
     re.MULTILINE,
 )
 # `import <clause> from "<specifier>"`, the clause possibly over several
@@ -14520,7 +14521,8 @@ class TSParser(BaseParser):
             es.extend(
                 (exported, specifier, original, file_id) for exported, original in names
             )
-        for default, *names in _TS_DEFAULT_EXPORT_RE.findall(content):
+        for found in filter(in_code, _TS_DEFAULT_EXPORT_RE.finditer(content)):
+            default, *names = found.groups("")
             es.append(("default" if default else "=", "", "".join(names), file_id))
         names = self.builder.import_names.setdefault(file_id, {})
         for found in filter(in_code, _TS_IMPORT_RE.finditer(content)):

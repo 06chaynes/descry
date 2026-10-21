@@ -573,7 +573,8 @@ class PhpParser(BaseParser):
         text, starts, closer = _js_brackets(codes)
         self._starts, self._takes, branches = starts, {}, []
         # Name -> the body of each closure that takes it by reference, in
-        # order, and the values each binds it to, read once it is past
+        # order, and by name and body the values the closure binds it to,
+        # read once it is past
         self._by_reference, self._bound_by = {}, {}
 
         # Read last first: an arrow function's body that holds another one
@@ -650,13 +651,13 @@ class PhpParser(BaseParser):
                 break
             if end >= at:
                 continue
-            if (first, end) not in self._bound_by:
-                self._bound_by[first, end] = {
+            if (name, first, end) not in self._bound_by:
+                self._bound_by[name, first, end] = {
                     d[1]
                     for d in self.declared.get(name, ())
                     if first <= (d[0], self._column(name, d) or 0) <= end
                 }
-            if self._bound_by[first, end] - {seen[1]}:
+            if self._bound_by[name, first, end] - {seen[1]}:
                 return seen[0], "?", seen[2], seen[3]
         return seen
 

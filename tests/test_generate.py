@@ -12983,6 +12983,35 @@ class TestTypeScriptCallResolution:
         )
         assert _calls(builder, "FILE:use.js") == ["REF:a.top", "REF:b.top", "REF:c.top"]
 
+    def test_a_default_export_past_another_statement_on_its_line_binds(self, tmp_path):
+        """`export default <name>` past another statement's `;`, or with
+        one after it on its line, is the module's default; one in a comment
+        is none, and an expression's is no name's."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": "const a = { use() {} }; export default a;\n",
+                "n.js": (
+                    "const b = { use() {} }; // export default b;\n"
+                    "export default b; foo();\n"
+                ),
+                "k.js": "const c = { use() {} };\nexport default c + 1;\n",
+                "u.js": """
+                import a from "./m.js";
+                import b from "./n.js";
+                import c from "./k.js";
+                a.use();
+                b.use();
+                c.use();
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:u.js") == [
+            "FILE:m.js::a::use",
+            "FILE:n.js::b::use",
+            "REF:c.use",
+        ]
+
     def test_an_import_past_another_statement_on_its_line_binds(self, tmp_path):
         """An `import` past another statement's `;` on its line binds its
         names; one in a comment or a string binds none."""
@@ -18758,6 +18787,41 @@ class TestPhpCallResolution:
             },
         )
         assert "FILE:a.php::C::u" not in _calls(builder, "FILE:a.php::M::m")
+
+    def test_each_variable_a_closure_takes_by_reference_holds_its_own(self, tmp_path):
+        """A closure that takes two variables by reference binds each its
+        own: past a rebinding of one, it holds what that gives or what the
+        closure binds that one to."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.php": """<?php
+                class C { public function u() {} }
+                class D { public function u() {} }
+                class M {
+                    public function m() {
+                        $f = function () use (&$a, &$b) {
+                            $a = new C();
+                            $b = new D();
+                        };
+                        $a = new C();
+                        $b = new C();
+                        $f();
+                        $a->u();
+                        $b->u();
+                    }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.php::M::m") == [
+            "FILE:a.php::C",
+            "FILE:a.php::C",
+            "FILE:a.php::C",
+            "FILE:a.php::C::u",
+            "FILE:a.php::D",
+            "REF:$b->u",
+        ]
 
     def test_a_doc_comment_types_a_variable_as_its_declaration_does(self, tmp_path):
         """`/** @var T|null $x */` types `$x` as a declaration of `?T`
