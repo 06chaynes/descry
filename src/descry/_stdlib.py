@@ -23,13 +23,14 @@
     functional qualified name of a type a lambda converts to, a C# delegate
                type or a Java functional interface -> how many parameters
                the lambda declares
-    modules    the names of the modules the runtime provides, as an import
+    modules    the names of the modules the runtime's declarations give, as an import
                writes them
 
-`node.json` holds `source` and `modules` alone: Node's built-in modules.
+`node.json` holds `source` and `modules` alone: Node's built-in modules as
+`@types/node` declares them.
 
-`variants`, `callbacks`, `extensions` and `functional` are there only for a
-language that has them.
+`variants`, `callbacks`, `extensions`, `functional` and `modules` are there
+only for a language that has them.
 C++ (`cpp.json`, read with `c.json`) keys a class by its name and the number
 of its template parameters, `std::vector`2`, a specialization being its
 template's, and gives each type `aliases`, its member typedefs by name; its
@@ -55,7 +56,8 @@ def load(lang: str) -> dict:
 
 @cache
 def modules(lang: str) -> frozenset:
-    """The modules `lang`'s data names as the runtime's own."""
+    """The modules `lang`'s data names as the runtime's declarations give
+    them."""
     return frozenset(load(lang).get("modules", ()))
 
 

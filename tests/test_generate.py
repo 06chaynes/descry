@@ -13383,6 +13383,26 @@ class TestTypeScriptCallResolution:
         assert _calls(builder, "FILE:m.js::f") == ["REF:x.use"]
         assert _calls(builder, "FILE:m.js::g") == ["FILE:m.js::b::use"]
 
+    def test_a_parameter_hides_the_constant_an_alias_would_name(self, tmp_path):
+        """A constant whose value is a name holds what that name is where it
+        is written: a parameter, a `var` or a `catch` binding of the name
+        hides an outer constant of it."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.js": """
+                const config = { get() {} };
+                function h(config) { const c = config; c.get(); }
+                function v() { var config = 1; const c = config; c.get(); }
+                function k() { try {} catch (config) { const c = config; c.get(); } }
+                function ok() { const c = config; c.get(); }
+                """,
+            },
+        )
+        for name in ("h", "v", "k"):
+            assert _calls(builder, f"FILE:m.js::{name}") == ["REF:c.get"]
+        assert _calls(builder, "FILE:m.js::ok") == ["FILE:m.js::config::get"]
+
     def test_an_import_past_another_statement_on_its_line_binds(self, tmp_path):
         """An `import` past another statement's `;` on its line binds its
         names; one in a comment or a string binds none."""
@@ -26473,6 +26493,26 @@ class TestModuleAliases:
         assert self._load_calls(tmp_path, "fs") == []
         assert self._load_calls(tmp_path, "node:test") == []
         assert self._load_calls(tmp_path, "test") == ["REF:store.list"]
+
+    def test_a_built_in_is_outside_ahead_of_a_package_of_its_name(self, tmp_path):
+        """Node resolves `require('fs')` to its own module even where the
+        project has a workspace package named `fs`; `new EventEmitter()`
+        of `require('events')` is no call of the file's constant."""
+        builder = _index(
+            tmp_path,
+            {
+                "package.json": '{"name": "root"}',
+                "packages/fs/package.json": '{"name": "fs", "main": "index.js"}',
+                "packages/fs/index.js": (
+                    "function readFile() {}\nmodule.exports = { readFile };\n"
+                ),
+                "src/use.js": (
+                    "const fs = require('fs');\nconst EventEmitter = require('events');\n"
+                    "function f() {\n  fs.readFile();\n  new EventEmitter();\n}\n"
+                ),
+            },
+        )
+        assert _calls(builder, "FILE:src/use.js::f") == []
 
     def test_package_that_is_not_declared_is_not_known(self, tmp_path):
         """A package the project does not declare may be its own or not:

@@ -27,8 +27,8 @@ paths used below, and the JDK at `$JAVA_HOME`.
   `builtins.object`).
 - A class that a module hands on under its own name (`asyncio.Queue`,
   `os.FileInfo`) is a type whose one base is the class it is.
-- `variants`, `callbacks`, `extensions` and `functional` are written only by
-  a generator that has them.
+- `variants`, `callbacks`, `extensions`, `functional` and `modules` are
+  written only by a generator that has them.
 
 ## TypeScript and JavaScript
 
@@ -77,6 +77,7 @@ with `node:` (`node:test`) is named only so.
         src/descry/stdlib/node.json
 
 sha256 `e4e47dac860469aa5aa79043a6b83396299d9cd6ee23b30fcb2074625ac8dbdf`.
+
 ## Python
 
 Source: the `stdlib` stubs of typeshed at commit

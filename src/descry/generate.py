@@ -15729,14 +15729,23 @@ class TSParser(BaseParser):
                     arrow_id = cid
                     own_defs.append((cid, match.end(1)))
                     enter(cid, lineno, _statement_end(code_lines, i) + 1, held[1])
+                written = (
+                    val
+                    and line[match.start(3) : _value_end(code_lines[i], match.start(3))]
+                )
+                if written and re.fullmatch(r"[\w$]+", written.strip()):
+                    # The binding the name is there, which a nearer one
+                    # without a node may be
+                    bound = self._read_from(
+                        match.start(3), self._declaration, written.strip(), lineno
+                    )
+                    if bound:
+                        self.builder.js_aliases[cid] = self.source_line(bound[1][0])
                 self.builder.add_node(
                     cid,
                     "Constant",
                     name=name,
-                    value=val
-                    and line[
-                        match.start(3) : _value_end(code_lines[i], match.start(3))
-                    ],
+                    value=written,
                     value_type=value_type,
                     lineno=lineno,
                     docstring=doc,
@@ -18809,6 +18818,9 @@ class CallResolver:
         aliased = self._js_alias(specifier, folder)
         if aliased is not None:
             return aliased
+        # Node resolves its own modules before any package.
+        if specifier.startswith("node:") or specifier in _stdlib.modules("node"):
+            return _EXTERNAL
         if specifier.partition("/")[0] == "$lib":
             # SvelteKit: `$lib` is `src/lib` beside the nearest configuration.
             for above in _ancestors(folder):
@@ -18845,12 +18857,7 @@ class CallResolver:
                             return [found]
             return []
         package = "/".join(specifier.split("/")[: 2 if specifier[0] == "@" else 1])
-        outside = package in self.builder.js_dependencies
-        if (
-            outside
-            or specifier.startswith("node:")
-            or specifier in _stdlib.modules("node")
-        ):
+        if package in self.builder.js_dependencies:
             return _EXTERNAL
         # A name no package can have (`$lib`, `#internal`, `@/x`) is an alias
         # of the project's own.
@@ -22362,15 +22369,16 @@ class CallResolver:
 
     def _aliased(self, held):
         """``held``, or where it is a constant whose value is the name of
-        another, what that names, in turn: the same value."""
+        another, what that names, in turn: the same value. The name is
+        followed only to the declaration the parser read it as, so a nearer
+        binding without a node, a parameter's, hides an outer constant."""
         seen = set()
         while held and held not in seen and self.nodes[held]["type"] == "Constant":
             seen.add(held)
+            line = self.builder.js_aliases.get(held)
             value = self.nodes[held]["metadata"].get("value") or ""
-            named = re.fullmatch(r"[\w$]+", value) and self._lexical(
-                value, held, skip_classes=True
-            )
-            if not named:
+            named = line and self._lexical(value.strip(), held, skip_classes=True)
+            if not named or self.nodes[named]["metadata"].get("lineno") != line:
                 break
             held = named
         return held
@@ -23700,6 +23708,9 @@ class CodeGraphBuilder:
         self.import_names = {}
         # JS/TS file ID -> each name a `require` binds -> the line it does on
         self.required_names = {}
+        # JS/TS constant ID -> the source line of the declaration its value,
+        # a name, names where the constant is declared
+        self.js_aliases = {}
         # (defining file or class ID, fixture name) -> (function ID, origin
         # path of the value the fixture returns or yields, if it has one,
         # whether it yields it)
