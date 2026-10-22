@@ -96,68 +96,95 @@ def test_a_whitespace_run_is_taken_once(find, text):
 
 
 @pytest.mark.parametrize(
-    ("name", "source"),
+    ("name", "source", "count"),
     [
-        ("m.js", "const b = { a: g() };\n" * 20000),
-        ("m.js", "let b = 1;\n" + "b = g();\nb.x();\n" * 10000),
+        ("m.js", lambda n: "const b = { a: g() };\n" * n, 20000),
+        ("m.js", lambda n: "let b = 1;\n" + "b = g();\nb.x();\n" * n, 10000),
         (
             "m.js",
-            "function f(xs) {\n" + "  for (const x of xs) { x.a(); }\n" * 15000 + "}\n",
+            lambda n: (
+                "function f(xs) {\n" + "  for (const x of xs) { x.a(); }\n" * n + "}\n"
+            ),
+            15000,
         ),
-        ("m.rb", "b = 2\n" * 20000),
-        ("m.rb", "a = []\n" + "a <<-b\n" * 60000),
-        ("m.dart", "void main() {\n" + "  var b = 2;\n" * 20000 + "}\n"),
-        ("m.py", "def f():\n" + "    b = B()\n    b.x()\n" * 20000),
-        ("m.py", "def f(xs):\n" + "    for x in xs:\n        x.a()\n" * 10000),
+        ("m.rb", lambda n: "b = 2\n" * n, 20000),
+        ("m.rb", lambda n: "a = []\n" + "a <<-b\n" * n, 60000),
+        ("m.dart", lambda n: "void main() {\n" + "  var b = 2;\n" * n + "}\n", 20000),
+        ("m.py", lambda n: "def f():\n" + "    b = B()\n    b.x()\n" * n, 20000),
+        (
+            "m.py",
+            lambda n: "def f(xs):\n" + "    for x in xs:\n        x.a()\n" * n,
+            10000,
+        ),
         (
             "M.java",
-            "class M {\n  void m() {\n"
-            + "    B b = new B();\n    b.x();\n" * 10000
-            + "  }\n}\n",
-        ),
-        (
-            "M.cs",
-            "class M {\n  void N() {\n"
-            + "    var b = new B();\n    b.X();\n" * 8000
-            + "  }\n}\n",
-        ),
-        (
-            "M.cs",
-            "".join(
-                f"class C{i} {{ int M() {{ return {i}; }} }}\n" for i in range(3000)
+            lambda n: (
+                "class M {\n  void m() {\n"
+                + "    B b = new B();\n    b.x();\n" * n
+                + "  }\n}\n"
             ),
+            10000,
+        ),
+        (
+            "M.cs",
+            lambda n: (
+                "class M {\n  void N() {\n"
+                + "    var b = new B();\n    b.X();\n" * n
+                + "  }\n}\n"
+            ),
+            8000,
+        ),
+        (
+            "M.cs",
+            lambda n: "".join(
+                f"class C{i} {{ int M() {{ return {i}; }} }}\n" for i in range(n)
+            ),
+            3000,
         ),
         (
             "m.go",
-            "package m\nfunc f() error {\n"
-            + "\tx, err := g()\n\tif err != nil {\n\t\treturn err\n\t}\n\tx.A()\n"
-            * 10000
-            + "\treturn nil\n}\n",
+            lambda n: (
+                "package m\nfunc f() error {\n"
+                + "\tx, err := g()\n\tif err != nil {\n\t\treturn err\n\t}\n\tx.A()\n"
+                * n
+                + "\treturn nil\n}\n"
+            ),
+            10000,
         ),
         (
             "m.php",
-            "<?php\nfunction f($xs) {\n"
-            + "    foreach ($xs as $x) { $x->a(); }\n" * 8000
-            + "}\n",
+            lambda n: (
+                "<?php\nfunction f($xs) {\n"
+                + "    foreach ($xs as $x) { $x->a(); }\n" * n
+                + "}\n"
+            ),
+            8000,
         ),
         (
             "src/lib.rs",
-            "".join(
-                f"fn f{i}<T: Clone>(a: T) -> T {{ a.clone() }}\n" for i in range(12000)
+            lambda n: "".join(
+                f"fn f{i}<T: Clone>(a: T) -> T {{ a.clone() }}\n" for i in range(n)
             ),
+            12000,
         ),
         (
             "m.js",
-            "function f(v) {\n  let b;\n"
-            + "  switch (v) { case 1: b = g(); break; default: b = h(); }\n  b.x();\n"
-            * 5000
-            + "}\n",
+            lambda n: (
+                "function f(v) {\n  let b;\n"
+                + "  switch (v) { case 1: b = g(); break; default: b = h(); }\n  b.x();\n"
+                * n
+                + "}\n"
+            ),
+            5000,
         ),
         (
             "src/lib.rs",
-            "fn f(v: Option<B>) {\n"
-            + "    match v { Some(b) => b.a(), None => () }\n" * 10000
-            + "}\n",
+            lambda n: (
+                "fn f(v: Option<B>) {\n"
+                + "    match v { Some(b) => b.a(), None => () }\n" * n
+                + "}\n"
+            ),
+            10000,
         ),
     ],
     ids=[
@@ -179,19 +206,25 @@ def test_a_whitespace_run_is_taken_once(find, text):
         "rust-matches",
     ],
 )
-def test_a_repeated_line_is_read_in_linear_time(name, source, tmp_path):
+def test_a_repeated_line_is_read_in_linear_time(name, source, count, tmp_path):
     """A line that binds a name again, loops over it, matches it, or
     declares a type or a generic function costs the same time however many
-    came before it: seconds in all, where it took minutes."""
-    (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
-    (tmp_path / name).write_text(source)
-    start = time.process_time()
+    came before it: four times the lines take about four times as long,
+    where they took sixteen times, minutes in all. The ratio, not a time,
+    is checked, so a slow machine does not fail it."""
 
-    builder = CodeGraphBuilder(tmp_path)
-    builder.process_directory()
-    builder.resolve_references()
+    def reading(lines):
+        root = tmp_path / str(lines)
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(source(lines))
+        start = time.process_time()
+        builder = CodeGraphBuilder(root)
+        builder.process_directory()
+        builder.resolve_references()
+        return time.process_time() - start
 
-    assert time.process_time() - start < 10
+    quarter = reading(count // 4)
+    assert reading(count) < 8 * max(quarter, 0.05)
 
 
 def test_the_patterns_still_match_source():
