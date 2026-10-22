@@ -5452,9 +5452,10 @@ class TestRustCallResolution:
 
     def test_a_type_alias_is_the_type_it_names(self, tmp_path):
         """A Rust type alias, of its module, imported or re-exported by a
-        glob, generic or not, on one line or more, is the type it names, read
-        in its module with its arguments; one its module declares as
-        different types is not known."""
+        glob, generic or not, on one line or more, borrowed or of an alias, is
+        the type it names, read in its module with its arguments; one its
+        module declares as different types is not known, and `()` is no
+        different type."""
         builder = _index(
             tmp_path,
             {
@@ -5478,6 +5479,24 @@ class TestRustCallResolution:
                 #[cfg(not(a))]
                 type Clock = ();
                 pub fn clocked(c: Clock) { c.go(); }
+                #[cfg(a)]
+                type Tick = A;
+                #[cfg(not(a))]
+                type Tick = B;
+                pub fn ticked(t: Tick) { t.go(); }
+                type Ref<'a, T> = &'a T;
+                pub fn borrowed(r: Ref<'_, B>) { r.go(); }
+                type Base = A;
+                type Top = Base;
+                impl Top { pub fn top(&self) {} }
+                pub fn chained(t: Top) { t.top(); t.go(); }
+                pub mod timed {
+                    #[cfg(a)]
+                    pub type A = crate::A;
+                    #[cfg(not(a))]
+                    pub type A = ();
+                    pub fn timed(a: A) { a.go(); }
+                }
                 """,
                 "src/model.rs": "mod inner;\npub use self::inner::*;\npub type Shown = crate::B;\n",
                 "src/model/inner.rs": "pub type Spread<T> =\n    crate::Wrap<T>;\n",
@@ -5485,12 +5504,258 @@ class TestRustCallResolution:
         )
         a, b = "FILE:src/lib.rs::A::go", "FILE:src/lib.rs::B::go"
         assert _calls(builder, "FILE:src/lib.rs::wrapped") == [a]
-        assert _calls(builder, "FILE:src/lib.rs::clocked") == ["REF:c.go"]
+        assert _calls(builder, "FILE:src/lib.rs::clocked") == [a]
+        assert _calls(builder, "FILE:src/lib.rs::ticked") == ["REF:t.go"]
+        assert _calls(builder, "FILE:src/lib.rs::borrowed") == [b]
+        assert _calls(builder, "FILE:src/lib.rs::chained") == [
+            a,
+            "FILE:src/lib.rs::Top::top",
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::timed::timed") == [a]
         assert _calls(builder, "FILE:src/lib.rs::held") == [
             "FILE:src/lib.rs::Wrap::send"
         ]
         assert _calls(builder, "FILE:src/lib.rs::generic") == [a, b]
         assert _calls(builder, "FILE:src/lib.rs::shown") == [b]
+
+    def test_a_macro_called_in_an_impl_block_writes_its_methods(self, tmp_path):
+        """The functions of the `macro_rules!` that an impl block calls among
+        its items, the one of its file, else the one of its crate, are
+        methods of the block's type."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct M;
+                pub struct Other;
+                impl approx::AbsDiffEq for M { fn abs_diff_eq(&self) -> bool { true } }
+                macro_rules! ctors(
+                    ($($args: ident),*) => {
+                        pub fn zeros($($args: usize),*) -> Self { todo!() }
+                    };
+                );
+                impl M { ctors!(); }
+                impl Other { pub fn zeros() -> Self { todo!() } }
+                pub fn made() { M::zeros(); }
+                mod view;
+                """,
+                "src/view.rs": """
+                macro_rules! ctors(
+                    () => { pub fn ones() -> Self { todo!() } };
+                );
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::made") == ["FILE:src/lib.rs::zeros"]
+
+    def test_a_function_given_again_is_the_one_its_arguments_fit(self, tmp_path):
+        """A Rust function its scope gives again, for another `#[cfg]` or trait
+        argument, is a node of its own, `name#2`: a path call is the one
+        whose parameters take what it passes, its own before a trait's, and
+        of several none."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct A;
+                pub struct B;
+                pub enum Kind { One = 1, Two = 2 }
+                pub struct E;
+                impl From<A> for E { fn from(a: A) -> Self { todo!() } }
+                impl From<B> for E { fn from(b: B) -> Self { todo!() } }
+                #[cfg(unix)]
+                fn alive(pid: u32) -> bool { true }
+                #[cfg(not(unix))]
+                fn alive(pid: u32) -> bool { false }
+                pub struct S;
+                impl S {
+                    pub fn load(&self, n: u8) {}
+                    pub fn each(&self, f: impl Fn(u8, u8) -> u8) {}
+                }
+                pub trait Loads { fn load(&self, n: u8); }
+                impl Loads for S { fn load(&self, n: u8) {} }
+                pub fn convert(b: B, u: u8, s: S) {
+                    E::from(b);
+                    E::from(u);
+                    alive(1);
+                    S::load(&s, 1);
+                    S::each(&s, |a, b| a);
+                }
+                """,
+            },
+        )
+        lib = "FILE:src/lib.rs"
+        assert _calls(builder, f"{lib}::convert") == [
+            f"{lib}::E::from#2",
+            f"{lib}::S::each",
+            f"{lib}::S::load",
+            "REF:E::from",
+            "REF:alive",
+        ]
+        candidates = _candidates(builder, f"{lib}::convert")
+        assert candidates["REF:alive"] == [f"{lib}::alive", f"{lib}::alive#2"]
+        assert candidates["REF:E::from"] == [f"{lib}::E::from", f"{lib}::E::from#2"]
+
+    def test_a_trait_for_an_outside_type_takes_its_argument_type(self, tmp_path):
+        """A trait method the project writes for a type from outside, which
+        has impls from outside too, is the call only where the argument is
+        known to be of its parameter's type, one of a trait without type
+        arguments, or of the project's own, where it is called; the type's function of its name that
+        it calls is the type's own; a trait's method called by the trait's
+        path is the receiver's; a type's call is on the type the path
+        names."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[workspace]\nmembers = ["one", "two"]\n',
+                "one/Cargo.toml": '[package]\nname = "one"\n',
+                "two/Cargo.toml": '[package]\nname = "two"\n',
+                "one/src/lib.rs": """
+                pub enum Mode { Fast = 0, Slow = 1 }
+                impl From<Mode> for i32 { fn from(m: Mode) -> i32 { 0 } }
+                pub trait Finish { fn done(&mut self) {} }
+                pub struct Config;
+                impl Finish for Config { fn done(&mut self) {} }
+                #[derive(Default)]
+                pub struct Settings;
+                pub fn modes(other: u8, mut c: Config) {
+                    i32::from(Mode::Fast);
+                    i32::from(other);
+                    Finish::done(&mut c);
+                    Settings::default();
+                }
+                use crate::generated::Client;
+                pub trait Driver { fn start(&mut self); fn ask(&self, path: &str); }
+                impl Driver for Client {
+                    fn start(&mut self) { Client::start(self); }
+                    fn ask(&self, path: &str) {}
+                }
+                pub fn asks(c: &Client) { c.ask("x"); }
+                pub trait Grow<T> { fn grow(&mut self, by: T); }
+                impl<T> Grow<T> for Vec<T> { fn grow(&mut self, by: T) {} }
+                pub fn grows(v: &mut Vec<u8>, n: u8) { v.grow(n); }
+                """,
+                "two/src/lib.rs": """
+                pub struct Settings;
+                impl Default for Settings { fn default() -> Self { todo!() } }
+                """,
+            },
+        )
+        lib = "FILE:one/src/lib.rs"
+        assert _calls(builder, f"{lib}::modes") == [
+            f"{lib}::Config::done",
+            f"{lib}::i32::from",
+        ]
+        assert _calls(builder, f"{lib}::Client::start") == []
+        assert _calls(builder, f"{lib}::asks") == [f"{lib}::Client::ask"]
+        assert _calls(builder, f"{lib}::grows") == [f"{lib}::Vec::grow"]
+
+    def test_a_path_names_a_type_not_its_impl_blocks(self, tmp_path):
+        """A Rust path through glob re-exports names a type's definition, not
+        a module's impl block of it, nor through a module a `use` binds the
+        item the module re-exports; a type a glob `use` brings is the one of
+        that module, and one a path names under a module the tree does not
+        reach is not another module's; a path through an imported module
+        leads through each of its segments; a `use` after a module written on one
+        line binds in the file."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "app"\n',
+                "src/lib.rs": """
+                mod b;
+                mod z;
+                mod other { pub struct M; pub struct S; pub fn helper() {} }
+                mod sem { pub struct S; impl S { pub fn go(&self) {} } }
+                mod user {
+                    use crate::sem::*;
+                    pub fn u(s: S) { s.go(); }
+                }
+                mod kinds { pub struct Kind; impl Kind { pub fn go(&self) {} } }
+                mod store { pub mod rows { pub struct Row; impl Row { pub fn go(&self) {} } } }
+                mod view {
+                    use crate::store;
+                    pub struct Row;
+                    impl Row { pub fn go(&self) {} }
+                    pub fn show(r: store::rows::Row) { r.go(); }
+                }
+                mod wire {
+                    use crate::generated::proto::Kind as WireKind;
+                    pub fn w(k: WireKind) { k.go(); }
+                }
+                pub use b::*;
+                pub use z::*;
+                pub fn g() { helper(); }
+                pub mod api { pub use crate::z::M; }
+                """,
+                "src/z.rs": "pub struct M;\nimpl M { pub fn go(&self) {} }\npub fn helper() {}\n",
+                "src/b.rs": "use crate::M;\nimpl M { pub fn more(&self) {} }\n",
+                "tests/t.rs": (
+                    "use app::api;\n"
+                    "fn f(m: app::M) { m.go(); m.more(); }\n"
+                    "fn h(m: api::M) { m.go(); }\n"
+                ),
+            },
+        )
+        assert _calls(builder, "FILE:tests/t.rs::f") == [
+            "FILE:src/b.rs::M::more",
+            "FILE:src/z.rs::M::go",
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::g") == ["FILE:src/z.rs::helper"]
+        assert _calls(builder, "FILE:tests/t.rs::h") == ["FILE:src/z.rs::M::go"]
+        assert _calls(builder, "FILE:src/lib.rs::wire::w") == []
+        assert _calls(builder, "FILE:src/lib.rs::view::show") == [
+            "FILE:src/lib.rs::store::rows::Row::go"
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::user::u") == [
+            "FILE:src/lib.rs::sem::S::go"
+        ]
+
+    def test_a_name_cfg_uses_bind_differently_is_not_told(self, tmp_path):
+        """A name the `use`s of a Rust module bind to different items, one for
+        each `#[cfg]`, is none of them where a path reaches it, nor a type
+        defined twice where its name is in scope; a `mod` declared under each
+        is one module."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[workspace]\nmembers = ["m", "app"]\n',
+                "m/Cargo.toml": '[package]\nname = "m"\n',
+                "m/src/lib.rs": "pub fn test() {}\npub fn test_fail() {}\n",
+                "app/Cargo.toml": '[package]\nname = "app"\n',
+                "app/src/lib.rs": """
+                #[cfg(a)]
+                pub use m::test;
+                #[cfg(not(a))]
+                pub use m::test_fail as test;
+                mod x;
+                mod y;
+                #[cfg(a)]
+                pub use x::B;
+                #[cfg(not(a))]
+                pub use y::B;
+                pub fn made() -> B { todo!() }
+                pub fn used() { made().go(); }
+                #[cfg(a)]
+                pub mod z;
+                #[cfg(not(a))]
+                pub(crate) mod z;
+                pub fn zed(s: crate::z::B) { s.go(); }
+                """,
+                "app/src/z.rs": "pub struct B;\nimpl B { pub fn go(&self) {} }\n",
+                "app/src/x.rs": "pub struct B;\nimpl B { pub fn go(&self) {} }\n",
+                "app/src/y.rs": "pub struct B;\nimpl B { pub fn go(&self) {} }\n",
+                "app/tests/t.rs": "fn f() { app::test(); }\n",
+            },
+        )
+        assert _calls(builder, "FILE:app/tests/t.rs::f") == ["REF:app::test"]
+        assert _calls(builder, "FILE:app/src/lib.rs::used") == [
+            "FILE:app/src/lib.rs::made",
+            "REF:go",
+        ]
+        assert _calls(builder, "FILE:app/src/lib.rs::zed") == [
+            "FILE:app/src/z.rs::B::go"
+        ]
 
     def test_a_struct_pattern_s_braces_open_no_block(self, tmp_path):
         """The names a struct pattern binds in an `if let`, a `for` or an arm
@@ -5923,7 +6188,7 @@ class TestRustCallResolution:
             tmp_path,
             {
                 "src/lib.rs": """
-                use remote::Client;
+                use crate::generated::Client;
                 pub trait Requests { fn signed_get(&self); }
                 impl Requests for Client { fn signed_get(&self) {} }
                 pub async fn make() -> (u8, Client) { todo!() }
@@ -6435,6 +6700,50 @@ class TestRustCallResolution:
 
 
 class TestTypeScriptCallResolution:
+    def test_this_in_an_arrow_property_is_the_one_around(self, tmp_path):
+        """An arrow function's `this` is the one around it, which the object
+        literal it is a property of does not bind; a method's is the
+        object's."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                export class Service {
+                  close(key: string): void {}
+                  open(key: string) {
+                    return {
+                      close: () => this.close(key),
+                      again() { return this.close(key); },
+                    };
+                  }
+                }
+                """,
+            },
+        )
+        held = "FILE:a.ts::Service::open::object@5"
+        assert _calls(builder, f"{held}::close") == ["FILE:a.ts::Service::close"]
+        assert _calls(builder, f"{held}::again") == [f"{held}::close"]
+
+    def test_a_class_field_is_an_instance_s_own(self, tmp_path):
+        """A field a class body writes with a value that is no function,
+        `update = wrap(...)`, is assigned to each instance: a call of it on
+        `this` is the project's, left unresolved, not dropped for a base
+        from outside."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.ts": """
+                import { Component } from "react";
+                const wrap = <T,>(f: T): T => f;
+                export class App extends Component {
+                  public update = wrap((x: number) => x);
+                  run() { this.update(1); }
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.ts::App::run") == ["REF:this.update"]
+
     def test_a_call_a_body_returns_leaves_the_call_being_kept_as_it_was(self, tmp_path):
         """Resolving the call a function's body returns, for what a call of
         the function gives, leaves what that call passes its arguments: the

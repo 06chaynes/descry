@@ -9419,8 +9419,13 @@ def _bracketed_parts(text, separator=",", expression=False, turbofish=False):
             opened.pop()
     if not expression:
         angles.update(column for column in opened if text[column] == "<")
-    parts, depth, start = [], 0, 0
+    parts, depth, start, bars = [], 0, 0, False
     for column, char in enumerate(text[:end]):
+        if expression and char == "|" and not depth:
+            # A Rust closure's parameters, `|a, b|`, open a part.
+            bars = not bars and text[start:column].strip() in ("", "move")
+        if bars:
+            continue
         if char in "([{" or char == "<" and column in angles:
             depth += 1
         elif char in ")]}" or char == ">" and column in angles:
@@ -9523,6 +9528,12 @@ def _rust_type_declared(text):
                 break
     held = re.match(r"\s*=\s*([^;]+);", rest)
     return held and (found[1], params, held[1])
+
+
+def _rust_declared(declared):
+    """The declarations of a Rust alias, but the unit type `()` where a
+    `#[cfg]` pair writes it as a stand-in for the other: it has no members."""
+    return {d for d in declared if d[1] != "()"} or declared
 
 
 @cache
@@ -9959,6 +9970,11 @@ def _rust_impl(text):
 _RUST_TYPE_HEAD_RE = re.compile(
     rf"\s*(?:{_RUST_VIS}\s*)?(?:unsafe\s+)?(?:impl|trait|mod)\b"
 )
+_RUST_RECEIVER_RE = re.compile(
+    r"((?:&\s*(?:'\w+\s+)?)?(?:mut\s+)?self)(?:\s*:.*)?", re.DOTALL
+)
+_RUST_PATH_ARGUMENT_RE = re.compile(r"[A-Za-z_]\w*(?:::\w+)+")
+_RUST_MACRO_RULES_RE = re.compile(r"\s*macro_rules!\s*(\w+)")
 _RUST_DEFINITION_HEAD_RE = re.compile(
     rf"(?:{_RUST_VIS}\s*)?(?:(?:const|async|unsafe|extern(?:\s+\"[^\"]*\")?)\s+)*"
     r"(?:fn|impl|struct|enum|union|trait|mod|type|static|const|macro_rules!)\b"
@@ -10100,8 +10116,8 @@ class RustParser(BaseParser):
         )
         re_struct = re.compile(rf"^\s*{_RUST_VIS}(?:struct|trait)\s+([a-zA-Z0-9_]+)")
         re_enum = re.compile(rf"^\s*{_RUST_VIS}enum\s+([a-zA-Z0-9_]+)")
-        # Enum variant patterns: Name, Name(Type), Name { field: Type }
-        re_enum_variant = re.compile(r"^\s*([A-Z][a-zA-Z0-9_]*)\s*(?:[({\,]|$)")
+        # Enum variant patterns: Name, Name(Type), Name { field: Type }, Name = 1
+        re_enum_variant = re.compile(r"^\s*([A-Z][a-zA-Z0-9_]*)\s*(?:[({\,=]|$)")
         re_mod = re.compile(rf"^\s*{_RUST_VIS}mod\s+([a-zA-Z0-9_]+)\s*\{{?")
         re_const = re.compile(
             r"^\s*(?:pub(?:\(.*?\))?\s+)?(?:const|static)\s+([A-Z0-9_]+)\s*:\s*.*?\s*=\s*(.*?);"
@@ -10127,15 +10143,16 @@ class RustParser(BaseParser):
         }:
             self.builder.rust_externs[file_id] = renamed
         self.builder.rust_aliases[file_id] = aliases
-        # The names each `use` binds, by the line it starts on
-        uses_at, at, counted = {}, 1, 0
-        for found in _RUST_USE_RE.finditer(content):
-            at += content.count("\n", counted, found.start(1))
+        # The names each `use` binds, by the line of ``lines`` it starts on
+        uses_at, at, counted, split = {}, 1, 0, "\n".join(lines)
+        for found in _RUST_USE_RE.finditer(split):
+            at += split.count("\n", counted, found.start(1))
             counted = found.start(1)
             uses_at.setdefault(at, {}).update(_use_leaves(_spaced(found[1], _RUST_GAP)))
 
         # The owner of the open `impl` block's items, and its type's name
         impl_id = current_impl_target = impl_bounds = None
+        trait_generic = False  # whether the open impl's trait takes type arguments
         current_trait_impl = (
             None  # Track trait name when in "impl Trait for Struct" block
         )
@@ -10145,6 +10162,8 @@ class RustParser(BaseParser):
         fn_start = 0  # first line of the function being read
         fn_ids = set()  # functions whose body is a context; a `fn` in one is nested
         modules = {file_id}  # the file and its inline modules
+        # (last line index, functions) of the `macro_rules!` being read
+        macro = None
         self._matches = []  # (indentation, origin of the value) of each open `match`
 
         def opens_block(text):
@@ -10308,12 +10327,12 @@ class RustParser(BaseParser):
 
         def impl_at(index, line):
             """What ``_rust_impl`` reads in the header of the `impl` block
-            that starts with ``line``, line ``index``, and the bounds the
-            block gives its type parameters, its own or by `where`; four
-            None where none does. The header runs to its `{`, on that line
-            or a later one."""
+            that starts with ``line``, line ``index``, the bounds the block
+            gives its type parameters, its own or by `where`, and whether
+            its trait is written with type arguments; five None where none
+            does. The header runs to its `{`, on that line or a later one."""
             if not _RUST_IMPL_RE.match(line):
-                return None, None, None, None
+                return None, None, None, None, None
             header = []
             for code, _ in codes[index:]:
                 header.append(code)
@@ -10324,7 +10343,15 @@ class RustParser(BaseParser):
             where = text.partition(" where ")[2]
             for name, bound in re.findall(r"\b(\w+)\s*:\s*([\w:]+)", where):
                 bounds[name] = bounds.get(name) or bound
-            return (*_rust_impl(text), {k: v for k, v in bounds.items() if v})
+            trait, owner, blanket = _rust_impl(text)
+            generic = trait and re.search(rf"\b{re.escape(trait)}\s*<\s*(?!')", text)
+            return (
+                trait,
+                owner,
+                blanket,
+                {k: v for k, v in bounds.items() if v},
+                generic,
+            )
 
         i = 0
         while i < len(lines):
@@ -10350,8 +10377,39 @@ class RustParser(BaseParser):
 
             parent_id = current_context[-1]
             if lineno in uses_at:
-                # A `use` binds in the module or the function it is in.
-                self.builder.imports.setdefault(parent_id, {}).update(uses_at[lineno])
+                # A `use` binds in the module or the function it is in; one
+                # binding a name bound already is a `#[cfg]` alternative.
+                held = self.builder.imports.setdefault(parent_id, {})
+                for name, path in uses_at[lineno].items():
+                    if held.get(name, path) != path:
+                        key = parent_id, name
+                        paths = self.builder.rust_use_alternatives.setdefault(
+                            key, set()
+                        )
+                        paths.update((held[name], path))
+                held.update(uses_at[lineno])
+            if macro and i > macro[0]:
+                macro = None
+            if rules := _RUST_MACRO_RULES_RE.match(code):
+                # The body runs to the bracket that closes its first.
+                depth = opened = 0
+                for end in range(i, len(codes)):
+                    text = codes[end][0][rules.end() if end == i else 0 :]
+                    opened = opened or any(c in text for c in "({[")
+                    depth += sum(map(text.count, "({[")) - sum(map(text.count, ")}]"))
+                    if opened and depth <= 0:
+                        break
+                macro = end, []
+                self.builder.rust_macros.setdefault(rules[1], []).append(
+                    (file_id, macro[1])
+                )
+            elif (
+                impl_id
+                and parent_id == impl_id
+                and (called := re.match(r"\s*(\w+)!\s*[({\[]", code))
+            ):
+                # A macro called among an impl block's items writes items of it.
+                self.builder.rust_macro_uses.setdefault(impl_id, set()).add(called[1])
 
             # 0. Constants
             if match := re_const.search(line):
@@ -10388,6 +10446,12 @@ class RustParser(BaseParser):
                 else:
                     func_id = f"{parent_id}::{name}"
                     node_type = "Function"
+                # One given again, for another `#[cfg]` or trait argument
+                # (`impl From<A>`, `impl From<B>`), is `name#2` and so on.
+                base, count = func_id, 1
+                while func_id in self.builder.node_registry:
+                    count += 1
+                    func_id = f"{base}#{count}"
 
                 # Find actual function end line by counting braces
                 end_lineno = (
@@ -10410,12 +10474,17 @@ class RustParser(BaseParser):
                 }
                 if current_trait_impl and node_type == "Method":
                     node_kwargs["trait_impl"] = current_trait_impl
+                    if trait_generic:
+                        # Its trait takes type arguments: `impl From<A> for T`
+                        node_kwargs["trait_generic"] = True
                 if impl_bounds and node_type == "Method":
                     # What its `impl` block bounds the type's parameters by
                     node_kwargs["impl_bounds"] = impl_bounds
 
                 self.builder.add_node(func_id, node_type, **node_kwargs)
                 self.builder.add_edge(parent_id, func_id, "DEFINES")
+                if macro and node_type == "Function" and parent_id not in fn_ids:
+                    macro[1].append(func_id)
                 for parameter in _RUST_PARAMETER_RE.findall(full_sig):
                     self.add_local(func_id, parameter)
                 for param in params:
@@ -10501,8 +10570,9 @@ class RustParser(BaseParser):
             # 3. Impl
             elif (named := impl_at(i, line))[1]:
                 # The trait is tracked for method metadata.
-                trait, current_impl_target, bounds, impl_bounds = named
+                trait, current_impl_target, bounds, impl_bounds, generic = named
                 current_trait_impl = _last_segment(trait)
+                trait_generic = bool(generic)
                 # The block is for the type its name names in its module.
                 struct_id = seen_type(parent_id, current_impl_target)
                 if struct_id is None:
@@ -10660,8 +10730,8 @@ class RustParser(BaseParser):
                         )
                 self._bind_closures(code, i, lines, len(code))
                 self._name_results(code, lineno, fn_start, owner)
-                # What each call of a variant of the prelude closed on the
-                # line is passed, but in a pattern
+                # What each call closed on the line is passed, but in a
+                # pattern
                 opened = {closed: paren for paren, closed in self._pairs.items()}
                 patterns = [
                     found.span("pattern")
@@ -10676,20 +10746,24 @@ class RustParser(BaseParser):
                 for closed, index in self._closes.items():
                     if index is None or closed not in opened:
                         continue
-                    if self.builder.edges[index]["target"][4:] not in _rust_variants():
-                        continue
                     at, passed = opened[closed] + 1, []
                     if any(start <= at < end for start, end in patterns):
                         continue
+                    # A literal's text, blanked, is still an argument.
+                    filled = "".join(
+                        "_" if c == " " and r != " " else c
+                        for c, r in zip(code, lines[i].ljust(len(code)))
+                    )
                     for part in _bracketed_parts(
-                        code[at:closed], expression=True, turbofish=True
+                        filled[at:closed], expression=True, turbofish=True
                     ):
-                        at = code.index(part, at)
-                        passed.append(
-                            self._expression_origin(
-                                code, at, at + len(part), lineno, fn_start, owner
-                            )
+                        at = filled.index(part, at)
+                        origin = self._expression_origin(
+                            code, at, at + len(part), lineno, fn_start, owner
                         )
+                        # A path, `Kind::Unit`, is its own origin.
+                        path = _RUST_PATH_ARGUMENT_RE.fullmatch(part)
+                        passed.append(origin or (part if path else None))
                         at += len(part)
                     site = self.builder.edges[index]["metadata"]
                     site.setdefault("site", {})["arguments"] = passed
@@ -10821,22 +10895,7 @@ class RustParser(BaseParser):
             if not params_str:
                 return [], [], returns
 
-            # Split on comma, but not inside angle brackets or parens
-            params = []
-            current = []
-            depth = 0
-            for c in params_str:
-                if c in "<([{":
-                    depth += 1
-                elif c in ">)]}":
-                    depth -= 1
-                elif c == "," and depth == 0:
-                    params.append("".join(current).strip())
-                    current = []
-                    continue
-                current.append(c)
-            if current:
-                params.append("".join(current).strip())
+            params = _bracketed_parts(params_str)
 
             named = {"Self", *re.findall(r"(?:^|,)\s*(?:const\s+)?(\w+)", generics)}
             for param in params:
@@ -10844,9 +10903,9 @@ class RustParser(BaseParser):
                 if not param:
                     continue
 
-                # Handle &self, &mut self, self
-                if param in ("self", "&self", "&mut self"):
-                    param_types.append(param)
+                # The receiver: `self`, `mut self`, `&'a mut self`, `self: Box<Self>`
+                if receiver := _RUST_RECEIVER_RE.fullmatch(param):
+                    param_types.append(receiver[1])
                     continue
 
                 # Handle name: Type pattern
@@ -16196,6 +16255,7 @@ class TSParser(BaseParser):
                     token_count=token_count,
                     docstring=docstring,
                     signatures=self._overloads(fid, typed, end_lineno),
+                    **({} if parameters.startswith("function") else {"arrow": True}),
                 )
                 self.builder.add_edge(object_id or parent_id, fid, "DEFINES")
                 named = _value_named(line)
@@ -16290,7 +16350,10 @@ class TSParser(BaseParser):
                 and not _function_value(fv[1])
             ):
                 # A field's value: the lines it goes on over declare nothing.
+                # The field is assigned to each instance, as `this.name =`.
                 signature_until = fv[2] + 1
+                held = self.builder.assigned.setdefault(parent_id, {})
+                held.setdefault(fv[0][0], set()).add(fv[1].strip().removesuffix(";"))
             elif (
                 "::" in parent_id
                 and parent_id != file_id
@@ -17838,7 +17901,8 @@ class CallResolver:
             if parent:
                 lang = self.lang(node_id)
                 # A JavaScript member given again, `name#2`, is one of its name.
-                written = re.sub(r"#\d+$", "", name) if lang == "typescript" else name
+                again = lang in ("typescript", "rust")
+                written = re.sub(r"#\d+$", "", name) if again else name
                 self.by_name.setdefault((lang, written), []).append(node_id)
                 self.members.setdefault(parent, {})[name] = node_id
                 declared = self._name(node_id)
@@ -17856,6 +17920,24 @@ class CallResolver:
                     # A function's prototype is what `new` makes an instance of.
                     function = name.removesuffix(".prototype")
                     self.companions[f"{parent}::{function}"] = node_id
+        self.macro_functions = {
+            f
+            for defined in builder.rust_macros.values()
+            for _, fs in defined
+            for f in fs
+        }
+        for owner, called in builder.rust_macro_uses.items():
+            # The functions of the `macro_rules!` a Rust impl block calls are
+            # its methods: the one of its file, else the one of its crate.
+            unit, file_id = self._unit(owner, "rust"), owner.split("::")[0]
+            for name in called:
+                defined = builder.rust_macros.get(name, ())
+                written = [f for at, f in defined if at == file_id] or [
+                    f for at, f in defined if self._unit(at, "rust") == unit
+                ]
+                for function in written[0] if len(written) == 1 else ():
+                    held = self.members.setdefault(owner, {})
+                    held.setdefault(self.nodes[function]["metadata"]["name"], function)
         # Object-like C/C++ macro -> what every definition of it expands
         # to, None where they disagree; and the names scopes are written by
         self.c_macros, self.c_scopes = {}, set(self.c_spaces)
@@ -18375,10 +18457,18 @@ class CallResolver:
         return values
 
     def resolve(
-        self, callee, source_id, origin=None, arguments=None, within=False, lambdas=None
+        self,
+        callee,
+        source_id,
+        origin=None,
+        arguments=None,
+        within=False,
+        lambdas=None,
+        passed=None,
     ):
         """``arguments`` is what the call passes, where the parser counted
-        it, ``lambdas`` its C# or Java lambdas' parameter counts. ``within``
+        it, ``lambdas`` its C# or Java lambdas' parameter counts, ``passed``
+        the origins of a Rust call's arguments. ``within``
         resolves a call, at no `#if` arm of its own, while another is being
         resolved: it gives the value the call returns in place of the
         verdict and leaves the state of the other as it was."""
@@ -18395,6 +18485,8 @@ class CallResolver:
         self._candidates_now = None
         self._name_only = False
         self._arguments = arguments
+        self._path_call = "::" in callee and "." not in callee
+        self._passed = passed
         self._typed_call = callee.endswith("<>")
         self._caller, self._looked_up = source_id, None
         if self.lang(source_id) in _GLOBAL_OBJECT:
@@ -18425,6 +18517,45 @@ class CallResolver:
             # nothing about the call site selects that arm.
             self._candidates_now = self._candidates_now or [verdict[0]]
             verdict = None, _UNRESOLVED
+        if (
+            verdict[0] == source_id
+            and self._path_call
+            and self._outside_owner(verdict[0])
+        ):
+            # A trait's function for a type from outside that calls the
+            # type's of its name calls the type's own, found before it.
+            verdict = None, _EXTERNAL
+        if (
+            verdict[0]
+            and self._path_call
+            and self._trait_method(verdict[0])
+            and _split_callee(callee)[0][-1:]
+            == [self._name(verdict[0].rpartition("::")[0])]
+        ):
+            # The trait's own path, not a type parameter it bounds
+            verdict = self._on_receiver(verdict[0])
+        given = (
+            verdict[0]
+            and self.lang(verdict[0]) == "rust"
+            and self._given_again(verdict[0])
+        )
+        fitting = [g for g in given or () if self._fits(g)]
+        inherent = [
+            g for g in fitting if not self.nodes[g]["metadata"].get("trait_impl")
+        ]
+        # A type's own function is found before a trait's of its name.
+        fitting = inherent if len(inherent) == 1 else fitting
+        if given and len(fitting) == 1:
+            verdict = fitting[0], verdict[1]
+        elif given:
+            # A Rust function given again in its scope, for another
+            # `#[cfg]` or trait argument, is any of those that can take what
+            # the call passes; what the call returns is what they all do.
+            values = [self._called(("def", g), self._receiver) for g in given]
+            self._result = values[0] if values.count(values[0]) == len(values) else None
+            self._candidates_now = fitting or given
+            outside = not fitting and self._outside_impls(given[0])
+            verdict = None, _EXTERNAL if outside else _UNRESOLVED
         rust_path = "::" in callee and "." not in callee
         lang = self.lang(source_id)
         # A Go callee without an origin is a function, or one of a package,
@@ -18481,6 +18612,135 @@ class CallResolver:
             # one of which may be what it returns.
             self._result = _OPAQUE if callee.endswith("<>") else _EXTERNAL
         return verdict
+
+    def _given_again(self, node_id):
+        """The IDs of the Rust function ``node_id`` and of each other its
+        scope gives of its name, `name#2` and on."""
+        base = re.sub(r"#\d+$", "", node_id)
+        given = [base]
+        while f"{base}#{len(given) + 1}" in self.nodes:
+            given.append(f"{base}#{len(given) + 1}")
+        return given
+
+    def _fits(self, target):
+        """Whether the Rust function ``target`` can take what the call being
+        resolved passes: as many arguments as it has parameters, `self`
+        among them for a path call, and to a trait impl's method each
+        argument of a known type of its parameter's, to one for a type from
+        outside, which has impls from outside too, of a type known to be
+        its parameter's. True where the parser did not record what the call
+        passes."""
+        metadata = self.nodes[target]["metadata"]
+        params = metadata.get("param_types")
+        if self._passed is None or params is None or target in self.macro_functions:
+            # A macro's function is written with the macro's fragments.
+            return True
+        if not self._path_call and params and re.search(r"\bself\b", params[0]):
+            # A method called on a value takes it as its `self`.
+            params = params[1:]
+        if len(self._passed) != len(params):
+            return False
+        outside = self._outside_impls(target)
+        for argument, param in zip(self._passed, params):
+            if not metadata.get("trait_impl") or re.search(r"\bself\b", param):
+                continue
+            value = isinstance(argument, str) and (
+                self._variant_value(argument, self._caller)
+                or self._value(argument, self._caller, set())
+            )
+            declared = self._returned_type(param, target)
+            project = [
+                v[1]
+                for v in (value, declared)
+                if isinstance(v, tuple) and v[0] == "self"
+            ]
+            same = len(project) == 2 and project[0] in self._declarations(project[1])
+            foreign = [
+                v
+                for v in (value, declared)
+                if v == _EXTERNAL or isinstance(v, tuple) and v[0] == "outside"
+            ]
+            named = [v[1] for v in foreign if v != _EXTERNAL]
+            if len(named) == 2:
+                # A value of a type from outside is of the types it derives
+                # from too, which it dereferences to: `String` is a `str`.
+                same = named[1] in self.standard["rust"].lineage(named[0])
+                if not same:
+                    return False
+            if len(project) == 2 and not same or len(project) == 1 and foreign:
+                return False
+            if outside and not same:
+                return False
+        return True
+
+    def _trait_method(self, node_id):
+        """Whether ``node_id`` is a method a Rust trait declares, with
+        `self`: one called by the trait's path takes its receiver first."""
+        node = self.nodes[node_id]
+        params = node["metadata"].get("param_types") or [""]
+        return (
+            self.lang(node_id) == "rust"
+            and node["type"] == "Function"
+            and self._is_class(node_id.rpartition("::")[0])
+            and bool(re.search(r"\bself\b", params[0]))
+        )
+
+    def _on_receiver(self, declared):
+        """``(the method, how it was found)`` that the trait method
+        ``declared``, called by its path, reaches on the receiver passed
+        first: the one of the receiver's type, the trait's own where that
+        type has none; unresolved, its impls the candidates, where the
+        receiver's type is not known."""
+        name = self._name(declared)
+        receiver = (self._passed or [None])[0]
+        value = isinstance(receiver, str) and self._value(receiver, self._caller, set())
+        if isinstance(value, tuple) and value[0] == "self":
+            own = self._find_member(value[1], name)[0]
+            return own or declared, "regex"
+        trait = self._name(declared.rpartition("::")[0])
+        self._candidates_now = sorted(
+            c
+            for c in self.by_name.get(("rust", name), ())
+            if c == declared or self.nodes[c]["metadata"].get("trait_impl") == trait
+        )
+        return None, _UNRESOLVED
+
+    def _variant_value(self, path, scope_id):
+        """Value of the Rust path ``path`` written in ``scope_id`` that names
+        a variant of a type, `Kind::Unit`: an instance of the type; outside
+        for one of a type from outside, None for any other."""
+        qualifier, _, name = path.rpartition("::")
+        owner = qualifier and self._type_named(qualifier, scope_id)
+        if owner == _EXTERNAL:
+            return _EXTERNAL
+        hit = owner and self.members.get(owner, {}).get(name)
+        variant = hit and "param_types" not in self.nodes[hit]["metadata"]
+        return ("self", owner) if variant else None
+
+    def _outside_impls(self, node_id):
+        """Whether the Rust function ``node_id`` is a generic trait's from
+        outside for a type from outside, which has impls of that trait from
+        outside too; one of a project trait has only the project's."""
+        metadata = self.nodes[node_id]["metadata"]
+        return bool(
+            metadata.get("trait_generic")
+            and not self._types("rust", metadata["trait_impl"])
+            and self._outside_owner(node_id)
+        )
+
+    def _outside_owner(self, node_id):
+        """Whether the Rust function ``node_id`` is a trait's for a type from
+        outside, one the project only writes impl blocks for."""
+        owner = node_id.rpartition("::")[0]
+        if (
+            not self.nodes[node_id]["metadata"].get("trait_impl")
+            or owner not in self.nodes
+        ):
+            return False
+        kinds = {
+            self.nodes[d]["metadata"].get("kind") for d in self._declarations(owner)
+        }
+        return kinds == {"impl"}
 
     def _accepts(self, target):
         """Whether the definition ``target`` can take the arguments of the
@@ -18740,6 +19000,11 @@ class CallResolver:
             source = "self_type"
         else:
             owners = self._types_in(lang, receiver, source_id, len(qualifier) == 1)
+            named = lang == "rust" and len(owners) > 1
+            named = named and self._type_named("::".join(qualifier), source_id)
+            if named and named != _EXTERNAL and named in owners:
+                # The one of them the path names where it is written
+                owners = [named]
             if lang == "clang":
                 owners = [o for o in owners if self._in_reach(o, source_id)] or owners
             if lang != "rust":
@@ -18893,13 +19158,18 @@ class CallResolver:
                 for c in self.by_name.get((lang, leaf), ())
                 if (self._unit(c, lang),) == crate
             ]
-            # Prefer the definition under the module the path names last.
+            # A path through modules names a definition in the one it names
+            # last, or in a module of that one; a type of the name defined
+            # elsewhere is not it.
             inside = [
                 c
                 for c in found
-                if modules and re.search(rf"[/:]{modules[-1]}(\.rs|/mod\.rs|::)", c)
+                if modules and re.search(rf"[/:]{modules[-1]}(\.rs|/|::)", c)
             ]
-            return inside or found or None
+            defined = [
+                c for c in found if self.nodes[c]["metadata"].get("kind") != "impl"
+            ]
+            return inside or ([] if modules and defined else found or None)
         if lang == "go":
             for folder, module in self.go_modules:
                 if target == module or target.startswith(f"{module}/"):
@@ -18955,7 +19225,9 @@ class CallResolver:
                         paths = [f"{at}/{name}.rs", f"{at}/{name}/mod.rs"]
                     for path in paths:
                         path = f"FILE:{posixpath.normpath(path.lstrip('/'))}"
-                        if path in files:
+                        # A `mod` declared again under another `#[cfg]` is
+                        # the one module.
+                        if path in files and path not in found.get(module_id, ()):
                             found.setdefault(module_id, []).append(path)
                             parents.setdefault(path, []).append(module_id)
             return found, parents
@@ -19041,8 +19313,9 @@ class CallResolver:
                 # the module or from a crate; else what each glob `use` of
                 # the module's own does.
                 uses = self._uses(module)
+                alternatives = self.builder.rust_use_alternatives.get((module, segment))
                 written = [uses[segment]] if segment in uses else []
-                written = written or [
+                written = sorted(alternatives or written) or [
                     f"{path[:-1]}{segment}"
                     for path in uses.values()
                     if path[-3:] == "::*"
@@ -19062,8 +19335,14 @@ class CallResolver:
                     if held == _EXTERNAL:
                         return _EXTERNAL
                     hits += held or []
-            found = hits
-        return found
+            found = list(dict.fromkeys(hits))
+        # A path names a type's definition, not the impl blocks of it.
+        defined = [
+            f
+            for f in found
+            if self.nodes.get(f, {}).get("metadata", {}).get("kind") != "impl"
+        ]
+        return defined or found
 
     def _rust_library(self, name, scope_id):
         """The root of the library of the project crate ``name`` written in
@@ -21557,11 +21836,16 @@ class CallResolver:
             return self._constant([*qualifier, name], scope_id)
         if lang == "clang":
             return self._c_type(qualifier, name, scope_id, full)
-        if lang == "rust" and qualifier and f"{qualifier[0]}::" in _RUST_PATH_ROOTS:
-            found = self._rust_path([*qualifier, name], scope_id)
+        path = "::".join([*qualifier, name])
+        if lang == "rust" and qualifier and self._rust_rooted(path, scope_id):
+            # A path the module tree tells; one from a crate's name it does
+            # not is read as written.
+            found = self._rust_path(path.split("::"), scope_id)
             if found == _EXTERNAL:
                 return _EXTERNAL
-            return found[0] if found and self._is_class(found[0]) else None
+            if found or f"{qualifier[0]}::" in _RUST_PATH_ROOTS:
+                one = len(found) == 1 and self._is_class(found[0])
+                return found[0] if one else None
         imported = self._imported(qualifier[0] if qualifier else name, scope_id)
         if imported == _EXTERNAL:
             return _EXTERNAL
@@ -21569,9 +21853,18 @@ class CallResolver:
             return self._java_type(".".join([*qualifier, name]), scope_id)
         types = [] if qualifier else [i for i in imported or () if self._is_class(i)]
         if not types and imported:
-            # The import names the scope the type is in.
+            # The import names the scope the type is in, in Rust that of
+            # the path's first segment, which the others lead on from.
             exported = name if qualifier else self._exported_as(name, scope_id)
-            found = (self._find_member(scope, exported)[0] for scope in imported)
+            scopes = imported
+            for segment in qualifier[1:] if lang == "rust" else ():
+                scopes = [h for s in scopes if (h := self._scope_member(s, segment))]
+            found = (
+                self._scope_member(scope, exported)
+                if lang == "rust"
+                else self._find_member(scope, exported)[0]
+                for scope in scopes
+            )
             found = (self.companions.get(hit, hit) for hit in found)
             types = [hit for hit in found if hit and self._is_class(hit)]
         if lang == "dart" and (imported or not qualifier):
@@ -21583,6 +21876,12 @@ class CallResolver:
                     # `void` and `dynamic` say nothing of the value.
                     unknown = named or name in ("void", "dynamic")
                     return None if unknown else _EXTERNAL
+        if lang == "rust" and not (types or qualifier or imported):
+            # A type of the module's, or one a glob `use` of it brings
+            found = self._rust_path(["self", name], scope_id)
+            types = (
+                [t for t in found if self._is_class(t)] if found != _EXTERNAL else []
+            )
         if not types:
             types = self._types_in(lang, name, scope_id)
             # A JavaScript function names its prototype, which its
@@ -21618,8 +21917,14 @@ class CallResolver:
                     return None
                 types = inside or types
         hit = self._decide(types, scope_id) if types else None
-        if hit is None and len({self._unit(t, lang) for t in types}) == 1:
-            # Declarations of one split type, in one crate or package.
+        defined = [t for t in types if self.nodes[t]["metadata"].get("kind") != "impl"]
+        if (
+            hit is None
+            and len({self._unit(t, lang) for t in types}) == 1
+            and (lang != "rust" or len(defined) <= 1)
+        ):
+            # Declarations of one split type, in one crate or package; a
+            # Rust type defined twice is one of two `#[cfg]`s.
             hit = types[0]
         return hit
 
@@ -22465,8 +22770,10 @@ class CallResolver:
             return self._annotated(returns, function_id, receiver)
         if function_id == self._bound[0] and returns in self._bound[1]:
             return self._bound[1][returns]
-        if self.builder.literals.get(returns):
-            return ("literal", returns)
+        if returns in self.builder.literals:
+            # A literal sequence, not known where its elements are not
+            held = self.builder.literals[returns]
+            return None if held is None else ("literal", returns)
         queried = self.lang(function_id) == "typescript" and _TS_TYPEOF_RE.fullmatch(
             returns.strip()
         )
@@ -22687,7 +22994,7 @@ class CallResolver:
         binds, by the name or by a glob."""
         found = self.builder.rust_alias_types.get((module, name))
         if found:
-            return module, name, found
+            return module, name, _rust_declared(found)
         uses = self._uses(module)
         written = [uses[name]] if name in uses else []
         written = written or [
@@ -22732,7 +23039,7 @@ class CallResolver:
         bound, self._bound = self._bound, (module, values, None)
         self.open_aliases.add((module, name))
         try:
-            return self._returned_type(held, module)
+            return self._returned_type(_RUST_BORROW_RE.sub("", held), module)
         finally:
             self._bound = bound
             self.open_aliases.discard((module, name))
@@ -22924,9 +23231,16 @@ class CallResolver:
             # In a JavaScript function given a prototype, `this` is the
             # instance it constructs.
             return f"{node_id}.prototype"
+        arrow = False
         for scope in self._scopes(node_id):
-            if self._is_class(scope):
+            metadata = self.nodes.get(scope, {}).get("metadata", {})
+            if self._is_class(scope) and not (
+                arrow and metadata.get("kind") == "object"
+            ):
                 return scope
+            # An arrow function's `this` is the one around it, which an
+            # object literal it is a property of does not bind.
+            arrow = bool(metadata.get("arrow"))
             # The body of a C/C++ macro definition is a member's of the type
             # that an argument of the macro names.
             words = self.nodes.get(scope, {}).get("metadata", {}).get("arguments", ())
@@ -23636,8 +23950,7 @@ class CallResolver:
             return [owner_id]
         unit = self._unit(owner_id, lang)
         # The impl blocks of a Rust alias are followed by those of its type.
-        names = [self._name(owner_id)]
-        names += filter(None, [self._alias_targets().get((unit, names[0]))])
+        names = self._alias_chain(unit, self._name(owner_id))
         return [owner_id] + [
             t
             for name in names
@@ -23649,7 +23962,7 @@ class CallResolver:
         """The impl blocks of its crate written for each alias of the Rust
         type ``owner_id``, or of the type it is an alias of, but itself."""
         unit, own = self._unit(owner_id, "rust"), self._name(owner_id)
-        name = self._alias_targets().get((unit, own)) or own
+        name = self._alias_chain(unit, own)[-1]
         if (unit, name) not in self.alias_blocks:
             self.alias_blocks[unit, name] = {
                 alias: [
@@ -23657,14 +23970,25 @@ class CallResolver:
                     for t in self._types("rust", alias)
                     if self._unit(t, "rust") == unit
                 ]
-                for (crate, alias), target in self._alias_targets().items()
-                if crate == unit and target == name
+                for crate, alias in self._alias_targets()
+                if crate == unit and self._alias_chain(unit, alias)[-1] == name
             }
         return [
             blocks
             for alias, blocks in self.alias_blocks[unit, name].items()
             if alias != own
         ]
+
+    def _alias_chain(self, unit, name):
+        """``name`` and the names of what the Rust alias ``name`` of the crate
+        ``unit`` stands for, an alias's alias after it."""
+        chain = [name]
+        while (target := self._alias_targets().get((unit, chain[-1]))) not in (
+            None,
+            *chain,
+        ):
+            chain.append(target)
+        return chain
 
     def _alias_targets(self):
         """``{(crate, alias name): name of the type it stands for}`` of the
@@ -23673,7 +23997,8 @@ class CallResolver:
             self.alias_targets = {}
             for (module, name), declared in self.builder.rust_alias_types.items():
                 written = {
-                    _rust_type_parts(_RUST_BORROW_RE.sub("", h))[0] for _, h in declared
+                    _rust_type_parts(_RUST_BORROW_RE.sub("", h))[0]
+                    for _, h in _rust_declared(declared)
                 }
                 named = {path.rpartition("::")[2] for path in written}
                 key = self._unit(module, "rust"), name
@@ -24273,6 +24598,14 @@ class CodeGraphBuilder:
         # (Rust module ID, alias name) -> {(its type parameters, the type it
         # names)}, one for each declaration that differs, as `#[cfg]` writes
         self.rust_alias_types = {}
+        # Rust macro name -> (file ID, the functions its body writes) of each
+        # `macro_rules!` of the name
+        self.rust_macros = {}
+        # (Rust scope ID, name) -> the paths the `use`s of the scope that bind
+        # the name to different items give, one for each `#[cfg]`
+        self.rust_use_alternatives = {}
+        # ID of a Rust impl block's owner -> the macros called among its items
+        self.rust_macro_uses = {}
         # Rust file ID -> (ID, `#[path]` or None) of each `mod name;` in it
         self.rust_mods = {}
         self.dart_packages = {}  # Dart package name -> its directory
@@ -24803,8 +25136,14 @@ class CodeGraphBuilder:
 
                 if is_call:
                     if not resolved and resolution_source != _EXTERNAL:
+                        site = edge.get("metadata", {}).get("site", {})
                         resolved, resolution_source = call_resolver.resolve(
-                            ref_name, source_id, origin, arguments, lambdas=lambdas
+                            ref_name,
+                            source_id,
+                            origin,
+                            arguments,
+                            lambdas=lambdas,
+                            passed=site.get("arguments"),
                         )
                     call_resolver.keep(idx, resolved)
                     if resolution_source == _EXTERNAL:
