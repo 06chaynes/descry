@@ -99,7 +99,7 @@ jobs:
         # digest exists. Pinning to the version tag is the documented
         # approach; PyPA controls this tag and tag mutation would be a
         # notable event we'd catch via the trusted-publisher audit log.
-        uses: pypa/gh-action-pypi-publish@v1.14.0
+        uses: pypa/gh-action-pypi-publish@v1.14.3
         with:
           repository-url: https://test.pypi.org/legacy/
 
@@ -125,4 +125,4 @@ jobs:
         # digest exists. Pinning to the version tag is the documented
         # approach; PyPA controls this tag and tag mutation would be a
         # notable event we'd catch via the trusted-publisher audit log.
-        uses: pypa/gh-action-pypi-publish@v1.14.0
+        uses: pypa/gh-action-pypi-publish@v1.14.3
