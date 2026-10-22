@@ -128,7 +128,9 @@ descry cross-lang --mode endpoint --method POST --path /api/v1/auth/login
 descry context <node_id>
 ```
 
-Requires `[cross_lang] openapi_path = "..."` in `.descry.toml`.
+Requires an OpenAPI spec: set `[cross_lang] openapi_path = "..."` in
+`.descry.toml`, or keep it at `public/api/latest.json` or
+`public/api/openapi.json`.
 
 ## Anti-patterns
 

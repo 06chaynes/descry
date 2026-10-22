@@ -14,11 +14,12 @@ adapter module plus an import in `adapters/__init__.py`.
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+from descry._env import env_flag
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class DiscoveredProject:
     """A concrete project discovered by an adapter's `discover()` method."""
 
     name: str
-    """Project identifier, also used as the `.scip` filename stem."""
+    """Project identifier; with the adapter name, keys the cached `.scip` file."""
 
     root: Path
     """Directory to run the indexer in (subprocess cwd)."""
@@ -48,7 +49,7 @@ class CommandSpec:
     """Working directory for the subprocess."""
 
     env_extras: dict[str, str] = field(default_factory=dict)
-    """Additional env vars merged after `safe_env()`."""
+    """Additional env vars merged over the inherited environment."""
 
     output_mode: str = "direct"
     """"direct": indexer writes to the requested out_path.
@@ -62,13 +63,10 @@ class AdapterConfig:
     """Per-language config forwarded into `build_command()`."""
 
     toolchain: str | None = None
-    """e.g. ``"1.92.0"`` for Rust rustup toolchain, JDK version for Java."""
+    """e.g. ``"1.92.0"`` for Rust rustup toolchain."""
 
     extra_args: tuple[str, ...] = ()
     """Validated positional/flag extras appended to argv."""
-
-    options: dict[str, str] = field(default_factory=dict)
-    """Adapter-specific knobs (e.g. ``build_tool`` for Java, ``module_name`` for Go)."""
 
 
 @runtime_checkable
@@ -83,7 +81,9 @@ class LanguageAdapter(Protocol):
     ``"scip-typescript"``, ``"scip-python"``, ``"scip-java"``, ``"scip-go"``)."""
 
     binary: str
-    """Command name probed via ``shutil.which()``."""
+    """Command name probed via ``shutil.which()``. An indexer installed
+    under another name lists it in ``binary_alternatives``, and one with no
+    ``--version`` names the flag that only reports in ``probe_flag``."""
 
     extensions: tuple[str, ...]
     """Source file extensions this adapter owns (e.g. ``(".java", ".kt", ".scala")``)."""
@@ -114,6 +114,26 @@ _binary_cache: dict[str, dict] = {}
 """Cache of binary probe results, keyed by adapter.name."""
 
 
+def project_dir(root: Path, name: str, *markers: str) -> Path:
+    """Directory of the project that ``discover()`` named ``name``.
+
+    ``root / name`` if it holds every marker, each a regular file or a
+    directory; otherwise ``root`` itself, for a single project at the root,
+    which is named after the root directory.
+    """
+    candidate = root / name
+    if all(
+        (candidate / marker).is_file() or (candidate / marker).is_dir()
+        for marker in markers
+    ):
+        return candidate
+    return root
+
+
+def scip_disabled_by_env() -> bool:
+    return env_flag("DESCRY_NO_SCIP")
+
+
 def register(adapter: LanguageAdapter) -> None:
     """Register an adapter in the global registry. Idempotent on `name`."""
     ADAPTERS[adapter.name] = adapter
@@ -131,20 +151,19 @@ def _probe_binary(adapter: LanguageAdapter) -> dict:
 
     import subprocess
 
-    from descry._env import safe_env
-
     result = {"available": False, "path": None, "version": None}
-    path = shutil.which(adapter.binary)
+    names = [adapter.binary, *getattr(adapter, "binary_alternatives", ())]
+    path = next((p for n in names if (p := shutil.which(n))), None)
     if path:
         try:
             proc = subprocess.run(
-                [path, "--version"],
+                [path, getattr(adapter, "probe_flag", "--version")],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 timeout=10,
-                env=safe_env(),
+                check=False,
             )
             if proc.returncode == 0:
                 result["available"] = True
@@ -152,13 +171,13 @@ def _probe_binary(adapter: LanguageAdapter) -> dict:
                 result["version"] = proc.stdout.strip() or proc.stderr.strip()
                 logger.debug(f"SCIP: {adapter.binary} available at {path}")
             else:
-                logger.debug(f"SCIP: {adapter.binary} found but failed to run")
+                logger.debug(f"SCIP: {path} found but failed to run")
         except subprocess.TimeoutExpired:
-            logger.debug(f"SCIP: {adapter.binary} version check timed out")
+            logger.debug(f"SCIP: {path} version check timed out")
         except (OSError, FileNotFoundError) as e:
-            logger.debug(f"SCIP: {adapter.binary} check failed: {e}")
+            logger.debug(f"SCIP: {path} check failed: {e.strerror or e}")
     else:
-        logger.debug(f"SCIP: {adapter.binary} not found in PATH")
+        logger.debug(f"SCIP: none of {names} found")
 
     _binary_cache[adapter.name] = result
     return result
@@ -172,9 +191,15 @@ def indexer_status(lang_name: str) -> dict:
     return _probe_binary(adapter)
 
 
+def resolved_binary(adapter: LanguageAdapter) -> str:
+    """The path the probe found for `adapter.binary` or one of its
+    `binary_alternatives`, else `adapter.binary`."""
+    return _probe_binary(adapter).get("path") or adapter.binary
+
+
 def indexer_available(lang_name: str) -> bool:
     """True if the adapter for `lang_name` is registered and its binary is on PATH."""
-    if os.environ.get("DESCRY_NO_SCIP"):
+    if scip_disabled_by_env():
         return False
     adapter = ADAPTERS.get(lang_name)
     if adapter is None:
@@ -184,7 +209,7 @@ def indexer_available(lang_name: str) -> bool:
 
 def available_adapters() -> list[LanguageAdapter]:
     """Return adapters whose binaries are present (respecting DESCRY_NO_SCIP)."""
-    if os.environ.get("DESCRY_NO_SCIP"):
+    if scip_disabled_by_env():
         return []
     return [a for a in ADAPTERS.values() if _probe_binary(a).get("available")]
 

@@ -2,11 +2,14 @@
 
 import logging
 import os
+import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
-from descry.handlers import DescryConfig
-from descry.scip.cache import ScipCacheManager
+import pytest
 
+from descry.handlers import DescryConfig
+from descry.scip.cache import ADAPTERS, ScipCacheManager
 
 # --- Default field values ---
 
@@ -16,7 +19,7 @@ class TestNewFieldDefaults:
 
     def test_embedding_model_default(self):
         config = DescryConfig()
-        assert config.embedding_model == "jinaai/jina-code-embeddings-0.5b"
+        assert config.embedding_model is None
 
     def test_test_path_patterns_default(self):
         config = DescryConfig()
@@ -48,7 +51,7 @@ class TestNewFieldDefaults:
 
     def test_scip_timeout_minutes_default(self):
         config = DescryConfig()
-        assert config.scip_timeout_minutes == 0
+        assert config.scip_timeout_minutes == 30
 
     def test_embedding_timeout_default(self):
         config = DescryConfig()
@@ -120,6 +123,7 @@ file_suffixes = ["_test.py", ".custom_test.js"]
 
 [code_files]
 extensions = [".rs", ".py", ".custom"]
+max_file_mb = 64
 
 [git]
 churn_exclusions = ["custom.lock"]
@@ -153,6 +157,7 @@ max_callers_shown = 30
         assert config.test_path_patterns == ("/tests/", "/custom_tests/")
         assert config.test_file_suffixes == ("_test.py", ".custom_test.js")
         assert config.code_extensions == {".rs", ".py", ".custom"}
+        assert config.max_file_bytes == 64 * 1024 * 1024
         assert config.churn_exclusions == ["custom.lock"]
         assert config.git_timeout == 60
         assert config.scip_timeout_minutes == 10
@@ -171,7 +176,7 @@ max_callers_shown = 30
         config = DescryConfig(project_root=tmp_path)
         config._apply_toml(data)
         # Should keep all defaults
-        assert config.embedding_model == "jinaai/jina-code-embeddings-0.5b"
+        assert config.embedding_model is None
         assert config.max_depth == 3
         assert config.git_timeout == 30
 
@@ -193,7 +198,28 @@ timeout = 45
         assert config.git_timeout == 45
         # Other fields stay default
         assert config.max_nodes == 100
-        assert config.embedding_model == "jinaai/jina-code-embeddings-0.5b"
+        assert config.embedding_model is None
+
+    @pytest.mark.parametrize(
+        ("key", "kept"), [("max_file_mb", 10), ("max_parse_seconds", 120)]
+    )
+    def test_negative_limit_is_refused(self, tmp_path, caplog, key, kept):
+        (tmp_path / ".descry.toml").write_text(f"[code_files]\n{key} = -5\n")
+        with caplog.at_level(logging.WARNING):
+            config = DescryConfig()
+            config._apply_toml(DescryConfig._load_toml(tmp_path))
+        assert getattr(config, key) == kept
+        assert any("is negative" in r.message for r in caplog.records)
+
+    def test_parse_time_and_gitignore_settings(self, tmp_path):
+        (tmp_path / ".descry.toml").write_text(
+            "[project]\nrespect_gitignore = false\n"
+            "[code_files]\nmax_parse_seconds = 0\n"
+        )
+        config = DescryConfig()
+        assert (config.respect_gitignore, config.max_parse_seconds) == (True, 120)
+        config._apply_toml(DescryConfig._load_toml(tmp_path))
+        assert (config.respect_gitignore, config.max_parse_seconds) == (False, 0)
 
     def test_from_toml_invalid(self, tmp_path, caplog):
         """Malformed TOML falls back to defaults with warning."""
@@ -210,7 +236,7 @@ timeout = 45
         toml_content = """\
 [scip]
 extra_args = ["--exclude-vendored-libraries", "--custom-flag"]
-skip_crates = ["mandible", "tarsus"]
+skip_crates = ["alpha", "beta"]
 """
         (tmp_path / ".descry.toml").write_text(toml_content)
 
@@ -221,7 +247,7 @@ skip_crates = ["mandible", "tarsus"]
             "--exclude-vendored-libraries",
             "--custom-flag",
         ]
-        assert config.scip_skip_crates == ["mandible", "tarsus"]
+        assert config.scip_skip_crates == ["alpha", "beta"]
 
     def test_scip_rust_toolchain_from_toml(self, tmp_path):
         """SCIP rust toolchain loads from TOML."""
@@ -274,7 +300,6 @@ extra_args = []
         (tmp_path / ".descry.toml").write_text(
             'openapi_path = "spec.json"\n'
             'backend_handler_patterns = ["handlers/"]\n'
-            'frontend_api_patterns = ["src/api/"]\n'
             'api_prefixes = ["/api/v1", "/api/v2"]\n'.replace(
                 "openapi_path", "[cross_lang]\nopenapi_path"
             )
@@ -284,7 +309,6 @@ extra_args = []
 
         assert config.openapi_path == (tmp_path / "spec.json").resolve()
         assert config.backend_handler_patterns == ["handlers/"]
-        assert config.frontend_api_patterns == ["src/api/"]
         assert config.api_prefixes == ["/api/v1", "/api/v2"]
 
     def test_cross_lang_openapi_path_outside_root_rejected(self, tmp_path, caplog):
@@ -386,8 +410,8 @@ class TestScipCacheManagerConfig:
         assert mgr._scip_skip_crates == set()
 
     def test_custom_skip_crates(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path, scip_skip_crates=["mandible", "tarsus"])
-        assert mgr._scip_skip_crates == {"mandible", "tarsus"}
+        mgr = ScipCacheManager(tmp_path, scip_skip_crates=["alpha", "beta"])
+        assert mgr._scip_skip_crates == {"alpha", "beta"}
 
     def test_skip_crates_filters_rust_crates(self, tmp_path):
         """Skipped crates are excluded from update_changed_rust."""
@@ -405,18 +429,19 @@ class TestScipCacheManagerConfig:
         )
 
         mgr = ScipCacheManager(tmp_path, scip_skip_crates=["beta"])
-        crates = mgr.get_rust_crates()
-        assert "beta" in crates  # get_rust_crates still discovers it
+        found = ADAPTERS["rust"].discover(tmp_path, mgr.excluded_dirs)
+        assert "beta" in [crate.name for crate in found]
 
-        # But update_changed_rust should filter it out
-        # We can't run the full generation (no rust-analyzer), but we can
-        # verify the filtering logic by checking what needs_update sees
-        # after filtering
-        all_crates = mgr.get_rust_crates()
-        filtered = [c for c in all_crates if c not in mgr._scip_skip_crates]
-        assert "beta" not in filtered
-        assert "alpha" in filtered
-        assert "gamma" in filtered
+        # But the indexer is only run on the crates that are not skipped.
+        with patch("descry.scip.cache.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 1, "", "")
+            mgr.update_all()
+        indexed = sorted(
+            Path(argv[argv.index("scip") + 1]).name
+            for argv in (call.args[0] for call in run.call_args_list)
+            if "scip" in argv
+        )
+        assert indexed == ["alpha", "gamma"]
 
     def test_default_toolchain(self, tmp_path):
         mgr = ScipCacheManager(tmp_path)
@@ -428,8 +453,13 @@ class TestScipCacheManagerConfig:
 
     def test_toolchain_builds_rustup_command(self, tmp_path):
         """When toolchain is set, command starts with rustup run."""
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "solo"')
+        (tmp_path / "src").mkdir()
         mgr = ScipCacheManager(tmp_path, scip_toolchain="1.92.0")
-        # Verify the toolchain is stored — the actual command construction
-        # happens in _generate_rust_scip which we can't easily test without
-        # rust-analyzer, but we can verify the config is wired through
-        assert mgr._scip_toolchain == "1.92.0"
+
+        with patch("descry.scip.cache.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 1, "", "")
+            mgr.update_all()
+
+        (call,) = run.call_args_list
+        assert call.args[0][:5] == ["rustup", "run", "1.92.0", "rust-analyzer", "scip"]

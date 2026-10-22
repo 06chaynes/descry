@@ -43,6 +43,7 @@ All tools are prefixed with `descry_`:
 - `descry_structure` - Show file structure overview
 - `descry_quick` - Find + context in one step
 - `descry_health` - Health check
+- `descry_status` - Graph existence and freshness
 - `descry_index` - Regenerate graph
 - `descry_impls` - Find trait implementations
 - `descry_cross_lang` - Trace frontend/backend API calls

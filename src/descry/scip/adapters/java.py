@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from xml.etree import ElementTree
 
 from descry.scip.adapter import (
     AdapterConfig,
@@ -46,14 +47,77 @@ _JAVA_DESCRIPTOR_PATTERN = re.compile(
     r"([a-zA-Z_$][a-zA-Z0-9_$]*)(\([^)]*\)|[#./\[\]])?"
 )
 
-_JAVA_BUILD_MARKERS = (
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-    "settings.gradle",
-    "settings.gradle.kts",
-    "build.sbt",
+# The regular files by which scip-java 0.12.3 detects each build tool it
+# supports. sbt is also detected by a `project/build.properties` holding the
+# key `sbt.version`; `_SBT_VERSION_KEY` finds it where a line starts with it,
+# which is every form but an escaped key or a continued line. A `\u` escape
+# not followed by four hex digits outside a comment, `_MALFORMED_ESCAPE`,
+# makes scip-java abort reading the file. Text mode turns CR and CRLF into
+# LF, the other line ends the properties format accepts.
+_BUILD_TOOL_MARKERS = {
+    "SCIP": ("scip-java.json", "lsif-java.json"),
+    "Maven": ("pom.xml",),
+    "Gradle": ("settings.gradle", "gradlew", "build.gradle", "build.gradle.kts"),
+    "sbt": ("build.sbt",),
+    "mill": ("build.sc",),
+    "Bazel": ("WORKSPACE",),
+}
+_SBT_VERSION_KEY = re.compile(r"^[ \t\f]*sbt\.version(?:[ \t\f=:]|$)", re.MULTILINE)
+_MALFORMED_ESCAPE = re.compile(
+    r"^(?![ \t\f]*[#!]).*?(?<!\\)(?:\\\\)*\\u(?![0-9a-fA-F]{4})", re.MULTILINE
 )
+
+
+def _build_tools(directory: Path) -> set[str] | None:
+    """The build tools scip-java detects in `directory`, or None where it
+    aborts reading a `project/build.properties` it cannot read or parse.
+
+    Run there without ``--build-tool``, as descry runs it, scip-java builds
+    with the one it detects and refuses a directory where it detects none
+    ("No build tool detected") or more than one ("Multiple build tools
+    detected").
+    """
+    tools = {
+        tool
+        for tool, markers in _BUILD_TOOL_MARKERS.items()
+        if any((directory / m).is_file() for m in markers)
+    }
+    properties = directory / "project" / "build.properties"
+    if properties.is_file():
+        try:
+            text = properties.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        if _MALFORMED_ESCAPE.search(text):
+            return None
+        if _SBT_VERSION_KEY.search(text):
+            tools.add("sbt")
+    return tools
+
+
+_GRADLE_SETTINGS = ("settings.gradle", "settings.gradle.kts")
+
+
+def _runs_gradle(directory: Path) -> bool:
+    """Whether scip-java run in `directory` builds it with Gradle."""
+    return _build_tools(directory) == {"Gradle"}
+
+
+def _lists_modules(pom: Path) -> bool:
+    """Whether the Maven POM ``pom`` lists modules outside any profile."""
+    if not pom.is_file():
+        return False
+    try:
+        project = ElementTree.parse(pom).getroot()
+    except (OSError, ElementTree.ParseError):
+        return False
+    return any(len(c) for c in project if c.tag.rpartition("}")[2] == "modules")
+
+
+def _scip_java_runs(directory: Path) -> bool:
+    """Whether scip-java run in `directory` builds it, with one tool."""
+    tools = _build_tools(directory)
+    return tools is not None and len(tools) == 1
 
 
 _COMPAT_INIT_SCRIPT_PATH = Path(__file__).parent / "_java_compat.init.gradle"
@@ -171,31 +235,40 @@ class JavaAdapter:
         """Return one DiscoveredProject per top-level JVM build directory.
 
         A JVM "project" in descry's sense is any top-level subdirectory
-        containing one of the recognized build markers (Maven, Gradle, or
-        sbt) plus at least one JVM source file. The root itself is
-        detected as a single project when it carries a build marker with
-        no subdirectory competing for the name.
-
-        Gradle multi-project builds (signalled by a root
-        ``settings.gradle`` / ``settings.gradle.kts``) are treated as a
-        single unit — scip-java handles their submodules natively, and
-        trying to index a ``buildSrc/`` directory in isolation fails
-        because it depends on the parent project's configuration
-        (observed on spring-framework, pre-fix).
+        where scip-java detects exactly one build tool, and so runs, holding
+        at least one JVM source file. The root itself is a single project
+        on the same terms when its build aggregates the subdirectories' —
+        a Gradle settings file, a Maven `pom.xml` with `<modules>` — or
+        when no subdirectory is one. Indexing a subdirectory of an
+        aggregating build alone fails where it depends on its parent's
+        configuration (a Maven module's parent POM, a Gradle ``buildSrc/``,
+        observed on spring-framework).
         """
-        seen: set[str] = set()
-        projects: list[DiscoveredProject] = []
+        runs = _scip_java_runs(root) and _has_jvm_sources(root)
+        settings = any((root / name).is_file() for name in _GRADLE_SETTINGS)
+        aggregates = (
+            settings if _runs_gradle(root) else _lists_modules(root / "pom.xml")
+        )
+        if runs and aggregates:
+            return [DiscoveredProject(name=root.name, root=root, language=self.name)]
 
-        # Gradle multi-project short-circuit — scip-java handles the
-        # subproject tree natively; iterating ourselves picks up
-        # buildSrc/ alone which fails to build standalone.
-        root_has_gradle = (root / "build.gradle").exists() or (
-            root / "build.gradle.kts"
-        ).exists()
-        root_has_settings = (root / "settings.gradle").exists() or (
-            root / "settings.gradle.kts"
-        ).exists()
-        if root_has_gradle and root_has_settings and _has_jvm_sources(root):
+        projects: list[DiscoveredProject] = []
+        for pkg_dir in sorted(root.iterdir()):
+            if not pkg_dir.is_dir() or pkg_dir.name.startswith("."):
+                continue
+            if pkg_dir.name in excluded_dirs:
+                continue
+            if not _scip_java_runs(pkg_dir) or not _has_jvm_sources(pkg_dir):
+                continue
+            projects.append(
+                DiscoveredProject(
+                    name=pkg_dir.name,
+                    root=pkg_dir,
+                    language=self.name,
+                )
+            )
+
+        if not projects and runs:
             projects.append(
                 DiscoveredProject(
                     name=root.name,
@@ -203,38 +276,6 @@ class JavaAdapter:
                     language=self.name,
                 )
             )
-            return projects
-
-        for marker_name in _JAVA_BUILD_MARKERS:
-            for marker in root.glob(f"*/{marker_name}"):
-                pkg_dir = marker.parent
-                if pkg_dir.name.startswith("."):
-                    continue
-                if pkg_dir.name in excluded_dirs:
-                    continue
-                if pkg_dir.name in seen:
-                    continue
-                if not _has_jvm_sources(pkg_dir):
-                    continue
-                seen.add(pkg_dir.name)
-                projects.append(
-                    DiscoveredProject(
-                        name=pkg_dir.name,
-                        root=pkg_dir,
-                        language=self.name,
-                    )
-                )
-
-        if not projects:
-            root_has_marker = any((root / m).exists() for m in _JAVA_BUILD_MARKERS)
-            if root_has_marker and _has_jvm_sources(root):
-                projects.append(
-                    DiscoveredProject(
-                        name=root.name,
-                        root=root,
-                        language=self.name,
-                    )
-                )
 
         projects.sort(key=lambda p: p.name)
         return projects
@@ -258,11 +299,13 @@ class JavaAdapter:
         scip-java Gradle tasks (``clean scipPrintDependencies
         scipCompileAll``) because ``--`` replaces scip-java's default
         task list.
-
-        Additional user extras from ``config.extra_args`` are appended
-        AFTER the compat flags, so users can override or add to the
-        default tasks.
         """
+        # The init-script and the default task list are Gradle arguments:
+        # scip-java forwards everything after `--` to the build tool it
+        # detects, and on a Maven (or sbt) project those flags reach `mvn`
+        # (or `sbt`), which rejects them and writes no index.
+        gradle = _runs_gradle(project.root)
+
         # Pre-flight: scip-java's SemanticdbGradlePlugin applies to
         # allprojects (incl. :buildSrc and includeBuild participants).
         # On Kotlin DSL projects with precompiled-script-plugins, that
@@ -270,7 +313,10 @@ class JavaAdapter:
         # and there is no flag (incl. -x / --exclude-task) that defers
         # it past task creation. Skip with a clear log so the user
         # sees what's happening instead of an opaque scip-java stderr.
-        kotlin_dsl_marker = _detect_kotlin_dsl_buildSrc(project.root)
+        # The plugin runs inside Gradle, so only a Gradle build is skipped.
+        kotlin_dsl_marker = (
+            _detect_kotlin_dsl_buildSrc(project.root) if gradle else None
+        )
         if kotlin_dsl_marker is not None:
             logger.warning(
                 f"SCIP: skipping scip-java for {project.name}: "
@@ -287,7 +333,7 @@ class JavaAdapter:
 
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
 
-        init_script = _compat_init_script()
+        init_script = _compat_init_script() if gradle else None
         pass_through: list[str] = []
         if init_script is not None:
             pass_through.extend(
@@ -298,19 +344,12 @@ class JavaAdapter:
                     "scipCompileAll",
                 ]
             )
-        pass_through.extend(config.extra_args)
 
         if pass_through:
             argv.append("--")
             argv.extend(pass_through)
 
-        env_extras: dict[str, str] = {}
-        # scip-java honors JVM_VERSION; the AdapterConfig.toolchain slot is
-        # the natural home for that override when set.
-        if config.toolchain:
-            env_extras["JVM_VERSION"] = config.toolchain
-
-        return CommandSpec(argv=argv, cwd=project.root, env_extras=env_extras)
+        return CommandSpec(argv=argv, cwd=project.root)
 
     def parse_descriptors(self, raw: str) -> list[str]:
         """Parse scip-java path-descriptor strings into name components.

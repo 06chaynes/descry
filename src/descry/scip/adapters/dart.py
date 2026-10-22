@@ -23,6 +23,7 @@ cache atomically.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from descry.scip.adapter import (
@@ -48,6 +49,14 @@ class DartAdapter:
     binary = "scip-dart"
     extensions = (".dart",)
 
+    @property
+    def binary_alternatives(self) -> tuple[str, ...]:
+        """`dart pub global` installs `scip_dart` into `$PUB_CACHE/bin`, or
+        `~/.pub-cache/bin` when that variable is unset, and warns that the
+        directory is not on PATH — probe it explicitly too."""
+        cache = os.environ.get("PUB_CACHE") or str(Path.home() / ".pub-cache")
+        return ("scip_dart", str(Path(cache) / "bin" / "scip_dart"))
+
     def discover(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
         """Return one DiscoveredProject per Dart package.
 
@@ -55,8 +64,9 @@ class DartAdapter:
         Discovery precedence:
         1. Root-level ``pubspec.yaml`` → single project (standard Dart
            and Flutter app layout).
-        2. Per-subdir packages (monorepo / melos workspace layout with
-           ``packages/*/pubspec.yaml``).
+        2. Per-subdir packages (``<dir>/pubspec.yaml``), then per-
+           collection packages (``<collection>/<dir>/pubspec.yaml`` —
+           melos ``packages/``, shelf's ``pkgs/``, ``apps/``…).
         """
         if (root / "pubspec.yaml").exists() and _has_dart_sources(root):
             return [
@@ -89,13 +99,14 @@ class DartAdapter:
                 )
             )
 
-        # Melos / workspace layout: packages/<name>/pubspec.yaml.
+        # A package one level below a collection directory (step 2).
         if not projects:
-            for marker in root.glob("packages/*/pubspec.yaml"):
+            for marker in root.glob("*/*/pubspec.yaml"):
                 pkg_dir = marker.parent
-                if pkg_dir.name.startswith("."):
+                collection = pkg_dir.parent
+                if pkg_dir.name.startswith(".") or collection.name.startswith("."):
                     continue
-                if pkg_dir.name in excluded_dirs:
+                if pkg_dir.name in excluded_dirs or collection.name in excluded_dirs:
                     continue
                 if pkg_dir.name in seen:
                     continue
@@ -122,13 +133,17 @@ class DartAdapter:
         """scip-dart takes the package root as a positional arg and
         writes ``index.scip`` to cwd.
 
+        The root is `.`: scip-dart skips every directory holding a
+        ``pubspec.yaml`` whose path, as text, is not the root's, and the
+        package's own directory is `.`, so `./` would skip the package and
+        index nothing.
+
         The shared runner (``output_mode="rename"``) moves that file
         into ``out_path`` after success. If ``dart pub get`` hasn't run
         scip-dart exits non-zero with a clear error; the runner reports
         the exit code and moves on to other adapters.
         """
-        argv: list[str] = [self.binary, "./"]
-        argv.extend(config.extra_args)
+        argv: list[str] = [self.binary, "."]
         return CommandSpec(argv=argv, cwd=project.root, output_mode="rename")
 
     def parse_descriptors(self, raw: str) -> list[str]:

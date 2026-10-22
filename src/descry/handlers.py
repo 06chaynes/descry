@@ -4,21 +4,25 @@ No MCP dependency. All tool logic lives here; MCP/CLI/Web are thin wrappers.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from descry._env import safe_env
-
 from descry import __version__
+from descry._env import env_flag
+from descry._graph import GraphSchemaError, load_graph_with_schema
 
 logger = logging.getLogger(__name__)
 
@@ -158,9 +162,14 @@ _DEFAULT_CODE_EXTENSIONS = {
     ".py",
     ".ts",
     ".tsx",
+    ".mts",
+    ".cts",
     ".js",
     ".jsx",
+    ".mjs",
+    ".cjs",
     ".svelte",
+    ".proto",
     ".go",
     ".java",
     ".kt",
@@ -198,8 +207,12 @@ _DEFAULT_SYNTAX_LANG_MAP = {
     ".py": "python",
     ".ts": "typescript",
     ".tsx": "typescript",
+    ".mts": "typescript",
+    ".cts": "typescript",
     ".js": "javascript",
     ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
     ".svelte": "svelte",
     ".proto": "protobuf",
     ".json": "json",
@@ -241,6 +254,18 @@ def _env(key: str, default: str = "") -> str:
 _TOOLCHAIN_REGEX = re.compile(r"^[A-Za-z0-9._\-]+$")
 _MODEL_HF_REGEX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]*$")
 _SHELL_METACHARS = set("\x00;|&`$\n\r\t<>")
+_LANG_NAME_REGEX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_+#.\-]*$")
+
+
+def _toml_number(section: str, key: str, value, default):
+    """A number from TOML, or `default` with a warning if it is anything else."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        logger.warning(
+            f"Invalid [{section}] {key} in .descry.toml: {value!r} is not a "
+            f"number; keeping {default!r}"
+        )
+        return default
+    return value
 
 
 def _validate_toolchain(value: str) -> str:
@@ -274,6 +299,20 @@ def _validate_embedding_model(value: str, project_root: Path) -> str:
     """
     if not value:
         raise ValueError("Empty embeddings.model")
+
+    from descry.embeddings import MODEL_REGISTRY
+
+    if value in MODEL_REGISTRY:
+        return value
+    if "/" not in value and not value.startswith("."):
+        # Usually a mistyped alias, but HuggingFace hosts a few single-segment
+        # repo ids, so warn and carry on.
+        logger.warning(
+            "embeddings.model %r is not a known alias (%s) and has no org prefix; "
+            "treating it as a HuggingFace repo id",
+            value,
+            ", ".join(sorted(MODEL_REGISTRY)),
+        )
     if value.startswith("/") or ".." in value.split("/"):
         resolved = Path(value).resolve()
         root = project_root.resolve()
@@ -298,12 +337,12 @@ class DescryConfig:
     enable_embeddings: bool = True
     openapi_path: Path | None = None
     backend_handler_patterns: list[str] = field(default_factory=list)
-    frontend_api_patterns: list[str] = field(default_factory=list)
     api_prefixes: list[str] = field(default_factory=lambda: list(_DEFAULT_API_PREFIXES))
     excluded_dirs: set[str] = field(default_factory=lambda: set(_DEFAULT_EXCLUDED_DIRS))
 
     # Embeddings
-    embedding_model: str = "jinaai/jina-code-embeddings-0.5b"
+    # None: the default model, or its ungated fallback when the default is gated.
+    embedding_model: str | None = None
 
     # Test detection
     test_path_patterns: tuple[str, ...] = field(
@@ -317,6 +356,13 @@ class DescryConfig:
     code_extensions: set[str] = field(
         default_factory=lambda: set(_DEFAULT_CODE_EXTENSIONS)
     )
+    max_file_mb: float = (
+        10  # larger files are not indexed, read or served; 0 = unlimited
+    )
+    # A file whose parsing takes longer is left as far as it got; 0 = unlimited
+    max_parse_seconds: float = 120
+    # In a git repository, files git ignores are not indexed
+    respect_gitignore: bool = True
 
     # Git
     churn_exclusions: list[str] = field(
@@ -325,7 +371,7 @@ class DescryConfig:
     git_timeout: int = 30
 
     # Timeouts
-    scip_timeout_minutes: int = 0  # 0 = unlimited
+    scip_timeout_minutes: int = 30  # per indexer; 0 = unlimited
     index_timeout_minutes: int = 30  # Overall index timeout (0 = unlimited)
     embedding_timeout: int = 60
     query_timeout_ms: int = 4000
@@ -352,14 +398,42 @@ class DescryConfig:
 
     def __post_init__(self):
         self.project_root = Path(self.project_root)
+        # The default cache directory is inside the project; one given here
+        # or by DESCRY_CACHE_DIR is the user's.
+        self.cache_dir_given = self.cache_dir is not None
         if self.cache_dir is None:
             self.cache_dir = self.project_root / ".descry_cache"
         else:
             self.cache_dir = Path(self.cache_dir)
 
+    def cache_dir_error(self) -> str | None:
+        """Why descry may not write to the cache directory, or None if it may.
+
+        A repository can ship the default directory, or its `scip`
+        subdirectory, as a symlink to a directory outside it, where descry
+        would replace files and remove stale indexes. The default must stay
+        inside the project; DESCRY_CACHE_DIR names any other.
+        """
+        if self.cache_dir_given:
+            return None
+        root = self.project_root.resolve()
+        for path in (self.cache_dir, self.cache_dir / "scip"):
+            resolved = path.resolve()
+            if not resolved.is_relative_to(root):
+                return (
+                    f"The cache directory {path} resolves to {resolved}, outside "
+                    "the project. Set DESCRY_CACHE_DIR to keep the cache there."
+                )
+        return None
+
     @property
     def graph_path(self) -> Path:
         return self.cache_dir / "codebase_graph.json"
+
+    @property
+    def max_file_bytes(self) -> int:
+        """`max_file_mb` in bytes; 0 when files of any size are accepted."""
+        return int(self.max_file_mb * 1024 * 1024)
 
     @property
     def resolved_project_root(self) -> Path:
@@ -390,7 +464,7 @@ class DescryConfig:
     def _load_toml(project_root: Path) -> dict:
         """Load .descry.toml from project root if it exists.
 
-        Rejects files > 1 MiB (TOML-parse DoS guard per A.4).
+        Rejects files > 1 MiB (TOML-parse DoS guard).
 
         Returns:
             Parsed TOML data as dict, or empty dict if not found/invalid.
@@ -398,7 +472,7 @@ class DescryConfig:
         import tomllib
 
         toml_path = Path(project_root) / ".descry.toml"
-        if not toml_path.exists():
+        if not toml_path.is_file():
             return {}
         try:
             if toml_path.stat().st_size > 1 * 1024 * 1024:
@@ -406,7 +480,7 @@ class DescryConfig:
                 return {}
             with open(toml_path, "rb") as f:
                 return tomllib.load(f)
-        except Exception as e:
+        except (OSError, tomllib.TOMLDecodeError) as e:
             logger.warning(f"Failed to parse .descry.toml: {e}")
             return {}
 
@@ -422,8 +496,15 @@ class DescryConfig:
         project = data.get("project", {})
         if "excluded_dirs" in project:
             self.excluded_dirs = set(project["excluded_dirs"])
+        if "respect_gitignore" in project:
+            self.respect_gitignore = project["respect_gitignore"]
         if "max_stale_hours" in project:
-            self.max_stale_hours = project["max_stale_hours"]
+            self.max_stale_hours = _toml_number(
+                "project",
+                "max_stale_hours",
+                project["max_stale_hours"],
+                self.max_stale_hours,
+            )
 
         # [features]
         features = data.get("features", {})
@@ -442,7 +523,7 @@ class DescryConfig:
             except ValueError as e:
                 logger.warning(
                     f"Invalid [embeddings] model in .descry.toml: {e}; "
-                    f"falling back to default {self.embedding_model!r}"
+                    "using the default model"
                 )
 
         # [test_detection]
@@ -456,35 +537,79 @@ class DescryConfig:
         code_files = data.get("code_files", {})
         if "extensions" in code_files:
             self.code_extensions = set(code_files["extensions"])
+        for key in ("max_file_mb", "max_parse_seconds"):
+            if key in code_files:
+                kept = getattr(self, key)
+                limit = _toml_number("code_files", key, code_files[key], kept)
+                if limit < 0:
+                    logger.warning(
+                        f"Invalid [code_files] {key} in .descry.toml: "
+                        f"{limit!r} is negative; keeping {kept!r}"
+                    )
+                else:
+                    setattr(self, key, limit)
 
         # [git]
         git = data.get("git", {})
         if "churn_exclusions" in git:
             self.churn_exclusions = git["churn_exclusions"]
         if "timeout" in git:
-            self.git_timeout = git["timeout"]
+            self.git_timeout = _toml_number(
+                "git", "timeout", git["timeout"], self.git_timeout
+            )
 
         # [timeouts]
         timeouts = data.get("timeouts", {})
         if "scip_minutes" in timeouts:
-            self.scip_timeout_minutes = timeouts["scip_minutes"]
+            self.scip_timeout_minutes = _toml_number(
+                "timeouts",
+                "scip_minutes",
+                timeouts["scip_minutes"],
+                self.scip_timeout_minutes,
+            )
         if "index_minutes" in timeouts:
-            self.index_timeout_minutes = timeouts["index_minutes"]
+            self.index_timeout_minutes = _toml_number(
+                "timeouts",
+                "index_minutes",
+                timeouts["index_minutes"],
+                self.index_timeout_minutes,
+            )
         if "embedding_seconds" in timeouts:
-            self.embedding_timeout = timeouts["embedding_seconds"]
+            self.embedding_timeout = _toml_number(
+                "timeouts",
+                "embedding_seconds",
+                timeouts["embedding_seconds"],
+                self.embedding_timeout,
+            )
         if "query_ms" in timeouts:
-            self.query_timeout_ms = timeouts["query_ms"]
+            self.query_timeout_ms = _toml_number(
+                "timeouts", "query_ms", timeouts["query_ms"], self.query_timeout_ms
+            )
 
         # [query]
         query = data.get("query", {})
         if "max_depth" in query:
-            self.max_depth = query["max_depth"]
+            self.max_depth = _toml_number(
+                "query", "max_depth", query["max_depth"], self.max_depth
+            )
         if "max_nodes" in query:
-            self.max_nodes = query["max_nodes"]
+            self.max_nodes = _toml_number(
+                "query", "max_nodes", query["max_nodes"], self.max_nodes
+            )
         if "max_children_per_level" in query:
-            self.max_children_per_level = query["max_children_per_level"]
+            self.max_children_per_level = _toml_number(
+                "query",
+                "max_children_per_level",
+                query["max_children_per_level"],
+                self.max_children_per_level,
+            )
         if "max_callers_shown" in query:
-            self.max_callers_shown = query["max_callers_shown"]
+            self.max_callers_shown = _toml_number(
+                "query",
+                "max_callers_shown",
+                query["max_callers_shown"],
+                self.max_callers_shown,
+            )
 
         # [scip]
         scip = data.get("scip", {})
@@ -507,14 +632,11 @@ class DescryConfig:
             patterns = cross_lang["backend_handler_patterns"]
             if isinstance(patterns, list):
                 self.backend_handler_patterns = [str(p) for p in patterns]
-        if "frontend_api_patterns" in cross_lang:
-            patterns = cross_lang["frontend_api_patterns"]
-            if isinstance(patterns, list):
-                self.frontend_api_patterns = [str(p) for p in patterns]
         if "api_prefixes" in cross_lang:
             prefixes = cross_lang["api_prefixes"]
             if isinstance(prefixes, list):
-                self.api_prefixes = [str(p) for p in prefixes]
+                # An empty prefix would match every path and strip nothing.
+                self.api_prefixes = [str(p) for p in prefixes if p]
         if "openapi_path" in cross_lang:
             raw = cross_lang["openapi_path"]
             if isinstance(raw, str) and raw:
@@ -526,8 +648,13 @@ class DescryConfig:
                 try:
                     resolved = candidate.resolve(strict=False)
                     root = self.project_root.resolve()
-                    if resolved == root or root in resolved.parents:
+                    if root in resolved.parents:
                         self.openapi_path = resolved
+                    elif resolved == root:
+                        logger.warning(
+                            f"[cross_lang] openapi_path {raw!r} is the project "
+                            f"root, not a spec file; ignoring"
+                        )
                     else:
                         logger.warning(
                             f"[cross_lang] openapi_path {raw!r} resolves outside "
@@ -549,36 +676,48 @@ class DescryConfig:
         # [syntax.lang_map] — merges with defaults (additive)
         syntax = data.get("syntax", {})
         lang_map = syntax.get("lang_map", {})
-        if lang_map:
-            self.syntax_lang_map.update(lang_map)
+        for ext, lang in lang_map.items():
+            # The value becomes a code-fence tag and part of a regex.
+            if isinstance(lang, str) and _LANG_NAME_REGEX.match(lang):
+                self.syntax_lang_map[ext] = lang
+            else:
+                logger.warning(
+                    f"Invalid [syntax.lang_map] {ext!r} in .descry.toml: "
+                    f"{lang!r} is not a language name; ignoring"
+                )
 
     @classmethod
-    def from_env(cls) -> "DescryConfig":
-        """Build config: auto_detect -> apply TOML -> apply env vars."""
+    def from_env(cls, project_root: Path | None = None) -> "DescryConfig":
+        """Build config: auto_detect, unless given the root -> apply TOML ->
+        apply env vars."""
         log_level = _env("DESCRY_LOG_LEVEL", "WARNING")
-        logging.getLogger("descry").setLevel(
-            getattr(logging, log_level.upper(), logging.WARNING)
-        )
+        level = logging.getLevelNamesMapping().get(log_level.upper())
+        if level is None:
+            logger.warning(f"Invalid DESCRY_LOG_LEVEL {log_level!r}; using WARNING")
+            level = logging.WARNING
+        logging.getLogger("descry").setLevel(level)
 
-        # Step 1: auto-detect project root
-        config = cls.auto_detect()
+        # Step 1: the project root, auto-detected unless given
+        config = cls(project_root=project_root) if project_root else cls.auto_detect()
 
         # Step 2: apply TOML (overrides defaults)
         toml_data = cls._load_toml(config.project_root)
         config._apply_toml(toml_data)
 
         # Step 3: apply env vars (override TOML)
-        cache_dir_str = _env("DESCRY_CACHE_DIR")
-        no_scip = _env("DESCRY_NO_SCIP").lower() in ("1", "true", "yes")
-        no_embeddings = _env("DESCRY_NO_EMBEDDINGS").lower() in ("1", "true", "yes")
-
-        if cache_dir_str:
-            config.cache_dir = Path(cache_dir_str)
-        if no_scip:
-            config.enable_scip = False
-        if no_embeddings:
-            config.enable_embeddings = False
+        config._apply_env()
         return config
+
+    def _apply_env(self) -> None:
+        """Apply DESCRY_CACHE_DIR, DESCRY_NO_SCIP and DESCRY_NO_EMBEDDINGS."""
+        cache_dir_str = _env("DESCRY_CACHE_DIR")
+        if cache_dir_str:
+            self.cache_dir = Path(cache_dir_str)
+            self.cache_dir_given = True
+        if env_flag("DESCRY_NO_SCIP"):
+            self.enable_scip = False
+        if env_flag("DESCRY_NO_EMBEDDINGS"):
+            self.enable_embeddings = False
 
 
 # --- Format Helpers (module-level pure functions) ---
@@ -698,12 +837,7 @@ def is_natural_language_query(terms: list[str]) -> bool:
 
 
 def symbol_type_priority(node: dict) -> int:
-    """Ranking key: prefer Function/Method > Class > everything else.
-
-    Shared by ``DescryService.context`` and the web ``/api/context``
-    handler so both surfaces agree on which match wins when multiple
-    symbols share a name.
-    """
+    """Ranking key: prefer Function/Method > Class > everything else."""
     t = node.get("type", "")
     if t in ("Function", "Method"):
         return 0
@@ -759,8 +893,8 @@ def _try_import_embeddings(enabled: bool):
         return False, None, None
     try:
         from descry.embeddings import (
-            embeddings_available,
             SemanticSearcher,
+            embeddings_available,
             get_embeddings_status,
         )
 
@@ -773,7 +907,7 @@ def _try_import_scip(enabled: bool):
     if not enabled:
         return False, None, None
     try:
-        from descry.scip.support import scip_available, get_scip_status
+        from descry.scip.support import get_scip_status, scip_available
 
         return scip_available(), scip_available, get_scip_status
     except ImportError:
@@ -782,7 +916,7 @@ def _try_import_scip(enabled: bool):
 
 def _try_import_git_history():
     try:
-        from descry.git_history import GitHistoryAnalyzer, GitError
+        from descry.git_history import GitError, GitHistoryAnalyzer
 
         return True, GitHistoryAnalyzer, GitError
     except ImportError:
@@ -790,6 +924,100 @@ def _try_import_git_history():
 
 
 # --- DescryService ---
+
+
+class ServiceError(str):
+    """A service result that reports a failure.
+
+    Still a `str`, so every interface returns it unchanged; the CLI checks
+    the type to choose its exit status. `reason` tells apart the failures an
+    interface answers differently.
+    """
+
+    def __new__(cls, message: str, reason: str = "failed"):
+        error = super().__new__(cls, message)
+        error.reason = reason
+        return error
+
+
+_GRAPH_NOT_FOUND = "Graph not found. Run descry ensure first."
+_INDEX_BUSY = "An index run is already in progress"
+
+
+def _limit_error(limit: int) -> str | None:
+    """Why `limit` cannot be used, or None. A negative one slices from the end."""
+    if limit < 0:
+        return f"limit must not be negative, got {limit}."
+    return None
+
+
+def _decode_output(raw: bytes) -> str:
+    """Decode a child's captured output as `subprocess.run(text=True)` does."""
+    text = raw.decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """Kill a process started by `_process_tree` and everything it started."""
+    if proc.returncode is not None:
+        return
+    if sys.platform == "win32":
+        # No process groups to signal here; taskkill walks the tree instead.
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True,
+            check=False,
+        )
+    else:
+        # The child may have exited without the event loop having seen it yet.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+
+@contextlib.asynccontextmanager
+async def _process_tree(argv: list[str], **kwargs):
+    """Run `argv` in a session of its own, so that what it starts dies with it.
+
+    Leaving the block kills whatever is still running, and returns only once
+    the child has exited. The session keeps the terminal's Ctrl-C and hangup,
+    and a signal sent to this process's group, from reaching the tree, so
+    while the block runs each of those kills it first and is then handled as
+    it would have been. The child's stdin is /dev/null, so neither it nor an
+    indexer it starts reads the terminal or the stream this process was
+    started with.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *argv, start_new_session=True, stdin=asyncio.subprocess.DEVNULL, **kwargs
+    )
+
+    def stop(signum, frame):
+        _kill_process_tree(proc)
+        previous = handlers[signum]
+        if callable(previous):
+            previous(signum, frame)
+        elif previous == signal.SIG_DFL:
+            signal.signal(signum, previous)
+            signal.raise_signal(signum)
+
+    handlers = {}
+    # Windows starts no session, and only the main thread may set handlers.
+    # A signal this process ignores, as under `nohup`, stays ignored.
+    if (
+        sys.platform != "win32"
+        and threading.current_thread() is threading.main_thread()
+    ):
+        handlers = {
+            signum: signal.signal(signum, stop)
+            for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+            if signal.getsignal(signum) != signal.SIG_IGN
+        }
+    try:
+        yield proc
+    finally:
+        for signum, previous in handlers.items():
+            signal.signal(signum, previous)
+        _kill_process_tree(proc)
+        await proc.wait()
 
 
 class DescryService:
@@ -822,66 +1050,98 @@ class DescryService:
         self._git_cache_lock = asyncio.Lock()
         self._dedup_cache_lock = asyncio.Lock()
 
-        self._graph_cache = {"mtime": 0, "nodes": 0, "edges": 0}
-        self._querier_cache = {"mtime": 0, "instance": None}
+        self._graph_cache = {"mtime": 0, "nodes": 0, "edges": 0, "error": None}
+        self._querier_cache = {"mtime": 0, "instance": None, "error": None}
         self._semantic_cache = {
             "mtime": 0,
             "instance": None,
             "loading": False,
             "error": None,
         }
+        self._semantic_load = None
         self._git_cache = {"analyzer": None, "graph_mtime": None}
         self._dedup_cache: dict[str, tuple[float, str]] = {}
         self._max_dedup_entries = 100
 
+        # Index runs write the same cache directory, so one runs at a time
+        # and another is refused, not queued. Never waited on, so a thread
+        # lock serves whichever event loop the service is called from.
+        self._index_lock = threading.Lock()
+
     # --- Internal helpers ---
 
+    def _graph_mtime(self) -> float | None:
+        """The graph file's mtime, or None if it cannot be stat'ed."""
+        try:
+            return self.config.graph_path.stat().st_mtime
+        except OSError:
+            return None
+
     def _get_graph_status(self) -> tuple[bool, str, float | None]:
-        gp = self.config.graph_path
-        if not gp.exists():
+        mtime = self._graph_mtime()
+        if mtime is None:
             return False, "Graph not found", None
-        mtime = gp.stat().st_mtime
         age_hours = (time.time() - mtime) / 3600
         return True, f"{age_hours:.1f}h ago", age_hours
 
     async def _update_cache(self):
         async with self._graph_cache_lock:
             gp = self.config.graph_path
-            if gp.exists():
-                mtime = gp.stat().st_mtime
-                if mtime != self._graph_cache["mtime"]:
-                    try:
-                        from descry._graph import load_graph_with_schema
-
-                        data = load_graph_with_schema(gp)
-                        self._graph_cache = {
-                            "mtime": mtime,
-                            "nodes": len(data.get("nodes", [])),
-                            "edges": len(data.get("edges", [])),
-                        }
-                    except Exception as e:
-                        logger.warning(f"Failed to update graph cache: {e}")
+            mtime = self._graph_mtime()
+            if mtime is not None and mtime != self._graph_cache["mtime"]:
+                try:
+                    data = load_graph_with_schema(gp)
+                    self._graph_cache = {
+                        "mtime": mtime,
+                        "nodes": len(data.get("nodes", [])),
+                        "edges": len(data.get("edges", [])),
+                        "error": None,
+                    }
+                # ValueError: invalid JSON or invalid UTF-8.
+                except (OSError, ValueError, GraphSchemaError) as e:
+                    logger.warning(f"Failed to update graph cache: {e}")
+                    # Zero counts, not those of the graph this one replaced.
+                    self._graph_cache = {
+                        "mtime": mtime,
+                        "nodes": 0,
+                        "edges": 0,
+                        "error": str(e),
+                    }
 
     async def _get_querier(self):
+        """The cached GraphQuerier; None if the graph is missing or unloadable."""
         if self._GraphQuerier is None:
             return None
         async with self._querier_cache_lock:
             gp = self.config.graph_path
-            if not gp.exists():
-                self._querier_cache = {"mtime": 0, "instance": None}
+            mtime = self._graph_mtime()
+            if mtime is None:
+                self._querier_cache = {"mtime": 0, "instance": None, "error": None}
                 return None
-            mtime = gp.stat().st_mtime
             if mtime != self._querier_cache["mtime"]:
+                try:
+                    instance = self._GraphQuerier(str(gp), config=self.config)
+                    error = None
+                except (OSError, ValueError, GraphSchemaError) as e:
+                    logger.warning(f"Cannot load graph {gp}: {e}")
+                    instance, error = None, str(e)
                 self._querier_cache = {
                     "mtime": mtime,
-                    "instance": self._GraphQuerier(str(gp), config=self.config),
+                    "instance": instance,
+                    "error": error,
                 }
             return self._querier_cache["instance"]
 
+    def _no_graph_error(self) -> str:
+        """Why `_get_querier` returned None."""
+        error = self._querier_cache["error"]
+        if error:
+            return f"Graph unusable ({error}). Run descry index to rebuild it."
+        return _GRAPH_NOT_FOUND
+
     async def _get_git_analyzer(self):
         async with self._git_cache_lock:
-            gp = self.config.graph_path
-            current_mtime = gp.stat().st_mtime if gp.exists() else None
+            current_mtime = self._graph_mtime()
             if (
                 self._git_cache["graph_mtime"] != current_mtime
                 or self._git_cache["analyzer"] is None
@@ -915,8 +1175,8 @@ class DescryService:
 
     def reset_caches(self):
         """Reset all cached instances. Call after reindex."""
-        self._graph_cache = {"mtime": 0, "nodes": 0, "edges": 0}
-        self._querier_cache = {"mtime": 0, "instance": None}
+        self._graph_cache = {"mtime": 0, "nodes": 0, "edges": 0, "error": None}
+        self._querier_cache = {"mtime": 0, "instance": None, "error": None}
         self._semantic_cache = {
             "mtime": 0,
             "instance": None,
@@ -958,108 +1218,135 @@ class DescryService:
         header = f"[{self._graph_cache['nodes']:,}n/{self._graph_cache['edges']:,}e | {age_str}{stale}]"
         return f"{header}\n\n{content}"
 
+    def _new_searcher(self):
+        """A SemanticSearcher over this service's graph, cache and model."""
+        if error := self.config.cache_dir_error():
+            raise RuntimeError(error)
+        return self._SemanticSearcher(
+            str(self.config.graph_path),
+            cache_dir=str(self.config.cache_dir),
+            model_name=self.config.embedding_model,
+            source_root=str(self.config.project_root),
+        )
+
     async def _load_embeddings_background(self):
         async with self._semantic_cache_lock:
-            if (
-                self._semantic_cache["instance"] is not None
-                or self._semantic_cache["loading"]
-            ):
+            # A reindex replaces the cache, so a load writes only to its own.
+            cache = self._semantic_cache
+            if cache["instance"] is not None or cache["loading"]:
                 return
-            self._semantic_cache["loading"] = True
-            self._semantic_cache["error"] = None
+            cache["loading"] = True
+            mtime = self._graph_mtime() or 0
 
         try:
 
             def load_sync():
-                return self._SemanticSearcher(
-                    str(self.config.graph_path), model_name=self.config.embedding_model
-                )
+                searcher = self._new_searcher()
+                # On a warm cache the constructor never touches the model, so
+                # without this the pre-warm reports "ready" while the first
+                # real query still pays the full model load.
+                searcher.ensure_model()
+                return searcher
 
-            searcher = await asyncio.wait_for(
-                asyncio.to_thread(load_sync), timeout=60.0
-            )
+            # No timeout: the thread cannot be stopped, so a load given up on
+            # would go on building the cache while a search started another.
+            searcher = await asyncio.to_thread(load_sync)
 
             async with self._semantic_cache_lock:
-                gp = self.config.graph_path
-                mtime = gp.stat().st_mtime if gp.exists() else 0
-                self._semantic_cache["mtime"] = mtime
-                self._semantic_cache["instance"] = searcher
+                cache["mtime"] = mtime
+                cache["instance"] = searcher
+                cache["error"] = None
                 logger.info("Pre-warm: embeddings ready")
-        except asyncio.TimeoutError:
+        except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and logged
             async with self._semantic_cache_lock:
-                self._semantic_cache["error"] = "Timeout loading embeddings (60s)"
-            logger.warning("Pre-warm: embeddings load timed out")
-        except Exception as e:
-            async with self._semantic_cache_lock:
-                self._semantic_cache["error"] = str(e)
+                cache["error"] = str(e)
             logger.warning(f"Pre-warm: embeddings failed: {e}")
         finally:
             async with self._semantic_cache_lock:
-                self._semantic_cache["loading"] = False
+                cache["loading"] = False
 
     async def _get_semantic_searcher(self):
-        """Single-flight accessor for the semantic searcher (E.1).
+        """Single-flight accessor for the semantic searcher.
 
         Returns the cached SemanticSearcher, rebuilding if
         codebase_graph.json mtime changed. Returns None if embeddings are
-        unavailable (module missing or disabled) or if the graph file does
-        not exist.
+        unavailable (module missing or disabled), if the graph file does
+        not exist, or while a load is not done.
 
         Uses _semantic_cache_lock; construction runs in asyncio.to_thread so
         the event loop is not blocked by model load. Callers that want to
         surface an "embeddings loading" UX string should check
-        _semantic_cache["loading"] / ["error"] before calling this helper.
+        _semantic_cache["error"] when this returns None: it is the last
+        failed load's until a load succeeds.
         """
         if not self._semantic_available or self._SemanticSearcher is None:
             return None
-        gp = self.config.graph_path
-        if not gp.exists():
+        mtime = self._graph_mtime()
+        if mtime is None:
             return None
-        mtime = gp.stat().st_mtime
 
         async with self._semantic_cache_lock:
-            if (
-                self._semantic_cache["instance"] is not None
-                and self._semantic_cache["mtime"] == mtime
-            ):
-                return self._semantic_cache["instance"]
-            if self._semantic_cache["loading"]:
+            cache = self._semantic_cache
+            if cache["instance"] is not None and cache["mtime"] == mtime:
+                return cache["instance"]
+            if cache["loading"]:
                 return None
-            self._semantic_cache["loading"] = True
-            self._semantic_cache["error"] = None
+            cache["loading"] = True
 
+        async def load():
+            try:
+                searcher = await asyncio.to_thread(self._new_searcher)
+                async with self._semantic_cache_lock:
+                    cache["mtime"] = mtime
+                    cache["instance"] = searcher
+                    cache["error"] = None
+                return searcher
+            except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and returned
+                async with self._semantic_cache_lock:
+                    cache["error"] = str(e)
+                logger.warning(f"Embeddings load failed: {e}")
+                return None
+            finally:
+                async with self._semantic_cache_lock:
+                    cache["loading"] = False
+
+        # The thread cannot be stopped: a load not done in time goes on and
+        # caches what it builds, and a search meanwhile is told it is loading.
+        self._semantic_load = asyncio.create_task(load())
         try:
-
-            def load_sync():
-                return self._SemanticSearcher(
-                    str(gp), model_name=self.config.embedding_model
-                )
-
-            searcher = await asyncio.wait_for(
-                asyncio.to_thread(load_sync), timeout=self.config.embedding_timeout
+            return await asyncio.wait_for(
+                asyncio.shield(self._semantic_load),
+                timeout=self.config.embedding_timeout,
             )
-            async with self._semantic_cache_lock:
-                self._semantic_cache["mtime"] = mtime
-                self._semantic_cache["instance"] = searcher
-                self._semantic_cache["error"] = None
-            return searcher
-        except asyncio.TimeoutError:
-            async with self._semantic_cache_lock:
-                self._semantic_cache["error"] = (
-                    f"Timeout loading embeddings ({self.config.embedding_timeout}s)"
-                )
-            logger.warning("Embeddings load timed out")
+        except TimeoutError:
+            logger.warning(
+                f"Embeddings still loading after {self.config.embedding_timeout}s"
+            )
             return None
-        except Exception as e:
-            async with self._semantic_cache_lock:
-                self._semantic_cache["error"] = str(e)
-            logger.warning(f"Embeddings load failed: {e}")
-            return None
-        finally:
-            async with self._semantic_cache_lock:
-                self._semantic_cache["loading"] = False
 
     # --- Public API (handle_* → service methods) ---
+
+    async def embedding_models(self) -> str:
+        """List the embedding models descry ships pinned configurations for."""
+        from descry.embeddings import (
+            DEFAULT_MODEL_ALIAS,
+            FALLBACK_MODEL_ALIAS,
+            list_models,
+        )
+
+        configured = self.config.embedding_model
+        selected = configured or DEFAULT_MODEL_ALIAS
+        models = list_models()
+        for m in models:
+            m["selected"] = selected in (m["alias"], m["repo_id"])
+        return json.dumps(
+            {
+                "configured": configured,
+                "fallback_if_gated": None if configured else FALLBACK_MODEL_ALIAS,
+                "models": models,
+            },
+            indent=2,
+        )
 
     async def health(self) -> str:
         """Quick diagnostic check."""
@@ -1081,19 +1368,21 @@ class DescryService:
                 "nodes": 0,
                 "edges": 0,
                 "age_hours": None,
+                "error": None,
             },
         }
 
         async with self._querier_cache_lock:
             health["warm"] = self._querier_cache["instance"] is not None
 
-        exists, age_str, age_hours = self._get_graph_status()
+        exists, _, age_hours = self._get_graph_status()
         health["graph"]["exists"] = exists
         health["graph"]["age_hours"] = age_hours
         if exists:
             await self._update_cache()
             health["graph"]["nodes"] = self._graph_cache["nodes"]
             health["graph"]["edges"] = self._graph_cache["edges"]
+            health["graph"]["error"] = self._graph_cache["error"]
 
         if self._scip_loaded and self._get_scip_status_fn:
             scip_status = self._get_scip_status_fn()
@@ -1120,24 +1409,49 @@ class DescryService:
 
         if not exists:
             health["status"] = "no_graph"
+        elif health["graph"]["error"]:
+            health["status"] = "invalid_graph"
         elif age_hours and age_hours > self.config.max_stale_hours:
             health["status"] = "stale"
 
         return json.dumps(health, indent=2)
 
-    async def status(self) -> str:
-        """Check graph existence and freshness."""
+    async def status_data(self) -> dict:
+        """Graph existence, age and size, as data.
+
+        A graph that cannot be loaded counts no nodes or edges, and `error`
+        says why.
+        """
         exists, age_str, age_hours = self._get_graph_status()
         if not exists:
-            return "Graph: NOT FOUND. Run descry index first."
+            return {
+                "exists": False,
+                "age_str": "N/A",
+                "age_hours": None,
+                "nodes": 0,
+                "edges": 0,
+            }
 
         await self._update_cache()
-        stale = (
-            " (STALE - run descry index)"
-            if age_hours and age_hours > self.config.max_stale_hours
-            else ""
-        )
-        result = f"Graph: {self._graph_cache['nodes']:,} nodes, {self._graph_cache['edges']:,} edges, updated {age_str}{stale}"
+        return {
+            "exists": True,
+            "age_str": age_str,
+            "age_hours": round(age_hours, 2),
+            "nodes": self._graph_cache["nodes"],
+            "edges": self._graph_cache["edges"],
+            "stale": age_hours > self.config.max_stale_hours,
+            "error": self._graph_cache["error"],
+        }
+
+    async def status(self) -> str:
+        """Check graph existence and freshness."""
+        data = await self.status_data()
+        if not data["exists"]:
+            return "Graph: NOT FOUND. Run descry index first."
+        if data["error"]:
+            return f"Graph: UNUSABLE ({data['error']})"
+        stale = " (STALE - run descry index)" if data["stale"] else ""
+        result = f"Graph: {data['nodes']:,} nodes, {data['edges']:,} edges, updated {data['age_str']}{stale}"
 
         if self._scip_loaded and self._get_scip_status_fn:
             scip_status = self._get_scip_status_fn()
@@ -1160,10 +1474,16 @@ class DescryService:
         result += scip_info
 
         if self._semantic_available and self._get_embeddings_status_fn:
-            emb_status = self._get_embeddings_status_fn(str(self.config.graph_path))
+            emb_status = self._get_embeddings_status_fn(
+                str(self.config.graph_path),
+                model_name=self.config.embedding_model,
+                cache_dir=str(self.config.cache_dir),
+                source_root=str(self.config.project_root),
+            )
             if emb_status.get("cached"):
                 emb_info = (
-                    f"\nEmbeddings: Ready ({emb_status.get('node_count', 0):,} nodes)"
+                    f"\nEmbeddings: Ready ({emb_status.get('node_count', 0):,} nodes, "
+                    f"{emb_status['model']})"
                 )
             elif emb_status.get("stale"):
                 emb_info = (
@@ -1177,26 +1497,105 @@ class DescryService:
 
         return result
 
-    async def ensure(self, max_age_hours: float = 24) -> str:
-        """Ensure graph exists and is fresh."""
+    async def ensure_data(self, max_age_hours: float | None = None) -> dict:
+        """Ensure the graph exists and is fresh, as data.
+
+        `max_age_hours` defaults to `[project] max_stale_hours`. `action` is
+        "ready" when the graph was left alone, "refreshed" when it was stale
+        and "generated" when there was none that could be used; `summary`
+        says which in words. `result` is the index report, None when "ready".
+        On failure `reason` is "invalid" when `max_age_hours` is not an age,
+        "busy" when the graph needs an index run and one is in progress, and
+        "failed" when the index run failed.
+        """
+        if max_age_hours is None:
+            max_age_hours = self.config.max_stale_hours
+        # Chained, so that NaN is refused too.
+        elif not 0 <= max_age_hours < math.inf:
+            return {
+                "ok": False,
+                "error": (
+                    "max_age_hours must be a finite, non-negative number, "
+                    f"got {max_age_hours}."
+                ),
+                "reason": "invalid",
+            }
         exists, age_str, age_hours = self._get_graph_status()
 
         if not exists:
-            result = await self.index(".")
-            return f"Generated new graph.\n{result}"
+            action, summary = "generated", "Generated new graph."
+        elif age_hours and age_hours > max_age_hours:
+            action = "refreshed"
+            summary = f"Refreshed stale graph ({age_hours:.0f}h old)."
+        else:
+            await self._update_cache()
+            if not self._graph_cache["error"]:
+                return {
+                    "ok": True,
+                    "error": None,
+                    "action": "ready",
+                    "summary": f"Graph ready: {self._graph_cache['nodes']:,}n/{self._graph_cache['edges']:,}e, {age_str}",
+                    "result": None,
+                }
+            action, summary = "generated", "Rebuilt unusable graph."
 
-        if age_hours and age_hours > max_age_hours:
-            result = await self.index(".")
-            return f"Refreshed stale graph ({age_hours:.0f}h old).\n{result}"
+        result = await self.index(".")
+        if isinstance(result, ServiceError):
+            return {"ok": False, "error": str(result), "reason": result.reason}
+        return {
+            "ok": True,
+            "error": None,
+            "action": action,
+            "summary": summary,
+            "result": result,
+        }
 
-        await self._update_cache()
-        return f"Graph ready: {self._graph_cache['nodes']:,}n/{self._graph_cache['edges']:,}e, {age_str}"
+    async def ensure(self, max_age_hours: float | None = None) -> str:
+        """Ensure graph exists and is fresh."""
+        data = await self.ensure_data(max_age_hours)
+        if not data["ok"]:
+            return ServiceError(data["error"])
+        if data["result"] is None:
+            return data["summary"]
+        return f"{data['summary']}\n{data['result']}"
+
+    def _indexer_child(self, index_path: str) -> tuple[list[str], dict[str, str]]:
+        """argv and env for the `descry.generate` child process."""
+        # -P keeps the cwd, which is the repository being indexed, off sys.path,
+        # so a `descry` package inside it cannot shadow the installed one.
+        argv = [
+            sys.executable,
+            "-P",
+            "-m",
+            "descry.generate",
+            f"--project-root={self.config.project_root}",
+            index_path,
+        ]
+        # The child writes to the cache dir this service reads from.
+        env = {
+            **os.environ,
+            "DESCRY_CACHE_DIR": str(self.config.cache_dir.resolve()),
+        }
+        return argv, env
+
+    def _index_timeout_message(self) -> str:
+        return (
+            f"Index timed out after {self.config.index_timeout_minutes} minutes. "
+            "Set [timeouts] index_minutes in .descry.toml to increase."
+        )
 
     async def index(self, path: str = ".") -> str:
         """Regenerate the codebase graph.
 
-        A.9: `path` must resolve inside project_root. Prevents prompt-injected
+        `path` must resolve inside project_root. Prevents prompt-injected
         MCP clients from forcing indexing of arbitrary directories.
+
+        A `path` below the root only narrows which files are walked. The graph
+        replaces this service's graph, is built under the root's config, and
+        records root-relative paths.
+
+        While another run is in progress this one is refused: the result is
+        a `ServiceError` whose `reason` is "busy".
         """
         if path == ".":
             index_path = str(self.config.project_root)
@@ -1204,13 +1603,24 @@ class DescryService:
             try:
                 resolved = Path(path).resolve(strict=False)
                 if not resolved.is_relative_to(self.config.resolved_project_root):
-                    return (
+                    return ServiceError(
                         f"Index path {path!r} outside project root; "
                         f"must be relative to {self.config.project_root}."
                     )
+                # The existing graph is replaced, so a mistyped path must not
+                # swap it for an empty one.
+                if not resolved.is_dir():
+                    return ServiceError(f"Index path {path!r} is not a directory.")
                 index_path = str(resolved)
             except (OSError, ValueError) as e:
-                return f"Invalid index path {path!r}: {e}"
+                return ServiceError(f"Invalid index path {path!r}: {e}")
+        if error := self.config.cache_dir_error():
+            return ServiceError(error)
+
+        if not self._index_lock.acquire(blocking=False):
+            return ServiceError(_INDEX_BUSY, reason="busy")
+        # Read before reset_caches() below discards it.
+        model_was_loaded = self._semantic_cache["instance"] is not None
 
         try:
             timeout = (
@@ -1218,20 +1628,21 @@ class DescryService:
                 if self.config.index_timeout_minutes
                 else None
             )
-            result = await asyncio.to_thread(
-                subprocess.run,
-                [sys.executable, "-m", "descry.generate", index_path],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+            argv, env = self._indexer_child(index_path)
+            async with _process_tree(
+                argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=str(self.config.project_root),
-                timeout=timeout,
-                env=safe_env(),
-            )
+                env=env,
+            ) as proc:
+                stdout, stderr = map(
+                    _decode_output,
+                    await asyncio.wait_for(proc.communicate(), timeout),
+                )
 
-            if result.returncode == 0:
-                output = result.stdout.strip() or result.stderr.strip()
+            if proc.returncode == 0:
+                output = stdout.strip() or stderr.strip()
                 # Full cache flush post-reindex. Previously only the dedup
                 # cache was cleared here and the CLI/MCP paths relied on
                 # mtime-triggered rebuilds for querier/semantic/git caches;
@@ -1261,82 +1672,171 @@ class DescryService:
                     and self.config.graph_path.exists()
                 ):
                     try:
-                        # Force-rebuild: reset cache then construct in a thread
-                        # so model load doesn't block the event loop (C.1).
+                        # Reset the cache, then construct in a thread so the
+                        # event loop is not blocked.
                         async with self._semantic_cache_lock:
-                            self._semantic_cache = {
+                            cache = self._semantic_cache = {
                                 "mtime": 0,
                                 "instance": None,
-                                "loading": False,
+                                "loading": True,
                                 "error": None,
                             }
                         logger.info("Generating embeddings for semantic search...")
+                        mtime = self._graph_mtime() or 0
 
                         def _build_searcher():
-                            return self._SemanticSearcher(
-                                str(self.config.graph_path),
-                                force_rebuild=True,
-                                model_name=self.config.embedding_model,
-                            )
+                            # The child process has just embedded this graph
+                            # and cached the vectors under a key derived from
+                            # the graph's content, so this loads them. It
+                            # encodes only when the child could not, since no
+                            # cache then matches.
+                            searcher = self._new_searcher()
+                            # Loading from cache never touches the model. A
+                            # server that had it loaded keeps it loaded, so
+                            # the first search after a reindex does not pay
+                            # for the load; a one-shot `descry index` skips it.
+                            if model_was_loaded:
+                                searcher.ensure_model()
+                            return searcher
 
                         searcher = await asyncio.to_thread(_build_searcher)
                         # Seed the cache with the freshly-built instance so
                         # the next search() call reuses it.
                         async with self._semantic_cache_lock:
-                            gp = self.config.graph_path
-                            mtime = gp.stat().st_mtime if gp.exists() else 0
-                            self._semantic_cache["mtime"] = mtime
-                            self._semantic_cache["instance"] = searcher
+                            cache["mtime"] = mtime
+                            cache["instance"] = searcher
                         embeddings_status = (
                             f"\nEmbeddings: {len(searcher.nodes):,} nodes indexed"
                         )
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch; reported in the index summary
                         embeddings_status = f"\nEmbeddings: Failed ({e})"
                         logger.warning(f"Embeddings generation failed: {e}")
+                    finally:
+                        async with self._semantic_cache_lock:
+                            cache["loading"] = False
 
                 return f"Index complete.{scip_status}{embeddings_status}\n{output}"
             else:
-                return f"Index failed:\n{result.stderr}"
+                return ServiceError(f"Index failed:\n{stderr}")
 
-        except subprocess.TimeoutExpired:
-            mins = self.config.index_timeout_minutes
-            return f"Index timed out after {mins} minutes. Set [timeouts] index_minutes in .descry.toml to increase."
-        except Exception as e:
-            return f"Index error: {e}"
+        except TimeoutError:
+            return ServiceError(self._index_timeout_message())
+        except Exception as e:  # noqa: BLE001 — tool boundary: every failure must come back as an error payload
+            return ServiceError(f"Index error: {e}")
+        finally:
+            self._index_lock.release()
+
+    async def callers_data(self, name: str, limit: int = 20) -> dict:
+        """Callers of a symbol, as data. An exact miss retries with fuzzy=True."""
+        if error := _limit_error(limit):
+            return {"ok": False, "error": error, "reason": "invalid"}
+        q = await self._get_querier()
+        if not q:
+            return {"ok": False, "error": self._no_graph_error()}
+        return self._callers_from(q, name, limit)
+
+    @staticmethod
+    def _callers_from(q, name: str, limit: int) -> dict:
+        all_callers = q.get_callers(name)
+        ambiguous = q.get_ambiguous_callers(name)
+        fuzzy = False
+        if not all_callers:
+            all_callers = q.get_callers(name, fuzzy=True)
+            ambiguous = q.get_ambiguous_callers(name, fuzzy=True)
+            fuzzy = bool(all_callers)
+        # Certain callers come before those that are one of several candidates.
+        all_callers = sorted(all_callers, key=ambiguous.__contains__)
+
+        return {
+            "ok": True,
+            "error": None,
+            "symbol": name,
+            "fuzzy": fuzzy,
+            "total": len(all_callers),
+            "callers": all_callers[:limit],
+            "ambiguous": {c: ambiguous[c] for c in all_callers if c in ambiguous},
+        }
+
+    async def callees_data(self, name: str, limit: int = 20) -> dict:
+        """Callees of a symbol, as data. Same fuzzy fallback as callers_data."""
+        if error := _limit_error(limit):
+            return {"ok": False, "error": error, "reason": "invalid"}
+        q = await self._get_querier()
+        if not q:
+            return {"ok": False, "error": self._no_graph_error()}
+        return self._callees_from(q, name, limit)
+
+    @staticmethod
+    def _callees_from(q, name: str, limit: int) -> dict:
+        matches = q.find_nodes_by_name(name)
+        func_matches = [m for m in matches if m["type"] in ("Function", "Method")]
+        fuzzy = False
+        if not func_matches:
+            matches = q.find_nodes_by_name(name, fuzzy=True)
+            func_matches = [m for m in matches if m["type"] in ("Function", "Method")]
+            fuzzy = bool(func_matches)
+
+        if not func_matches:
+            return {
+                "ok": True,
+                "error": None,
+                "found": False,
+                "symbol": name,
+                "fuzzy": False,
+                "node": None,
+                "total": 0,
+                "callees": [],
+            }
+
+        node = func_matches[0]
+        callees = sorted(q.get_callees(node["id"]))
+        ambiguous = q.get_ambiguous_callees(node["id"])
+        return {
+            "ok": True,
+            "error": None,
+            "found": True,
+            "symbol": name,
+            "fuzzy": fuzzy,
+            "node": node,
+            "total": len(callees),
+            "callees": callees[:limit],
+            "ambiguous": {c: ambiguous[c] for c in callees if c in ambiguous},
+        }
 
     async def callers(self, name: str, limit: int = 20) -> str:
         """Find all callers of a symbol."""
+        if error := _limit_error(limit):
+            return ServiceError(f"ERROR: {error}")
+        # One querier for lookup and rendering: a second fetch returns None
+        # if the graph file has been removed in between.
         q = await self._get_querier()
         if not q:
-            return "ERROR: Graph not found. Run descry ensure first."
+            return ServiceError(f"ERROR: {self._no_graph_error()}")
+        data = self._callers_from(q, name, limit)
 
-        all_callers = q.get_callers(name)
-        fuzzy_note = ""
+        callers = data["callers"]
+        total_count = data["total"]
+        ambiguous = data.get("ambiguous", {})
+        fuzzy_note = " (fuzzy match)" if data["fuzzy"] else ""
 
-        if not all_callers:
-            all_callers = q.get_callers(name, fuzzy=True)
-            if all_callers:
-                fuzzy_note = " (fuzzy match)"
-
-        if not all_callers:
+        if not callers:
             result = (
                 f"No callers of '{name}'. Try descry search to verify symbol exists."
             )
         else:
-            total_count = len(all_callers)
-            callers = sorted(all_callers)[:limit]
             lines = [f"{len(callers)} caller(s) of '{name}'{fuzzy_note}:"]
             for caller in callers:
                 node_info = q.get_node_info(caller)
+                one_of = q.one_of(ambiguous.get(caller))
                 if node_info:
                     lineno = node_info.get("metadata", {}).get("lineno")
                     if lineno:
                         file_path = caller.split("::")[0].replace("FILE:", "")
-                        lines.append(f"  {caller} ({file_path}:{lineno})")
+                        lines.append(f"  {caller} ({file_path}:{lineno}){one_of}")
                     else:
-                        lines.append(f"  {caller}")
+                        lines.append(f"  {caller}{one_of}")
                 else:
-                    lines.append(f"  {caller}")
+                    lines.append(f"  {caller}{one_of}")
             if len(callers) < total_count:
                 lines.append(
                     f"  ... ({total_count - len(callers)} more, limit {limit})"
@@ -1347,43 +1847,36 @@ class DescryService:
 
     async def callees(self, name: str, limit: int = 20) -> str:
         """Find what a symbol calls."""
+        if error := _limit_error(limit):
+            return ServiceError(f"ERROR: {error}")
         q = await self._get_querier()
         if not q:
-            return "ERROR: Graph not found. Run descry ensure first."
-
-        matches = q.find_nodes_by_name(name)
-        func_matches = [m for m in matches if m["type"] in ("Function", "Method")]
-        fuzzy_note = ""
-
-        if not func_matches:
-            matches = q.find_nodes_by_name(name, fuzzy=True)
-            func_matches = [m for m in matches if m["type"] in ("Function", "Method")]
-            if func_matches:
-                fuzzy_note = " (fuzzy match)"
-
-        if not func_matches:
+            return ServiceError(f"ERROR: {self._no_graph_error()}")
+        data = self._callees_from(q, name, limit)
+        if not data["found"]:
             return f"No function '{name}' found. Try descry search."
 
-        node = func_matches[0]
-        callees = q.get_callees(node["id"])
-        callees = sorted(callees)[:limit]
-
+        node = data["node"]
+        callees = data["callees"]
+        ambiguous = data.get("ambiguous", {})
+        fuzzy_note = " (fuzzy match)" if data["fuzzy"] else ""
         display_name = node.get("metadata", {}).get("name", name)
         if not callees:
             result = f"'{display_name}'{fuzzy_note} calls no tracked functions."
         else:
             lines = [f"'{display_name}'{fuzzy_note} calls {len(callees)} function(s):"]
             for callee in callees:
+                one_of = q.one_of(ambiguous.get(callee))
                 callee_info = q.get_node_info(callee)
                 if callee_info:
                     lineno = callee_info.get("metadata", {}).get("lineno")
                     if lineno:
                         file_path = callee.split("::")[0].replace("FILE:", "")
-                        lines.append(f"  {callee} ({file_path}:{lineno})")
+                        lines.append(f"  {callee} ({file_path}:{lineno}){one_of}")
                     else:
-                        lines.append(f"  {callee}")
+                        lines.append(f"  {callee}{one_of}")
                 else:
-                    lines.append(f"  {callee}")
+                    lines.append(f"  {callee}{one_of}")
             result = "\n".join(lines)
 
         return await self._format_response(result)
@@ -1404,7 +1897,7 @@ class DescryService:
         """Get full context for a symbol."""
         q = await self._get_querier()
         if not q:
-            return "ERROR: Graph not found. Run descry ensure first."
+            return ServiceError(f"ERROR: {self._no_graph_error()}")
 
         gp = self.config.graph_path
         # Capture mtime + hash once so the check and record use the same
@@ -1462,6 +1955,34 @@ class DescryService:
             max_lines=ml,
         )
 
+    async def flow_data(
+        self,
+        start: str,
+        direction: str = "forward",
+        depth: int = 3,
+        target: str | None = None,
+        inline_threshold: int = 100,
+        structured: bool = False,
+    ) -> dict:
+        """Call flow from a starting symbol, as data.
+
+        `result` is the markdown trace, or the tree of
+        `GraphQuerier.trace_flow_structured` when `structured`.
+        """
+        q = await self._get_querier()
+        if not q:
+            return {"ok": False, "error": self._no_graph_error()}
+
+        trace = q.trace_flow_structured if structured else q.trace_flow
+        result = trace(
+            start_name=start,
+            direction=direction,
+            depth=depth,
+            target=target,
+            inline_threshold=inline_threshold,
+        )
+        return {"ok": True, "error": None, "result": result}
+
     async def flow(
         self,
         start: str,
@@ -1471,18 +1992,90 @@ class DescryService:
         inline_threshold: int = 100,
     ) -> str:
         """Trace call flow from a starting symbol."""
+        data = await self.flow_data(start, direction, depth, target, inline_threshold)
+        if not data["ok"]:
+            return ServiceError(f"ERROR: {data['error']}")
+        return await self._format_response(
+            data["result"], include_header=True, max_lines=300
+        )
+
+    async def search_data(
+        self,
+        terms: list[str],
+        limit: int = 10,
+        lang: str | None = None,
+        crate: str | None = None,
+        symbol_type: str | None = None,
+        exclude_tests: bool = False,
+    ) -> dict:
+        """Hybrid keyword + semantic search, as data.
+
+        The ranking rules live here so every interface ranks identically.
+        Returns `{"ok", "error", "results", "method"}`; `method` is "keyword"
+        or "hybrid".
+        """
+        if error := _limit_error(limit):
+            return {
+                "ok": False,
+                "error": error,
+                "reason": "invalid",
+                "results": [],
+                "method": "keyword",
+            }
         q = await self._get_querier()
         if not q:
-            return "ERROR: Graph not found. Run descry ensure first."
+            return {
+                "ok": False,
+                "error": self._no_graph_error(),
+                "results": [],
+                "method": "keyword",
+            }
 
-        result = q.trace_flow(
-            start_name=start,
-            direction=direction,
-            depth=depth,
-            target=target,
-            inline_threshold=inline_threshold,
-        )
-        return await self._format_response(result, include_header=True, max_lines=300)
+        # "all" is the web UI's wildcard; normalise it once, here.
+        lang = None if lang == "all" else lang
+        symbol_type = None if symbol_type == "all" else symbol_type
+
+        tfidf_results = q.search_docs(
+            terms,
+            lang=lang,
+            crate=crate,
+            symbol_type=symbol_type,
+            exclude_tests=exclude_tests,
+        )[: limit * 2]
+
+        semantic_results = []
+        method = "keyword"
+
+        if (
+            self._semantic_available
+            and self._SemanticSearcher
+            and self.config.graph_path.exists()
+            and (is_natural_language_query(terms) or len(tfidf_results) < 3)
+        ):
+            try:
+                # Single-flight async helper (runs in asyncio.to_thread
+                # and respects the cache lock).
+                searcher = await self._get_semantic_searcher()
+                if searcher is not None:
+                    semantic_results = await asyncio.to_thread(
+                        searcher.search,
+                        " ".join(terms),
+                        limit=limit * 2,
+                        min_score=0.25,
+                    )
+            except Exception as e:  # noqa: BLE001 — boundary over the embedding backend; search degrades to keyword-only
+                logger.warning(f"Semantic search failed, using keyword only: {e}")
+
+        if semantic_results and tfidf_results:
+            combined = reciprocal_rank_fusion(tfidf_results, semantic_results)
+            results = [node for node, _ in combined[:limit]]
+            method = "hybrid"
+        elif tfidf_results:
+            results = tfidf_results[:limit]
+        else:
+            results = []
+
+        return {"ok": True, "error": None, "results": results, "method": method}
 
     async def search(
         self,
@@ -1495,11 +2088,19 @@ class DescryService:
         exclude_tests: bool = False,
     ) -> str:
         """Search symbol names and docstrings."""
-        q = await self._get_querier()
-        if not q:
-            return await self._format_response(
-                "ERROR: Graph not found. Run descry ensure first.",
-                include_header=True,
+        data = await self.search_data(
+            terms,
+            limit=limit,
+            lang=lang,
+            crate=crate,
+            symbol_type=symbol_type,
+            exclude_tests=exclude_tests,
+        )
+        if not data["ok"]:
+            return ServiceError(
+                await self._format_response(
+                    f"ERROR: {data['error']}", include_header=True
+                )
             )
 
         filters = []
@@ -1515,46 +2116,8 @@ class DescryService:
             filters.append("compact")
         filter_note = f" [{', '.join(filters)}]" if filters else ""
 
-        tfidf_results = q.search_docs(
-            terms,
-            lang=lang,
-            crate=crate,
-            symbol_type=symbol_type,
-            exclude_tests=exclude_tests,
-        )[: limit * 2]
-
-        semantic_results = []
-        search_method = "keyword"
-
-        if (
-            self._semantic_available
-            and self._SemanticSearcher
-            and self.config.graph_path.exists()
-        ):
-            use_semantic = is_natural_language_query(terms) or len(tfidf_results) < 3
-            if use_semantic:
-                try:
-                    # E.1/C.1: use the single-flight async helper (runs in
-                    # asyncio.to_thread and respects the cache lock).
-                    searcher = await self._get_semantic_searcher()
-                    if searcher is not None:
-                        query = " ".join(terms)
-                        # searcher.search is CPU-bound; wrap in to_thread.
-                        semantic_results = await asyncio.to_thread(
-                            searcher.search, query, limit=limit * 2, min_score=0.25
-                        )
-                        search_method = "hybrid"
-                except Exception as e:
-                    logger.warning(f"Semantic search failed, using keyword only: {e}")
-
-        if semantic_results and tfidf_results:
-            combined = reciprocal_rank_fusion(tfidf_results, semantic_results)
-            results = [node for node, _ in combined[:limit]]
-            search_method = "hybrid"
-        elif tfidf_results:
-            results = tfidf_results[:limit]
-        else:
-            results = []
+        results = data["results"]
+        search_method = data["method"]
 
         if not results:
             result = f"No matches for '{' '.join(terms)}'{filter_note}."
@@ -1578,21 +2141,30 @@ class DescryService:
 
         return await self._format_response(result)
 
-    async def structure(self, filename: str) -> str:
-        """Show file structure."""
+    async def structure_data(self, filename: str) -> dict:
+        """A file's imports and definitions, as data.
+
+        `found` is False when no File node matches. `imports` is the sorted
+        module names and `definitions` the nodes the file defines.
+        """
         q = await self._get_querier()
         if not q:
-            return "ERROR: Graph not found. Run descry ensure first."
+            return {"ok": False, "error": self._no_graph_error()}
 
         matches = q.find_nodes_by_name(filename)
         file_matches = [m for m in matches if m["type"] == "File"]
 
         if not file_matches:
-            return f"File '{filename}' not found. Check spelling."
+            return {
+                "ok": True,
+                "error": None,
+                "found": False,
+                "file": None,
+                "imports": [],
+                "definitions": [],
+            }
 
         node_id = file_matches[0]["id"]
-        lines = [f"{node_id}:"]
-
         defs = []
         imports = set()
         for edge in q.outgoing[node_id]:
@@ -1607,8 +2179,28 @@ class DescryService:
                 else:
                     imports.add(target)
 
-        if imports:
-            sorted_imports = sorted(imports)
+        return {
+            "ok": True,
+            "error": None,
+            "found": True,
+            "file": node_id,
+            "imports": sorted(imports),
+            "definitions": defs,
+        }
+
+    async def structure(self, filename: str) -> str:
+        """Show file structure."""
+        data = await self.structure_data(filename)
+        if not data["ok"]:
+            return ServiceError(f"ERROR: {data['error']}")
+        if not data["found"]:
+            return f"File '{filename}' not found. Check spelling."
+
+        lines = [f"{data['file']}:"]
+        defs = data["definitions"]
+        sorted_imports = data["imports"]
+
+        if sorted_imports:
             lines.append(f"  Imports: {', '.join(sorted_imports[:10])}")
             if len(sorted_imports) > 10:
                 lines.append(f"           (+{len(sorted_imports) - 10} more)")
@@ -1619,7 +2211,11 @@ class DescryService:
             ("Fn", "Function"),
         ]:
             items = sorted(
-                [d["metadata"]["name"] for d in defs if d["type"] == type_filter]
+                [
+                    d["metadata"].get("name", "")
+                    for d in defs
+                    if d["type"] == type_filter
+                ]
             )
             if items:
                 lines.append(f"  {type_name}: {', '.join(items[:15])}")
@@ -1641,41 +2237,25 @@ class DescryService:
         """Show effective API of a class including inherited methods."""
         q = await self._get_querier()
         if not q:
-            return "ERROR: Graph not found. Run descry ensure first."
+            return ServiceError(f"ERROR: {self._no_graph_error()}")
 
         result = q.flatten_class(class_node_id)
         return await self._format_response(result, include_header=False, max_lines=150)
 
     async def semantic(self, query: str, limit: int = 10) -> str:
         """Pure semantic search using embeddings only."""
-        if not self._semantic_available or not self._SemanticSearcher:
-            return (
-                "Semantic search not available. Install dependencies:\n"
-                "  pip install sentence-transformers numpy\n\n"
-                "Falling back to TF-IDF keyword search..."
-            )
-
-        gp = self.config.graph_path
-        if not gp.exists():
-            return "ERROR: Graph not found. Run descry ensure first."
-
-        # Show a friendly message if a background pre-warm is in flight.
-        async with self._semantic_cache_lock:
-            if self._semantic_cache["loading"]:
-                return "Embeddings loading in background (~2-3s). Try again shortly."
-
-        # E.1/C.1: single-flight helper wraps the model load in asyncio.to_thread.
-        searcher = await self._get_semantic_searcher()
-        if searcher is None:
-            err = self._semantic_cache.get("error")
-            if err:
-                return f"Failed to initialize semantic search: {err}"
-            return "Semantic search unavailable."
-
-        try:
-            results = await asyncio.to_thread(searcher.search, query, limit=limit)
-        except Exception as e:
-            return f"Semantic search error: {e}"
+        data = await self.semantic_data(query, limit=limit)
+        if not data["ok"]:
+            if data["reason"] == "unavailable":
+                return ServiceError(
+                    f"{data['error']} Install dependencies:\n"
+                    "  pip install sentence-transformers numpy\n\n"
+                    "Falling back to TF-IDF keyword search..."
+                )
+            if data["reason"] == "no_graph":
+                return f"ERROR: {data['error']}"
+            return ServiceError(data["error"])
+        results = data["results"]
 
         if not results:
             result = f"No semantic matches for '{query}'."
@@ -1688,11 +2268,18 @@ class DescryService:
 
         return await self._format_response(result)
 
-    async def quick(self, name: str, full: bool = False, brief: bool = False) -> str:
-        """Find symbol and show full context in one step."""
+    async def quick_data(
+        self, name: str, full: bool = False, brief: bool = False
+    ) -> dict:
+        """The best match for a name and its context, as data.
+
+        An exact miss retries with fuzzy=True, and `found` is False when that
+        misses too. `node` is the best-ranked match, `other_matches` counts
+        the rest and `context` is the match's rendered context.
+        """
         q = await self._get_querier()
         if not q:
-            return "ERROR: Graph not found. Run descry ensure first."
+            return {"ok": False, "error": self._no_graph_error()}
 
         matches = q.find_nodes_by_name(name)
         matches.sort(key=symbol_type_priority)
@@ -1702,16 +2289,38 @@ class DescryService:
             matches.sort(key=symbol_type_priority)
 
         if not matches:
-            return f"No symbol found for '{name}'. Try descry search to explore."
+            return {
+                "ok": True,
+                "error": None,
+                "found": False,
+                "node": None,
+                "other_matches": 0,
+                "context": None,
+            }
 
         best_match = matches[0]
-        node_id = best_match["id"]
+        return {
+            "ok": True,
+            "error": None,
+            "found": True,
+            "node": best_match,
+            "other_matches": len(matches) - 1,
+            "context": q.get_context_prompt(best_match["id"], full=full, brief=brief),
+        }
+
+    async def quick(self, name: str, full: bool = False, brief: bool = False) -> str:
+        """Find symbol and show full context in one step."""
+        data = await self.quick_data(name, full=full, brief=brief)
+        if not data["ok"]:
+            return ServiceError(f"ERROR: {data['error']}")
+        if not data["found"]:
+            return f"No symbol found for '{name}'. Try descry search to explore."
+
+        context = data["context"]
+        other_count = data["other_matches"]
 
         if brief:
-            context = q.get_context_prompt(node_id, brief=True)
-            other_matches = (
-                f"\n*({len(matches) - 1} other matches)*" if len(matches) > 1 else ""
-            )
+            other_matches = f"\n*({other_count} other matches)*" if other_count else ""
             return await self._format_response(
                 context + other_matches, include_header=False, max_lines=50
             )
@@ -1719,15 +2328,14 @@ class DescryService:
         header_lines = [
             f"### Quick Context for `{name}`",
             "",
-            format_search_result(best_match),
+            format_search_result(data["node"]),
             "",
         ]
 
-        if len(matches) > 1:
-            header_lines.append(f"*({len(matches) - 1} other matches available)*")
+        if other_count:
+            header_lines.append(f"*({other_count} other matches available)*")
             header_lines.append("")
 
-        context = q.get_context_prompt(node_id, full=full)
         result = "\n".join(header_lines) + "\n" + context
         if full:
             result += "\n [full=true]"
@@ -1735,13 +2343,278 @@ class DescryService:
         ml = 2000 if full else 500
         return await self._format_response(result, include_header=False, max_lines=ml)
 
-    async def impls(self, method: str, trait_name: str | None = None) -> str:
-        """Find all implementations of a trait method."""
+    async def semantic_data(self, query: str, limit: int = 10) -> dict:
+        """Pure semantic search, as data: `results` is a list of `(node, score)`.
+
+        `error` says which step failed, so a model that would not load is not
+        reported as a missing graph; `reason` classifies it as "invalid",
+        "unavailable", "no_graph", "loading" or "failed".
+        """
+        if limit_error := _limit_error(limit):
+            reason, error = "invalid", limit_error
+        elif not self._semantic_available or not self._SemanticSearcher:
+            reason, error = "unavailable", "Semantic search not available."
+        elif not self.config.graph_path.exists():
+            reason, error = "no_graph", _GRAPH_NOT_FOUND
+        elif (searcher := await self._get_semantic_searcher()) is None:
+            # A failed load has set the error, to an empty string if the
+            # exception carried no message, and a load that succeeds clears it.
+            load_error = self._semantic_cache["error"]
+            if load_error is None:
+                reason, error = "loading", "Embeddings are loading. Try again shortly."
+            else:
+                reason = "failed"
+                error = (
+                    f"Failed to initialize semantic search: {load_error}"
+                    if load_error
+                    else "Semantic search unavailable."
+                )
+        else:
+            try:
+                results = await asyncio.to_thread(searcher.search, query, limit=limit)
+            except Exception as e:  # noqa: BLE001 — boundary over the embedding backend; reported to the caller
+                reason, error = "failed", f"Semantic search error: {e}"
+            else:
+                return {"ok": True, "error": None, "results": results}
+        return {"ok": False, "error": error, "reason": reason, "results": []}
+
+    async def examples_data(self) -> dict:
+        """Symbols of this graph worth trying each tool on, as data.
+
+        `examples` maps a tool to names that give it something to show: the
+        most-called functions, a class, a function with a wide call tree.
+        It is None for a graph without nodes.
+        """
         q = await self._get_querier()
         if not q:
-            return "ERROR: Graph not found. Run descry ensure first."
+            return {"ok": False, "error": self._no_graph_error()}
 
-        results = q.find_trait_impls(method, trait_name)
+        nodes = q.data.get("nodes", [])
+        if not nodes:
+            return {"ok": True, "error": None, "examples": None}
+
+        edges = q.data.get("edges", [])
+
+        # Categorize nodes
+        functions = []
+        classes = []
+        methods = []
+        for n in nodes:
+            meta = n.get("metadata", {})
+            ntype = n.get("type", "")
+            name = meta.get("name", "")
+            # Skip test nodes and private/dunder names
+            if not name or name.startswith("_") or "test" in n.get("id", "").lower():
+                continue
+            entry = {
+                "name": name,
+                "id": n["id"],
+                "type": ntype,
+                "in_degree": meta.get("in_degree", 0),
+                "token_count": meta.get("token_count", 0),
+                "file": n["id"].replace("FILE:", "").split("::")[0]
+                if "::" in n["id"]
+                else "",
+            }
+            if ntype == "Function":
+                functions.append(entry)
+            elif ntype in ("Class", "Struct"):
+                classes.append(entry)
+            elif ntype == "Method":
+                methods.append(entry)
+
+        # Sort by in_degree (most-called first) for relevance
+        functions.sort(key=lambda x: x["in_degree"], reverse=True)
+        methods.sort(key=lambda x: x["in_degree"], reverse=True)
+
+        # Build outgoing edge counts for flow examples
+        out_degree = {}
+        for e in edges:
+            src = e.get("source", "")
+            out_degree[src] = out_degree.get(src, 0) + 1
+
+        # Pick "interesting" symbols for each tool
+        # Search: a popular function, a class, and a method
+        search_examples = []
+        if functions:
+            search_examples.append(functions[0]["name"])
+        if classes:
+            search_examples.append(classes[0]["name"])
+        if methods and len(search_examples) < 3:
+            search_examples.append(methods[0]["name"])
+
+        # Quick/callers/callees: functions with high in-degree (many callers)
+        popular = [f for f in functions if f["in_degree"] >= 2][:3]
+        popular_names = [f["name"] for f in popular] or [
+            f["name"] for f in functions[:3]
+        ]
+
+        # Flow: find a function with good fanout (interesting forward trace)
+        flow_candidates = []
+        for f in functions[:20]:
+            od = out_degree.get(f["id"], 0)
+            if od >= 2:
+                flow_candidates.append({"name": f["name"], "out_degree": od})
+        flow_candidates.sort(key=lambda x: x["out_degree"], reverse=True)
+        flow_fwd = (
+            flow_candidates[0]["name"]
+            if flow_candidates
+            else (popular_names[0] if popular_names else "")
+        )
+        # Backward: pick a popular callee that differs from the forward symbol
+        flow_bwd = ""
+        for pn in popular_names:
+            if pn != flow_fwd:
+                flow_bwd = pn
+                break
+        if not flow_bwd:
+            flow_bwd = popular_names[0] if popular_names else ""
+
+        # Path: pick two symbols likely connected
+        path_start = flow_fwd
+        path_end = popular_names[0] if popular_names else ""
+        if path_start == path_end and len(popular_names) > 1:
+            path_end = popular_names[1]
+
+        # Structure: pick files that have multiple symbols
+        file_counts = {}
+        for n in nodes:
+            nid = n.get("id", "")
+            if "::" in nid:
+                f = nid.replace("FILE:", "").split("::")[0]
+                file_counts[f] = file_counts.get(f, 0) + 1
+        structure_files = sorted(file_counts.items(), key=lambda x: x[1], reverse=True)
+        structure_examples = [f for f, _ in structure_files[:3]]
+
+        # Flatten: pick a class
+        flatten_example = classes[0]["id"] if classes else ""
+
+        # Impls: pick method names that might have multiple implementations
+        impl_candidates = []
+        seen_names = {}
+        for m in methods:
+            n = m["name"]
+            seen_names[n] = seen_names.get(n, 0) + 1
+        impl_candidates = sorted(
+            [(name, count) for name, count in seen_names.items() if count >= 2],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        impl_examples = [name for name, _ in impl_candidates[:3]]
+
+        return {
+            "ok": True,
+            "error": None,
+            "examples": {
+                "search": search_examples,
+                "quick": popular_names[:3],
+                "callers": popular_names[:3],
+                "callees": popular_names[:2],
+                "flow_forward": flow_fwd,
+                "flow_backward": flow_bwd,
+                "path_start": path_start,
+                "path_end": path_end,
+                "structure": structure_examples,
+                "flatten": flatten_example,
+                "impls": impl_examples,
+                "evolution": popular_names[:2],
+            },
+        }
+
+    async def index_stream(self):
+        """Regenerate the graph, yielding the indexer's output as it arrives.
+
+        Yields `{"type": "start", "message": str}`, `{"type": "output",
+        "line": str}` per line, then one `{"type": "done", "success": bool,
+        "message": str}`. Like `index()` it honors `[timeouts] index_minutes`
+        and reloads the caches, and is refused, with only that `done`, while
+        another run is in progress. The indexer is killed if the run times
+        out or the generator is closed early.
+        """
+        # Read before reset_caches() below discards it.
+        model_was_loaded = self._semantic_cache["instance"] is not None
+        minutes = self.config.index_timeout_minutes
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + minutes * 60 if minutes else None
+
+        def remaining() -> float | None:
+            return None if deadline is None else max(deadline - loop.time(), 0)
+
+        if error := self.config.cache_dir_error():
+            yield {"type": "done", "success": False, "message": error}
+            return
+        argv, env = self._indexer_child(str(self.config.project_root))
+        if not self._index_lock.acquire(blocking=False):
+            yield {"type": "done", "success": False, "message": _INDEX_BUSY}
+            return
+        try:
+            yield {"type": "start", "message": "Starting reindex..."}
+            async with _process_tree(
+                argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=str(self.config.project_root),
+                env={**env, "PYTHONUNBUFFERED": "1"},
+                limit=10 * 1024 * 1024,  # the indexer can emit very long lines
+            ) as proc:
+                while line := await asyncio.wait_for(
+                    proc.stdout.readline(), remaining()
+                ):
+                    text = line.decode("utf-8", errors="replace").rstrip()
+                    if text:
+                        yield {"type": "output", "line": text}
+                returncode = await asyncio.wait_for(proc.wait(), remaining())
+        except TimeoutError:
+            yield {
+                "type": "done",
+                "success": False,
+                "message": self._index_timeout_message(),
+            }
+        # OSError: the indexer could not be started or read from.
+        # ValueError: it printed a line longer than `limit`.
+        except (OSError, ValueError) as e:
+            yield {"type": "done", "success": False, "message": f"Index error: {e}"}
+        else:
+            if returncode != 0:
+                yield {
+                    "type": "done",
+                    "success": False,
+                    "message": f"Index failed: indexer exited with code {returncode}",
+                }
+                return
+
+            self.reset_caches()
+            # The child has cached this graph's vectors, so this loads them.
+            searcher = await self._get_semantic_searcher()
+            if searcher is not None:
+                line = f"Embeddings: {len(searcher.nodes):,} nodes indexed"
+                if model_was_loaded:
+                    try:
+                        await asyncio.to_thread(searcher.ensure_model)
+                    except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch; reported in the stream
+                        line = f"Embeddings: Failed ({e})"
+                yield {"type": "output", "line": line}
+            yield {"type": "done", "success": True, "message": "Index complete."}
+        finally:
+            self._index_lock.release()
+
+    async def impls_data(self, method: str, trait_name: str | None = None) -> dict:
+        """Implementations of a trait method, as data: a list of nodes."""
+        q = await self._get_querier()
+        if not q:
+            return {"ok": False, "error": self._no_graph_error()}
+        return {
+            "ok": True,
+            "error": None,
+            "implementations": q.find_trait_impls(method, trait_name),
+        }
+
+    async def impls(self, method: str, trait_name: str | None = None) -> str:
+        """Find all implementations of a trait method."""
+        data = await self.impls_data(method, trait_name)
+        if not data["ok"]:
+            return ServiceError(f"ERROR: {data['error']}")
+        results = data["implementations"]
 
         if not results:
             trait_filter = f" for trait '{trait_name}'" if trait_name else ""
@@ -1784,6 +2657,57 @@ class DescryService:
 
         return await self._format_response("\n".join(lines))
 
+    async def path_data(
+        self,
+        start: str,
+        end: str,
+        max_depth: int = 10,
+        direction: str = "forward",
+    ) -> dict:
+        """Shortest call path between two symbols, as data.
+
+        `status` and `path` are those of `GraphQuerier.find_call_path_result`.
+        Unless `status` is "found", `message` says why there is no path.
+        """
+        q = await self._get_querier()
+        if not q:
+            return {"ok": False, "error": self._no_graph_error()}
+
+        found = q.find_call_path_result(
+            start, end, max_depth=max_depth, direction=direction
+        )
+
+        message = None
+        if found["status"] == "timeout":
+            message = (
+                f"Path search from '{start}' to '{end}' stopped at the "
+                f"{self.config.query_timeout_ms} ms time limit ([timeouts] "
+                f"query_ms) before finishing; a path may still exist."
+            )
+        elif found["status"] == "node_budget":
+            message = (
+                f"Path search from '{start}' to '{end}' stopped after visiting "
+                f"{self.config.max_nodes} symbols ([query] max_nodes) before "
+                f"finishing; a path may still exist."
+            )
+        elif found["status"] == "not_found":
+            message = (
+                f"No path found from '{start}' to '{end}' within {found['max_depth']} hops.\n\n"
+                f"Direction: {direction} ('{start}' {'calls' if direction == 'forward' else 'is called by'} '{end}')\n\n"
+                f"Try:\n"
+                f"- Verify both symbols exist with descry search\n"
+                f"- Increase max_depth if the path is longer\n"
+                f"- Try the opposite direction"
+            )
+
+        return {
+            "ok": True,
+            "error": None,
+            "status": found["status"],
+            "path": found["path"],
+            "message": message,
+        }
+
     async def path(
         self,
         start: str,
@@ -1792,23 +2716,12 @@ class DescryService:
         direction: str = "forward",
     ) -> str:
         """Find shortest call path between two symbols."""
-        q = await self._get_querier()
-        if not q:
-            return "ERROR: Graph not found. Run descry ensure first."
-
-        result_path = q.find_call_path(
-            start, end, max_depth=max_depth, direction=direction
-        )
-
-        if not result_path:
-            return (
-                f"No path found from '{start}' to '{end}' within {max_depth} hops.\n\n"
-                f"Direction: {direction} ('{start}' {'calls' if direction == 'forward' else 'is called by'} '{end}')\n\n"
-                f"Try:\n"
-                f"- Verify both symbols exist with descry search\n"
-                f"- Increase max_depth if the path is longer\n"
-                f"- Try the opposite direction"
-            )
+        data = await self.path_data(start, end, max_depth, direction)
+        if not data["ok"]:
+            return ServiceError(f"ERROR: {data['error']}")
+        if data["status"] != "found":
+            return data["message"]
+        result_path = data["path"]
 
         lines = [
             f"### Call Path: `{start}` -> `{end}` ({len(result_path)} hop{'s' if len(result_path) != 1 else ''})\n"
@@ -1821,7 +2734,10 @@ class DescryService:
             call_line = hop.get("call_line")
             snippet = hop.get("call_snippet", "")
 
-            lines.append(f"**{i}. {caller_name}** -> **{callee_name}**")
+            lines.append(
+                f"**{i}. {caller_name}** -> **{callee_name}**"
+                f"{self._GraphQuerier.one_of(hop.get('candidates'))}"
+            )
             if file_path and call_line:
                 lines.append(f"   {file_path}:{call_line}")
             elif file_path:
@@ -1829,7 +2745,7 @@ class DescryService:
 
             if snippet:
                 lang = (
-                    self._get_syntax_lang(file_path)
+                    self._get_syntax_lang(file_path, self.config.syntax_lang_map)
                     if file_path and self._get_syntax_lang
                     else ""
                 )
@@ -1841,6 +2757,87 @@ class DescryService:
 
         return await self._format_response("\n".join(lines), include_header=True)
 
+    def _openapi_spec(self) -> Path | None:
+        """The OpenAPI spec to trace against, or None if the project has none.
+
+        That is `[cross_lang] openapi_path`. A project that leaves it unset
+        may instead keep its spec at `public/api/latest.json` or
+        `public/api/openapi.json` under the root.
+        """
+        if self.config.openapi_path is not None:
+            return self.config.openapi_path
+        from descry.query import source_path
+
+        for name in ("latest.json", "openapi.json"):
+            if path := source_path(self.config.project_root, f"public/api/{name}"):
+                return Path(path)
+        return None
+
+    def cross_lang_error(self) -> str | None:
+        """Why cross-language tracing cannot run here, or None if it can."""
+        if not self._CrossLangTracer:
+            return "Cross-language tracing not available. Missing cross_lang module."
+        openapi_path = self._openapi_spec()
+        if openapi_path is None:
+            return "Cross-language tracing not configured. Set openapi_path in config."
+        if not openapi_path.is_file():
+            return f"OpenAPI spec not found at {openapi_path}."
+        return None
+
+    async def cross_lang_data(
+        self,
+        mode: str = "endpoint",
+        method: str | None = None,
+        path: str | None = None,
+        tag: str | None = None,
+    ) -> dict:
+        """Cross-language tracing, as data.
+
+        `result` is the tracer's stats for mode "stats", its endpoint list
+        for "list", and for "endpoint" the handler info, or None when no
+        endpoint matches. On failure `reason` is "unavailable" when tracing
+        cannot run here and "invalid" when the arguments are wrong.
+        """
+        error = self.cross_lang_error()
+        if error:
+            return {"ok": False, "error": error, "reason": "unavailable"}
+
+        graph_path = (
+            str(self.config.graph_path) if self.config.graph_path.exists() else None
+        )
+        tracer = self._CrossLangTracer(
+            str(self._openapi_spec()),
+            graph_path,
+            backend_handler_patterns=self.config.backend_handler_patterns or None,
+            api_prefixes=self.config.api_prefixes or None,
+            is_test=(await self._get_querier()).is_test if graph_path else None,
+            project_root=self.config.project_root,
+            max_file_bytes=self.config.max_file_bytes,
+        )
+
+        if mode == "stats":
+            result = tracer.get_stats()
+        elif mode == "list":
+            result = tracer.list_endpoints(tag=tag)
+        elif mode == "endpoint":
+            if not method or not path:
+                return {
+                    "ok": False,
+                    "error": (
+                        "Endpoint mode requires 'method' and 'path' arguments.\n"
+                        "Example: method='GET', path='/api/v1/deployments'"
+                    ),
+                    "reason": "invalid",
+                }
+            result = tracer.get_handler_info(method.upper(), path)
+        else:
+            return {
+                "ok": False,
+                "error": f"Unknown mode '{mode}'. Use 'endpoint', 'list', or 'stats'.",
+                "reason": "invalid",
+            }
+        return {"ok": True, "error": None, "result": result}
+
     async def cross_lang(
         self,
         mode: str = "endpoint",
@@ -1849,28 +2846,12 @@ class DescryService:
         tag: str | None = None,
     ) -> str:
         """Trace API calls from frontend to backend handlers via OpenAPI spec."""
-        if not self._CrossLangTracer:
-            return "Cross-language tracing not available. Missing cross_lang module."
-
-        openapi_path = self.config.openapi_path
-        if openapi_path is None:
-            return "Cross-language tracing not configured. Set openapi_path in config."
-        if not openapi_path.exists():
-            return f"OpenAPI spec not found at {openapi_path}."
-
-        graph_path = (
-            str(self.config.graph_path) if self.config.graph_path.exists() else None
-        )
-        tracer = self._CrossLangTracer(
-            str(openapi_path),
-            graph_path,
-            backend_handler_patterns=self.config.backend_handler_patterns or None,
-            frontend_api_patterns=self.config.frontend_api_patterns or None,
-            api_prefixes=self.config.api_prefixes or None,
-        )
+        data = await self.cross_lang_data(mode, method, path, tag)
+        if not data["ok"]:
+            return ServiceError(data["error"])
 
         if mode == "stats":
-            stats = tracer.get_stats()
+            stats = data["result"]
             lines = [
                 "### Cross-Language Tracing Stats",
                 "",
@@ -1884,7 +2865,7 @@ class DescryService:
             return "\n".join(lines)
 
         elif mode == "list":
-            endpoints = tracer.list_endpoints(tag=tag)
+            endpoints = data["result"]
             if not endpoints:
                 tag_note = f" for tag '{tag}'" if tag else ""
                 return f"No endpoints found{tag_note}."
@@ -1919,14 +2900,8 @@ class DescryService:
             lines.append(f"*{len(endpoints)} endpoint(s) total*")
             return "\n".join(lines)
 
-        elif mode == "endpoint":
-            if not method or not path:
-                return (
-                    "Endpoint mode requires 'method' and 'path' arguments.\n"
-                    "Example: method='GET', path='/api/v1/deployments'"
-                )
-
-            info = tracer.get_handler_info(method.upper(), path)
+        else:
+            info = data["result"]
             if not info:
                 return (
                     f"No handler found for {method.upper()} {path}.\n\n"
@@ -1971,8 +2946,61 @@ class DescryService:
 
             return "\n".join(lines)
 
-        else:
-            return f"Unknown mode '{mode}'. Use 'endpoint', 'list', or 'stats'."
+    async def _git_history(self, tool: str, method: str, **kwargs) -> dict:
+        """Run a GitHistoryAnalyzer method off the event loop, as data.
+
+        `result` is what the method returned. On failure `reason` is
+        "invalid" for a negative `limit`, "unavailable" when the git history
+        module is missing and "failed" when the analysis raised.
+        """
+        if error := _limit_error(kwargs["limit"]):
+            return {"ok": False, "error": error, "reason": "invalid"}
+        if not self._git_available:
+            return {
+                "ok": False,
+                "error": "Git history tools not available. Missing git_history module.",
+                "reason": "unavailable",
+            }
+
+        try:
+            analyzer = await self._get_git_analyzer()
+            result = await asyncio.to_thread(getattr(analyzer, method), **kwargs)
+        except self._GitError as e:
+            return {"ok": False, "error": str(e), "reason": "failed"}
+        # Tool boundary over git output and graph lookups: whatever the
+        # analysis raises is logged with its traceback and reported.
+        except Exception as e:
+            logger.exception("Error in %s", tool)
+            return {
+                "ok": False,
+                "error": f"Error analyzing {tool}: {e}",
+                "reason": "failed",
+            }
+        return {"ok": True, "error": None, "result": result}
+
+    async def churn_data(
+        self,
+        time_range: str | None = None,
+        path_filter: str | None = None,
+        limit: int = 20,
+        mode: str = "symbols",
+        exclude_generated: bool = True,
+        structured: bool = False,
+    ) -> dict:
+        """Code churn hotspots, as data.
+
+        `result` is the markdown report, or the dict of
+        `GitHistoryAnalyzer.get_churn_structured` when `structured`.
+        """
+        return await self._git_history(
+            "churn",
+            "get_churn_structured" if structured else "get_churn",
+            time_range=time_range,
+            path_filter=path_filter,
+            limit=limit,
+            mode=mode,
+            exclude_generated=exclude_generated,
+        )
 
     async def churn(
         self,
@@ -1983,25 +3011,31 @@ class DescryService:
         exclude_generated: bool = True,
     ) -> str:
         """Find code churn hotspots."""
-        if not self._git_available:
-            return "Git history tools not available. Missing git_history module."
+        data = await self.churn_data(
+            time_range, path_filter, limit, mode, exclude_generated
+        )
+        if not data["ok"]:
+            return ServiceError(data["error"])
+        return await self._format_response(data["result"])
 
-        try:
-            analyzer = await self._get_git_analyzer()
-            result = await asyncio.to_thread(
-                analyzer.get_churn,
-                time_range=time_range,
-                path_filter=path_filter,
-                limit=limit,
-                mode=mode,
-                exclude_generated=exclude_generated,
-            )
-            return await self._format_response(result)
-        except self._GitError as e:
-            return str(e)
-        except Exception as e:
-            logger.exception("Error in churn")
-            return f"Error analyzing churn: {e}"
+    async def evolution_data(
+        self,
+        name: str,
+        time_range: str | None = None,
+        limit: int = 10,
+        show_diff: bool = False,
+        crate: str | None = None,
+    ) -> dict:
+        """How a symbol has changed over time, as data: a markdown timeline."""
+        return await self._git_history(
+            "evolution",
+            "get_evolution",
+            name=name,
+            time_range=time_range,
+            limit=limit,
+            show_diff=show_diff,
+            crate=crate,
+        )
 
     async def evolution(
         self,
@@ -2012,25 +3046,34 @@ class DescryService:
         crate: str | None = None,
     ) -> str:
         """Track how a symbol has changed over time."""
-        if not self._git_available:
-            return "Git history tools not available. Missing git_history module."
+        data = await self.evolution_data(name, time_range, limit, show_diff, crate)
+        if not data["ok"]:
+            return ServiceError(data["error"])
+        return await self._format_response(data["result"])
 
-        try:
-            analyzer = await self._get_git_analyzer()
-            result = await asyncio.to_thread(
-                analyzer.get_evolution,
-                name=name,
-                time_range=time_range,
-                limit=limit,
-                show_diff=show_diff,
-                crate=crate,
-            )
-            return await self._format_response(result)
-        except self._GitError as e:
-            return str(e)
-        except Exception as e:
-            logger.exception("Error in evolution")
-            return f"Error analyzing evolution: {e}"
+    async def changes_data(
+        self,
+        commit_range: str | None = None,
+        time_range: str | None = None,
+        path_filter: str | None = None,
+        show_callers: bool = True,
+        limit: int = 50,
+        structured: bool = False,
+    ) -> dict:
+        """Change impact for a commit range, as data.
+
+        `result` is the markdown report, or the dict of
+        `GitHistoryAnalyzer.get_changes_structured` when `structured`.
+        """
+        return await self._git_history(
+            "changes",
+            "get_changes_structured" if structured else "get_changes",
+            commit_range=commit_range,
+            time_range=time_range,
+            path_filter=path_filter,
+            show_callers=show_callers,
+            limit=limit,
+        )
 
     async def changes(
         self,
@@ -2041,22 +3084,9 @@ class DescryService:
         limit: int = 50,
     ) -> str:
         """Analyze change impact for a commit range."""
-        if not self._git_available:
-            return "Git history tools not available. Missing git_history module."
-
-        try:
-            analyzer = await self._get_git_analyzer()
-            result = await asyncio.to_thread(
-                analyzer.get_changes,
-                commit_range=commit_range,
-                time_range=time_range,
-                path_filter=path_filter,
-                show_callers=show_callers,
-                limit=limit,
-            )
-            return await self._format_response(result)
-        except self._GitError as e:
-            return str(e)
-        except Exception as e:
-            logger.exception("Error in changes")
-            return f"Error analyzing changes: {e}"
+        data = await self.changes_data(
+            commit_range, time_range, path_filter, show_callers, limit
+        )
+        if not data["ok"]:
+            return ServiceError(data["error"])
+        return await self._format_response(data["result"])

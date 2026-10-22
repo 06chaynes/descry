@@ -35,11 +35,11 @@ mcp:
 
 # Lint with ruff
 lint:
-    . .venv/bin/activate && ruff check src/ tests/
+    . .venv/bin/activate && ruff check src/ tests/ tools/
 
 # Format with ruff
 fmt:
-    . .venv/bin/activate && ruff format src/ tests/
+    . .venv/bin/activate && ruff format src/ tests/ tools/
 
 # Clean build artifacts and caches
 clean:

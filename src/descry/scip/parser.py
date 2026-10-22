@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from urllib.parse import unquote, urlsplit
 
 import descry.scip.adapters  # noqa: F401 — side-effect: populate ADAPTERS registry
 from descry.scip.adapter import (
@@ -24,9 +24,6 @@ from descry.scip.adapter import (
     adapter_for_extension,
     adapter_for_scheme,
 )
-
-if TYPE_CHECKING:
-    from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -46,36 +43,61 @@ class ScipIndex:
     - Converting between SCIP symbol IDs and descry node IDs
     """
 
-    def __init__(self, scip_files: List[Path]):
+    def __init__(
+        self,
+        scip_files: list[Path],
+        project_dirs: dict[Path, str] | None = None,
+        root: Path | None = None,
+    ):
         """Initialize the index from SCIP files.
 
         Args:
             scip_files: List of paths to .scip files to load
+            project_dirs: For an index whose document paths are relative to
+                its project rather than to the repository root, that
+                project's directory relative to the root ("" for the root)
+            root: The repository root. An index not in ``project_dirs`` that
+                names a project root at or below it gets its project
+                directory from that.
         """
-        # symbol_id -> (file_path, line_number)
-        self.definitions: Dict[str, Tuple[str, int]] = {}
+        self._project_dirs = project_dirs or {}
+        self._root = root
+        # Document paths made relative to the repository root on load.
+        self._rooted_files: set[str] = set()
+
+        # symbol_id -> file_path -> the lines defining it there
+        self.definitions: dict[str, dict[str, set[int]]] = {}
 
         # (file_path, line) -> list of symbol_ids (may be multiple if several
         # crates contribute the same relative file). At resolve time we prefer
         # a candidate whose extracted name matches ref_name, then fall back to
         # the first.
-        self.references: Dict[Tuple[str, int], List[str]] = {}
+        self.references: dict[tuple[str, int], list[str]] = {}
+
+        # (file_path, line) -> (start column, symbol_id) of each occurrence
+        # there
+        self._spans: dict[tuple[str, int], list[tuple[int, str]]] = {}
+        # file_path -> the SCIP position encoding its columns are counted in
+        self._position_encodings: dict[str, int] = {}
 
         # symbol_id -> parsed symbol metadata
-        self.symbols: Dict[str, dict] = {}
+        self.symbols: dict[str, dict] = {}
 
         # Simple name -> list of symbol_ids (for fuzzy matching)
-        self.name_to_symbols: Dict[str, List[str]] = {}
+        self.name_to_symbols: dict[str, list[str]] = {}
+
+        # scheme -> test of whether an outside symbol's call leaves the project
+        self._leaving: dict[str, object] = {}
 
         # Resolution statistics by language, driven by the adapter registry
         # so new SCIP languages automatically get a stats bucket.
-        self._resolution_stats: Dict[str, Dict[str, int]] = {
+        self._resolution_stats: dict[str, dict[str, int]] = {
             adapter.name: {"attempted": 0, "resolved": 0}
             for adapter in ADAPTERS.values()
         }
 
         for scip_file in scip_files:
-            if scip_file.exists():
+            if scip_file.is_file():
                 self._load_scip(scip_file)
 
         logger.info(
@@ -91,20 +113,45 @@ class ScipIndex:
         """
         try:
             # Import here to avoid import errors if protobuf not installed
+            from google.protobuf.message import DecodeError
+            from google.protobuf.runtime_version import VersionError
+
             from descry.scip import pb2 as scip_pb2
         except ImportError:
             logger.warning("SCIP: protobuf bindings not available")
+            return
+        except VersionError as e:
+            # Raised by pb2 at import when the protobuf runtime is older
+            # than the generated code.
+            logger.warning(f"SCIP: protobuf bindings unusable: {e}")
             return
 
         try:
             index = scip_pb2.Index()
             index.ParseFromString(scip_file.read_bytes())
-        except Exception as e:
+        except (OSError, DecodeError) as e:
             logger.warning(f"SCIP: Failed to parse {scip_file}: {e}")
             return
 
+        if not any(d.occurrences for d in index.documents):
+            # An indexer that ran but found nothing usually means its own
+            # environment was missing (a `pip`/`java` on PATH, a `dart pub
+            # get`), not that the project holds no symbols — the regex
+            # rates that follow look correct while SCIP contributes 0%.
+            logger.warning(
+                f"SCIP: {scip_file} carries no symbols — "
+                f"check the indexer's output and its own requirements"
+            )
+
+        project_dir = self._project_dirs.get(scip_file)
+        if project_dir is None:
+            project_dir = self._stated_project_dir(index.metadata.project_root)
         for doc in index.documents:
             file_path = doc.relative_path
+            if project_dir is not None:
+                file_path = f"{project_dir}/{file_path}" if project_dir else file_path
+                self._rooted_files.add(file_path)
+            self._position_encodings[file_path] = doc.position_encoding
 
             # Process occurrences (references and definitions)
             for occ in doc.occurrences:
@@ -113,16 +160,21 @@ class ScipIndex:
                     continue
 
                 # Extract line number from range (range is [startLine, startChar, ...])
-                line = occ.range[0] if occ.range else 0
+                # SCIP lines are 0-based; descry edge linenos are 1-based.
+                line = occ.range[0] + 1 if occ.range else 0
 
                 # Check if this is a definition (symbol_roles & 0x1)
                 if occ.symbol_roles & SYMBOL_ROLE_DEFINITION:
-                    self.definitions[symbol_id] = (file_path, line)
+                    self.definitions.setdefault(symbol_id, {}).setdefault(
+                        file_path, set()
+                    ).add(line)
 
                 # Store all occurrences for reverse lookup. Append to a list
                 # so multi-crate workspaces that share relative filenames
                 # don't silently overwrite each other.
                 key = (file_path, line)
+                if len(occ.range) > 1:
+                    self._spans.setdefault(key, []).append((occ.range[1], symbol_id))
                 bucket = self.references.get(key)
                 if bucket is None:
                     self.references[key] = [symbol_id]
@@ -140,11 +192,11 @@ class ScipIndex:
                 # Build name-to-symbol index for fuzzy matching
                 name = self._extract_name(sym.symbol)
                 if name:
-                    if name not in self.name_to_symbols:
-                        self.name_to_symbols[name] = []
-                    self.name_to_symbols[name].append(sym.symbol)
+                    known = self.name_to_symbols.setdefault(name, [])
+                    if sym.symbol not in known:
+                        known.append(sym.symbol)
 
-    def _extract_name(self, symbol_id: str) -> Optional[str]:
+    def _extract_name(self, symbol_id: str) -> str | None:
         """Extract the simple name from a SCIP symbol ID.
 
         SCIP symbol format:
@@ -192,7 +244,7 @@ class ScipIndex:
 
         return name_parts[-1] if name_parts else None
 
-    def resolve(self, ref_name: str, source_file: str, line: int) -> Optional[str]:
+    def resolve(self, ref_name: str, source_file: str, line: int) -> str | None:
         """Resolve a reference to its definition node ID.
 
         Attempts resolution in order:
@@ -203,11 +255,91 @@ class ScipIndex:
         Args:
             ref_name: The reference name to resolve (e.g., "validate_token")
             source_file: Path to the file containing the reference
-            line: Line number of the reference
+            line: 1-based line number of the reference (a descry edge `lineno`)
 
         Returns:
             Descry node ID if resolved, None otherwise
         """
+        lang = self._count_attempt(source_file)
+        path, chosen = self._symbol_at(ref_name, source_file, line)
+        if chosen is not None:
+            if lang in self._resolution_stats:
+                self._resolution_stats[lang]["resolved"] += 1
+            return self._to_node_id(chosen, self._defining_file(chosen, path))
+
+        # Strategy 2: Try symbol name matching
+        result = self._fuzzy_resolve(ref_name)
+        if result and lang in self._resolution_stats:
+            self._resolution_stats[lang]["resolved"] += 1
+        return result
+
+    def definition_at(
+        self,
+        ref_name: str,
+        source_file: str,
+        line: int,
+        column: int | None = None,
+        alone: bool = True,
+        within=(),
+    ) -> tuple[str, str, tuple[int, ...]] | None:
+        """Find the definition of the symbol SCIP recorded at a reference.
+
+        Unlike ``resolve`` this never falls back to matching by name. With
+        ``column`` (0-based) given, the symbol of ``ref_name``'s name whose
+        occurrence on the line starts there is taken, else, where the call
+        is ``alone`` of its name on the line, the line's one recorded where
+        a call whose parentheses hold it starts, at one of the columns
+        ``within``: an indexer records it at the macro whose expansion
+        holds the call. A column is one number or ``(UTF-8, UTF-16,
+        UTF-32)`` code-unit offsets.
+
+        A symbol defined in several files, as an indexer names C `static`
+        functions of one name, is the one of the reference's own file;
+        where none is, SCIP does not tell which.
+
+        Returns:
+            ``(node_id, file, lines)`` of the definition, the lines 1-based
+            and sorted, several where the file defines the symbol at each,
+            as overload signatures or alternatives of the build; or None
+            when no occurrence at ``source_file``:``line`` carries
+            ``ref_name``'s name, ``column`` does not tell which symbol of the
+            name the call is, or no file tells which definition it is
+        """
+        lang = self._count_attempt(source_file)
+        path, chosen = self._symbol_at(
+            ref_name, source_file, line, column, alone, within
+        )
+        if chosen is None:
+            return None
+        def_file = self._defining_file(chosen, path)
+        lines = self.definitions[chosen].get(def_file)
+        if not lines:
+            return None
+        if lang in self._resolution_stats:
+            self._resolution_stats[lang]["resolved"] += 1
+        return self._to_node_id(chosen, def_file), def_file, tuple(sorted(lines))
+
+    def _defining_file(self, symbol: str, path: str) -> str:
+        """The file of the definition of ``symbol`` a reference in ``path``
+        reaches: its only one, else ``path``'s own."""
+        defined = self.definitions[symbol]
+        return path if len(defined) > 1 else next(iter(defined))
+
+    def _stated_project_dir(self, project_root: str) -> str | None:
+        """The directory, relative to the repository root, that an index
+        names in its metadata as the base of its document paths."""
+        if self._root is None or not project_root.startswith("file://"):
+            return None
+        stated = Path(unquote(urlsplit(project_root).path))
+        try:
+            relative = stated.relative_to(self._root).as_posix()
+        except ValueError:
+            return None
+        return "" if relative == "." else relative
+
+    def _count_attempt(self, source_file: str) -> str:
+        """Count a resolution attempt for ``source_file``'s language and
+        return that language."""
         # Determine language for stats tracking via the adapter registry.
         # Extension → adapter.name; unknown extensions fall back to "rust" to
         # preserve the pre-refactor behavior (rust-analyzer is the broadest
@@ -219,9 +351,73 @@ class ScipIndex:
         lang = ext_adapter.name if ext_adapter is not None else "rust"
         if lang in self._resolution_stats:
             self._resolution_stats[lang]["attempted"] += 1
+        return lang
 
+    def outside_at(self, ref_name: str, source_file: str, line: int) -> bool:
+        """Whether every symbol SCIP recorded at ``source_file``:``line``
+        under ``ref_name``'s last segment is one outside the project whose
+        call cannot reach it, as the adapter of its scheme tells."""
+        named = self._named_at(ref_name, source_file, line)[1]
+        return bool(named) and all(self._leaves(symbol) for symbol in named)
+
+    def _leaves(self, symbol: str) -> bool:
+        if symbol in self.definitions:
+            return False
+        scheme = symbol.partition(" ")[0]
+        if scheme not in self._leaving:
+            adapter = adapter_for_scheme(scheme)
+            defined = [
+                known for known in self.definitions if known.startswith(f"{scheme} ")
+            ]
+            # An adapter that cannot tell says nothing leaves.
+            build = getattr(adapter, "leaving", None)
+            self._leaving[scheme] = (
+                build(defined, self._root) if build else (lambda _: False)
+            )
+        return self._leaving[scheme](symbol)
+
+    def _symbol_at(
+        self,
+        ref_name: str,
+        source_file: str,
+        line: int,
+        column: int | None = None,
+        alone: bool = True,
+        within=(),
+    ) -> tuple[str, str | None]:
+        """The path SCIP has ``source_file`` under, and the defined symbol
+        referenced at ``line`` of it under ``ref_name``'s last segment, if
+        any, as ``definition_at`` tells it."""
+        path, named = self._named_at(ref_name, source_file, line)
+        named = [cid for cid in named if cid in self.definitions]
+        if column is not None and named:
+            spans = self._spans.get((path, line), ())
+            columns = self._columns(path, column)
+            exact = set(named) & {s for at, s in spans if at in columns}
+            if exact or len(set(named)) > 1 or not alone:
+                return path, exact.pop() if len(exact) == 1 else None
+            # The line's one symbol of the name, recorded where a call that
+            # holds this one starts: at a macro whose expansion holds it.
+            macros = set().union(*(self._columns(path, c) for c in within))
+            held = any(s == named[0] and at in macros for at, s in spans)
+            return path, named[0] if held else None
+        return path, named[0] if named else None
+
+    def _columns(self, path: str, column) -> set[int]:
+        """The offsets ``column`` stands for in ``path``'s document: a column
+        given in several units is read in the document's, and where the
+        index does not say which, any of them may match."""
+        if isinstance(column, int):
+            return {column}
+        unit = self._position_encodings.get(path)
+        return {column[unit - 1]} if unit else set(column)
+
+    def _named_at(self, ref_name: str, source_file: str, line: int):
+        """The path SCIP has ``source_file`` under, and the symbols it
+        recorded on ``line`` of it under ``ref_name``'s last segment."""
         # Strategy 1: Try exact location lookup with full path
         candidates = self.references.get((source_file, line)) or []
+        path = source_file
 
         # Strategy 1b: Try with package-relative path
         # Descry uses: webapp/src/lib/stores/auth.ts
@@ -230,37 +426,22 @@ class ScipIndex:
             # Try stripping the first path component (package name)
             parts = source_file.split("/", 1)
             if len(parts) == 2:
-                relative_path = parts[1]
-                candidates = self.references.get((relative_path, line)) or []
+                path = parts[1]
+                candidates = self.references.get((path, line)) or []
 
-        if candidates:
-            # Require an extracted-name match on the candidate — the
-            # (file, line) tuple can contain multiple occurrences (type
-            # prefix, method call, closing punctuation), and the
-            # no-name-match fallback used to pick the first candidate in
-            # `definitions`, which routinely yielded wrong targets that
-            # later got rejected by the cross-crate name check in
-            # generate.py without ever trying Strategy 2. Require name
-            # match here so non-matching line lookups fall through to
-            # Strategy 2's fuzzy resolve.
-            chosen = None
-            for cid in candidates:
-                if cid in self.definitions and self._extract_name(cid) == ref_name:
-                    chosen = cid
-                    break
-            if chosen is not None:
-                def_file, def_line = self.definitions[chosen]
-                if lang in self._resolution_stats:
-                    self._resolution_stats[lang]["resolved"] += 1
-                return self._to_node_id(chosen, def_file)
+        # Only candidates whose extracted name matches count: one
+        # (file, line) can hold several occurrences (type prefix, method
+        # call, closing punctuation). SCIP names are unqualified, so
+        # compare against the last segment of ref_name.
+        simple_name = self._simple_name(ref_name)
+        return path, [c for c in candidates if self._extract_name(c) == simple_name]
 
-        # Strategy 2: Try symbol name matching
-        result = self._fuzzy_resolve(ref_name)
-        if result and lang in self._resolution_stats:
-            self._resolution_stats[lang]["resolved"] += 1
-        return result
+    @staticmethod
+    def _simple_name(ref_name: str) -> str:
+        """Last segment of a qualified reference name."""
+        return ref_name.split("::")[-1].split(".")[-1]
 
-    def _fuzzy_resolve(self, ref_name: str) -> Optional[str]:
+    def _fuzzy_resolve(self, ref_name: str) -> str | None:
         """Attempt fuzzy resolution by name.
 
         Args:
@@ -270,25 +451,23 @@ class ScipIndex:
             Descry node ID if found, None otherwise
         """
         # Extract simple name from qualified references
-        # e.g., "ThoraxServer::start" -> "start"
-        simple_name = ref_name.split("::")[-1].split(".")[-1]
+        # e.g., "Server::start" -> "start"
+        simple_name = self._simple_name(ref_name)
 
         if simple_name in self.name_to_symbols:
-            symbol_ids = self.name_to_symbols[simple_name]
-            # Prefer symbols that match more of the qualified name
+            defined = {
+                self._to_node_id(sym_id, next(iter(self.definitions[sym_id])))
+                for sym_id in self.name_to_symbols[simple_name]
+                if sym_id in self.definitions
+            }
             if "::" in ref_name:
-                type_name = ref_name.split("::")[-2] if "::" in ref_name else ""
-                for sym_id in symbol_ids:
-                    if type_name and type_name.lower() in sym_id.lower():
-                        if sym_id in self.definitions:
-                            def_file, _ = self.definitions[sym_id]
-                            return self._to_node_id(sym_id, def_file)
-
-            # Fall back to first match
-            for sym_id in symbol_ids:
-                if sym_id in self.definitions:
-                    def_file, _ = self.definitions[sym_id]
-                    return self._to_node_id(sym_id, def_file)
+                # Those of the type the name is qualified with, if any is.
+                ending = "::" + "::".join(ref_name.split("::")[-2:])
+                typed = {node_id for node_id in defined if node_id.endswith(ending)}
+                defined = typed or defined
+            # The one definition left, where there is one.
+            if len(defined) == 1:
+                return defined.pop()
 
         return None
 
@@ -334,8 +513,13 @@ class ScipIndex:
         # - the package token is "." (scip-dotnet's "no package name"
         #   sentinel — emits the .scip with workspace-relative paths).
         # Both classes of indexer emit file_path already workspace-relative,
-        # so prepending would produce a mismatched node id.
-        if "/" in package_name or package_name == ".":
+        # so prepending would produce a mismatched node id. So would
+        # prepending to a path made root-relative through `project_dirs`.
+        if (
+            "/" in package_name
+            or package_name == "."
+            or file_path in self._rooted_files
+        ):
             full_path = file_path
         elif not file_path.startswith(package_name + "/"):
             full_path = f"{package_name}/{file_path}"
@@ -356,7 +540,7 @@ class ScipIndex:
             return f"FILE:{full_path}::{'::'.join(name_parts)}"
         return f"FILE:{full_path}"
 
-    def _parse_descriptors(self, descriptors: str) -> List[str]:
+    def _parse_descriptors(self, descriptors: str) -> list[str]:
         """Parse SCIP descriptors into name components for descry node IDs.
 
         SCIP descriptors use suffixes to indicate type:
@@ -397,10 +581,6 @@ class ScipIndex:
 
             # Skip impl keyword but include the type name in brackets
             if name == "impl":
-                continue
-
-            # Skip 'tests' module in test paths
-            if name == "tests" and suffix == "/":
                 continue
 
             # Include types (#), terms (.), and methods (())

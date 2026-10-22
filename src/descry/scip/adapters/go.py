@@ -109,23 +109,9 @@ class GoAdapter:
         """Build the ``scip-go --output <out>`` command.
 
         scip-go is invoked from the module root and discovers packages via
-        ``go list``. Optional overrides are surfaced via
-        ``config.options``: ``module_name``, ``module_version``,
-        ``go_version`` — each maps to the corresponding ``scip-go``
-        flag. ``config.extra_args`` are appended verbatim after any
-        validated options.
+        ``go list``.
         """
         argv: list[str] = [self.binary, "--output", str(out_path)]
-
-        opts = config.options or {}
-        if "module_name" in opts:
-            argv.extend(["--module-name", opts["module_name"]])
-        if "module_version" in opts:
-            argv.extend(["--module-version", opts["module_version"]])
-        if "go_version" in opts:
-            argv.extend(["--go-version", opts["go_version"]])
-
-        argv.extend(config.extra_args)
 
         return CommandSpec(argv=argv, cwd=project.root, output_mode="direct")
 

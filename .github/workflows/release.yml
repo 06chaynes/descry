@@ -27,11 +27,14 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.12.23"
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
       - name: Verify tag matches pyproject version
-        if: github.event_name == 'push'
+        # A manual run that targets PyPI must be dispatched from the release tag.
+        if: github.event_name == 'push' || inputs.target == 'pypi'
         env:
           GIT_TAG: ${{ github.ref_name }}
         run: |
@@ -45,7 +48,7 @@ jobs:
         run: uv build
       - name: Check distributions with twine
         run: |
-          uv pip install --system twine
+          uv pip install --system twine==7.0.0
           twine check --strict dist/*
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -59,6 +62,8 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.12.23"
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
@@ -70,12 +75,7 @@ jobs:
       - name: Audit resolved environment
         run: |
           . .venv/bin/activate
-          # CVE-2026-3219 (GHSA-58qw-9mgm-455v): concatenated tar/ZIP
-          # interpretation conflict in pip itself. Affects pip <= 26.0.1
-          # with no patched version upstream. pip is a build-time
-          # installer in the venv, not a runtime dep we ship.
-          # Re-evaluate when pip ships a fix.
-          pip-audit --skip-editable --ignore-vuln CVE-2026-3219
+          pip-audit --skip-editable
 
   publish-testpypi:
     name: Publish to TestPyPI

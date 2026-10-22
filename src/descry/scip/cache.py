@@ -23,24 +23,38 @@ import hashlib
 import json
 import logging
 import os
+import shutil
+import stat
 import subprocess
+import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import ClassVar
+from urllib.parse import quote
 
 import descry.scip.adapters  # noqa: F401 — side-effect: populate ADAPTERS registry
-from descry._env import safe_env
 from descry.scip.adapter import (
     ADAPTERS,
     AdapterConfig,
     DiscoveredProject,
     LanguageAdapter,
+    project_dir,
+    resolved_binary,
 )
-
-if TYPE_CHECKING:
-    from typing import Dict, List, Tuple
+from descry.scip.adapters.rust import crate_dir as rust_crate_dir
 
 logger = logging.getLogger(__name__)
+
+
+def _writes_through(path: Path) -> bool:
+    """Whether a write to `path` would land elsewhere or wait: a symlink, a
+    FIFO or a device sits there."""
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return False
+    return not (stat.S_ISREG(mode) or stat.S_ISDIR(mode))
 
 
 class ScipCacheManager:
@@ -50,10 +64,11 @@ class ScipCacheManager:
     checksums. When a project's sources haven't changed, the cached SCIP
     index is reused.
 
-    Cache location: {project_root}/.descry_cache/scip/
+    Cache location: {cache_dir}/scip/ (default
+    {project_root}/.descry_cache/scip/)
     """
 
-    _DEFAULT_EXCLUDED_DIRS = {
+    _DEFAULT_EXCLUDED_DIRS: ClassVar[set[str]] = {
         "target",
         "node_modules",
         "dist",
@@ -72,6 +87,7 @@ class ScipCacheManager:
         scip_extra_args: list[str] | None = None,
         scip_skip_crates: list[str] | None = None,
         scip_toolchain: str | None = None,
+        cache_dir: Path | None = None,
     ):
         """Initialize the cache manager.
 
@@ -89,10 +105,20 @@ class ScipCacheManager:
             scip_toolchain: Rust toolchain to use for rust-analyzer
                 (e.g. "1.92.0"). Uses `rustup run <toolchain>` prefix.
                 None means use the default rust-analyzer on PATH.
+            cache_dir: Descry's cache directory; SCIP files go in its
+                ``scip/`` subdirectory. Defaults to
+                ``{project_root}/.descry_cache``.
         """
         self.project_root = project_root
-        self.cache_dir = project_root / ".descry_cache" / "scip"
+        if cache_dir is None:
+            self.cache_dir = project_root / ".descry_cache" / "scip"
+        else:
+            # Absolute, because indexers run with the project directory as
+            # cwd rather than the caller's.
+            self.cache_dir = Path(cache_dir).absolute() / "scip"
         self.checksums_file = self.cache_dir / "checksums.json"
+        # Guards the read-modify-write of checksums.json across adapter threads.
+        self._checksums_lock = threading.Lock()
         self.excluded_dirs = (
             excluded_dirs if excluded_dirs is not None else self._DEFAULT_EXCLUDED_DIRS
         )
@@ -105,42 +131,34 @@ class ScipCacheManager:
         self._scip_skip_crates = set(scip_skip_crates) if scip_skip_crates else set()
         self._scip_toolchain = scip_toolchain
 
-    def _discover_for(self, lang: str) -> List[DiscoveredProject]:
-        """Run discovery for one adapter by `lang` name; empty list if unknown."""
-        adapter = ADAPTERS.get(lang)
-        if adapter is None:
-            return []
-        return adapter.discover(self.project_root, self.excluded_dirs)
+    @staticmethod
+    def _project_key(adapter_name: str, project: str) -> str:
+        """Key for one project in ``checksums.json`` and in result dicts.
 
-    def get_projects(self) -> List[Tuple[str, str]]:
-        """Auto-discover all indexable projects across every registered adapter.
-
-        Returns:
-            Sorted list of (project_name, project_type) tuples where
-            project_type is the adapter's `name` (e.g. "rust", "typescript",
-            "python", and any future SCIP language additions).
+        Project names are only unique within an adapter.
         """
-        out: list[tuple[str, str]] = []
-        for adapter in ADAPTERS.values():
-            for project in adapter.discover(self.project_root, self.excluded_dirs):
-                out.append((project.name, adapter.name))
-        return sorted(out)
+        return f"{adapter_name}:{project}"
 
-    def get_rust_crates(self) -> List[str]:
-        """Auto-discover Rust crates (names only) via RustAdapter.
+    def _index_path(self, adapter_name: str, project: str) -> Path:
+        """Cache file for one project's index.
 
-        Returns:
-            Sorted list of crate directory names.
+        The name is percent-encoded so that one containing ``/`` (a
+        workspace-relative crate path) is still a file directly in the
+        cache directory.
         """
-        return [p.name for p in self._discover_for("rust")]
+        return self.cache_dir / f"{adapter_name}--{quote(project, safe='')}.scip"
 
-    def get_typescript_packages(self) -> List[str]:
-        """Auto-discover TypeScript/JavaScript packages (names only) via TypeScriptAdapter."""
-        return [p.name for p in self._discover_for("typescript")]
+    @staticmethod
+    def _file_signature(path: Path) -> tuple[int, int, int] | None:
+        """Inode, mtime and size of `path`, or None if absent.
 
-    def get_python_packages(self) -> List[str]:
-        """Auto-discover Python packages (names only) via PythonAdapter."""
-        return [p.name for p in self._discover_for("python")]
+        Differs before and after a subprocess iff it wrote the file.
+        """
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        return (st.st_ino, st.st_mtime_ns, st.st_size)
 
     def needs_update(self, project: str, project_type: str = "rust") -> bool:
         """Check if project SCIP needs regeneration.
@@ -156,17 +174,17 @@ class ScipCacheManager:
         Returns:
             True if SCIP should be regenerated
         """
-        scip_file = self.cache_dir / f"{project}.scip"
+        scip_file = self._index_path(project_type, project)
         if not scip_file.exists():
             return True
 
         checksums = self._load_checksums()
         current_hash = self._hash_project(project, project_type)
-        return checksums.get(project) != current_hash
+        return checksums.get(self._project_key(project_type, project)) != current_hash
 
     def _update_changed_for_adapter(
         self, adapter: LanguageAdapter, parallel: bool
-    ) -> Dict[str, Path]:
+    ) -> dict[str, Path]:
         """Shared body of `update_changed_<lang>` — runs one adapter.
 
         Discovers projects via the adapter, applies language-specific skip
@@ -215,28 +233,35 @@ class ScipCacheManager:
             else:
                 results = [self._generate_scip(adapter, p) for p in changed]
 
-            checksums = self._load_checksums()
-            for project, success in zip(changed, results, strict=True):
-                if success:
-                    checksums[project.name] = self._hash_project(
-                        project.name, adapter.name
-                    )
-            self._save_checksums(checksums)
+            with self._checksums_lock:
+                checksums = self._load_checksums()
+                for project, success in zip(changed, results, strict=True):
+                    if success:
+                        key = self._project_key(adapter.name, project.name)
+                        checksums[key] = self._hash_project(project.name, adapter.name)
+                self._save_checksums(checksums)
         else:
             logger.debug(f"SCIP: All {adapter.name} projects up-to-date")
 
-        return self._get_scip_paths(names)
+        return self._get_scip_paths(adapter.name, names)
 
-    def update_all(self, parallel: bool = False) -> Dict[str, Path]:
+    def update_all(self, parallel: bool = False) -> dict[str, Path]:
         """Update SCIP for every registered adapter concurrently.
 
         Each adapter's generation runs in its own worker since adapters use
-        independent tools with no shared resources.
+        independent tools with no shared resources. The result is keyed by
+        ``<adapter>:<project>``.
         """
-        results: Dict[str, Path] = {}
+        results: dict[str, Path] = {}
 
         if not ADAPTERS:
             return results
+
+        # Remove indexes that no registered adapter's name prefixes.
+        current = tuple(f"{name}--" for name in ADAPTERS)
+        for path in self.cache_dir.glob("*.scip"):
+            if not path.name.startswith(current):
+                path.unlink(missing_ok=True)
 
         with ThreadPoolExecutor(max_workers=max(1, len(ADAPTERS))) as executor:
             futures = {
@@ -250,7 +275,7 @@ class ScipCacheManager:
                 try:
                     lang_results = future.result()
                     results.update(lang_results)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — one adapter's failure must not abandon the other languages in the pool
                     logger.error(f"SCIP: {lang} generation failed: {e}")
 
         return results
@@ -258,8 +283,7 @@ class ScipCacheManager:
     def _adapter_config_for(self, adapter: LanguageAdapter) -> AdapterConfig:
         """Build an AdapterConfig for `adapter` from this manager's state.
 
-        For now only Rust has per-language state (`toolchain`, `extra_args`);
-        Java/Go adapters added later get their own state here.
+        Only Rust has per-language state (`toolchain`, `extra_args`).
         """
         if adapter.name == "rust":
             return AdapterConfig(
@@ -274,12 +298,12 @@ class ScipCacheManager:
         """Run one adapter's SCIP generation for one project.
 
         Shared across every registered adapter. Timing, first-run detection,
-        timeout resolution, safe_env() application, and post-hoc file rename
+        timeout resolution, extra env vars, and post-hoc file rename
         (for adapters whose indexer lacks an --output flag) all live here so
         each adapter only has to describe *what* to run via `build_command`.
         """
-        output_path = self.cache_dir / f"{project.name}.scip"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path = self._index_path(adapter.name, project.name)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         timeout_seconds = self._get_timeout()
         timeout_str = (
@@ -293,19 +317,49 @@ class ScipCacheManager:
         config = self._adapter_config_for(adapter)
         try:
             spec = adapter.build_command(project, output_path, config)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — boundary over third-party adapter code in the ADAPTERS registry
             logger.warning(
                 f"SCIP: {adapter.name} failed to build command for {project.name}: {e}"
             )
             return False
 
-        env = safe_env()
-        if spec.env_extras:
-            env = {**env, **spec.env_extras}
+        env = {**os.environ, **spec.env_extras}
 
+        # The indexer writes the output path, and in rename mode `index.scip`
+        # in its working directory. Either would be written through a link
+        # or FIFO there: one in the cache directory is removed, and the run
+        # stops on one in the project rather than delete it.
+        default_output = spec.cwd / "index.scip"
+        if _writes_through(output_path):
+            output_path.unlink()
+        if spec.output_mode == "rename" and _writes_through(default_output):
+            logger.warning(
+                f"SCIP: {default_output} is not a regular file; "
+                f"not running {adapter.name} for {project.name}"
+            )
+            return False
+
+        # Only a file the indexer writes during this run counts as its
+        # output, not an index that was already there.
+        output_before = self._file_signature(output_path)
+        default_before = self._file_signature(default_output)
+
+        if not spec.argv:
+            logger.warning(
+                f"SCIP: {adapter.name} built an empty command for {project.name}"
+            )
+            return False
+
+        # Where argv[0] is the indexer itself, run the probed binary: an
+        # indexer installed under another name (scip_dart for scip-dart)
+        # still runs. argv[0] is allowed to be a wrapper (`sh -c`), which
+        # this leaves alone.
+        argv0 = (
+            resolved_binary(adapter) if spec.argv[0] == adapter.binary else spec.argv[0]
+        )
         try:
             result = subprocess.run(
-                spec.argv,
+                [argv0, *spec.argv[1:]],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -313,6 +367,7 @@ class ScipCacheManager:
                 timeout=timeout_seconds,
                 cwd=str(spec.cwd),
                 env=env,
+                check=False,
             )
         except subprocess.TimeoutExpired:
             logger.warning(
@@ -322,7 +377,7 @@ class ScipCacheManager:
         except FileNotFoundError:
             logger.debug(f"SCIP: {adapter.binary} binary not on PATH")
             return False
-        except Exception as e:
+        except (OSError, ValueError) as e:
             logger.warning(
                 f"SCIP: Error generating {adapter.name} index for {project.name}: {e}"
             )
@@ -337,24 +392,27 @@ class ScipCacheManager:
         # errors but the index is still usable for the subset of files
         # that parsed cleanly. Treating partial output as failure
         # forfeits hundreds of thousands of resolvable references.
-        if spec.output_mode == "rename":
-            default_output = spec.cwd / "index.scip"
-            if (
-                default_output.exists()
-                and default_output.resolve() != output_path.resolve()
-            ):
-                try:
-                    default_output.replace(output_path)
-                except OSError as e:
-                    logger.warning(
-                        f"SCIP: Failed to move {default_output} to {output_path}: {e}"
-                    )
-                    return False
+        if (
+            spec.output_mode == "rename"
+            and self._file_signature(default_output) not in (None, default_before)
+            and default_output.resolve() != output_path.resolve()
+        ):
+            try:
+                # Unlike a rename, this also works across filesystems.
+                shutil.move(default_output, output_path)
+            except OSError as e:
+                logger.warning(
+                    f"SCIP: Failed to move {default_output} to {output_path}: {e}"
+                )
+                return False
 
-        if output_path.exists() and output_path.stat().st_size > 0:
+        if (
+            self._file_signature(output_path) not in (None, output_before)
+            and output_path.stat().st_size > 0
+        ):
             size_kb = output_path.stat().st_size / 1024
             if result.returncode == 0:
-                logger.info(f"SCIP: Generated {project.name}.scip ({size_kb:.1f} KB)")
+                logger.info(f"SCIP: Generated {output_path.name} ({size_kb:.1f} KB)")
             else:
                 logger.warning(
                     f"SCIP: {adapter.name} exited non-zero ({result.returncode}) "
@@ -458,7 +516,8 @@ class ScipCacheManager:
                 errors="replace",
                 timeout=600,  # 10 minute timeout for cache priming
                 cwd=str(self.project_root),
-                env={**safe_env(), "RUST_ANALYZER_THREADS": str(num_threads)},
+                env={**os.environ, "RUST_ANALYZER_THREADS": str(num_threads)},
+                check=False,
             )
             # analysis-stats returns non-zero for warnings (like cyclic deps)
             # but still warms the cache, so we consider it a success
@@ -475,34 +534,32 @@ class ScipCacheManager:
         except FileNotFoundError:
             logger.debug("SCIP: rust-analyzer not found for cache priming")
             return False
-        except Exception as e:
+        except (OSError, ValueError) as e:
             logger.debug(f"SCIP: Cache priming error: {e}")
             return False
 
     def _get_timeout(self) -> int | None:
         """Get SCIP-generation timeout in seconds.
 
-        Precedence: ``scip_timeout_minutes`` constructor arg > the
-        ``DESCRY_SCIP_TIMEOUT`` env var (minutes, or ``0``/``none``/
-        ``unlimited``) > default (no timeout).
+        Precedence: the ``DESCRY_SCIP_TIMEOUT`` env var (minutes, or
+        ``0``/``none``/``unlimited``) > ``scip_timeout_minutes`` constructor
+        arg (``0`` = unlimited) > no timeout.
         """
-        # Config value takes priority
-        if self._scip_timeout_minutes is not None:
-            if self._scip_timeout_minutes == 0:
-                return None  # 0 means unlimited
-            return self._scip_timeout_minutes * 60
-
-        # Then check environment variable
         env_timeout = os.environ.get("DESCRY_SCIP_TIMEOUT", "").lower()
-        if env_timeout in ("0", "none", "unlimited", ""):
+        if env_timeout in ("0", "none", "unlimited"):
             return None
-        try:
-            return int(env_timeout) * 60
-        except ValueError:
-            logger.warning(
-                f"DESCRY_SCIP_TIMEOUT={env_timeout!r} is not an integer; ignoring"
-            )
-            return None
+        if env_timeout:
+            try:
+                return int(env_timeout) * 60
+            except ValueError:
+                logger.warning(
+                    f"DESCRY_SCIP_TIMEOUT={env_timeout!r} is not an integer; ignoring"
+                )
+
+        # Anything but a number is ignored.
+        if isinstance(self._scip_timeout_minutes, (int, float)):
+            return self._scip_timeout_minutes * 60 or None
+        return None
 
     def _hash_project(self, project: str, project_type: str = "rust") -> str:
         """Hash project sources for change detection.
@@ -547,6 +604,8 @@ class ScipCacheManager:
         source_files.sort()
 
         for src_file in source_files:
+            if not src_file.is_file():
+                continue
             rel_parts = src_file.relative_to(pkg_path).parts
             skip = False
             for part in rel_parts[:-1]:
@@ -573,7 +632,7 @@ class ScipCacheManager:
         - Pinned rust toolchain and scip extra args (so cache invalidates when
           the user changes either)
         """
-        crate_path = self.project_root / crate
+        crate_path = rust_crate_dir(self.project_root, crate)
         hasher = hashlib.sha256()
 
         # Hash pinned toolchain + extra args (cache-key component).
@@ -582,19 +641,19 @@ class ScipCacheManager:
 
         # Hash Cargo.toml
         cargo_toml = crate_path / "Cargo.toml"
-        if cargo_toml.exists():
+        if cargo_toml.is_file():
             hasher.update(cargo_toml.read_bytes())
 
         # Hash workspace Cargo.lock (resolved dependency versions affect types).
         cargo_lock = self.project_root / "Cargo.lock"
-        if cargo_lock.exists():
+        if cargo_lock.is_file():
             hasher.update(cargo_lock.read_bytes())
 
         # Hash all .rs files (sorted for determinism)
         rs_files = sorted(crate_path.rglob("*.rs"))
         for rs_file in rs_files:
             # Skip target directory
-            if "target" in rs_file.parts:
+            if "target" in rs_file.parts or not rs_file.is_file():
                 continue
             try:
                 # Include relative path in hash so renames are detected
@@ -620,17 +679,17 @@ class ScipCacheManager:
         Returns:
             16-character hex hash string
         """
-        pkg_path = self.project_root / package
+        pkg_path = project_dir(self.project_root, package, "package.json")
         hasher = hashlib.sha256()
 
         # Hash package.json
         package_json = pkg_path / "package.json"
-        if package_json.exists():
+        if package_json.is_file():
             hasher.update(package_json.read_bytes())
 
         # Hash tsconfig.json if present
         tsconfig = pkg_path / "tsconfig.json"
-        if tsconfig.exists():
+        if tsconfig.is_file():
             hasher.update(tsconfig.read_bytes())
 
         # Hash all source files (sorted for determinism)
@@ -643,6 +702,8 @@ class ScipCacheManager:
         for src_file in source_files:
             # Skip node_modules and dist directories
             if "node_modules" in src_file.parts or "dist" in src_file.parts:
+                continue
+            if not src_file.is_file():
                 continue
             try:
                 # Include relative path in hash so renames are detected
@@ -693,7 +754,7 @@ class ScipCacheManager:
             "Pipfile.lock",
         ):
             marker = pkg_path / name
-            if marker.exists():
+            if marker.is_file():
                 hasher.update(f"{name}:".encode())
                 hasher.update(marker.read_bytes())
 
@@ -707,7 +768,7 @@ class ScipCacheManager:
                 if part.startswith(".") or part in self.excluded_dirs:
                     skip = True
                     break
-            if not skip:
+            if not skip and candidate_path.is_file():
                 py_files.append(candidate_path)
         py_files.sort()
         for py_file in py_files:
@@ -720,34 +781,57 @@ class ScipCacheManager:
 
         return hasher.hexdigest()[:16]
 
-    def _get_scip_paths(self, crates: List[str]) -> Dict[str, Path]:
+    def project_dirs(self, scip_paths: dict[str, Path]) -> dict[Path, str]:
+        """Map each Rust index of ``update_all()``'s result to its crate's
+        directory relative to the project root, which rust-analyzer's
+        document paths are relative to."""
+        dirs = {}
+        for key, scip_file in scip_paths.items():
+            adapter_name, _, crate = key.partition(":")
+            if adapter_name == "rust":
+                crate_path = rust_crate_dir(self.project_root, crate)
+                relative = crate_path.relative_to(self.project_root).as_posix()
+                dirs[scip_file] = "" if relative == "." else relative
+        return dirs
+
+    def _get_scip_paths(self, adapter_name: str, crates: list[str]) -> dict[str, Path]:
         """Get paths to existing SCIP files.
 
         Args:
+            adapter_name: Adapter the crates belong to
             crates: List of crate names
 
         Returns:
-            Dictionary mapping crate names to SCIP file paths (only existing files)
+            Dictionary mapping ``<adapter>:<crate>`` keys to SCIP file paths
+            (only existing files)
         """
         paths = {}
         for crate in crates:
-            scip_file = self.cache_dir / f"{crate}.scip"
+            scip_file = self._index_path(adapter_name, crate)
             if scip_file.exists():
-                paths[crate] = scip_file
+                paths[self._project_key(adapter_name, crate)] = scip_file
         return paths
 
-    def _load_checksums(self) -> Dict[str, str]:
+    def _load_checksums(self) -> dict[str, str]:
         """Load cached checksums from disk."""
-        if self.checksums_file.exists():
+        if self.checksums_file.is_file():
             try:
                 with open(self.checksums_file, encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
             except (json.JSONDecodeError, OSError):
                 return {}
+            if isinstance(data, dict):
+                return data
         return {}
 
-    def _save_checksums(self, checksums: Dict[str, str]):
-        """Save checksums to disk."""
+    def _save_checksums(self, checksums: dict[str, str]):
+        """Save checksums to disk atomically (tmp then rename)."""
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.checksums_file, "w", encoding="utf-8") as f:
-            json.dump(checksums, f, indent=2)
+        fd, tmp = tempfile.mkstemp(dir=self.cache_dir, prefix=".checksums.")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(checksums, f, indent=2)
+            os.replace(tmp, self.checksums_file)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)

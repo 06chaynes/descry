@@ -15,14 +15,12 @@ supports:
 - Make:  ``bear -- make``
 
 The adapter looks for the compdb at (in order):
-1. ``config.options["compdb_path"]`` (user override).
-2. ``{project.root}/compile_commands.json`` (in-place).
-3. ``{project.root}/build/compile_commands.json`` (conventional
+1. ``{project.root}/compile_commands.json`` (in-place).
+2. ``{project.root}/build/compile_commands.json`` (conventional
    out-of-tree build dir).
 
-If none is found the adapter still returns a CommandSpec but logs a
-warning; scip-clang will fail with a clear message pointing at the
-missing compdb.
+A project with neither is not indexed: the adapter raises, and the
+runner logs why.
 """
 
 from __future__ import annotations
@@ -52,16 +50,12 @@ def _has_c_sources(pkg_dir: Path) -> bool:
     return False
 
 
-def _find_compdb(project_root: Path, config: AdapterConfig) -> Path | None:
+# A build file that makes a directory a project
+_MARKERS = ("CMakeLists.txt", "Makefile", "meson.build", "compile_commands.json")
+
+
+def _find_compdb(project_root: Path) -> Path | None:
     """Locate compile_commands.json with precedence rules from the adapter docstring."""
-    override = config.options.get("compdb_path") if config.options else None
-    if override:
-        candidate = Path(override)
-        if not candidate.is_absolute():
-            candidate = project_root / candidate
-        if candidate.exists():
-            return candidate
-        logger.warning(f"scip-clang: configured compdb_path {override!r} not found")
     for rel in ("compile_commands.json", "build/compile_commands.json"):
         candidate = project_root / rel
         if candidate.exists():
@@ -87,37 +81,30 @@ class ClangAdapter:
     def discover(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
         """Return one DiscoveredProject per top-level C/C++ project.
 
-        Discovery precedence:
-        1. **Root compile_commands.json takes priority.** If the
-           workspace has a ``compile_commands.json`` at the root, treat
-           the whole repo as a single project — this is how Bear-backed
-           Makefile builds and top-level CMake builds emit their compdb,
-           and running scip-clang from subdirs would miss the entries.
-        2. Per-subdir projects (each with its own
-           CMakeLists.txt/Makefile/meson.build/compile_commands.json).
-        3. Root as single project if root has a build marker.
+        A root with a compile database of its own, there or in ``build/``,
+        where a CMake build writes it, is one project: its subdirectories'
+        build files are parts of it, as `add_subdirectory` and recursive
+        make make them, and scip-clang run from one would miss the root's
+        entries. Else the subdirectories with a build file and a compile
+        database of their own are the projects; where none has one, a root
+        with a build file (CMakeLists.txt, Makefile, meson.build) is the
+        project, else each subdirectory with one is.
         """
-        markers = (
-            "CMakeLists.txt",
-            "Makefile",
-            "meson.build",
-            "compile_commands.json",
-        )
+        if _find_compdb(root) is None:
+            parts = self._parts(root, excluded_dirs)
+            compiled = [p for p in parts if _find_compdb(p.root)]
+            if compiled or not any((root / m).exists() for m in _MARKERS):
+                return compiled or parts
+        if not _has_c_sources(root):
+            return []
+        return [DiscoveredProject(name=root.name, root=root, language=self.name)]
 
-        # Priority 1: root-level compile_commands.json → single project.
-        if (root / "compile_commands.json").exists() and _has_c_sources(root):
-            return [
-                DiscoveredProject(
-                    name=root.name,
-                    root=root,
-                    language=self.name,
-                )
-            ]
-
+    def _parts(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
+        """The subdirectories of ``root`` with a build file and C/C++
+        sources of their own."""
         seen: set[str] = set()
         projects: list[DiscoveredProject] = []
-
-        for marker_name in markers:
+        for marker_name in _MARKERS:
             for marker in root.glob(f"*/{marker_name}"):
                 pkg_dir = marker.parent
                 if pkg_dir.name.startswith("."):
@@ -136,18 +123,6 @@ class ClangAdapter:
                         language=self.name,
                     )
                 )
-
-        if not projects:
-            root_has_marker = any((root / m).exists() for m in markers)
-            if root_has_marker and _has_c_sources(root):
-                projects.append(
-                    DiscoveredProject(
-                        name=root.name,
-                        root=root,
-                        language=self.name,
-                    )
-                )
-
         projects.sort(key=lambda p: p.name)
         return projects
 
@@ -158,24 +133,19 @@ class ClangAdapter:
         config: AdapterConfig,
     ) -> CommandSpec:
         """Build the scip-clang command with --compdb-path and
-        --index-output-path.
-
-        If no compile_commands.json is present, the adapter still
-        returns a command pointing at the default path so scip-clang
-        can surface its own "missing compdb" error; the shared runner
-        reports the exit code and moves on.
+        --index-output-path. A project without a compile database is not
+        indexed: this raises, and the shared runner logs why.
         """
-        compdb = _find_compdb(project.root, config)
-        compdb_arg = (
-            str(compdb) if compdb else str(project.root / "compile_commands.json")
-        )
-
+        compdb = _find_compdb(project.root)
+        if compdb is None:
+            raise FileNotFoundError(
+                f"no compile_commands.json in {project.root} or its build/"
+            )
         argv: list[str] = [
             self.binary,
-            f"--compdb-path={compdb_arg}",
+            f"--compdb-path={compdb}",
             f"--index-output-path={out_path}",
         ]
-        argv.extend(config.extra_args)
 
         return CommandSpec(argv=argv, cwd=project.root, output_mode="direct")
 

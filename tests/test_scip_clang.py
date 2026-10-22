@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from descry.scip.adapter import AdapterConfig, DiscoveredProject
 from descry.scip.adapters.clang import ClangAdapter
 from descry.scip.parser import ScipIndex
@@ -34,6 +36,33 @@ class TestClangAdapterDiscovery:
         projects = ClangAdapter().discover(tmp_path, set())
         assert sorted(p.name for p in projects) == ["alpha", "beta"]
 
+    def test_root_build_holds_its_subdirectories(self, tmp_path):
+        """A CMake root with a subdirectory of its own CMakeLists.txt, its
+        compile_commands.json in build/, is one project."""
+        (tmp_path / "CMakeLists.txt").write_text("project(top)\nadd_subdirectory(test)")
+        (tmp_path / "build").mkdir()
+        (tmp_path / "build" / "compile_commands.json").write_text("[]")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "lib.cc").write_text("int f(){return 0;}")
+        (tmp_path / "test").mkdir()
+        (tmp_path / "test" / "CMakeLists.txt").write_text("add_executable(t t.cc)")
+        (tmp_path / "test" / "t.cc").write_text("int main(){return 0;}")
+
+        projects = ClangAdapter().discover(tmp_path, set())
+        assert [p.root for p in projects] == [tmp_path]
+
+    def test_subdirectories_compile_databases_over_a_root_without_one(self, tmp_path):
+        """A root Makefile without a compile database leaves the projects to
+        the subdirectories that have one."""
+        (tmp_path / "Makefile").write_text("all:")
+        for name in ("x", "y"):
+            (tmp_path / name).mkdir()
+            (tmp_path / name / "compile_commands.json").write_text("[]")
+            (tmp_path / name / "m.cpp").write_text("int main(){return 0;}")
+
+        projects = ClangAdapter().discover(tmp_path, set())
+        assert [p.root for p in projects] == [tmp_path / "x", tmp_path / "y"]
+
 
 class TestClangAdapterBuildCommand:
     def test_compdb_auto_detected_at_root(self, tmp_path):
@@ -58,21 +87,20 @@ class TestClangAdapterBuildCommand:
         compdb_arg = next(a for a in spec.argv if a.startswith("--compdb-path="))
         assert "build/compile_commands.json" in compdb_arg
 
-    def test_compdb_override(self, tmp_path):
-        (tmp_path / "custom").mkdir()
-        (tmp_path / "custom" / "cc.json").write_text("[]")
-        project = DiscoveredProject(name="app", root=tmp_path, language="clang")
-        config = AdapterConfig(options={"compdb_path": "custom/cc.json"})
-        spec = ClangAdapter().build_command(project, tmp_path / "app.scip", config)
-        compdb_arg = next(a for a in spec.argv if a.startswith("--compdb-path="))
-        assert "custom/cc.json" in compdb_arg
-
     def test_index_output_path_flag(self, tmp_path):
+        (tmp_path / "compile_commands.json").write_text("[]")
         project = DiscoveredProject(name="app", root=tmp_path, language="clang")
         spec = ClangAdapter().build_command(
             project, tmp_path / "app.scip", AdapterConfig()
         )
         assert any(arg.startswith("--index-output-path=") for arg in spec.argv)
+
+    def test_no_command_without_a_compile_database(self, tmp_path):
+        project = DiscoveredProject(name="app", root=tmp_path, language="clang")
+        with pytest.raises(FileNotFoundError):
+            ClangAdapter().build_command(
+                project, tmp_path / "app.scip", AdapterConfig()
+            )
 
 
 class TestScipClangHealthStatus:

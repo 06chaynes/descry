@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from descry.scip.adapter import AdapterConfig, DiscoveredProject
 from descry.scip.adapters.dart import DartAdapter
 from descry.scip.parser import ScipIndex
@@ -30,6 +32,68 @@ class TestDartAdapterDiscovery:
         projects = DartAdapter().discover(tmp_path, set())
         assert sorted(p.name for p in projects) == ["alpha", "beta"]
 
+    def test_pkgs_workspace(self, tmp_path):
+        """shelf's layout keeps packages under `pkgs/` — a collection
+        directory of any name, one level above each package."""
+        for name in ("shelf", "shelf_web_socket"):
+            pkg = tmp_path / "pkgs" / name
+            pkg.mkdir(parents=True)
+            (pkg / "pubspec.yaml").write_text(f"name: {name}\n")
+            (pkg / "lib").mkdir()
+            (pkg / "lib" / "main.dart").write_text("void main() {}\n")
+
+        projects = DartAdapter().discover(tmp_path, set())
+        assert sorted(p.name for p in projects) == ["shelf", "shelf_web_socket"]
+
+    def test_binary_alternative_probes_scip_dart(self, tmp_path, monkeypatch):
+        """`dart pub global activate scip_dart` installs `scip_dart`;
+        the adapter probes both spellings."""
+        import shutil
+
+        fake = tmp_path / "scip_dart"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+        monkeypatch.setattr(
+            shutil, "which", lambda name: str(fake) if name == "scip_dart" else None
+        )
+        from descry.scip import adapter as adapter_mod
+
+        monkeypatch.setattr(adapter_mod, "_binary_cache", {})
+        assert adapter_mod.resolved_binary(DartAdapter()) == str(fake)
+
+    def test_collection_directory_is_excluded(self, tmp_path):
+        """The exclusion applies to the collection too: `build/` can hold a
+        stale copy of a package."""
+        pkg = tmp_path / "build" / "pkg"
+        pkg.mkdir(parents=True)
+        (pkg / "pubspec.yaml").write_text("name: pkg\n")
+        (pkg / "main.dart").write_text("void main() {}\n")
+
+        assert DartAdapter().discover(tmp_path, {"build"}) == []
+
+    def test_dot_collection_is_skipped(self, tmp_path):
+        pkg = tmp_path / ".hidden" / "pkg"
+        pkg.mkdir(parents=True)
+        (pkg / "pubspec.yaml").write_text("name: pkg\n")
+        (pkg / "main.dart").write_text("void main() {}\n")
+
+        assert DartAdapter().discover(tmp_path, set()) == []
+
+    def test_pub_cache_is_honoured(self, tmp_path, monkeypatch):
+        """`dart pub global` installs into `$PUB_CACHE/bin` when that
+        variable is set, and the adapter probes it there."""
+        monkeypatch.setenv("PUB_CACHE", str(tmp_path))
+
+        assert str(tmp_path / "bin" / "scip_dart") in DartAdapter().binary_alternatives
+
+    def test_pub_cache_default_is_the_home_directory(self, monkeypatch):
+        monkeypatch.delenv("PUB_CACHE", raising=False)
+
+        assert (
+            str(Path.home() / ".pub-cache" / "bin" / "scip_dart")
+            in DartAdapter().binary_alternatives
+        )
+
     def test_subdir_packages(self, tmp_path):
         for name in ("alpha", "beta"):
             pkg = tmp_path / name
@@ -57,7 +121,7 @@ class TestDartAdapterBuildCommand:
             project, tmp_path / "app.scip", AdapterConfig()
         )
         assert spec.argv[0] == "scip-dart"
-        assert "./" in spec.argv
+        assert spec.argv[1:] == ["."]
         assert spec.cwd == tmp_path
 
     def test_output_mode_rename(self, tmp_path):
@@ -66,12 +130,6 @@ class TestDartAdapterBuildCommand:
             project, tmp_path / "app.scip", AdapterConfig()
         )
         assert spec.output_mode == "rename"
-
-    def test_extra_args_appended(self, tmp_path):
-        project = DiscoveredProject(name="app", root=tmp_path, language="dart")
-        config = AdapterConfig(extra_args=("--foo", "bar"))
-        spec = DartAdapter().build_command(project, tmp_path / "app.scip", config)
-        assert "--foo" in spec.argv and "bar" in spec.argv
 
 
 class TestScipDartHealthStatus:

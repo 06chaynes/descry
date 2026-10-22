@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Git History Analysis Module
 
@@ -13,13 +12,14 @@ Usage:
 """
 
 import logging
+import os
 import re
 import subprocess
+import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
 
-from descry._env import safe_env
+from descry.handlers import _DEFAULT_CODE_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -28,20 +28,26 @@ class GitError(Exception):
     """Raised for git-specific errors (not installed, not a repo, etc.)."""
 
 
-# --- Git argument validators (A.1) ---
+class PartialCloneError(GitError):
+    """Raised when git needs objects a partial clone has not downloaded."""
+
+
+# --- Git argument validators ---
 # Accepts: HEAD, HEAD^, HEAD^^, HEAD~N, HEAD^{tree}, @, @{-1},
-#          branch@{upstream}, master@{yesterday}, branch names, sha prefixes.
+#          branch@{upstream}, master@{yesterday}, branch names, sha prefixes,
+#          and the ~N / ^ / ^{type} suffixes on any of those names.
 # Rejects: leading '-', '--' anywhere, empty peel, shell metacharacters.
 _REF_REGEX = re.compile(
-    r"^(?:HEAD|@)(?:[~^]\d*)*(?:\^\{[a-z]+\})?(?:@\{(?:-\d+|[^}\-]+)\})?$"
-    r"|^[A-Za-z0-9][A-Za-z0-9._\-/]*(?:@\{(?:-\d+|[^}\-]+)\})?$"
+    r"(?:HEAD|@|[A-Za-z0-9][A-Za-z0-9._\-/]*)"
+    r"(?:[~^]\d*)*(?:\^\{[a-z]+\})?(?:@\{(?:-\d+|[^}\-]+)\})?"
+    r"|@\{-\d+\}"
 )
 _SYMBOL_REGEX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _validate_git_ref(ref: str) -> str:
     """Validate a single git ref. Raises GitError on invalid input."""
-    if not ref or "--" in ref or not _REF_REGEX.match(ref):
+    if not ref or "--" in ref or not _REF_REGEX.fullmatch(ref):
         raise GitError(f"Invalid git ref: {ref!r}")
     return ref
 
@@ -68,7 +74,7 @@ def _validate_git_range(range_str: str) -> str:
 
 def _validate_git_symbol(name: str) -> str:
     """Validate a symbol name for `git log -L:<symbol>:<file>`."""
-    if not name or not _SYMBOL_REGEX.match(name):
+    if not name or not _SYMBOL_REGEX.fullmatch(name):
         raise GitError(f"Invalid git symbol: {name!r}")
     return name
 
@@ -98,6 +104,8 @@ def _validate_pathspec(spec: str) -> str:
         raise GitError(f"Invalid pathspec (magic prefix): {spec!r}")
     if ".." in spec.split("/"):
         raise GitError(f"Invalid pathspec: {spec!r}")
+    if any(c in spec for c in "\x00\n\r"):
+        raise GitError(f"Invalid pathspec: {spec!r}")
     return spec
 
 
@@ -110,20 +118,128 @@ DEFAULT_CHURN_EXCLUSIONS = [
     "pnpm-lock.yaml",
 ]
 
-CODE_EXTENSIONS = {
-    ".rs",
-    ".py",
-    ".ts",
-    ".tsx",
-    ".js",
-    ".jsx",
-    ".svelte",
-    ".go",
-    ".java",
-    ".css",
-    ".scss",
-    ".html",
-}
+# Placed before the subcommand on every invocation. All but the last stop
+# the analysed repository's own config and hooks from making git run a
+# command; `-c` overrides the repository's config, including files it
+# includes.
+_GIT_CONFIG_PINS = (
+    "-c",
+    f"core.hooksPath={os.devnull}",
+    "-c",
+    "core.fsmonitor=",
+    # Would run gpg.program for every signed commit a log walks.
+    "-c",
+    "log.showSignature=false",
+    # Print non-ASCII paths as they are instead of as quoted octal escapes.
+    "-c",
+    "core.quotePath=false",
+    # Keep blank context lines as " " so hunk line counts stay exact.
+    "-c",
+    "diff.suppressBlankEmpty=false",
+)
+# Ignore diff.external and the diff drivers and textconv filters that
+# attributes select, and print the plain a/ b/ uncoloured form the diff
+# parser reads whatever the repository's config asks for.
+_GIT_DIFF_OPTS = (
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-color",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+)
+# Merged over the environment. A partial clone would otherwise fetch missing
+# objects on demand through whatever transport command its remote config
+# names. The C locale keeps the resulting error text matchable.
+_GIT_ENV = {"GIT_NO_LAZY_FETCH": "1", "LC_ALL": "C"}
+
+# A commit header line starts with a NUL and separates its fields with NULs.
+# No path, subject, author name or diffed line can start with one, and no
+# length is assumed for the commit id.
+_NAME_ONLY_FORMAT = "--format=%x00%H%x00%P"
+_HEADER_FORMAT = "--format=%x00%H%x00%ad%x00%an%x00%s"
+
+# Symbol-mode churn runs one `git diff` per commit per file. Only this many
+# of a file's most recent commits are diffed, and no further diff is started
+# once the pass has run for this many seconds.
+CHURN_MAX_COMMITS_PER_FILE = 100
+CHURN_DIFF_BUDGET_SECONDS = 30
+_UNKNOWN_CHURN_MODE = "Unknown mode '{}'. Use 'symbols', 'files', or 'co-change'."
+
+
+def _parse_name_only_log(output: str) -> tuple[dict[str, list[str]], set[str]]:
+    """Parse `git log --name-only` output written with _NAME_ONLY_FORMAT.
+
+    Returns each file's commits, newest first, and the commits that have no
+    parent.
+    """
+    file_commits: dict[str, list[str]] = defaultdict(list)
+    root_commits = set()
+    current_commit = None
+    for line in output.split("\n"):
+        if line.startswith("\x00"):
+            current_commit, _, parents = line[1:].strip().partition("\x00")
+            if not parents:
+                root_commits.add(current_commit)
+        elif line.strip() and current_commit:
+            file_commits[line.strip()].append(current_commit)
+    return file_commits, root_commits
+
+
+def _parse_log_header(line: str) -> dict | None:
+    """Parse a commit header line written with _HEADER_FORMAT, else None."""
+    if not line.startswith("\x00"):
+        return None
+    commit_hash, date, author, subject = line[1:].split("\x00", 3)
+    return {
+        "hash": commit_hash[:8],
+        "date": date,
+        "author": author.strip(),
+        "subject": subject.strip(),
+    }
+
+
+def _diffable_commits(commits: list[str], deadline: float, skipped: dict[str, int]):
+    """Yield the commits of one file that the churn limits allow diffing.
+
+    `commits` is newest first; `deadline` is a time.monotonic() value.
+    What the limits leave out is counted in `skipped`.
+    """
+    recent = commits[:CHURN_MAX_COMMITS_PER_FILE]
+    if len(recent) < len(commits):
+        skipped["capped_files"] += 1
+    for done, commit_hash in enumerate(recent):
+        if time.monotonic() >= deadline:
+            skipped["unread_files"] += 1
+            skipped["unread_commits"] += len(recent) - done
+            return
+        yield commit_hash
+
+
+def _churn_partial_note(skipped: dict[str, int]) -> str:
+    """Describe what the churn limits left undiffed, or "" if nothing."""
+    parts = []
+    if skipped["capped_files"]:
+        parts.append(
+            f"only the {CHURN_MAX_COMMITS_PER_FILE} most recent commits were "
+            f"read for {skipped['capped_files']} file(s) with a longer history"
+        )
+    if skipped["unread_files"]:
+        parts.append(
+            f"the {CHURN_DIFF_BUDGET_SECONDS}s time budget ran out with "
+            f"{skipped['unread_commits']} commit(s) across "
+            f"{skipped['unread_files']} file(s) unread"
+        )
+    if not parts:
+        return ""
+    return (
+        "Partial results: "
+        + "; ".join(parts)
+        + ". Symbol commit and line counts are lower bounds - narrow the "
+        "time range or path filter for complete numbers."
+    )
+
+
+CODE_EXTENSIONS = _DEFAULT_CODE_EXTENSIONS
 
 
 class GitHistoryAnalyzer:
@@ -161,12 +277,18 @@ class GitHistoryAnalyzer:
         )
         self.default_timeout = git_timeout
 
-    def _run_git(self, args: list[str], timeout: int | None = None) -> str:
+    def _run_git(
+        self,
+        args: list[str],
+        timeout: int | None = None,
+        config: tuple[str, ...] = (),
+    ) -> str:
         """Run a git command and return stdout.
 
         Args:
             args: Git command arguments (without 'git' prefix).
             timeout: Timeout in seconds. Defaults to self.default_timeout.
+            config: Extra `-c key=value` options for this call.
 
         Returns:
             Command stdout as string.
@@ -176,22 +298,34 @@ class GitHistoryAnalyzer:
         """
         if timeout is None:
             timeout = self.default_timeout
-        cmd = ["git"] + args
+        cmd = ["git", *_GIT_CONFIG_PINS, *config, args[0]]
+        if args[0] in ("diff", "log"):
+            cmd.extend(_GIT_DIFF_OPTS)
+        cmd.extend(args[1:])
         try:
+            # Captured as bytes: text mode would translate a bare CR inside
+            # a diffed line into a line break of its own.
             result = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 cwd=str(self.project_root),
                 timeout=timeout,
-                env=safe_env(),
+                env={**os.environ, **_GIT_ENV},
+                check=False,
             )
             if result.returncode != 0:
-                stderr = result.stderr.strip()
+                stderr = result.stderr.decode("utf-8", errors="replace").strip()
+                if "lazy fetching disabled" in stderr or (
+                    "unable to read" in stderr and self._is_partial_clone()
+                ):
+                    raise PartialCloneError(
+                        "This repository is a partial clone and git objects this "
+                        "analysis needs have not been downloaded. Descry does not "
+                        "fetch them on demand: fetch the missing objects with git, "
+                        "then retry."
+                    )
                 raise GitError(f"git {' '.join(args[:3])}... failed: {stderr}")
-            return result.stdout
+            return result.stdout.decode("utf-8", errors="replace")
         except FileNotFoundError:
             raise GitError("git not found. Install git to use history tools.") from None
         except subprocess.TimeoutExpired:
@@ -213,9 +347,74 @@ class GitHistoryAnalyzer:
 
     def _is_shallow(self) -> bool:
         """Check if the repo is a shallow clone."""
-        return (self.project_root / ".git" / "shallow").exists()
+        output = self._run_git(["rev-parse", "--is-shallow-repository"])
+        return output.strip() == "true"
 
-    def _parse_time_range(self, time_range: Optional[str]) -> list[str]:
+    def _is_partial_clone(self) -> bool:
+        """Check if the repo has a promisor remote (was cloned with a filter)."""
+        pattern = r"^(extensions\.partialclone|remote\..*\.promisor)$"
+        try:
+            self._run_git(["config", "--get-regexp", pattern])
+        except GitError:
+            return False
+        return True
+
+    def _worktree_filter_overrides(self, commit_range: str) -> tuple[str, ...]:
+        """Return `-c` options that blank every configured filter driver.
+
+        Only a single-ref range needs them: git diffs it against the working
+        tree, running each modified file through its clean/process filter.
+        """
+        if ".." in commit_range:
+            return ()
+        keys = self._run_git(["config", "-z", "--name-only", "--list"]).split("\x00")
+        names = {
+            k.removeprefix("filter.").rpartition(".")[0]
+            for k in keys
+            if k.startswith("filter.")
+        }
+        overrides: list[str] = []
+        for name in sorted(names - {""}):
+            # `-c` splits key from value at the first '='.
+            if "=" in name:
+                raise GitError(
+                    f"Refusing to diff the working tree: filter driver {name!r} "
+                    "cannot be disabled. Use an explicit commit range (a..b)."
+                )
+            for setting in ("clean=", "process=", "required=false"):
+                overrides += ["-c", f"filter.{name}.{setting}"]
+        return tuple(overrides)
+
+    def _empty_tree(self) -> str:
+        """Return the id of the empty tree, the diff base of a root commit."""
+        return self._run_git(["hash-object", "-t", "tree", os.devnull]).strip()
+
+    def _commit_file_diff(
+        self, commit_hash: str, file_path: str, root_commits: set[str]
+    ) -> str:
+        """Return the diff one commit made to one file."""
+        if commit_hash in root_commits:
+            parent = self._empty_tree()
+        else:
+            parent = f"{commit_hash}~1"
+        return self._run_git(
+            ["diff", f"{parent}..{commit_hash}", "--", file_path], timeout=10
+        )
+
+    def _ranges_covering(self, commit_hashes: list[str]) -> tuple[str, str]:
+        """Return the diff range and rev-list range spanning `commit_hashes`.
+
+        `commit_hashes` is newest first. A root commit has no parent to start
+        from, so its diff starts at the empty tree.
+        """
+        oldest, newest = commit_hashes[-1], commit_hashes[0]
+        try:
+            self._run_git(["rev-parse", "--verify", "--quiet", f"{oldest}~1"])
+        except GitError:
+            return f"{self._empty_tree()}..{newest}", newest
+        return f"{oldest}~1..{newest}", f"{oldest}~1..{newest}"
+
+    def _parse_time_range(self, time_range: str | None) -> list[str]:
         """Convert human-readable time range to git flags.
 
         Supported formats:
@@ -278,13 +477,16 @@ class GitHistoryAnalyzer:
         # Collect function/method spans in this file
         spans = []
         for node in nodes:
-            if node["id"].startswith(file_id + "::"):
-                if node["type"] in ("Function", "Method", "Class"):
-                    start = node["metadata"].get("lineno", 0)
-                    end = node["metadata"].get("end_lineno", start)
-                    if start > 0:
-                        span_size = end - start
-                        spans.append((span_size, start, end, node["id"]))
+            if node["id"].startswith(file_id + "::") and node["type"] in (
+                "Function",
+                "Method",
+                "Class",
+            ):
+                start = node["metadata"].get("lineno", 0)
+                end = node["metadata"].get("end_lineno", start)
+                if start > 0:
+                    span_size = end - start
+                    spans.append((span_size, start, end, node["id"]))
 
         # Sort by span size descending so outer spans are written first and inner spans overwrite them
         spans.sort(key=lambda x: -x[0])
@@ -309,12 +511,22 @@ class GitHistoryAnalyzer:
         hunks = []
         current_file = None
         current_hunk = None
+        # Lines the current hunk's header says its body still holds. Inside
+        # a body every line is content, even one that reads like a header.
+        old_left = new_left = 0
 
         for line in diff_output.split("\n"):
+            if (old_left > 0 or new_left > 0) and line.startswith(("+", "-", " ")):
+                current_hunk["lines"].append(line)
+                old_left -= not line.startswith("+")
+                new_left -= not line.startswith("-")
             # Track file changes
-            if line.startswith("diff --git"):
+            elif line.startswith("diff --git"):
                 current_file = None
                 current_hunk = None
+                # A body falls short of its header's counts when git writes
+                # empty context lines as empty lines (diff.suppressBlankEmpty).
+                old_left = new_left = 0
             elif line.startswith("+++ b/"):
                 current_file = line[6:]
             elif line.startswith("--- /dev/null"):
@@ -336,6 +548,8 @@ class GitHistoryAnalyzer:
                         "lines": [],
                     }
                     hunks.append(current_hunk)
+                    old_left = current_hunk["old_count"]
+                    new_left = current_hunk["new_count"]
             elif current_hunk is not None:
                 if line.startswith(("+", "-", " ")):
                     current_hunk["lines"].append(line)
@@ -381,8 +595,8 @@ class GitHistoryAnalyzer:
 
     def get_churn(
         self,
-        time_range: Optional[str] = None,
-        path_filter: Optional[str] = None,
+        time_range: str | None = None,
+        path_filter: str | None = None,
         limit: int = 20,
         mode: str = "symbols",
         exclude_generated: bool = True,
@@ -406,7 +620,7 @@ class GitHistoryAnalyzer:
         # Build git log command for file-level commit counts
         git_args = [
             "log",
-            "--format=%H",
+            _NAME_ONLY_FORMAT,
             "--name-only",
             "--no-merges",
         ]
@@ -427,16 +641,7 @@ class GitHistoryAnalyzer:
             return "No commits found for the given time range."
 
         # Parse file-level commit counts
-        file_commits: dict[str, set[str]] = defaultdict(set)
-        current_commit = None
-        for line in output.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            if len(line) == 40 and all(c in "0123456789abcdef" for c in line):
-                current_commit = line
-            elif current_commit:
-                file_commits[line].add(current_commit)
+        file_commits, root_commits = _parse_name_only_log(output)
 
         if not file_commits:
             return "No file changes found for the given time range."
@@ -467,6 +672,8 @@ class GitHistoryAnalyzer:
 
             symbol_commits: dict[str, set[str]] = defaultdict(set)
             symbol_lines: dict[str, tuple[int, int]] = {}  # node_id -> (added, removed)
+            skipped: dict[str, int] = defaultdict(int)
+            deadline = time.monotonic() + CHURN_DIFF_BUDGET_SECONDS
 
             for file_path, commits in sorted_files:
                 # Skip commits touching too many files (bulk refactors)
@@ -477,19 +684,15 @@ class GitHistoryAnalyzer:
                     continue
 
                 # Get per-commit diffs for this file
-                for commit_hash in commits:
+                for commit_hash in _diffable_commits(commits, deadline, skipped):
                     try:
-                        diff_output = self._run_git(
-                            [
-                                "diff",
-                                f"{commit_hash}~1..{commit_hash}",
-                                "--",
-                                file_path,
-                            ],
-                            timeout=10,
+                        diff_output = self._commit_file_diff(
+                            commit_hash, file_path, root_commits
                         )
+                    except PartialCloneError:
+                        raise
                     except GitError:
-                        # First commit or other issue - skip
+                        # Timed out or unreadable - skip this commit
                         continue
 
                     hunks = self._parse_diff_hunks(diff_output)
@@ -522,9 +725,13 @@ class GitHistoryAnalyzer:
                     for sym in touched_symbols:
                         symbol_commits[sym].add(commit_hash)
 
+            partial_note = _churn_partial_note(skipped)
+            partial_suffix = f"\n\n*{partial_note}*" if partial_note else ""
+
             if not symbol_commits:
                 return (
                     "No symbol-level changes detected. Graph may not cover these files."
+                    + partial_suffix
                 )
 
             # Separate graph-resolved symbols (FILE:path::Symbol) from
@@ -544,7 +751,10 @@ class GitHistoryAnalyzer:
             symbol_commits = graph_resolved if graph_resolved else file_fallbacks
 
             if mode == "co-change":
-                return self._format_co_change(symbol_commits, limit, file_commits)
+                return (
+                    self._format_co_change(symbol_commits, limit, file_commits)
+                    + partial_suffix
+                )
 
             # Sort by commit count
             sorted_symbols = sorted(
@@ -567,14 +777,14 @@ class GitHistoryAnalyzer:
                     f"({len(commits)} commits{line_stats})"
                 )
 
-            return "\n".join(lines)
+            return "\n".join(lines) + partial_suffix
 
-        return f"Unknown mode '{mode}'. Use 'symbols', 'files', or 'co-change'."
+        return _UNKNOWN_CHURN_MODE.format(mode)
 
     def get_churn_structured(
         self,
-        time_range: Optional[str] = None,
-        path_filter: Optional[str] = None,
+        time_range: str | None = None,
+        path_filter: str | None = None,
         limit: int = 20,
         mode: str = "symbols",
         exclude_generated: bool = True,
@@ -585,13 +795,17 @@ class GitHistoryAnalyzer:
         - symbols: list of {id, type, name, file, line, commits, added, removed}
         - files: list of {file, commits}
         - pairs: list of {a_id, a_name, a_file, b_id, b_name, b_file, shared_commits}
+        Symbol and co-change results carry truncation_note when the churn
+        limits left commits undiffed.
         """
+        if mode not in ("symbols", "files", "co-change"):
+            return {"error": _UNKNOWN_CHURN_MODE.format(mode)}
         self._verify_git()
 
         if path_filter:
             _validate_pathspec(path_filter)
 
-        git_args = ["log", "--format=%H", "--name-only", "--no-merges"]
+        git_args = ["log", _NAME_ONLY_FORMAT, "--name-only", "--no-merges"]
         git_args.extend(self._parse_time_range(time_range))
         if path_filter:
             git_args.extend(["--", path_filter])
@@ -607,16 +821,7 @@ class GitHistoryAnalyzer:
         if not output.strip():
             return {"error": "No commits found for the given time range."}
 
-        file_commits: dict[str, set[str]] = defaultdict(set)
-        current_commit = None
-        for line in output.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            if len(line) == 40 and all(c in "0123456789abcdef" for c in line):
-                current_commit = line
-            elif current_commit:
-                file_commits[line].add(current_commit)
+        file_commits, root_commits = _parse_name_only_log(output)
 
         if not file_commits:
             return {"error": "No file changes found for the given time range."}
@@ -644,6 +849,8 @@ class GitHistoryAnalyzer:
 
         symbol_commits: dict[str, set[str]] = defaultdict(set)
         symbol_lines: dict[str, tuple[int, int]] = {}
+        skipped: dict[str, int] = defaultdict(int)
+        deadline = time.monotonic() + CHURN_DIFF_BUDGET_SECONDS
 
         for file_path, commits in sorted_files:
             file_line_map = self._build_file_line_map(file_path)
@@ -651,12 +858,13 @@ class GitHistoryAnalyzer:
                 symbol_commits[f"FILE:{file_path}"].update(commits)
                 continue
 
-            for commit_hash in commits:
+            for commit_hash in _diffable_commits(commits, deadline, skipped):
                 try:
-                    diff_output = self._run_git(
-                        ["diff", f"{commit_hash}~1..{commit_hash}", "--", file_path],
-                        timeout=10,
+                    diff_output = self._commit_file_diff(
+                        commit_hash, file_path, root_commits
                     )
+                except PartialCloneError:
+                    raise
                 except GitError:
                     continue
 
@@ -685,10 +893,15 @@ class GitHistoryAnalyzer:
                 for sym in touched_symbols:
                     symbol_commits[sym].add(commit_hash)
 
+        partial_note = _churn_partial_note(skipped)
+
         if not symbol_commits:
             return {
                 "error": "No symbol-level changes detected. Graph may not cover these files."
+                + (f" {partial_note}" if partial_note else "")
             }
+        if partial_note:
+            base["truncation_note"] = partial_note
 
         # Filter to graph-resolved symbols
         graph_resolved = {}
@@ -747,7 +960,7 @@ class GitHistoryAnalyzer:
         self,
         symbol_commits: dict[str, set[str]],
         limit: int,
-        file_commits: dict[str, set[str]],
+        file_commits: dict[str, list[str]],
         base: dict,
     ) -> dict:
         """Build structured co-change data."""
@@ -833,7 +1046,7 @@ class GitHistoryAnalyzer:
         self,
         symbol_commits: dict[str, set[str]],
         limit: int,
-        file_commits: Optional[dict[str, set[str]]] = None,
+        file_commits: dict[str, list[str]] | None = None,
     ) -> str:
         """Format co-change analysis showing symbol pairs that change together.
 
@@ -894,12 +1107,12 @@ class GitHistoryAnalyzer:
         return "No co-change patterns found (need pairs with 2+ shared commits)."
 
     def _format_file_co_change(
-        self, file_commits: dict[str, set[str]], limit: int
+        self, file_commits: dict[str, list[str]], limit: int
     ) -> str:
         """Format co-change analysis at the file level (fallback).
 
         Args:
-            file_commits: Mapping of file path -> set of commit hashes.
+            file_commits: Mapping of file path -> list of commit hashes.
             limit: Max pairs to show.
 
         Returns:
@@ -950,10 +1163,10 @@ class GitHistoryAnalyzer:
     def get_evolution(
         self,
         name: str,
-        time_range: Optional[str] = None,
+        time_range: str | None = None,
         limit: int = 10,
         show_diff: bool = False,
-        crate: Optional[str] = None,
+        crate: str | None = None,
     ) -> str:
         """Track the evolution of a specific symbol over time.
 
@@ -1033,7 +1246,7 @@ class GitHistoryAnalyzer:
         git_args = [
             "log",
             f"-L:{symbol_name}:{file_path}",
-            "--format=%H %ad %an%n%s",
+            _HEADER_FORMAT,
             "--date=short",
             "--no-merges",
         ]
@@ -1041,6 +1254,8 @@ class GitHistoryAnalyzer:
 
         try:
             output = self._run_git(git_args, timeout=30)
+        except PartialCloneError:
+            raise
         except GitError:
             output = None
 
@@ -1058,13 +1273,15 @@ class GitHistoryAnalyzer:
                     git_args = [
                         "log",
                         f"-L{int(start_line)},{int(end_line)}:{file_path}",
-                        "--format=%H %ad %an%n%s",
+                        _HEADER_FORMAT,
                         "--date=short",
                         "--no-merges",
                     ]
                     git_args.extend(self._parse_time_range(time_range))
                     try:
                         output = self._run_git(git_args, timeout=30)
+                    except PartialCloneError:
+                        raise
                     except GitError:
                         output = None
 
@@ -1088,7 +1305,7 @@ class GitHistoryAnalyzer:
             return result + disambig_note
 
         # Fallback: simple file log filtered by symbol
-        git_args = ["log", "--format=%H %ad %an%n%s", "--date=short", "--no-merges"]
+        git_args = ["log", _HEADER_FORMAT, "--date=short", "--no-merges"]
         git_args.extend(self._parse_time_range(time_range))
         git_args.extend(["--", file_path])
 
@@ -1110,13 +1327,13 @@ class GitHistoryAnalyzer:
         output: str,
         symbol_name: str,
         file_path: str,
-        node_id: Optional[str],
+        node_id: str | None,
         limit: int,
         show_diff: bool,
     ) -> str:
         """Format evolution from git log -L output.
 
-        The output format is: commit_hash date author\nsubject\ndiff...
+        The output is one _HEADER_FORMAT line per commit, then its diff.
         """
         commits = []
         current_commit = None
@@ -1124,27 +1341,18 @@ class GitHistoryAnalyzer:
         authors = set()
 
         for line in output.split("\n"):
-            # New commit line: hash date author
-            match = re.match(r"^([0-9a-f]{40})\s+(\S+)\s+(.+)$", line)
-            if match:
+            header = _parse_log_header(line)
+            if header:
                 if current_commit:
                     current_commit["diff"] = "\n".join(diff_lines)
                     commits.append(current_commit)
                     diff_lines = []
 
-                current_commit = {
-                    "hash": match.group(1)[:8],
-                    "date": match.group(2),
-                    "author": match.group(3).strip(),
-                    "subject": "",
-                    "diff": "",
-                    "added": 0,
-                    "removed": 0,
-                }
-                authors.add(match.group(3).strip())
-            elif current_commit and not current_commit["subject"]:
-                current_commit["subject"] = line.strip()
+                current_commit = {**header, "diff": "", "added": 0, "removed": 0}
+                authors.add(header["author"])
             elif current_commit:
+                # Lines of a CRLF file end in CR; output is split on LF only.
+                line = line.rstrip("\r")
                 diff_lines.append(line)
                 if line.startswith("+") and not line.startswith("+++"):
                     current_commit["added"] += 1
@@ -1208,7 +1416,7 @@ class GitHistoryAnalyzer:
         output: str,
         symbol_name: str,
         file_path: str,
-        node_id: Optional[str],
+        node_id: str | None,
         limit: int,
         show_diff: bool,
     ) -> str:
@@ -1217,19 +1425,10 @@ class GitHistoryAnalyzer:
         authors = set()
 
         for line in output.strip().split("\n"):
-            match = re.match(r"^([0-9a-f]{40})\s+(\S+)\s+(.+)$", line)
-            if match:
-                commits.append(
-                    {
-                        "hash": match.group(1)[:8],
-                        "date": match.group(2),
-                        "author": match.group(3).strip(),
-                        "subject": "",
-                    }
-                )
-                authors.add(match.group(3).strip())
-            elif commits and not commits[-1]["subject"]:
-                commits[-1]["subject"] = line.strip()
+            header = _parse_log_header(line)
+            if header:
+                commits.append(header)
+                authors.add(header["author"])
 
         commits = commits[:limit]
 
@@ -1258,25 +1457,53 @@ class GitHistoryAnalyzer:
 
         return "\n".join(lines)
 
-    def get_changes(
+    def _attribute_hunks_to_symbols(self, hunks) -> dict[str, dict]:
+        """Attribute added/removed diff lines to the symbols containing them.
+
+        Removed lines are attributed using new-side line numbers; old-side
+        attribution would need a line map built from the pre-change state, so
+        per-symbol +N/-M counts are approximate. Commit-level attribution is
+        exact.
+        """
+        file_hunks: dict[str, list[dict]] = defaultdict(list)
+        for hunk in hunks:
+            file_hunks[hunk["file"]].append(hunk)
+
+        modified_symbols: dict[str, dict] = {}
+        for file_path, fhunks in file_hunks.items():
+            line_map = self._build_file_line_map(file_path)
+            if not line_map:
+                continue
+            for hunk in fhunks:
+                line = hunk["new_start"]
+                for diff_line in hunk["lines"]:
+                    if diff_line.startswith("+"):
+                        symbol = line_map.get(line)
+                        if symbol:
+                            modified_symbols.setdefault(
+                                symbol, {"added": 0, "removed": 0}
+                            )["added"] += 1
+                        line += 1
+                    elif diff_line.startswith("-"):
+                        symbol = line_map.get(line)
+                        if symbol:
+                            modified_symbols.setdefault(
+                                symbol, {"added": 0, "removed": 0}
+                            )["removed"] += 1
+                    else:
+                        line += 1
+        return modified_symbols
+
+    def _collect_changes(
         self,
-        commit_range: Optional[str] = None,
-        time_range: Optional[str] = None,
-        path_filter: Optional[str] = None,
-        show_callers: bool = True,
-        limit: int = 50,
-    ) -> str:
-        """Analyze change impact for a commit range.
+        commit_range: str | None,
+        time_range: str | None,
+        path_filter: str | None,
+    ) -> tuple[list[dict], int, dict[str, dict]] | str:
+        """Changed files, commit count and per-symbol line counts for a range.
 
-        Args:
-            commit_range: Git commit range (e.g., "HEAD~5..HEAD").
-            time_range: Time range (e.g., "last 7 days"). Used if commit_range not given.
-            path_filter: Path filter (e.g., "backend/").
-            show_callers: Include callers of changed symbols.
-            limit: Maximum symbols to show.
-
-        Returns:
-            Formatted impact analysis.
+        A string instead when there is nothing to report: the message saying
+        why.
         """
         self._verify_git()
 
@@ -1289,6 +1516,7 @@ class GitHistoryAnalyzer:
             except GitError as e:
                 return f"Invalid commit range '{commit_range}': {e}"
         effective_range = commit_range
+        count_range = None
         if not effective_range:
             if time_range:
                 # Get commits in time range and build a range
@@ -1301,9 +1529,9 @@ class GitHistoryAnalyzer:
                 if not commit_hashes:
                     return "No commits found for the given time range."
                 # oldest..newest
-                effective_range = f"{commit_hashes[-1]}~1..{commit_hashes[0]}"
+                effective_range, count_range = self._ranges_covering(commit_hashes)
             else:
-                effective_range = "HEAD~1..HEAD"
+                effective_range, count_range = self._ranges_covering(["HEAD"])
 
         if path_filter:
             try:
@@ -1317,7 +1545,12 @@ class GitHistoryAnalyzer:
             diff_stat_args.extend(["--", path_filter])
 
         try:
-            numstat_output = self._run_git(diff_stat_args, timeout=30)
+            filter_overrides = self._worktree_filter_overrides(effective_range)
+            numstat_output = self._run_git(
+                diff_stat_args, timeout=30, config=filter_overrides
+            )
+        except PartialCloneError:
+            raise
         except GitError as e:
             return f"Invalid commit range '{effective_range}': {e}"
 
@@ -1342,7 +1575,7 @@ class GitHistoryAnalyzer:
         # Count commits in range
         try:
             commit_count_output = self._run_git(
-                ["rev-list", "--count", effective_range], timeout=10
+                ["rev-list", "--count", count_range or effective_range], timeout=10
             )
             commit_count = int(commit_count_output.strip())
         except (GitError, ValueError):
@@ -1354,46 +1587,39 @@ class GitHistoryAnalyzer:
             diff_args.extend(["--", path_filter])
 
         try:
-            diff_output = self._run_git(diff_args, timeout=60)
+            diff_output = self._run_git(diff_args, timeout=60, config=filter_overrides)
         except GitError:
             diff_output = ""
 
         hunks = self._parse_diff_hunks(diff_output) if diff_output else []
 
         # Attribute changes to symbols
-        modified_symbols: dict[str, dict] = {}  # node_id -> {added, removed}
+        return changed_files, commit_count, self._attribute_hunks_to_symbols(hunks)
 
-        # Group hunks by file
-        file_hunks: dict[str, list[dict]] = defaultdict(list)
-        for hunk in hunks:
-            file_hunks[hunk["file"]].append(hunk)
+    def get_changes(
+        self,
+        commit_range: str | None = None,
+        time_range: str | None = None,
+        path_filter: str | None = None,
+        show_callers: bool = True,
+        limit: int = 50,
+    ) -> str:
+        """Analyze change impact for a commit range.
 
-        for file_path, fhunks in file_hunks.items():
-            line_map = self._build_file_line_map(file_path)
-            if not line_map:
-                continue
+        Args:
+            commit_range: Git commit range (e.g., "HEAD~5..HEAD").
+            time_range: Time range (e.g., "last 7 days"). Used if commit_range not given.
+            path_filter: Path filter (e.g., "backend/").
+            show_callers: Include callers of changed symbols.
+            limit: Maximum symbols to show.
 
-            for hunk in fhunks:
-                line = hunk["new_start"]
-                for diff_line in hunk["lines"]:
-                    if diff_line.startswith("+"):
-                        symbol = line_map.get(line)
-                        if symbol:
-                            if symbol not in modified_symbols:
-                                modified_symbols[symbol] = {"added": 0, "removed": 0}
-                            modified_symbols[symbol]["added"] += 1
-                        line += 1
-                    elif diff_line.startswith("-"):
-                        # NOTE: For removed lines, symbol attribution uses new-side line numbers
-                        # (approximate — old-side would require building line map from pre-change state).
-                        # The +N/-M stats may be slightly inaccurate but commit-level attribution is correct.
-                        symbol = line_map.get(line)
-                        if symbol:
-                            if symbol not in modified_symbols:
-                                modified_symbols[symbol] = {"added": 0, "removed": 0}
-                            modified_symbols[symbol]["removed"] += 1
-                    else:
-                        line += 1
+        Returns:
+            Formatted impact analysis.
+        """
+        changes = self._collect_changes(commit_range, time_range, path_filter)
+        if isinstance(changes, str):
+            return changes
+        changed_files, commit_count, modified_symbols = changes
 
         # Format output
         lines = []
@@ -1456,9 +1682,9 @@ class GitHistoryAnalyzer:
 
     def get_changes_structured(
         self,
-        commit_range: Optional[str] = None,
-        time_range: Optional[str] = None,
-        path_filter: Optional[str] = None,
+        commit_range: str | None = None,
+        time_range: str | None = None,
+        path_filter: str | None = None,
         show_callers: bool = True,
         limit: int = 50,
     ) -> dict:
@@ -1467,102 +1693,10 @@ class GitHistoryAnalyzer:
         Returns dict with keys: range, commits, files_count, symbols_count,
         symbols (list), changed_files (list when no symbol attribution).
         """
-        self._verify_git()
-
-        if commit_range:
-            try:
-                _validate_git_range(commit_range)
-            except GitError as e:
-                return {"error": f"Invalid commit range '{commit_range}': {e}"}
-        effective_range = commit_range
-        if not effective_range:
-            if time_range:
-                time_flags = self._parse_time_range(time_range)
-                git_args = ["log", "--format=%H", "--no-merges"] + time_flags
-                output = self._run_git(git_args, timeout=30)
-                commit_hashes = [
-                    h.strip() for h in output.strip().split("\n") if h.strip()
-                ]
-                if not commit_hashes:
-                    return {"error": "No commits found for the given time range."}
-                effective_range = f"{commit_hashes[-1]}~1..{commit_hashes[0]}"
-            else:
-                effective_range = "HEAD~1..HEAD"
-
-        if path_filter:
-            try:
-                _validate_pathspec(path_filter)
-            except GitError as e:
-                return {"error": f"Invalid path filter '{path_filter}': {e}"}
-
-        diff_stat_args = ["diff", "--numstat", effective_range]
-        if path_filter:
-            diff_stat_args.extend(["--", path_filter])
-
-        try:
-            numstat_output = self._run_git(diff_stat_args, timeout=30)
-        except GitError as e:
-            return {"error": f"Invalid commit range '{effective_range}': {e}"}
-
-        if not numstat_output.strip():
-            return {"error": f"No changes found in {effective_range}."}
-
-        changed_files: list[dict] = []
-        for line in numstat_output.strip().split("\n"):
-            parts = line.split("\t")
-            if len(parts) == 3:
-                added = int(parts[0]) if parts[0] != "-" else 0
-                removed = int(parts[1]) if parts[1] != "-" else 0
-                changed_files.append(
-                    {"file": parts[2], "added": added, "removed": removed}
-                )
-
-        try:
-            commit_count_output = self._run_git(
-                ["rev-list", "--count", effective_range], timeout=10
-            )
-            commit_count = int(commit_count_output.strip())
-        except (GitError, ValueError):
-            commit_count = 0
-
-        diff_args = ["diff", effective_range]
-        if path_filter:
-            diff_args.extend(["--", path_filter])
-
-        try:
-            diff_output = self._run_git(diff_args, timeout=60)
-        except GitError:
-            diff_output = ""
-
-        hunks = self._parse_diff_hunks(diff_output) if diff_output else []
-
-        modified_symbols: dict[str, dict] = {}
-        file_hunks: dict[str, list[dict]] = defaultdict(list)
-        for hunk in hunks:
-            file_hunks[hunk["file"]].append(hunk)
-
-        for file_path, fhunks in file_hunks.items():
-            line_map = self._build_file_line_map(file_path)
-            if not line_map:
-                continue
-            for hunk in fhunks:
-                line = hunk["new_start"]
-                for diff_line in hunk["lines"]:
-                    if diff_line.startswith("+"):
-                        symbol = line_map.get(line)
-                        if symbol:
-                            if symbol not in modified_symbols:
-                                modified_symbols[symbol] = {"added": 0, "removed": 0}
-                            modified_symbols[symbol]["added"] += 1
-                        line += 1
-                    elif diff_line.startswith("-"):
-                        symbol = line_map.get(line)
-                        if symbol:
-                            if symbol not in modified_symbols:
-                                modified_symbols[symbol] = {"added": 0, "removed": 0}
-                            modified_symbols[symbol]["removed"] += 1
-                    else:
-                        line += 1
+        changes = self._collect_changes(commit_range, time_range, path_filter)
+        if isinstance(changes, str):
+            return {"error": changes}
+        changed_files, commit_count, modified_symbols = changes
 
         range_display = commit_range or time_range or "HEAD~1..HEAD"
 

@@ -6,6 +6,382 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-22
+
+Call resolution is rebuilt for every supported language: a call is
+resolved from what the source says, with the standard libraries read from
+generated data, and left unresolved with its candidates where the source
+does not decide. Semantic search and the SCIP integration are reworked,
+the MCP server is ported to the MCP Python SDK v2, and the web UI, the
+indexer and descry's use of git are hardened.
+
+**Upgrading**
+
+- The first `descry index` re-embeds every symbol and regenerates every
+  SCIP index. Embedding builds take longer than before, because each
+  symbol's source is now embedded.
+- The graph schema is v2. An existing graph is rejected with a message to
+  run `descry index`. Node IDs and node types change in most languages; a
+  function a scope defines again (a TypeScript member assigned twice, a
+  Rust `#[cfg]` twin, a type's several impls of one trait) is `name#2` and
+  on.
+- The default embedding model is `embeddinggemma`
+  (`google/embeddinggemma-300m`), which is gated on HuggingFace: accept its
+  licence and log in, or descry falls back to `f2llm-v2-0.6b` with a
+  warning. It was `jinaai/jina-code-embeddings-0.5b`, still available as
+  `jina-code`. No model is loaded with `trust_remote_code`.
+- Expect fewer resolved calls in some places. 0.2.0 resolved a call to the
+  first definition of its name; 0.3.0 resolves it only where the source
+  decides, and otherwise keeps it as an unresolved call that lists the
+  definitions that fit as `metadata.candidates`, shown by `callers` as
+  "one of N candidates". This is most visible for receivers whose type the
+  source does not give, for overloads, for definitions under `#if` or
+  `#[cfg]`, and for Rust types with many impls of one trait (`impl
+  Mul<f32> for Vec3`, `impl Mul<Vec3> for Vec3`, …) called with an
+  argument whose type the source does not give, as in glam and nalgebra.
+  With SCIP enabled, rust-analyzer resolves the Rust cases.
+- The CALLS resolution percentage is measured differently and is not
+  comparable with earlier releases (see *Changed*).
+- The `mcp` extra requires `mcp>=2`; the `embeddings` extra requires
+  `transformers>=4.51`.
+- The CLI exits `2` on every service failure, not only on `ERROR:` text.
+- The web API answers `500` for a failed index run, `404` for callees of
+  an unknown function and `400` for a negative `limit`; these were `200`.
+- `[timeouts] scip_minutes` defaults to 30 (was unlimited; `0` still means
+  unlimited).
+- Removed: the `ast` extra, `[cross_lang] frontend_api_patterns`, and the
+  per-adapter SCIP options of every adapter except Rust.
+- Subprocesses inherit the environment unfiltered, and `/api/source` no
+  longer refuses files by name (see *Removed*).
+
+### Security
+
+- **Web UI.** Symbol and file names are escaped in the flow tree. Remote
+  scripts carry Subresource Integrity hashes and every response carries a
+  Content-Security-Policy that allows exactly those asset URLs.
+  State-changing requests are refused unless same-origin. `/api/source`
+  opens every path component with `O_NOFOLLOW` and caps the read.
+- **Index runs.** One runs at a time per service, whichever interface
+  asks. The indexer and everything it started are stopped on timeout,
+  cancellation, client disconnect, and `SIGINT`/`SIGTERM`/`SIGHUP`.
+- **Indexer child process.** Spawned with `python -P`, so a `descry/`
+  package inside the indexed repository cannot shadow the installed one,
+  and with its stdin on `/dev/null`, so neither it nor an indexer it starts
+  reads the terminal or the stream descry was started with.
+- **Non-regular files.** A FIFO or a link to a device where descry expects
+  a file (a source file, `.descry.toml`, the graph, a SCIP manifest, index
+  or checksum file, an embedding sidecar, the OpenAPI spec) is left alone
+  rather than read, which would wait or never end; a graph that is not a
+  regular file is reported as malformed.
+- **Hostile input.** Every parser reads a file in time linear in its
+  length. Long runs of whitespace or blank lines, unclosed Dart type
+  arguments, thousands of chained assignments, branches, nested blocks or
+  bindings of one name, which took minutes or exhausted the stack, are
+  read once. `[code_files] max_parse_seconds` and `max_file_mb` bound what
+  one file can cost (see *Added*).
+- **Writes into the cache.** The cache directory sits in the indexed
+  repository by default, which can ship it. The graph and the embedding
+  cache are written through new, randomly named temporaries, so a symlink
+  at a guessable name no longer has its target overwritten, and one a
+  killed write leaves is removed once nothing has written to it for an
+  hour; the embedding lock is opened without following a symlink and never
+  truncated; a symlink at a SCIP index path is removed rather than written
+  through, and an indexer that writes `index.scip` in the project does not
+  run through one there. Indexing refuses a default cache directory, or a
+  `scip` subdirectory, that resolves outside the project, where descry
+  would replace another directory's files; `DESCRY_CACHE_DIR` names any
+  other.
+- **Git.** Hooks, fsmonitor, signature display, external diff, textconv
+  and filter drivers are disabled; partial clones are never lazily
+  fetched; diffs are forced to the plain `a/` `b/` format; log output is
+  NUL-framed, so commit subjects and file names cannot forge a commit;
+  argument validators match the whole value.
+- **Source reads.** Paths in the graph are confined to the project root in
+  the query engine and the embedder, so a hand-edited graph cannot make a
+  tool return files from outside it.
+- **Embedding models.** No model is loaded with `trust_remote_code`; the
+  option and every way of enabling it are removed.
+- **SCIP cache.** The checksum file is written atomically, and Rust and
+  TypeScript workspace entries that resolve outside the project are
+  dropped.
+- **MCP.** `descry_ensure` output is fenced like `descry_index`, and a
+  closing fence tag inside repository content is neutralised.
+- **Config.** `[syntax.lang_map]`, `[timeouts]`, `[query]` and
+  `[cross_lang] api_prefixes` values are validated on load.
+- **Release workflow.** A manual publish to PyPI must be dispatched from
+  the tag that matches the package version.
+
+### Changed
+
+- **Call resolution is decided from evidence.** Imports (including
+  `go.mod`, `Cargo.toml`, `package.json`, `tsconfig.json` and SvelteKit's
+  `$lib`), declared and returned types, lexical scope, the class hierarchy
+  and each language's visibility rules decide each call. Names bound by
+  loops, patterns, destructuring and closure or lambda parameters are typed
+  from declarations. A call is *resolved* to one definition, left
+  *unresolved* when nothing in the source decides, or dropped as
+  *external*. Previously a call resolved to the first symbol of that name,
+  a name list discarded most call sites before counting, and ties were
+  broken by file path. The summary line is now
+  `CALLS Resolution: P% of N project calls (...); E external calls not counted`.
+- **A receiver of unknown type is never resolved by name.** In every
+  language a member call whose receiver the source does not type is left
+  unresolved with the definitions that fit as its candidates; it was
+  resolved to the one definition of the member's name.
+- **Several definitions that fit leave a call unresolved.** Overloads are
+  chosen by the arguments a call passes (C#, Java, C++, Rust), and where
+  several still take it the call is left open with them as candidates. A
+  definition under `#if` (C, C++, C#) is chosen only when the call sits
+  under the same condition or nothing else could be meant; Go build
+  constraints and `_test.go` visibility decide between platform variants;
+  a Rust function or type defined under several `#[cfg]`s, and a name
+  several `#[cfg]` `use`s bind, is none of them.
+- **Unresolved calls name their candidates.** A `CALLS` edge that could
+  reach several definitions carries them in `metadata.candidates`.
+  `callers` and backward `flow` mark such a caller "one of N candidates"
+  and `callees` lists the call once. `path` goes through such a call only
+  when no path of resolved calls exists, and marks the hop. Forward `flow`
+  and `context` follow resolved edges only.
+- **A base type is found as a call's target is.** An `INHERITS` edge
+  reaches the type the base's name stands for where the subtype is
+  declared, through its import, its qualifier, its namespace or its
+  library; it went to the first definition of that name. A base outside
+  the project, one that several types fit, and a template or type
+  parameter stay unresolved, and no type inherits from itself.
+- **Owners are named as source names them.** A block for no type source
+  can name has an owner no source can name: a Rust `impl` for a tuple, a
+  slice or a type parameter is `<Trait for (A, B)>`, a Java anonymous class
+  or enum constant body `class@<line>`, an object a JavaScript or
+  TypeScript function returns or a call is passed `object@<line>`, a class
+  expression no declarator names `class@<line>`. They were filed under the
+  trait, the parameter or the enclosing class. An accessor is filed as
+  source writes it (`Type::get size`, Dart's `Type::set size`), where it
+  shared a node with a method `get_size`.
+- **Standard libraries are generated data.** `src/descry/stdlib/<lang>.json`
+  says which types and members a language's standard library has and what
+  they return, for Rust, TypeScript and JavaScript (with Node's built-in
+  modules), Python, Go, Java, PHP, C#, Ruby, Dart, C and C++. A call on a
+  standard value is external, and its result is typed for the next call in
+  a chain. The files are written by `tools/stdlib/` from each language's
+  own machine-readable description (rustdoc JSON, TypeScript's `lib.*.d.ts`,
+  typeshed, Go's `api/*.txt`, `javap`, phpstorm-stubs, reflection over the
+  .NET shared runtime, RBS, the Dart SDK, clang's AST) and replace the
+  hand-written name lists.
+- **C#, PHP, Ruby, Dart, C and C++ parsers are rewritten.** Every
+  definition is a node under its real parent with its line range
+  (overloads, constructors, properties, accessors, enum members, local
+  functions, out-of-class C++ members, Ruby singleton and generated
+  methods); a call belongs to the member it is written in; receivers are
+  typed from declarations. Ruby calls written without parentheses are
+  recorded.
+- **What each language's resolver reads.**
+  - *JavaScript and TypeScript*: block and function scope as the language
+    gives it, assignments wherever written and the values that reach a
+    read; ES modules, CommonJS (`require`, `module.exports`, `exports`)
+    and TypeScript's `export =`, package `exports` and directory indexes;
+    named, default and namespace imports; the object a factory returns and
+    the functions written in it; classes as values; generic types and
+    functions; `this` in methods, static members, prototypes and arrow
+    functions, and class fields; JSX and Svelte `<script>` blocks.
+  - *Python*: star re-exports, class attributes, `with`, properties,
+    return types read from bodies, the values that reach a name after a
+    branch, the module below the importing file's own.
+  - *Go*: interface methods, struct fields, package-level variables,
+    multi-value results, generic types and functions.
+  - *Java*: inheritance edges, enum constants, lambdas and method
+    references, `instanceof` patterns, generic types.
+  - *C#*: partial types, extension methods by `using` scope, `is` and
+    `out` variables, delegates, generic types.
+  - *Dart*: flow-analysis promotion, patterns and `switch` cases, mixins
+    and extensions, generic types.
+  - *PHP and Ruby*: closures and `use`, `@var`, mixins, prepend, include
+    and extend, singleton methods.
+  - *C and C++*: namespaces and `using`, templates, partial and explicit
+    specializations, macros as they expand, smart and raw pointers,
+    includes through the include path.
+  - *Rust*: the module tree `mod` declarations lay out, `#[path]` too;
+    `use`, globs and re-exports; paths from a crate's name and `extern
+    crate … as`; type aliases; generic types and impl bounds; traits,
+    blanket impls and associated types; `#[derive]`, `?`, patterns,
+    closures and turbofish; the functions a `macro_rules!` writes into an
+    impl block that calls it; a trait's method called by the trait's path
+    on its receiver's impl; of a type's several impls of one trait, the one
+    whose parameters take the call's arguments, their types and whether
+    each is a reference, and whose `self` is the receiver's.
+- **SCIP.** Indexes map onto graph nodes by line and column (Rust
+  workspace indexes did not map at all, and every SCIP-labelled edge fell
+  back to name matching). A call an index records as outside the project
+  is external. Where the index records two symbols at the call, names a
+  method that cannot take what the call passes, or defines the symbol where
+  no one node holds it, the call is resolved from source. Index files are
+  named `<adapter>--<project>.scip`. The SCIP cache follows
+  `DESCRY_CACHE_DIR`, and `DESCRY_SCIP_TIMEOUT` overrides the configured
+  timeout.
+- **Semantic search embeds one text per symbol**: name, signature,
+  docstring and up to 1,500 characters of its source, through the model's
+  task prompts. The cache key covers everything that shapes the vectors.
+- **Embedding models are a registry** (`descry embedding-models`), selected
+  by alias, repo id or local path. With no model configured, a gated
+  refusal of the default falls back to `f2llm-v2-0.6b` with a warning, and
+  each `descry index` tries the default again. A model named explicitly
+  never falls back.
+- **MCP server targets the MCP Python SDK v2** (`MCPServer`) and reports
+  descry's version in its handshake.
+- **The web UI delegates every operation to `DescryService`.** `/api/path`
+  reports whether a search found a path, found none, timed out or ran out
+  of budget. `/api/health`, `/api/status`, `/api/ensure` and
+  `/api/examples` follow the service's view of the graph.
+- **Files git ignores are not indexed.** In a git repository the indexer
+  leaves out what `.gitignore` and git's other exclude files ignore. A
+  tracked file is always indexed. `[project] respect_gitignore = false`
+  indexes ignored files as before; outside a repository nothing changes.
+- **Cross-language tracing links an endpoint by what the code declares.**
+  Where several functions have an operation's name, its handler is the one
+  whose attributes or decorators write the operation's path, else the one
+  outside test code; with more than one left, none is linked. It was the
+  last function of that name in the graph. A handler whose name is not the
+  operationId is found by the path it declares.
+- **CLI and tools.** `ensure` uses `[project] max_stale_hours` unless given
+  an age. `index <subdir>` narrows the walk and writes the root's graph.
+  `--lang` covers every indexed language and accepts `ts`, `js`, `py`,
+  `rs`, `rb`, `cs`. `path --max-depth` is honoured up to 50. An OpenAPI
+  spec at `public/api/latest.json` or `public/api/openapi.json` is found
+  without configuration by all three interfaces. `descry --help` no longer
+  imports the embedding stack. The indexer shows other libraries' messages
+  only from WARNING.
+- **Git history.** Symbol churn reads at most the 100 most recent commits
+  per file within a 30-second budget and says when results are partial; a
+  file's first commit is counted.
+- **ruff is pinned** to `ruff==0.16.4` in the dev extra and in CI.
+
+### Fixed
+
+- **Indexer.** A parser failure or an unusable `sg` binary no longer aborts
+  the whole index. A line holding a form feed, a vertical tab or another
+  character Python's `str.splitlines` ends a line at is one line, so the
+  definitions and calls after it are no longer filed below where they are
+  written. Calls in comments, string literals and JSX text are no longer
+  recorded, and declarations are no longer recorded as calls. A licence
+  notice inside a file is no longer the next symbol's docstring. `index` no
+  longer encodes every symbol twice. `descry-generate` honours
+  `DESCRY_LOG_LEVEL`, walks the project root when given `--project-root`
+  alone, and refuses a path outside it.
+- **SCIP indexers.** A root with a build of its own is one project to every
+  indexer, where its subdirectories were indexed apart and the root's own
+  sources had none: a CMake or Make root, a Maven root that lists
+  `<modules>`, a Gradle root with a settings file, a `package.json`,
+  `pyproject.toml`, `setup.py` or `setup.cfg`, a `Gemfile`, a
+  `composer.json`. scip-java runs where it detects exactly one build tool
+  and gets the Gradle init-script only for Gradle; a Rust root package
+  beside its workspace members is indexed too; scip-dart is run on `.`,
+  found under either spelling and reaches `<collection>/<name>/pubspec.yaml`;
+  scip-php is probed with `--help`; scip-dotnet indexes every `.sln` and
+  project file, or every `.slnx` where there are none; scip-clang runs only
+  with a compile database that exists; a JavaScript or TypeScript package
+  without a `tsconfig.json` is indexed with one written beside the index,
+  not into the package. An index that parses but carries no symbols is
+  logged.
+- **SCIP cache.** The single-crate Rust path, a stale index counted as
+  fresh, projects of one name in two languages sharing an index, and
+  `DESCRY_NO_SCIP` parsed two ways.
+- **Service and query.** Source is read relative to the project root
+  whatever the working directory. A missing, stale or corrupt graph no
+  longer stops the MCP server from starting, and is reported by `health`
+  and rebuilt by `ensure`. A malformed graph raises a schema error instead
+  of a traceback, including for metadata of the wrong type. An empty
+  `api_prefixes` entry no longer recurses forever. A graph file removed
+  between two looks is reported as missing. A streamed index run always
+  ends with a `done` event. `ensure` refuses an age limit that is not a
+  finite, non-negative number, and a negative `limit` is an error in every
+  interface. Callers come back in a stable order, certain ones before
+  candidates, and `callers Type::name` lists the callers of that method
+  instead of every `name`; `Type.name` is read the same way, and a
+  qualified name no longer matches inside a longer one. `path` no longer
+  follows an unresolved call to the first definition of its name, and
+  searches from every definition its start name matches; `flatten`
+  follows an unresolved base only when one class has the name.
+- **Embeddings.** The file lock now excludes; cache cleanup cannot delete
+  another process's temporary; concurrent first searches load the model
+  once; `min_score` applies after re-ranking; a stale or mismatched cache
+  is detected; NaN scores and empty graphs are handled; a gated model
+  fails with the licence page and login command. A search during the
+  model's load, or a reindex's, is told the embeddings are loading rather
+  than timing out or starting a second load; a load begun before a
+  reindex no longer caches the old graph's embeddings as the new one's.
+- **Git history.** Changes over a range reaching the root commit, the
+  default range in a one-commit repository, non-ASCII paths, SHA-256
+  repositories and shallow-clone detection in worktrees.
+- **Web.** `/api/ensure` without a body, unvalidated `direction`, errors
+  returned as `200`, IPv6 loopback `Host`, a NUL byte in `?file=`, an
+  `Origin` header that is not a URL, text files in other encodings refused
+  by `/api/source`, no syntax language for most extensions in the source
+  view, and a file whose lines end in a carriage return alone shown there
+  as one line.
+- **Packaging.** `descry-mcp` and `descry-web` name the extra to install
+  when it is missing. `pi-extension` uses one interpreter name and a
+  Windows-safe script path. Licence metadata uses the SPDX form.
+
+### Added
+
+- `embeddinggemma` (`google/embeddinggemma-300m`, the default),
+  `embeddinggemma-2` (`google/embeddinggemma-2`, text-only, with its
+  dependencies in the `embeddinggemma-2` extra) and `f2llm-v2-0.6b`
+  (`codefuse-ai/F2LLM-v2-0.6B`).
+- `tests/eval/`: a retrieval-evaluation harness scoring models on a
+  project's own graph (docstring→symbol queries, leave-one-out leakage
+  control, paired bootstrap, per-language breakdown).
+- `descry-generate --project-root`.
+- `[code_files] max_file_mb` (default 10, `0` for no limit): the size above
+  which a file is skipped by the indexer, not read for source snippets and
+  refused by `/api/source`.
+- `[code_files] max_parse_seconds` (default 120, `0` for no limit): a file
+  whose parsing takes longer is left as far as it got and logged, so one
+  file cannot keep an index run from finishing. Not enforced on Windows.
+- `[project] respect_gitignore` (default `true`).
+- `tools/stdlib/`: the generators of the standard-library data, one per
+  language, each reproducible from a pinned source.
+- `THIRD-PARTY-NOTICES.md`, shipped in the wheel and the sdist: the source,
+  copyright holder and licence of each standard-library data file.
+- `descry_status` in the Pi extension.
+- `graph.error` in `health`, `invalid_graph` in `status`, and
+  `truncation_note` in structured churn.
+
+### Removed
+
+- The `ast` extra and the unwired `tree_sitter_parser` module.
+- The ast-grep call extraction and `DESCRY_AST_GREP_MAX_FILES`. With `sg`
+  on `PATH`, ast-grep replaced the Rust, TypeScript and JavaScript
+  readers' calls with ones that carry no receiver's type and are filed by
+  line alone: commander resolved 30% of its calls with it and 86%
+  without, ripgrep 57% and 84%. The readers' own calls are used always.
+- Subprocess environment filtering (`safe_env`). Git, the SCIP indexers
+  and the indexing child inherit the environment as it is.
+- The credential-filename blocklist on `/api/source`. Reads stay confined
+  to regular text files inside the project root.
+- `[cross_lang] frontend_api_patterns`, which had no effect.
+- `GraphQuerier.find_call_path` (use `find_call_path_result`) and the
+  `python -m descry.embeddings` entry point.
+
+### Known limitations
+
+- Without SCIP, Rust impls of one trait for one type are told apart by
+  what the call's arguments are written as and what descry knows of their
+  types; an argument of no known type (a plain variable bound to a
+  reference or not) leaves the call with the impls that fit as
+  candidates. Which `#[cfg]` alternative a build compiles is not
+  evaluated.
+- Without SCIP, a Rust parameter destructured from a type outside the
+  project, `State(state): State<App>`, has no known type.
+- A function a macro writes is a method of the impl block that calls the
+  macro only for `macro_rules!` of the project whose functions are written
+  with literal names.
+- rust-analyzer is run once per workspace member, which takes longer on a
+  large workspace than one run over it would.
+- scip-typescript is run on the project root and the packages a workspace
+  config lists; a package elsewhere in the tree is not indexed, and a
+  SvelteKit package's generated `tsconfig.json` needs `svelte-kit sync` run
+  first.
+
 ## [0.2.0] — 2026-04-20
 
 A large feature + resolution-quality release. Seven new SCIP language

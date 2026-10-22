@@ -140,7 +140,7 @@ def _scip_php_incompatibility_reason(pkg_dir: Path) -> str | None:
     PHP parse, so we leave that to surface as a runtime error.)
     """
     composer_json = pkg_dir / "composer.json"
-    if not composer_json.exists():
+    if not composer_json.is_file():
         return None
     try:
         import json as _json
@@ -176,17 +176,25 @@ class PhpAdapter:
     name = "php"
     scheme = "scip-php"
     binary = "scip-php"
+    # It has no `--version`: anything but `--help` indexes the directory.
+    probe_flag = "--help"
     extensions = (".php",)
 
     def discover(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
         """Return one DiscoveredProject per top-level Composer package.
 
-        A PHP project is a directory containing ``composer.json``. The
+        A PHP project is a directory containing ``composer.json``: the root
+        where it has one, else each top-level subdirectory that does. The
         adapter does not require ``vendor/`` during discovery because
         that's a runtime prerequisite for scip-php, not for descry's
         file walk. scip-php will surface its own error if vendor is
         missing at index time.
         """
+        if (root / "composer.json").exists():
+            # A root package is the one project scip-php indexes.
+            if not _has_php_sources(root):
+                return []
+            return [DiscoveredProject(name=root.name, root=root, language=self.name)]
         seen: set[str] = set()
         projects: list[DiscoveredProject] = []
 
@@ -208,16 +216,6 @@ class PhpAdapter:
                     language=self.name,
                 )
             )
-
-        if not projects:
-            if (root / "composer.json").exists() and _has_php_sources(root):
-                projects.append(
-                    DiscoveredProject(
-                        name=root.name,
-                        root=root,
-                        language=self.name,
-                    )
-                )
 
         projects.sort(key=lambda p: p.name)
         return projects
@@ -255,7 +253,6 @@ class PhpAdapter:
                 raise RuntimeError(f"scip-php incompatibility: {reason}")
 
         argv: list[str] = [self.binary]
-        argv.extend(config.extra_args)
         return CommandSpec(argv=argv, cwd=project.root, output_mode="rename")
 
     def parse_descriptors(self, raw: str) -> list[str]:

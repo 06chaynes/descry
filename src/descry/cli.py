@@ -12,7 +12,7 @@ import argparse
 import asyncio
 import sys
 
-from descry.handlers import DescryService, DescryConfig
+from descry.handlers import DescryConfig, DescryService, ServiceError
 
 
 def _make_service() -> DescryService:
@@ -28,10 +28,15 @@ def _print_result(coro):
     """Run a service coroutine, print the result, and translate service-side
     errors to a nonzero exit code so shell chains like `descry callers X &&
     next_step` don't silently advance on "ERROR: Graph not found".
+
+    A failure is a `ServiceError`, whatever its text; the `ERROR:` prefix
+    marks one in text that arrives as a plain string.
     """
     result = _run(coro)
     print(result)
-    if isinstance(result, str) and result.lstrip().upper().startswith("ERROR:"):
+    if isinstance(result, ServiceError) or (
+        isinstance(result, str) and result.lstrip().upper().startswith("ERROR:")
+    ):
         sys.exit(2)
 
 
@@ -120,6 +125,11 @@ def cmd_structure(args):
 def cmd_flatten(args):
     svc = _make_service()
     _print_result(svc.flatten(class_node_id=args.class_node_id))
+
+
+def cmd_embedding_models(_args):
+    svc = _make_service()
+    _print_result(svc.embedding_models())
 
 
 def cmd_semantic(args):
@@ -220,8 +230,8 @@ def main():
     sub.add_argument(
         "--max-age-hours",
         type=float,
-        default=24,
-        help="Max graph age in hours (default: 24)",
+        default=None,
+        help="Max graph age in hours (default: [project] max_stale_hours)",
     )
     sub.set_defaults(func=cmd_ensure)
 
@@ -339,6 +349,13 @@ def main():
     sub.add_argument("query", help="Natural language query")
     sub.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     sub.set_defaults(func=cmd_semantic)
+
+    # embedding-models
+    sub = subparsers.add_parser(
+        "embedding-models",
+        help="List embedding models descry ships pinned configurations for",
+    )
+    sub.set_defaults(func=cmd_embedding_models)
 
     # quick
     sub = subparsers.add_parser(

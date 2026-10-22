@@ -4,38 +4,53 @@ from __future__ import annotations
 
 import logging
 import re
+import tomllib
 from pathlib import Path
 
 from descry.scip.adapter import (
     AdapterConfig,
     CommandSpec,
     DiscoveredProject,
+    project_dir,
     register,
 )
 
 logger = logging.getLogger(__name__)
 
 
+# `impl#[Type][Trait]`: the trait an `impl` block is for, without its
+# arguments. A name that is no identifier is written between backticks.
+_RUST_TRAIT_IMPL = re.compile(r"impl#\[(?:`[^`]*`|[^\]`])*\]\[`?([^\]`<]+)")
+# A symbol's package and its descriptors
+_RUST_SYMBOL = re.compile(r"\S+ \S+ (\S+) \S+ (.+)", re.DOTALL)
 _RUST_DESCRIPTOR_PATTERN = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)(\([^)]*\)|[#./\[\]])?")
+
+
+def crate_dir(workspace_root: Path, name: str) -> Path:
+    """Directory of the crate that ``discover()`` reported as ``name``."""
+    return project_dir(workspace_root, name, "Cargo.toml", "src")
+
+
+def _load_manifest(cargo_toml: Path) -> dict:
+    """The parsed ``cargo_toml``, or an empty table where it cannot be read."""
+    try:
+        with open(cargo_toml, "rb") as f:
+            return tomllib.load(f)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        logger.debug(f"Cargo.toml parse failed at {cargo_toml}: {e}")
+        return {}
 
 
 def _parse_workspace_members(root_cargo: Path) -> list[Path]:
     """Parse ``[workspace] members = [...]`` entries from ``root_cargo``.
 
     Glob patterns like ``"crates/*"`` are expanded against the workspace
-    root. Returns absolute paths; invalid/missing entries are silently
-    dropped. Uses ``tomllib`` (3.11+); on parse error returns an empty
-    list so discovery falls through to the single-level glob fallback.
+    root. Returns absolute paths; invalid/missing entries and entries
+    outside the root are silently dropped. A manifest that cannot be
+    parsed gives an empty list, so discovery falls through to the
+    single-level glob fallback.
     """
-    try:
-        import tomllib
-
-        with open(root_cargo, "rb") as f:
-            data = tomllib.load(f)
-    except Exception as e:
-        logger.debug(f"Cargo.toml parse failed at {root_cargo}: {e}")
-        return []
-
+    data = _load_manifest(root_cargo)
     workspace = data.get("workspace") or {}
     raw_members = workspace.get("members") or []
     if not isinstance(raw_members, list):
@@ -48,8 +63,13 @@ def _parse_workspace_members(root_cargo: Path) -> list[Path]:
             continue
         if "*" in member or "?" in member or "[" in member:
             try:
-                result.extend(p for p in root.glob(member) if p.is_dir())
-            except (OSError, ValueError):
+                result.extend(
+                    p
+                    for p in root.glob(member)
+                    if p.is_dir() and p.resolve().is_relative_to(root.resolve())
+                )
+            except (OSError, ValueError, NotImplementedError):
+                # pathlib raises NotImplementedError for an absolute pattern.
                 pass
         else:
             candidate = (root / member).resolve()
@@ -88,11 +108,15 @@ class RustAdapter:
         2. Falls back to top-level ``*/Cargo.toml`` globbing for simple
            workspaces that don't declare ``[workspace] members`` (e.g.,
            tokio — each subdir is an independent crate).
-        3. If neither matches but root has ``src/``, index root as a
-           single-crate project (small libraries).
+        3. The root is a crate of its own, named after the root directory,
+           or ``.`` where a member is named so, where its ``Cargo.toml``
+           declares a ``[package]`` and it has ``src/``, or where nothing
+           else was found and it has ``src/``.
+           ``rust-analyzer scip`` indexes only the crate at the path it is
+           given, so a root package beside its members needs its own run.
         """
         root_cargo = root / "Cargo.toml"
-        if not root_cargo.exists():
+        if not root_cargo.is_file():
             return []
 
         projects: list[DiscoveredProject] = []
@@ -105,7 +129,7 @@ class RustAdapter:
                 part in excluded_dirs for part in member_dir.relative_to(root).parts
             ):
                 continue
-            if not (member_dir / "Cargo.toml").exists():
+            if not (member_dir / "Cargo.toml").is_file():
                 continue
             if not (member_dir / "src").exists():
                 continue
@@ -124,7 +148,7 @@ class RustAdapter:
         if not projects:
             for cargo_toml in root.glob("*/Cargo.toml"):
                 crate_dir = cargo_toml.parent
-                if crate_dir.name.startswith("."):
+                if crate_dir.name.startswith(".") or not cargo_toml.is_file():
                     continue
                 if crate_dir.name in excluded_dirs:
                     continue
@@ -141,10 +165,14 @@ class RustAdapter:
                     )
                 )
 
-        if not projects and (root / "src").exists():
+        root_package = "package" in _load_manifest(root_cargo)
+        if (root_package or not projects) and (root / "src").exists():
+            # Named after the root directory, or `.` where a member already
+            # holds that name; `crate_dir` resolves either to the root.
+            taken = any(p.name == root.name for p in projects)
             projects.append(
                 DiscoveredProject(
-                    name=root.name,
+                    name="." if taken else root.name,
                     root=root,
                     language=self.name,
                 )
@@ -165,7 +193,7 @@ class RustAdapter:
         passed as the positional argument, so rust-analyzer can share its
         workspace analysis cache across invocations.
         """
-        crate_path = project.root / project.name
+        crate_path = crate_dir(project.root, project.name)
         argv: list[str] = []
         if config.toolchain:
             argv.extend(["rustup", "run", config.toolchain])
@@ -180,6 +208,45 @@ class RustAdapter:
         )
         argv.extend(config.extra_args)
         return CommandSpec(argv=argv, cwd=project.root)
+
+    def _packages(self, root: Path | None) -> set[str]:
+        """Cargo package names of the crates ``discover()`` finds in ``root``."""
+        names = set()
+        for project in self.discover(root, set()) if root else ():
+            manifest = crate_dir(root, project.name) / "Cargo.toml"
+            if not manifest.is_file():
+                continue
+            try:
+                with open(manifest, "rb") as f:
+                    names.add(tomllib.load(f)["package"]["name"])
+            except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError):
+                pass
+        return names
+
+    def leaving(self, defined, root):
+        """A test of whether a call of a symbol no index defines cannot
+        reach the project: it names a function, a method of a concrete type
+        (`impl#[String]len().`), or a method of a trait (`Display#fmt().`)
+        that no `impl` among ``defined``, the symbols the indexes define, is
+        for. A symbol of a crate of ``root`` that has no index does not
+        leave; the `impl`s of such a crate are not seen."""
+        found = map(_RUST_SYMBOL.fullmatch, defined)
+        known = [match.groups() for match in found if match]
+        found = (_RUST_TRAIT_IMPL.search(descriptors) for _, descriptors in known)
+        implemented = {impl[1].rpartition("::")[2] for impl in found if impl}
+        unindexed = self._packages(root) - {package for package, _ in known}
+
+        def leaves(symbol: str) -> bool:
+            match = _RUST_SYMBOL.fullmatch(symbol)
+            if not match or match[1] in unindexed or not match[2].endswith(")."):
+                return False
+            descriptors = match[2]
+            if "impl#[" in descriptors or "#" not in descriptors:
+                return True
+            trait = descriptors.rpartition("#")[0].rpartition("/")[2]
+            return trait not in implemented
+
+        return leaves
 
     def parse_descriptors(self, raw: str) -> list[str]:
         """Parse Rust-flavored SCIP descriptors into name components.

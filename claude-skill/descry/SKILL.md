@@ -237,7 +237,8 @@ model can tell indexed repo content apart from LLM-generated text. Prefer the
 MCP tools in MCP-enabled sessions; they're faster (no shell round-trip) and
 safer to feed into downstream reasoning.
 
-The 19 tools map 1:1 to the CLI subcommands. See
+The 19 tools map 1:1 to the CLI subcommands, except `embedding-models`,
+which is CLI-only. See
 `references/mcp-tools.md` for the full list and argument conventions.
 
 ## Outputs and further reading

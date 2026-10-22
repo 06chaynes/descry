@@ -58,14 +58,28 @@ class TestDotnetAdapterBuildCommand:
         # Roll-forward env so scip-dotnet (net9.0) runs on newer SDKs.
         assert spec.env_extras.get("DOTNET_ROLL_FORWARD") == "LatestMajor"
 
-    def test_extra_args_forwarded(self, tmp_path):
+    def test_names_the_solution(self, tmp_path):
+        """scip-dotnet does not find a `.slnx` itself."""
+        (tmp_path / "App.slnx").write_text("<Solution/>")
         project = DiscoveredProject(name="app", root=tmp_path, language="dotnet")
         spec = DotnetAdapter().build_command(
-            project,
-            tmp_path / "app.scip",
-            AdapterConfig(extra_args=("--skip-dotnet-restore",)),
+            project, tmp_path / "app.scip", AdapterConfig()
         )
-        assert spec.argv[-1] == "--skip-dotnet-restore"
+        assert spec.argv[-1] == "App.slnx"
+
+    def test_indexes_every_solution(self, tmp_path):
+        """Every `.slnx` is named, and where a `.sln` or project file is
+        there scip-dotnet is left to find each of them."""
+        project = DiscoveredProject(name="app", root=tmp_path, language="dotnet")
+        out = tmp_path / "app.scip"
+        for name in ("B.slnx", "A.slnx"):
+            (tmp_path / name).write_text("<Solution/>")
+        spec = DotnetAdapter().build_command(project, out, AdapterConfig())
+        assert spec.argv[-3:] == [str(out), "A.slnx", "B.slnx"]
+        for name in ("A.sln", "B.sln"):
+            (tmp_path / name).write_text("")
+        spec = DotnetAdapter().build_command(project, out, AdapterConfig())
+        assert spec.argv[-1] == str(out)
 
 
 class TestScipDotnetHealthStatus:

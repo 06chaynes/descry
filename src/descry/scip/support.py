@@ -16,7 +16,6 @@ time.
 from __future__ import annotations
 
 import logging
-import os
 
 import descry.scip.adapters  # noqa: F401 — side-effect: registers built-in adapters
 from descry.scip.adapter import (
@@ -24,6 +23,7 @@ from descry.scip.adapter import (
     available_adapters,
     indexer_status,
     reset_registry_state,
+    scip_disabled_by_env,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 def scip_available() -> bool:
     """True if at least one SCIP indexer is available (respects DESCRY_NO_SCIP)."""
-    if os.environ.get("DESCRY_NO_SCIP"):
+    if scip_disabled_by_env():
         return False
     return len(available_adapters()) > 0
 
@@ -57,7 +57,7 @@ def get_scip_status() -> dict:
 
     return {
         "available": scip_available(),
-        "disabled_by_env": bool(os.environ.get("DESCRY_NO_SCIP")),
+        "disabled_by_env": scip_disabled_by_env(),
         "indexers": indexers,
         # Legacy back-compat fields:
         "rust_analyzer_path": rust_info.get("path"),

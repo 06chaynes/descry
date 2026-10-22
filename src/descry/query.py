@@ -1,10 +1,11 @@
 import logging
-import os
 import math
+import os
+import re
 import time
 from collections import defaultdict
 from functools import lru_cache
-import re
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,20 @@ MAX_CALLERS_SHOWN = 15  # Maximum callers to show in context
 # Timeout (milliseconds)
 TIMEOUT_MS = 4000  # Wall-clock timeout for recursive operations
 
+# Hard ceiling on find_call_path_result's max_depth argument. The node budget and
+# the timeout bound the search itself.
+MAX_PATH_DEPTH = 50
+
+# Short spellings accepted by the `lang` search filter.
+_LANG_ALIASES = {
+    "ts": "typescript",
+    "js": "javascript",
+    "py": "python",
+    "rs": "rust",
+    "rb": "ruby",
+    "cs": "csharp",
+}
+
 
 def _estimate_tokens(text: str) -> int:
     """Estimate token count from text (rough approximation: 4 chars ≈ 1 token)."""
@@ -37,7 +52,7 @@ def _estimate_tokens(text: str) -> int:
 @lru_cache(maxsize=128)
 def _read_file_cached_inner(
     file_path: str,
-    mtime_ns: int,  # noqa: ARG001 — forms lru_cache key so mtime changes invalidate the entry
+    mtime_ns: int,
 ) -> tuple[str, ...]:
     """Inner cache keyed on (path, mtime_ns) so edits invalidate the entry.
 
@@ -65,6 +80,27 @@ def _read_file_cached(file_path: str) -> tuple[str, ...]:
     return _read_file_cached_inner(file_path, mtime_ns)
 
 
+def source_path(root, rel_path: str, max_bytes: int = 0) -> str:
+    """Where a graph-relative source file lives under `root`.
+
+    Empty unless it is a regular file inside `root`: a graph may be
+    hand-edited, so its paths are not trusted to stay in the project.
+    Empty too for a file larger than `max_bytes`, when that is not 0.
+    """
+    root = Path(root).resolve()
+    try:
+        path = (root / rel_path).resolve()
+        if (
+            path.is_relative_to(root)
+            and path.is_file()
+            and not (max_bytes and path.stat().st_size > max_bytes)
+        ):
+            return str(path)
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return ""
+
+
 def _clear_file_cache():
     """Clear the file content cache (useful after indexing)."""
     _read_file_cached_inner.cache_clear()
@@ -75,22 +111,9 @@ def _get_syntax_lang(file_path: str, lang_map: dict[str, str] | None = None) -> 
     ext = os.path.splitext(file_path)[1].lower()
     if lang_map:
         return lang_map.get(ext, "")
-    default_lang_map = {
-        ".rs": "rust",
-        ".py": "python",
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".svelte": "svelte",
-        ".proto": "protobuf",
-        ".json": "json",
-        ".toml": "toml",
-        ".yaml": "yaml",
-        ".yml": "yaml",
-        ".md": "markdown",
-    }
-    return default_lang_map.get(ext, "")
+    from descry.handlers import _DEFAULT_SYNTAX_LANG_MAP
+
+    return _DEFAULT_SYNTAX_LANG_MAP.get(ext, "")
 
 
 def _normalize_name(name: str) -> str:
@@ -137,6 +160,13 @@ def _get_name_variants(name: str) -> list[str]:
     return list(set(variants))  # Deduplicate
 
 
+def _ends_at_segment(node_id: str, name: str) -> bool:
+    """Whether ``node_id`` ends with ``name`` where one of its segments
+    starts: `Foo::m` ends `a.py::Foo::m` and not `a.py::BigFoo::m`."""
+    before = node_id[: -len(name)][-1:]
+    return node_id.endswith(name) and not (before.isalnum() or before == "_")
+
+
 def _clean_ref_name(ref_name: str, max_len: int = 60) -> str:
     """Clean up an unresolved reference name for display.
 
@@ -181,15 +211,23 @@ class GraphQuerier:
 
         self.data = load_graph_with_schema(graph_file)
 
+        # Paths in node IDs are relative to the project root.
+        self._project_root = config.project_root if config else None
+        self._max_file_bytes = config.max_file_bytes if config else 0
+
         self.nodes = {n["id"]: n for n in self.data["nodes"]}
         self.edges = self.data["edges"]
 
         self.outgoing = defaultdict(list)
         self.incoming = defaultdict(list)
+        # candidate node id -> the unresolved edges that may reach it
+        self.candidate_incoming = defaultdict(list)
 
         for edge in self.edges:
             self.outgoing[edge["source"]].append(edge)
             self.incoming[edge["target"]].append(edge)
+            for candidate in edge.get("metadata", {}).get("candidates", ()):
+                self.candidate_incoming[candidate].append(edge)
 
         # Config-driven limits (fall back to module-level constants)
         self._max_depth = config.max_depth if config else MAX_DEPTH
@@ -216,20 +254,36 @@ class GraphQuerier:
         self._indices_built = False
 
         # Memoization cache for recursive expansion
-        self._expansion_cache = {}  # {(node_id, depth): (results, token_cost)}
+        self._expansion_cache = {}  # {key: (results, token_cost, nodes_added)}
+
+    def _disk_path(self, file_path):
+        """Where a graph-relative source path lives on disk; see source_path.
+
+        Empty when the querier has no project root to resolve it against,
+        and for a file over `[code_files] max_file_mb`.
+        """
+        if self._project_root:
+            return source_path(self._project_root, file_path, self._max_file_bytes)
+        return ""
 
     def get_source_segment(self, file_path, start_line, end_line):
         """Get source code segment using cached file content."""
         try:
-            lines = _read_file_cached(file_path)
+            lines = _read_file_cached(self._disk_path(file_path))
             if not lines:
                 return "<Error: file not found or empty>"
             # line numbers are 1-based
             start = max(0, start_line - 1)
             end = min(len(lines), end_line)
             return "".join(lines[start:end])
-        except Exception as e:
+        except OSError as e:
             return f"<Error reading file: {e}>"
+
+    def is_test(self, node_id):
+        """Whether ``node_id`` is test code: in a test file, or a test
+        function by its name."""
+        self._ensure_filter_indices()
+        return node_id in self._index_is_test
 
     def _ensure_filter_indices(self):
         """Build filter indices lazily on first use.
@@ -249,17 +303,6 @@ class GraphQuerier:
         self._index_by_lang = defaultdict(set)
         self._index_by_type = defaultdict(set)
         self._index_is_test = set()
-
-        lang_map = {
-            ".rs": "rust",
-            ".ts": "typescript",
-            ".tsx": "typescript",
-            ".js": "javascript",
-            ".jsx": "javascript",
-            ".svelte": "svelte",
-            ".py": "python",
-            ".proto": "protobuf",
-        }
 
         # Test detection patterns
         test_path_patterns = self._test_path_patterns or (
@@ -303,10 +346,9 @@ class GraphQuerier:
                     self._index_by_crate[crate].add(node_id)
 
                 # Extract language from extension
-                for ext, lang in lang_map.items():
-                    if path.endswith(ext):
-                        self._index_by_lang[lang].add(node_id)
-                        break
+                lang = _get_syntax_lang(path, self._syntax_lang_map)
+                if lang:
+                    self._index_by_lang[lang].add(node_id)
 
                 # Test detection: check path patterns and file suffixes
                 is_test_file = any(p in path for p in test_path_patterns) or any(
@@ -356,7 +398,7 @@ class GraphQuerier:
         Threshold of 1000 tokens (~100 lines) covers most middleware/interceptor patterns.
         """
         try:
-            all_lines = _read_file_cached(file_path)
+            all_lines = _read_file_cached(self._disk_path(file_path))
             if not all_lines:
                 return "<Error: file not found or empty>"
 
@@ -409,7 +451,7 @@ class GraphQuerier:
                 + "".join(tail)
             )
 
-        except Exception as e:
+        except OSError as e:
             return f"<Error reading file: {e}>"
 
     def get_context_prompt(
@@ -460,7 +502,7 @@ class GraphQuerier:
 
         # 1. Identify File
         file_path_rel = node["id"].split("::")[0].replace("FILE:", "")
-        if not os.path.exists(file_path_rel):
+        if not os.path.exists(self._disk_path(file_path_rel)):
             return f"ERROR: Source file '{file_path_rel}' not found on disk."
 
         # Determine syntax highlighting language
@@ -581,7 +623,9 @@ class GraphQuerier:
                     sig = c_meta.get("signature", f"{c_meta.get('name')}(...)")
 
                     # INLINING LOGIC: If small (< threshold tokens), show code.
-                    if c_tokens < inline_threshold and os.path.exists(c_file):
+                    if c_tokens < inline_threshold and os.path.exists(
+                        self._disk_path(c_file)
+                    ):
                         c_start = c_meta.get("lineno", 1)
                         c_end = c_meta.get("end_lineno", c_start)
                         c_code = self.get_source_segment(c_file, c_start, c_end)
@@ -754,7 +798,7 @@ class GraphQuerier:
         if candidates:
             for node in self.nodes.values():
                 if node["type"] in ("Function", "Method"):
-                    name = node["metadata"]["name"]
+                    name = node["metadata"].get("name", "")
                     # Check exact match or verify it starts with test_ and contains symbol
                     if name in candidates:
                         found_tests.append(f"{node['id']} (Direct match)")
@@ -772,7 +816,7 @@ class GraphQuerier:
         """Find Configuration nodes in the same file (interceptors, middleware, event handlers).
 
         This helps users understand the full setup when looking at related functions.
-        For example, when viewing setAuthTokenGetter, show the request interceptor that uses it.
+        For example, when viewing set_token_getter, show the request interceptor that uses it.
 
         Args:
             file_id: The file ID (e.g., "FILE:webapp/src/lib/api/client.ts")
@@ -933,7 +977,7 @@ class GraphQuerier:
         if current_tokens > max_tokens:
             # Apply aggressive head_lines truncation
             match = re.search(
-                r"(#### Source Code:\n```" + source_lang + r"\n)(.*?)(```)",
+                r"(#### Source Code:\n```" + re.escape(source_lang) + r"\n)(.*?)(```)",
                 result,
                 re.DOTALL,
             )
@@ -992,7 +1036,7 @@ class GraphQuerier:
 
             # Get file path and check it exists
             file_path = callee_id.split("::")[0].replace("FILE:", "")
-            if not os.path.exists(file_path):
+            if not os.path.exists(self._disk_path(file_path)):
                 continue
 
             # Get source code
@@ -1024,13 +1068,13 @@ class GraphQuerier:
 
         Handles partial matches for:
         - Symbol name only (e.g., "authenticate" finds "FILE:auth.rs::authenticate")
-        - Class::method format (e.g., "JwtAuth::from_request_parts")
+        - Class::method format (e.g., "TokenAuth::from_request_parts")
         - Partial paths (e.g., "auth.rs::validate_token")
         - Naming convention variants (camelCase vs snake_case)
 
         Returns list of candidate nodes with match quality scores.
         """
-        # D.3: skip when query is empty/whitespace (would "match" all nodes).
+        # Skip when query is empty/whitespace (would "match" all nodes).
         if not query or not query.strip():
             return []
         candidates = []
@@ -1068,7 +1112,7 @@ class GraphQuerier:
             elif node_name_normalized == query_normalized:
                 score += 80  # Naming convention variant
 
-            # Partial symbol match (D.3: require >= 2 chars to avoid
+            # Partial symbol match (require >= 2 chars to avoid
             # `"" in anything` being always True)
             elif len(query_normalized) >= 2 and (
                 query_normalized in node_name_normalized
@@ -1155,7 +1199,9 @@ class GraphQuerier:
         if not target_node:
             return []
 
-        target_name = target_node["metadata"]["name"]
+        target_name = target_node["metadata"].get("name")
+        if not target_name:
+            return []
         examples = []
 
         # We need to find edges that target REF:target_name or REF:parent.target_name
@@ -1192,7 +1238,7 @@ class GraphQuerier:
             file_path = source_id.split("::")[0].replace("FILE:", "")
             lineno = edge.get("metadata", {}).get("lineno")
 
-            if lineno and os.path.exists(file_path):
+            if lineno and os.path.exists(self._disk_path(file_path)):
                 # Get context around the call (e.g. -1 to +1 lines)
                 code = self.get_source_segment(file_path, lineno - 1, lineno + 2)
                 examples.append(
@@ -1293,15 +1339,26 @@ class GraphQuerier:
 
         # Check memoization cache. Key includes indent because rendered
         # output lines contain indentation prefixes; caching without the
-        # indent would produce wrong-depth whitespace on re-use.
-        cache_key = (node_id, depth - current_depth + 1, indent)
+        # indent would produce wrong-depth whitespace on re-use. It includes
+        # the budget and threshold because they decide what is inlined, and
+        # the already-expanded set because those nodes are skipped; the nodes
+        # an expansion adds are stored so a hit adds them too.
+        expanded_at_entry = frozenset(expanded)
+        budget_at_entry = budget
+        cache_key = (
+            node_id,
+            depth - current_depth + 1,
+            indent,
+            budget,
+            inline_threshold,
+            expanded_at_entry,
+        )
         if cache_key in self._expansion_cache:
-            cached_results, cached_cost = self._expansion_cache[cache_key]
-            if cached_cost <= budget:
-                return list(cached_results), budget - cached_cost
+            cached_results, cached_cost, cached_added = self._expansion_cache[cache_key]
+            expanded |= cached_added
+            return list(cached_results), budget - cached_cost
 
         results = []
-        tokens_used = 0
         callees = self.get_callees(node_id)[: self._max_children_per_level]
 
         for callee_id in callees:
@@ -1331,7 +1388,7 @@ class GraphQuerier:
                 if (
                     c_tokens <= inline_threshold
                     and c_tokens <= budget
-                    and os.path.exists(c_file)
+                    and os.path.exists(self._disk_path(c_file))
                 ):
                     c_start = c_meta.get("lineno", 1)
                     c_end = c_meta.get("end_lineno", c_start + 10)
@@ -1345,7 +1402,6 @@ class GraphQuerier:
                     results.append(f"{indent_str}  ```{c_lang}")
                     results.append(code_indented)
                     results.append(f"{indent_str}  ```")
-                    tokens_used += c_tokens
                     budget -= c_tokens
 
                     # Recurse if depth allows
@@ -1372,10 +1428,36 @@ class GraphQuerier:
                 clean_name = _clean_ref_name(raw_name)
                 results.append(f"{indent_str}- `{clean_name}` (External)")
 
-        # Cache results
-        self._expansion_cache[cache_key] = (results.copy(), tokens_used)
+        # Cache results, with the cost of the whole subtree, unless the
+        # timeout cut the expansion short.
+        if (time.time() - start_time) * 1000 <= self._timeout_ms:
+            self._expansion_cache[cache_key] = (
+                results.copy(),
+                budget_at_entry - budget,
+                expanded - expanded_at_entry,
+            )
 
         return results, budget
+
+    def _resolve_flow_start(self, start_name, depth):
+        """Clamp depth to the configured ceiling and resolve the start symbol.
+
+        Returns ``(func_nodes, depth)``; ``func_nodes`` is empty when nothing
+        matched, leaving each caller to raise its own error shape.
+        """
+        # The project's `[query] max_depth` is the ceiling, or 5 when unset.
+        effective_max = self._max_depth if self._max_depth else 5
+        depth = min(depth, effective_max)
+
+        start_nodes = self.find_nodes_by_name(start_name)
+        if not start_nodes:
+            start_nodes = self.find_nodes_by_name(start_name, fuzzy=True)
+
+        func_nodes = [n for n in start_nodes if n["type"] in ("Function", "Method")]
+        if not func_nodes and start_nodes:
+            # Fall back to the first match even when it is not a function.
+            func_nodes = start_nodes[:1]
+        return func_nodes, depth
 
     def trace_flow(
         self,
@@ -1401,24 +1483,9 @@ class GraphQuerier:
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
-        # Respect the project's configured `[query] max_depth` ceiling, with
-        # a fallback of 5 for the legacy hard limit. Previously this method
-        # hardcoded `min(depth, 5)` and silently ignored `.descry.toml`.
-        effective_max = self._max_depth if self._max_depth else 5
-        depth = min(depth, effective_max)
-
-        # Resolve start node
-        start_nodes = self.find_nodes_by_name(start_name)
-        if not start_nodes:
-            # Try fuzzy match
-            start_nodes = self.find_nodes_by_name(start_name, fuzzy=True)
-
-        func_nodes = [n for n in start_nodes if n["type"] in ("Function", "Method")]
+        func_nodes, depth = self._resolve_flow_start(start_name, depth)
         if not func_nodes:
-            if start_nodes:
-                func_nodes = start_nodes[:1]  # Use first match even if not function
-            else:
-                return f"No function '{start_name}' found."
+            return f"No function '{start_name}' found."
 
         start_node = func_nodes[0]
         start_id = start_node["id"]
@@ -1450,7 +1517,9 @@ class GraphQuerier:
         start_time = time.time()
         nodes_visited = 0
 
-        def trace(node_id: str, current_depth: int, path: list) -> bool:
+        def trace(
+            node_id: str, current_depth: int, path: list, candidates=None
+        ) -> bool:
             nonlocal nodes_visited
 
             # Check limits
@@ -1482,20 +1551,25 @@ class GraphQuerier:
                 return True
 
             # Get next level
+            ambiguous = {}
             if direction == "forward":
                 next_ids = self.get_callees(node_id)[: self._max_children_per_level]
             else:
                 next_ids = self.get_callers(name)[: self._max_children_per_level]
+                ambiguous = self.get_ambiguous_callers(name)
 
             # Format node
             indent = "  " * (current_depth - 1)
             arrow = "├─" if current_depth > 1 else ""
-            output.append(f"{indent}{arrow}[{node_type}] **{name}** ({tokens} toks)")
+            output.append(
+                f"{indent}{arrow}[{node_type}] **{name}** ({tokens} toks)"
+                f"{self.one_of(candidates)}"
+            )
 
             # Inline small functions
             if tokens <= inline_threshold and tokens > 0:
                 file_path = node_id.split("::")[0].replace("FILE:", "")
-                if os.path.exists(file_path):
+                if os.path.exists(self._disk_path(file_path)):
                     start_line = meta.get("lineno", 1)
                     end_line = meta.get("end_lineno", start_line + 10)
                     code = self.get_source_segment(file_path, start_line, end_line)
@@ -1506,7 +1580,9 @@ class GraphQuerier:
 
             # Recurse (limit branching)
             for next_id in next_ids:
-                if trace(next_id, current_depth + 1, path + [node_id]):
+                if trace(
+                    next_id, current_depth + 1, path + [node_id], ambiguous.get(next_id)
+                ):
                     return True
             return False
 
@@ -1525,30 +1601,22 @@ class GraphQuerier:
         start_name: str,
         direction: str = "forward",
         depth: int = 3,
+        target: str | None = None,
         inline_threshold: int = 100,
         timeout_ms: int | None = None,
     ) -> dict:
         """Trace call flow, returning a structured tree for UI rendering.
 
-        Returns dict with keys: root, alternatives (optional), note (optional).
+        Returns dict with keys: root, alternatives (optional), note (optional),
+        path_to_target (symbol names from the start to `target`, when reached).
         Each tree node has: id, name, type, tokens, file, line, code, lang, children.
+        The trace stops at the first node named `target`.
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
-        effective_max = self._max_depth if self._max_depth else 5
-        depth = min(depth, effective_max)
-
-        # Resolve start node
-        start_nodes = self.find_nodes_by_name(start_name)
-        if not start_nodes:
-            start_nodes = self.find_nodes_by_name(start_name, fuzzy=True)
-
-        func_nodes = [n for n in start_nodes if n["type"] in ("Function", "Method")]
+        func_nodes, depth = self._resolve_flow_start(start_name, depth)
         if not func_nodes:
-            if start_nodes:
-                func_nodes = start_nodes[:1]
-            else:
-                return {"error": f"No function '{start_name}' found."}
+            return {"error": f"No function '{start_name}' found."}
 
         start_node = func_nodes[0]
         start_id = start_node["id"]
@@ -1574,10 +1642,13 @@ class GraphQuerier:
                 )
 
         visited = set()
+        path_to_target = []
         start_time = time.time()
         nodes_visited = 0
 
-        def build_tree(node_id: str, current_depth: int) -> dict | None:
+        def build_tree(
+            node_id: str, current_depth: int, path: list, candidates=None
+        ) -> dict | None:
             nonlocal nodes_visited
 
             elapsed_ms = (time.time() - start_time) * 1000
@@ -1605,23 +1676,35 @@ class GraphQuerier:
 
             # Inline small functions
             code = None
-            if tokens <= inline_threshold and tokens > 0:
-                if os.path.exists(file_path):
-                    start_line = meta.get("lineno", 1)
-                    end_line = meta.get("end_lineno", start_line + 10)
-                    code = self.get_source_segment(file_path, start_line, end_line)
+            if (
+                tokens <= inline_threshold
+                and tokens > 0
+                and os.path.exists(self._disk_path(file_path))
+            ):
+                start_line = meta.get("lineno", 1)
+                end_line = meta.get("end_lineno", start_line + 10)
+                code = self.get_source_segment(file_path, start_line, end_line)
 
             # Recurse into children
-            if direction == "forward":
+            ambiguous = {}
+            if target and name == target:
+                path_to_target.extend([*path, name])
+                next_ids = []
+            elif direction == "forward":
                 next_ids = self.get_callees(node_id)[: self._max_children_per_level]
             else:
                 next_ids = self.get_callers(name)[: self._max_children_per_level]
+                ambiguous = self.get_ambiguous_callers(name)
 
             children = []
             for next_id in next_ids:
-                child = build_tree(next_id, current_depth + 1)
+                child = build_tree(
+                    next_id, current_depth + 1, [*path, name], ambiguous.get(next_id)
+                )
                 if child:
                     children.append(child)
+                if path_to_target:
+                    break
 
             return {
                 "id": node_id,
@@ -1632,12 +1715,15 @@ class GraphQuerier:
                 "line": line,
                 "code": code,
                 "lang": lang,
+                "candidates": candidates,
                 "children": children,
             }
 
-        root = build_tree(start_id, 1)
+        root = build_tree(start_id, 1, [])
 
         result = {"root": root}
+        if path_to_target:
+            result["path_to_target"] = path_to_target
         if note:
             result["note"] = note
         if alternatives:
@@ -1670,10 +1756,10 @@ class GraphQuerier:
                 name = current_id.replace("REF:", "")
                 matches = self.find_nodes_by_name(name)
                 class_matches = [m for m in matches if m["type"] == "Class"]
-                if class_matches:
+                if len(class_matches) == 1:
                     current_node = class_matches[0]
                 else:
-                    # External class or not found
+                    # External, not found, or one of several classes of the name
                     chain.insert(
                         0, {"id": current_id, "name": name, "type": "External"}
                     )
@@ -1694,11 +1780,16 @@ class GraphQuerier:
         methods = {}  # Name -> Node/Signature
 
         output = []
-        output.append(f"### Flattened View: `{class_node['metadata']['name']}`")
+        output.append(
+            f"### Flattened View: `{class_node['metadata'].get('name', class_node_id)}`"
+        )
         output.append("#### Inheritance Chain:")
         output.append(
             " -> ".join(
-                [c.get("metadata", {}).get("name", c.get("name")) for c in chain]
+                [
+                    c.get("metadata", {}).get("name") or c.get("name") or c["id"]
+                    for c in chain
+                ]
             )
         )
         output.append("\n#### Effective API:")
@@ -1713,7 +1804,7 @@ class GraphQuerier:
                 if edge["relation"] == "DEFINES":
                     child = self.nodes.get(edge["target"])
                     if child and child["type"] == "Method":
-                        name = child["metadata"]["name"]
+                        name = child["metadata"].get("name", "")
                         methods[name] = child
 
         # Output sorted methods
@@ -1777,7 +1868,7 @@ class GraphQuerier:
         - Adjacent terms (phrase proximity): +20 bonus
         """
         results = []
-        # D.3: drop empty/whitespace-only terms before scoring — `"" in s` is
+        # Drop empty/whitespace-only terms before scoring — `"" in s` is
         # always True and would match every node.
         terms = [t.lower() for t in query_terms if t and t.strip()]
         num_terms = len(terms)
@@ -1798,8 +1889,9 @@ class GraphQuerier:
                 if crate not in self._index_by_crate:
                     return []
                 candidate_ids &= self._index_by_crate[crate]
-            if lang and lang != "all" and lang in self._index_by_lang:
-                candidate_ids &= self._index_by_lang[lang]
+            if lang and lang != "all":
+                lang = _LANG_ALIASES.get(lang.lower(), lang.lower())
+                candidate_ids &= self._index_by_lang.get(lang, set())
             if symbol_type and symbol_type != "all":
                 type_map = {
                     "function": "Function",
@@ -1871,7 +1963,7 @@ class GraphQuerier:
                     score = 1000 + score * 2  # Base tier + amplified TF-IDF
 
                     # Check for adjacent terms (phrase proximity)
-                    phrase = "_".join(terms)  # e.g., "deployment_dispatch"
+                    phrase = "_".join(terms)  # e.g., "order_dispatch"
                     phrase_space = " ".join(terms)  # e.g., "deployment dispatch"
 
                     if phrase in name or phrase in full_text:
@@ -1930,16 +2022,17 @@ class GraphQuerier:
         Supports:
         - Exact name match: "start" matches any node with name="start"
         - Naming convention variants: "getClient" matches "get_client" (camelCase/snake_case)
-        - Qualified name: "ThoraxServer::start" matches node IDs ending with that pattern
+        - Qualified name: "Server::start", also written "Server.start", matches node IDs
+          ending with that pattern
         - File path suffix: "server.rs" matches files ending with that path
-        - Partial qualified: "auth::check_permission" matches IDs containing that pattern
+        - Partial qualified (when fuzzy=True): "Server::sta" matches IDs containing that pattern
         - Fuzzy/prefix matching (when fuzzy=True): "validate_token" matches "validate_token_format"
 
         Args:
             name: Name or pattern to search for
             fuzzy: If True, also matches names that start with or contain the search term
         """
-        # D.3: empty/whitespace name would match every node (`"" in s` is True).
+        # Empty/whitespace name would match every node (`"" in s` is True).
         if not name or not name.strip():
             return []
         exact_matches = []
@@ -1954,9 +2047,11 @@ class GraphQuerier:
             node_id = node["id"]
             node_name = meta.get("name", "")
             node_name_normalized = _normalize_name(node_name) if node_name else ""
+            owner, _, filed = node_id.rpartition("::")
 
-            # Exact name match
-            if node_name == name:
+            # Exact name match: the name source gives it, or the one it is
+            # filed under where that is another (an accessor's `get size`).
+            if name in (node_name, filed):
                 exact_matches.append(node)
                 continue
 
@@ -1973,21 +2068,18 @@ class GraphQuerier:
                 exact_matches.append(node)
                 continue
 
-            # Qualified name match (e.g., "ThoraxServer::start")
+            # Qualified name match (e.g., "Server::start"); an ID that only
+            # contains the name is a fuzzy match.
             if "::" in name:
-                # Check if node ID ends with the qualified name
-                if node_id.endswith((f"::{name}", name)):
+                lowered = node_id.lower()
+                if _ends_at_segment(node_id, name) or _ends_at_segment(
+                    f"{owner}::{node_name}", name
+                ):
                     exact_matches.append(node)
-                    continue
-                # Check if the qualified pattern appears in the node ID
-                if name in node_id:
-                    exact_matches.append(node)
-                    continue
-                # Also try with normalized variants
-                for variant in name_variants:
-                    if variant in node_id.lower():
-                        variant_matches.append(node)
-                        break
+                elif any(_ends_at_segment(lowered, v) for v in name_variants):
+                    variant_matches.append(node)
+                elif fuzzy and name.lower() in lowered:
+                    fuzzy_matches.append(node)
 
             # Fuzzy matching: prefix or contains (for simple names)
             if fuzzy and "::" not in name and len(name) >= 3:
@@ -1995,7 +2087,7 @@ class GraphQuerier:
                 if node_name.startswith(name):
                     fuzzy_matches.append(node)
                     continue
-                # Contains match in node ID (for cases like searching "dispatch" finding "dispatch_to_handler")
+                # Contains match in node ID (for cases like searching "dispatch" finding "dispatch_order")
                 if f"::{name}" in node_id.lower() or node_id.lower().endswith(
                     name.lower()
                 ):
@@ -2003,11 +2095,11 @@ class GraphQuerier:
                     continue
 
         # Return exact matches first, then variant matches, then fuzzy if no others
-        if exact_matches:
-            return exact_matches
-        if variant_matches:
-            return variant_matches
-        return fuzzy_matches
+        found = exact_matches or variant_matches or fuzzy_matches
+        if not found and "." in name:
+            # `Type.name` that matches nothing as written is `Type::name`.
+            return self.find_nodes_by_name(name.replace(".", "::"), fuzzy)
+        return found
 
     def find_trait_impls(self, method_name: str, trait_name: str | None = None) -> list:
         """Find all implementations of a trait method across the codebase.
@@ -2026,7 +2118,7 @@ class GraphQuerier:
 
         Example:
             find_trait_impls("from_request_parts")
-            # Returns JwtAuth, OptionalJwtAuth, SseAuth, Pagination, etc.
+            # Returns the extractor types: an auth guard, a pagination query, etc.
 
             find_trait_impls("from_request_parts", "FromRequestParts")
             # Returns only FromRequestParts implementations
@@ -2047,10 +2139,8 @@ class GraphQuerier:
 
             # Check if this is a trait implementation
             impl_trait = meta.get("trait_impl")
-            if impl_trait:
-                # If trait_name filter is specified, check it matches
-                if trait_name is None or impl_trait == trait_name:
-                    results.append(node)
+            if impl_trait and (trait_name is None or impl_trait == trait_name):
+                results.append(node)
 
         return results
 
@@ -2061,7 +2151,7 @@ class GraphQuerier:
 
         Supports:
         - Simple name: "start" matches calls to any function named start
-        - Qualified name: "ThoraxServer::start" matches that specific method
+        - Qualified name: "Server::start" matches that specific method
         - Full node ID: "FILE:path::Class::method" for exact matching
         - Struct names: includes INSTANTIATES edges for struct usage tracking
         - Fuzzy matching (when fuzzy=True): "validate_token" matches "validate_token_format"
@@ -2088,7 +2178,43 @@ class GraphQuerier:
                 if edge["relation"] in relevant_relations:
                     callers.add(edge["source"])
 
-        return list(callers)
+        # A call the resolver left unresolved but narrowed to candidates
+        # reaches each one.
+        for target_id in target_ids:
+            if target_id.startswith("REF:"):
+                continue
+            for edge in self.candidate_incoming.get(target_id, []):
+                if edge["relation"] in relevant_relations:
+                    callers.add(edge["source"])
+
+        return sorted(callers)
+
+    @staticmethod
+    def one_of(candidates):
+        """The note on a call that is one of ``candidates`` definitions an
+        unresolved edge names; empty for a call that is certain."""
+        return f" (one of {candidates} candidates)" if candidates else ""
+
+    def get_ambiguous_callers(self, func_name, fuzzy=False):
+        """``{caller: number of candidates}`` of the calls that may reach a
+        symbol matching ``func_name`` only through an unresolved edge's
+        candidates — the call is one of N, not a caller for sure."""
+        target_ids = self._resolve_target_ids(func_name, fuzzy)
+        relations = {"CALLS", "INSTANTIATES"}
+        certain = {
+            edge["source"]
+            for target_id in target_ids
+            if not target_id.startswith("REF:")
+            for edge in self.incoming.get(target_id, [])
+        }
+        ambiguous = {}
+        for target_id in target_ids:
+            if target_id.startswith("REF:"):
+                continue
+            for edge in self.candidate_incoming.get(target_id, []):
+                if edge["relation"] in relations and edge["source"] not in certain:
+                    ambiguous[edge["source"]] = len(edge["metadata"]["candidates"])
+        return ambiguous
 
     def _resolve_target_ids(self, func_name: str, fuzzy: bool = False) -> set:
         """Resolve a function name to all possible target IDs in the graph.
@@ -2096,26 +2222,23 @@ class GraphQuerier:
         Returns node IDs and REF: IDs that match the given name.
         """
         target_ids = set()
-        base_name = func_name.split("::")[-1].split(".")[-1]
+        # `Type::name`, also written `Type.name`, asks for that one; a bare
+        # name for every `name`.
+        names = {func_name, func_name.replace(".", "::"), func_name.replace("::", ".")}
 
         # Direct matches - these are the most common
         target_ids.add(func_name)
-        target_ids.add(f"REF:{func_name}")
-        target_ids.add(f"REF:{base_name}")
+        target_ids.update(f"REF:{name}" for name in names)
 
         # Find resolved nodes that match the name
         matches = self.find_nodes_by_name(func_name, fuzzy=fuzzy)
         for match in matches:
             target_ids.add(match["id"])
 
-        # For qualified names, also add the qualified REF
-        if "::" in func_name:
-            target_ids.add(f"REF:{func_name}")
-
         # Build additional targets from existing nodes/edges that end with our name
         # This catches cases like REF:Foo::Bar when searching for "Bar"
-        for node_id in self.nodes.keys():
-            if node_id.endswith((f"::{func_name}", f"::{base_name}")):
+        for node_id in self.nodes:
+            if node_id.endswith(tuple(f"::{name}" for name in names)):
                 target_ids.add(node_id)
 
         # Also check for REF targets in incoming edges (for unresolved calls)
@@ -2123,13 +2246,11 @@ class GraphQuerier:
         for target_id in list(self.incoming.keys()):
             if target_id.startswith("REF:"):
                 ref_name = target_id.replace("REF:", "")
-                # Exact match
-                if ref_name == func_name or ref_name == base_name:
-                    target_ids.add(target_id)
-                # Suffix match
-                elif ref_name.endswith((f"::{func_name}", f".{func_name}")):
-                    target_ids.add(target_id)
-                elif ref_name.endswith((f"::{base_name}", f".{base_name}")):
+                # Exact or suffix match
+                endings = tuple(
+                    f"{mark}{name}" for name in names for mark in ("::", ".")
+                )
+                if ref_name in names or ref_name.endswith(endings):
                     target_ids.add(target_id)
                 # Fuzzy prefix match
                 elif fuzzy and len(func_name) >= 3:
@@ -2172,13 +2293,25 @@ class GraphQuerier:
 
         return callees
 
-    def find_call_path(
+    def get_ambiguous_callees(self, func_node_id):
+        """``{REF: target: number of candidates}`` of the calls of
+        ``func_node_id`` the resolver left unresolved but narrowed — each
+        is one call that may reach one of N definitions, not N calls."""
+        ambiguous = {}
+        for edge in self.outgoing[func_node_id]:
+            if edge["relation"] == "CALLS" and edge["target"].startswith("REF:"):
+                candidates = edge.get("metadata", {}).get("candidates")
+                if candidates:
+                    ambiguous[edge["target"]] = len(candidates)
+        return ambiguous
+
+    def find_call_path_result(
         self,
         start_name: str,
         end_name: str,
         max_depth: int = 10,
         direction: str = "forward",
-    ) -> list:
+    ) -> dict:
         """Find shortest call path between two symbols using BFS.
 
         Much more focused than trace_flow which shows entire call trees.
@@ -2187,11 +2320,16 @@ class GraphQuerier:
         Args:
             start_name: Starting symbol name (e.g., 'handle_request')
             end_name: Target symbol name (e.g., 'validate_token')
-            max_depth: Maximum path length (default: 10)
+            max_depth: Maximum path length (default: 10, at most MAX_PATH_DEPTH)
             direction: 'forward' (start calls end) or 'backward' (end calls start)
 
         Returns:
-            List of hops, each containing:
+            Dict with:
+            - status: 'found'; 'not_found' when the search completed without
+              reaching the target; 'timeout' or 'node_budget' when it was cut
+              off first, so a path may still exist
+            - max_depth: the depth actually searched
+            - path: list of hops (empty unless found), each containing:
             - caller_id: Full node ID of the caller
             - caller_name: Short name
             - callee_id: Full node ID of the callee
@@ -2199,94 +2337,99 @@ class GraphQuerier:
             - call_line: Line number where call occurs
             - call_snippet: Code snippet around the call (3 lines)
             - file_path: File containing the call
+            - candidates: on a hop through an unresolved call, how many
+              definitions the call may reach; absent on a resolved call
 
         Example:
-            find_call_path("create_deployment", "dispatch_to_handler")
+            find_call_path_result("create_order", "dispatch_order")
             # Returns the direct path with code snippets at each hop
         """
         from collections import deque
 
-        # Respect configured depth ceiling, and cap visited-node expansion
-        # and wall time so a pathological graph shape cannot stall the
-        # service. Previously this BFS had only `max_depth` and could chew
-        # through the entire call graph with no budget.
-        effective_max_depth = self._max_depth if self._max_depth else 10
-        max_depth = min(max_depth, effective_max_depth)
+        # Cap visited-node expansion and wall time so a pathological graph
+        # shape cannot stall the service however deep the caller asks to look.
+        max_depth = min(max_depth, MAX_PATH_DEPTH)
         node_budget = self._max_nodes if self._max_nodes else 2000
         deadline = time.time() + (self._timeout_ms / 1000.0)
+
+        def result(status, path=()):
+            return {"status": status, "max_depth": max_depth, "path": list(path)}
 
         # Resolve start and end to node IDs
         start_nodes = self.find_nodes_by_name(start_name)
         end_nodes = self.find_nodes_by_name(end_name)
 
         if not start_nodes:
-            return []
+            return result("not_found")
         if not end_nodes:
-            return []
+            return result("not_found")
 
-        start_id = start_nodes[0]["id"]
+        start_ids = [n["id"] for n in start_nodes]
         end_ids = {n["id"] for n in end_nodes}
 
-        # BFS with path tracking
-        queue = deque([(start_id, [])])  # (node_id, path_so_far)
-        visited = {start_id}
-        # Pre-index REF: name resolution once per call to avoid O(N) scans
-        # inside the inner loop — noticeably faster on large graphs and
-        # cheaper against the node_budget.
-        ref_cache: dict[str, str | None] = {}
+        # BFS with path tracking: first over the calls that are certain, then
+        # also through unresolved calls, each reaching one of its candidates.
+        passes = (False, True) if self.candidate_incoming else (False,)
+        for through_candidates in passes:
+            # (node_id, path_so_far)
+            queue = deque((start_id, []) for start_id in start_ids)
+            visited = set(start_ids)
 
-        while queue:
-            if time.time() > deadline or len(visited) >= node_budget:
-                return []  # Budget exhausted — caller treats as "no path"
+            while queue:
+                if time.time() > deadline:
+                    return result("timeout")
+                if len(visited) - len(start_ids) >= node_budget:
+                    return result("node_budget")
 
-            current_id, path = queue.popleft()
+                current_id, path = queue.popleft()
 
-            # Get edges based on direction
-            if direction == "forward":
-                edges = [
-                    e
-                    for e in self.outgoing.get(current_id, [])
-                    if e["relation"] in ("CALLS", "CALLS_RESOLVED")
-                ]
-            else:
-                edges = [
-                    e
-                    for e in self.incoming.get(current_id, [])
-                    if e["relation"] in ("CALLS", "CALLS_RESOLVED")
-                ]
+                # Get edges based on direction
+                if direction == "forward":
+                    edges = [
+                        e
+                        for e in self.outgoing.get(current_id, [])
+                        if e["relation"] in ("CALLS", "CALLS_RESOLVED")
+                    ]
+                else:
+                    incoming = self.incoming.get(current_id, [])
+                    if through_candidates:
+                        incoming = incoming + self.candidate_incoming.get(
+                            current_id, []
+                        )
+                    edges = [
+                        e
+                        for e in incoming
+                        if e["relation"] in ("CALLS", "CALLS_RESOLVED")
+                    ]
 
-            for edge in edges:
-                next_id = edge["target"] if direction == "forward" else edge["source"]
-
-                # Try to resolve REF: nodes to actual nodes (memoized per call).
-                if next_id.startswith("REF:"):
-                    ref_name = next_id.replace("REF:", "")
-                    if ref_name in ref_cache:
-                        resolved_id = ref_cache[ref_name]
+                for edge in edges:
+                    if direction == "backward":
+                        reached = (edge["source"],)
+                    elif not edge["target"].startswith("REF:"):
+                        reached = (edge["target"],)
+                    elif through_candidates:
+                        # An unresolved call reaches one of its candidates.
+                        reached = edge.get("metadata", {}).get("candidates", ())
                     else:
-                        resolved = self.find_nodes_by_name(ref_name)
-                        resolved_id = resolved[0]["id"] if resolved else None
-                        ref_cache[ref_name] = resolved_id
-                    if resolved_id is None:
-                        continue
-                    next_id = resolved_id
+                        reached = ()
 
-                if next_id in visited:
-                    continue
-                visited.add(next_id)
+                    for next_id in reached:
+                        if next_id in visited and next_id not in end_ids:
+                            continue
+                        visited.add(next_id)
 
-                # Build hop info
-                hop = self._build_hop_info(edge, current_id, next_id, direction)
-                new_path = path + [hop]
+                        # Build hop info
+                        hop = self._build_hop_info(edge, current_id, next_id, direction)
+                        new_path = path + [hop]
 
-                # Check if we reached the target
-                if next_id in end_ids:
-                    return new_path
+                        # Check if we reached the target
+                        if next_id in end_ids:
+                            return result("found", new_path)
 
-                if len(new_path) < max_depth:
-                    queue.append((next_id, new_path))
+                        if len(new_path) < max_depth:
+                            queue.append((next_id, new_path))
 
-        return []  # No path found
+        return result("not_found")
 
     def _build_hop_info(
         self, edge: dict, caller_id: str, callee_id: str, direction: str
@@ -2317,10 +2460,10 @@ class GraphQuerier:
 
         # Get code snippet around call site (3 lines: before, call, after)
         snippet = ""
-        if call_line and os.path.exists(file_path):
+        if call_line and os.path.exists(self._disk_path(file_path)):
             snippet = self.get_source_segment(file_path, call_line - 1, call_line + 2)
 
-        return {
+        hop = {
             "caller_id": caller_id,
             "caller_name": caller_meta.get("name", caller_id.split("::")[-1]),
             "callee_id": callee_id,
@@ -2329,3 +2472,6 @@ class GraphQuerier:
             "call_snippet": snippet.strip() if snippet else "",
             "file_path": file_path,
         }
+        if edge["target"].startswith("REF:"):
+            hop["candidates"] = len(edge["metadata"]["candidates"])
+        return hop

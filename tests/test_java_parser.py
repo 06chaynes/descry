@@ -24,6 +24,27 @@ def _node_names(builder: CodeGraphBuilder) -> list[str]:
     return [n["id"] for n in builder.nodes]
 
 
+class TestTypeScope:
+    def test_brace_in_char_literal_does_not_end_the_class(self, builder):
+        src = """
+public class Reader {
+    public int peek() {
+        switch (c) {
+            case '}':
+                return 1;
+        }
+        return 0;
+    }
+
+    public int next() {
+        return 2;
+    }
+}
+""".strip()
+        _parse(builder, src)
+        assert "FILE:src/Foo.java::Reader::next" in _node_names(builder)
+
+
 class TestClassExtraction:
     def test_simple_public_class(self, builder):
         src = """
@@ -213,9 +234,49 @@ public class X {
 }
 """.strip()
         _parse(builder, src)
-        call_targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
-        # java.lang.System.out.println should not produce a CALLS edge.
-        assert "REF:java.lang.System.out.println" not in call_targets
+        builder.resolve_references()
+        assert [e for e in builder.edges if e["relation"].startswith("CALLS")] == []
+
+    def test_constructor_without_modifier_is_a_declaration_not_a_call(self, builder):
+        src = """
+class Wrapper {
+    Wrapper(Instrument instrument) {
+        this.instrument = instrument;
+    }
+}
+""".strip()
+        _parse(builder, src)
+        assert "FILE:src/Foo.java::Wrapper::<init>" in _node_names(builder)
+        assert [e for e in builder.edges if e["relation"] == "CALLS"] == []
+
+    def test_string_literal_text_is_not_a_call(self, builder):
+        src = """
+public class X {
+    public String hint() {
+        return "Use reader.setLenient(true) to accept this";
+    }
+}
+""".strip()
+        _parse(builder, src)
+        assert [e for e in builder.edges if e["relation"] == "CALLS"] == []
+
+    def test_method_without_modifier_is_a_declaration_not_a_call(self, builder):
+        src = """
+interface Strategy {
+    Number readNumber(Reader in) throws IOException;
+}
+
+class Impl implements Strategy {
+    long[] values(Instant instant) {
+        return null;
+    }
+}
+""".strip()
+        _parse(builder, src)
+        ids = _node_names(builder)
+        assert "FILE:src/Foo.java::Strategy::readNumber" in ids
+        assert "FILE:src/Foo.java::Impl::values" in ids
+        assert [e for e in builder.edges if e["relation"] == "CALLS"] == []
 
     def test_control_flow_not_a_call(self, builder):
         src = """
@@ -231,6 +292,37 @@ public class X {
         assert "REF:tick" in call_targets
 
 
+class TestFieldAndMethodOfOneName:
+    def test_field_gets_its_own_node_and_the_method_keeps_its_id(self, builder):
+        """A field declared before or after a method of its name is
+        `<type>::field_<name>`; other fields keep `<type>::<name>`."""
+        src = """
+public class Counter {
+    private int size;
+    private int limit;
+
+    public int size() {
+        return size;
+    }
+
+    public int total() {
+        return total;
+    }
+
+    private int total;
+}
+""".strip()
+        _parse(builder, src)
+        types = {n["id"]: n["type"] for n in builder.nodes}
+        owner = "FILE:src/Foo.java::Counter"
+        assert types[f"{owner}::size"] == "Method"
+        assert types[f"{owner}::field_size"] == "Constant"
+        assert types[f"{owner}::total"] == "Method"
+        assert types[f"{owner}::field_total"] == "Constant"
+        assert types[f"{owner}::limit"] == "Constant"
+        assert f"{owner}::field_limit" not in types
+
+
 class TestPackageMetadata:
     def test_package_attached_to_file_node(self, builder):
         src = """
@@ -240,3 +332,81 @@ public class Foo {}
         _parse(builder, src)
         file_node = next(n for n in builder.nodes if n["id"] == "FILE:src/Foo.java")
         assert file_node.get("metadata", {}).get("java_package") == "com.example.app"
+
+
+class TestAllmanBraces:
+    def test_class_members_indexed(self, builder):
+        """A class whose `{` is on a later line still gets its members."""
+        src = """
+public class Foo
+    extends Base
+{
+    private int count;
+
+    public void bar()
+    {
+        helper();
+    }
+}
+""".strip()
+        _parse(builder, src)
+        ids = _node_names(builder)
+        assert "FILE:src/Foo.java::Foo::bar" in ids
+        assert "FILE:src/Foo.java::Foo::count" in ids
+        calls = {
+            (e["source"], e["target"])
+            for e in builder.edges
+            if e["relation"] == "CALLS"
+        }
+        assert ("FILE:src/Foo.java::Foo::bar", "REF:helper") in calls
+
+    def test_context_closes_with_class(self, builder):
+        """Members after an Allman class belong to the next class."""
+        src = """
+class First
+{
+    public void a() {}
+}
+
+class Second {
+    public void b() {}
+}
+""".strip()
+        _parse(builder, src)
+        ids = _node_names(builder)
+        assert "FILE:src/Foo.java::First::a" in ids
+        assert "FILE:src/Foo.java::Second::b" in ids
+
+
+class TestDeclarationsAndComments:
+    def test_declaration_is_not_a_call(self, builder):
+        """Declaring a method or constructor does not call it."""
+        src = """
+public class Foo {
+    public Foo(int size) {
+        applySize(size);
+    }
+
+    public void bar(int x) {
+        helper(x);
+    }
+}
+""".strip()
+        _parse(builder, src)
+        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
+        assert targets == {"REF:applySize", "REF:helper"}
+
+    def test_mid_line_block_comment_stripped(self, builder):
+        """Code inside a block comment that shares a line with code is skipped."""
+        src = """
+public class Foo {
+    public void bar() {
+        stepOne(); /* hidden(1);
+        alsoHidden(2); */ stepTwo();
+        /* inline(3); */ stepThree();
+    }
+}
+""".strip()
+        _parse(builder, src)
+        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
+        assert targets == {"REF:stepOne", "REF:stepTwo", "REF:stepThree"}

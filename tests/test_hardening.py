@@ -10,10 +10,9 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
-
-from types import SimpleNamespace
 
 from descry._graph import CURRENT_SCHEMA, GraphSchemaError, load_graph_with_schema
 from descry.handlers import (
@@ -24,7 +23,6 @@ from descry.handlers import (
     _validate_toolchain,
 )
 from descry.query import GraphQuerier
-
 
 # --- Schema version enforcement -------------------------------------------
 
@@ -51,6 +49,123 @@ class TestGraphSchemaGuard:
         )
         data = load_graph_with_schema(good)
         assert data["schema_version"] == CURRENT_SCHEMA
+
+
+class TestGraphShapeGuard:
+    @pytest.mark.parametrize(
+        "content",
+        [
+            [],
+            None,
+            "a string",
+            {"schema_version": CURRENT_SCHEMA},
+            {"schema_version": CURRENT_SCHEMA, "nodes": {}, "edges": []},
+            {"schema_version": CURRENT_SCHEMA, "nodes": [], "edges": None},
+            {"schema_version": CURRENT_SCHEMA, "nodes": ["n"], "edges": []},
+            {
+                "schema_version": CURRENT_SCHEMA,
+                "nodes": [{"type": "File"}],
+                "edges": [],
+            },
+            {"schema_version": CURRENT_SCHEMA, "nodes": [{"id": "a"}], "edges": []},
+            {
+                "schema_version": CURRENT_SCHEMA,
+                "nodes": [{"id": "a", "type": "File", "metadata": "x"}],
+                "edges": [],
+            },
+            {
+                "schema_version": CURRENT_SCHEMA,
+                "nodes": [{"id": "a", "type": "Function", "metadata": {"lineno": "3"}}],
+                "edges": [],
+            },
+            {"schema_version": CURRENT_SCHEMA, "nodes": [], "edges": [[]]},
+            {
+                "schema_version": CURRENT_SCHEMA,
+                "nodes": [],
+                "edges": [{"source": "a", "target": "b"}],
+            },
+            {
+                "schema_version": CURRENT_SCHEMA,
+                "nodes": [],
+                "edges": [
+                    {
+                        "source": "a",
+                        "target": "b",
+                        "relation": "CALLS",
+                        "metadata": {"lineno": "3"},
+                    }
+                ],
+            },
+        ],
+    )
+    def test_malformed_graph_raises_schema_error(self, tmp_path, content):
+        bad = tmp_path / "codebase_graph.json"
+        bad.write_text(json.dumps(content))
+        with pytest.raises(GraphSchemaError):
+            load_graph_with_schema(bad)
+        with pytest.raises(GraphSchemaError):
+            GraphQuerier(bad)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("token_count", "12"),
+            ("token_count", None),
+            ("in_degree", [1]),
+            ("in_degree", 1.5),
+            ("docstring", 7),
+            ("docstring", None),
+            ("name", None),
+            ("signature", ["x"]),
+            ("path", 7),
+        ],
+    )
+    def test_node_metadata_of_the_wrong_type_raises_schema_error(
+        self, tmp_path, field, value
+    ):
+        node = {"id": "FILE:a.py::f", "type": "Function", "metadata": {field: value}}
+        bad = tmp_path / "codebase_graph.json"
+        bad.write_text(
+            json.dumps({"schema_version": CURRENT_SCHEMA, "nodes": [node], "edges": []})
+        )
+        with pytest.raises(GraphSchemaError, match=field):
+            load_graph_with_schema(bad)
+
+    @pytest.mark.parametrize("candidates", ["FILE:a.py::f", [7], None])
+    def test_edge_candidates_of_the_wrong_type_raise_schema_error(
+        self, tmp_path, candidates
+    ):
+        edge = {
+            "source": "FILE:a.py::f",
+            "target": "REF:g",
+            "relation": "CALLS",
+            "metadata": {"candidates": candidates},
+        }
+        bad = tmp_path / "codebase_graph.json"
+        bad.write_text(
+            json.dumps({"schema_version": CURRENT_SCHEMA, "nodes": [], "edges": [edge]})
+        )
+        with pytest.raises(GraphSchemaError, match="candidates"):
+            load_graph_with_schema(bad)
+
+    def test_node_without_metadata_or_name_is_queryable(self, tmp_path):
+        path = tmp_path / "codebase_graph.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": CURRENT_SCHEMA,
+                    "nodes": [
+                        {"id": "FILE:a.py::f", "type": "Function"},
+                        {"id": "FILE:a.py::C", "type": "Class", "metadata": {}},
+                    ],
+                    "edges": [],
+                }
+            )
+        )
+        q = GraphQuerier(path)
+        assert q._find_related_tests("a.py", "f") == []
+        assert q._get_usage_examples("FILE:a.py::f") == []
+        assert "Flattened View" in q.flatten_class("FILE:a.py::C")
 
 
 # --- TOML → subprocess arg validators -------------------------------------
@@ -226,6 +341,8 @@ class TestFindCallPathBounds:
             test_path_patterns=None,
             test_file_suffixes=None,
             syntax_lang_map=None,
+            project_root=None,
+            max_file_bytes=0,
         )
         return GraphQuerier(path, config=config)
 
@@ -243,7 +360,7 @@ class TestFindCallPathBounds:
             }
         ]
         q = self._make_querier(tmp_path, nodes, edges)
-        hops = q.find_call_path("a", "b")
+        hops = q.find_call_path_result("a", "b")["path"]
         assert len(hops) == 1
         assert hops[0]["callee_name"] == "b"
 
@@ -276,15 +393,15 @@ class TestFindCallPathBounds:
         ]
         q = self._make_querier(tmp_path, nodes, edges, timeout_ms=2000)
         start = time.monotonic()
-        hops = q.find_call_path("a", "nonexistent")
+        hops = q.find_call_path_result("a", "nonexistent")["path"]
         elapsed = time.monotonic() - start
         assert elapsed < 2.0  # well under 2s sanity bound
         assert hops == []
 
     def test_respects_node_budget(self, tmp_path):
-        # Long linear chain; with a small node budget, path to terminal
-        # should fail gracefully rather than traverse everything.
-        chain_len = 50
+        # Long linear chain, within the depth limit; a roomy node budget
+        # reaches the end, so only the small budget explains the miss.
+        chain_len = 30
         nodes = [
             {
                 "id": f"FILE:x.py::n{i}",
@@ -302,10 +419,16 @@ class TestFindCallPathBounds:
             }
             for i in range(chain_len - 1)
         ]
+        target = f"n{chain_len - 1}"
+        roomy = self._make_querier(tmp_path, nodes, edges, max_nodes=2000)
+        assert (
+            len(roomy.find_call_path_result("n0", target, max_depth=40)["path"])
+            == chain_len - 1
+        )
+
         q = self._make_querier(tmp_path, nodes, edges, max_nodes=5)
-        hops = q.find_call_path("n0", f"n{chain_len - 1}", max_depth=100)
-        # With max_nodes=5 we must bail out well before reaching n49.
-        assert hops == []
+        cut_off = q.find_call_path_result("n0", target, max_depth=40)
+        assert cut_off == {"status": "node_budget", "max_depth": 40, "path": []}
 
 
 # --- reset_caches clears the stale file cache -----------------------------
@@ -313,7 +436,7 @@ class TestFindCallPathBounds:
 
 class TestCacheResetStaleFile:
     def test_file_cache_mtime_keyed(self, tmp_path):
-        from descry.query import _read_file_cached, _clear_file_cache
+        from descry.query import _clear_file_cache, _read_file_cached
 
         _clear_file_cache()
         path = tmp_path / "sample.py"
@@ -332,7 +455,11 @@ class TestCacheResetStaleFile:
         assert second == ("second\n",)
 
     def test_service_reset_caches_clears_file_cache(self, tmp_path):
-        from descry.query import _read_file_cached, _clear_file_cache
+        from descry.query import (
+            _clear_file_cache,
+            _read_file_cached,
+            _read_file_cached_inner,
+        )
 
         _clear_file_cache()
         config = DescryConfig(project_root=tmp_path)
@@ -340,7 +467,91 @@ class TestCacheResetStaleFile:
         path = tmp_path / "sample.py"
         path.write_text("alpha\n")
         _ = _read_file_cached(str(path))
+        assert _read_file_cached_inner.cache_info().currsize == 1
         # reset_caches should not error even when optional modules missing.
         svc.reset_caches()
-        # After reset, the cache is empty and the next read must re-stat.
-        assert _read_file_cached(str(path)) == ("alpha\n",)
+        assert _read_file_cached_inner.cache_info().currsize == 0
+
+
+class TestTOMLValueValidation:
+    def _config(self, tmp_path, toml, caplog):
+        import logging
+
+        (tmp_path / ".descry.toml").write_text(toml)
+        config = DescryConfig(project_root=tmp_path)
+        with caplog.at_level(logging.WARNING, logger="descry"):
+            config._apply_toml(DescryConfig._load_toml(tmp_path))
+        return config
+
+    @pytest.mark.parametrize(
+        ("key", "attr"),
+        [
+            ("scip_minutes", "scip_timeout_minutes"),
+            ("index_minutes", "index_timeout_minutes"),
+            ("embedding_seconds", "embedding_timeout"),
+            ("query_ms", "query_timeout_ms"),
+        ],
+    )
+    @pytest.mark.parametrize("bad", ['"10"', "true", "[1]"])
+    def test_non_numeric_timeout_keeps_the_default(
+        self, tmp_path, caplog, key, attr, bad
+    ):
+        default = getattr(DescryConfig(project_root=tmp_path), attr)
+        config = self._config(tmp_path, f"[timeouts]\n{key} = {bad}\n", caplog)
+        assert getattr(config, attr) == default
+        assert any(f"[timeouts] {key}" in r.message for r in caplog.records)
+
+    def test_numeric_timeouts_are_applied(self, tmp_path, caplog):
+        config = self._config(
+            tmp_path, "[timeouts]\nscip_minutes = 10\nquery_ms = 250.5\n", caplog
+        )
+        assert config.scip_timeout_minutes == 10
+        assert config.query_timeout_ms == 250.5
+        assert caplog.records == []
+
+    @pytest.mark.parametrize(
+        ("toml", "attr"),
+        [
+            ('[project]\nmax_stale_hours = "soon"\n', "max_stale_hours"),
+            ('[git]\ntimeout = "30"\n', "git_timeout"),
+            ('[query]\nmax_depth = "3"\n', "max_depth"),
+            ('[query]\nmax_nodes = "100"\n', "max_nodes"),
+            ('[query]\nmax_children_per_level = "10"\n', "max_children_per_level"),
+            ('[query]\nmax_callers_shown = "15"\n', "max_callers_shown"),
+        ],
+    )
+    def test_non_numeric_limit_keeps_the_default(self, tmp_path, caplog, toml, attr):
+        default = getattr(DescryConfig(project_root=tmp_path), attr)
+        assert getattr(self._config(tmp_path, toml, caplog), attr) == default
+        assert caplog.records
+
+    @pytest.mark.parametrize("value", ['"("', '"a b"', "3"])
+    def test_lang_map_value_that_is_not_a_language_name_is_ignored(
+        self, tmp_path, caplog, value
+    ):
+        config = self._config(tmp_path, f'[syntax.lang_map]\n".py" = {value}\n', caplog)
+        assert config.syntax_lang_map[".py"] == "python"
+        assert any("[syntax.lang_map]" in r.message for r in caplog.records)
+
+    def test_lang_map_accepts_fence_tags_with_punctuation(self, tmp_path, caplog):
+        config = self._config(
+            tmp_path, '[syntax.lang_map]\n".zz" = "c++"\n".fs" = "f#"\n', caplog
+        )
+        assert config.syntax_lang_map[".zz"] == "c++"
+        assert config.syntax_lang_map[".fs"] == "f#"
+        assert caplog.records == []
+
+    def test_empty_api_prefixes_are_dropped(self, tmp_path, caplog):
+        config = self._config(
+            tmp_path, '[cross_lang]\napi_prefixes = ["", "/api", ""]\n', caplog
+        )
+        assert config.api_prefixes == ["/api"]
+
+    @pytest.mark.parametrize("value", [".", "sub/.."])
+    def test_openapi_path_naming_the_root_is_ignored(self, tmp_path, caplog, value):
+        (tmp_path / "sub").mkdir()
+        config = self._config(
+            tmp_path, f'[cross_lang]\nopenapi_path = "{value}"\n', caplog
+        )
+        assert config.openapi_path is None
+        assert any("not a spec file" in r.message for r in caplog.records)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import logging
+import json
 import re
 from pathlib import Path
 
@@ -13,22 +13,26 @@ from descry.scip.adapter import (
     register,
 )
 
-logger = logging.getLogger(__name__)
-
-
 _BACKTICK_DESCRIPTOR_PATTERN = re.compile(
     r"([a-zA-Z_$][a-zA-Z0-9_$]*)(\([^)]*\)|[#./\[\]])?"
 )
+
+
+_SOURCE_PATTERNS = ("*.ts", "*.tsx", "*.js", "*.jsx")
+
+
+def _has_src(pkg_dir: Path) -> bool:
+    """True if ``pkg_dir`` has TS/TSX/JS/JSX files under ``src/``."""
+    return any(any(pkg_dir.glob(f"src/**/{p}")) for p in _SOURCE_PATTERNS)
 
 
 def _has_ts_js_sources(pkg_dir: Path) -> bool:
     """True if ``pkg_dir`` has TS/TSX/JS/JSX files under ``src/`` (or at
     the package root for flatter layouts without ``src/``).
     """
-    for pattern in ("*.ts", "*.tsx", "*.js", "*.jsx"):
-        if any(pkg_dir.glob(f"src/**/{pattern}")):
-            return True
-    for pattern in ("*.ts", "*.tsx", "*.js", "*.jsx"):
+    if _has_src(pkg_dir):
+        return True
+    for pattern in _SOURCE_PATTERNS:
         for candidate in pkg_dir.glob(pattern):
             if candidate.is_file():
                 return True
@@ -47,10 +51,12 @@ def _parse_ts_workspace_packages(root: Path) -> list[Path]:
     - **yarn berry** — same ``workspaces`` array in ``package.json``.
 
     Glob entries like ``"packages/*"`` are expanded against ``root``.
-    Invalid / missing configs yield an empty list.
+    Invalid / missing configs yield an empty list; entries that resolve
+    outside ``root`` are dropped.
     """
     result: list[Path] = []
     seen: set[Path] = set()
+    root_resolved = root.resolve()
 
     def _expand(entries: list) -> None:
         for entry in entries:
@@ -62,14 +68,17 @@ def _parse_ts_workspace_packages(root: Path) -> list[Path]:
                 else:
                     matches = [root / entry]
                 for m in matches:
+                    if not m.resolve().is_relative_to(root_resolved):
+                        continue
                     if m.is_dir() and m not in seen:
                         seen.add(m)
                         result.append(m)
-            except (OSError, ValueError):
+            except (OSError, ValueError, NotImplementedError):
+                # pathlib raises NotImplementedError for an absolute pattern.
                 continue
 
     pnpm_yaml = root / "pnpm-workspace.yaml"
-    if pnpm_yaml.exists():
+    if pnpm_yaml.is_file():
         try:
             text = pnpm_yaml.read_text(encoding="utf-8", errors="ignore")
         except OSError:
@@ -93,7 +102,7 @@ def _parse_ts_workspace_packages(root: Path) -> list[Path]:
         _expand(parsed_entries)
 
     root_pkg_json = root / "package.json"
-    if root_pkg_json.exists():
+    if root_pkg_json.is_file():
         try:
             import json as _json
 
@@ -194,11 +203,12 @@ class TypeScriptAdapter:
            root ``package.json`` ``workspaces`` array (npm / yarn), expand
            glob entries like ``"packages/*"``. Used by next.js, vite,
            and most modern monorepos.
-        2. **Top-level fallback.** ``*/package.json`` — simple multi-
-           package layouts with no explicit workspace config.
-        3. **Root fallback.** If no subpackages match but root itself has
-           ``package.json`` + TS/JS sources, index the root as a single
-           project.
+        2. **Root.** A root ``package.json`` with TS/JS sources is a single
+           project: scip-typescript run there indexes the tree under it.
+           A workspace root is a package too: one whose own ``src/`` holds
+           sources is a project beside its members.
+        3. **Top-level fallback.** ``*/package.json`` — simple multi-
+           package layouts with no root package or workspace config.
         """
         projects: list[DiscoveredProject] = []
         seen_paths: set[Path] = set()
@@ -224,6 +234,15 @@ class TypeScriptAdapter:
                 )
             )
 
+        root_pkg = root / "package.json"
+        if root_pkg.exists() and (
+            _has_src(root) if projects else _has_ts_js_sources(root)
+        ):
+            # A root package indexes the tree under it.
+            projects.append(
+                DiscoveredProject(name=root.name, root=root, language=self.name)
+            )
+
         if not projects:
             for package_json in root.glob("*/package.json"):
                 pkg_dir = package_json.parent
@@ -242,17 +261,6 @@ class TypeScriptAdapter:
                     )
                 )
 
-        if not projects:
-            root_pkg = root / "package.json"
-            if root_pkg.exists() and _has_ts_js_sources(root):
-                projects.append(
-                    DiscoveredProject(
-                        name=root.name,
-                        root=root,
-                        language=self.name,
-                    )
-                )
-
         projects.sort(key=lambda p: p.name)
         return projects
 
@@ -262,30 +270,24 @@ class TypeScriptAdapter:
         out_path: Path,
         config: AdapterConfig,
     ) -> CommandSpec:
-        """Build the `scip-typescript index` command.
-
-        Runs from the package directory. Adds ``--infer-tsconfig`` in
-        two cases:
-
-        1. SvelteKit / Vite apps where ``tsconfig.json`` isn't at the
-           package root (Vite packages configure TypeScript via
-           ``vite.config.ts``).
-        2. **Any package missing ``tsconfig.json`` entirely** — common
-           in monorepo workspace fixtures (vite's ``packages/*/src/
-           __tests__/fixtures/``, next.js playground apps). Without
-           this fallback, scip-typescript exits non-zero immediately
-           with "missing tsconfig.json" and produces no index.
+        """Build the `scip-typescript index` command, run from the package
+        directory. A package without a ``tsconfig.json`` (a Vite or SvelteKit
+        app, a workspace fixture, plain JavaScript) is indexed with one
+        written beside the index that reads its TypeScript and JavaScript
+        with the current standard library: ``--infer-tsconfig`` would write
+        one into the package.
         """
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
-
-        svelte_config = project.root / "svelte.config.js"
-        vite_config = project.root / "vite.config.ts"
-        tsconfig = project.root / "tsconfig.json"
-        if svelte_config.exists() or vite_config.exists() or not tsconfig.exists():
-            argv.append("--infer-tsconfig")
-            logger.debug(f"SCIP: Using --infer-tsconfig for {project.name}")
-
-        argv.extend(config.extra_args)
+        if not (project.root / "tsconfig.json").exists():
+            inferred = out_path.with_suffix(".tsconfig.json")
+            inferred.unlink(missing_ok=True)
+            settings = {
+                "compilerOptions": {"allowJs": True, "target": "esnext"},
+                "include": [f"{project.root}/**/*"],
+            }
+            with open(inferred, "x", encoding="utf-8") as file:
+                json.dump(settings, file)
+            argv.append(str(inferred))
         return CommandSpec(argv=argv, cwd=project.root)
 
     def parse_descriptors(self, raw: str) -> list[str]:

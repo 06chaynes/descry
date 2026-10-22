@@ -5,15 +5,15 @@ projects via MSBuild. Install:
 
     dotnet tool install --global scip-dotnet
 
-Invocation: ``scip-dotnet index`` at the project or solution root.
-The tool reads ``.sln`` / ``.csproj`` / ``.vbproj`` and can do its own
-``dotnet restore``. Supports ``--output`` so we use
-``output_mode="direct"``.
+Invocation: ``scip-dotnet index`` at the project's directory, which
+indexes every ``.sln`` / ``.csproj`` / ``.vbproj`` there, else
+``scip-dotnet index <each .slnx>``. The tool can do its own ``dotnet
+restore``. Supports ``--output`` so we use ``output_mode="direct"``.
 
 scip-dotnet v0.2.13 targets ``net9.0`` — on a system with a newer SDK
 (.NET 10+) the adapter sets ``DOTNET_ROLL_FORWARD=LatestMajor`` so the
-tool runs against the installed runtime. ``DOTNET_ROOT`` is surfaced
-too so ``safe_env()`` filtering doesn't drop it.
+tool runs against the installed runtime, and ``DOTNET_ROOT`` so it
+finds one.
 """
 
 from __future__ import annotations
@@ -36,17 +36,9 @@ logger = logging.getLogger(__name__)
 _DOTNET_MARKERS = (".sln", ".slnx", ".csproj", ".vbproj", ".fsproj")
 
 
-def _find_solution_or_project(pkg_dir: Path) -> Path | None:
-    """Prefer a solution file, then a project file.
-
-    Checks ``.sln`` first (legacy MSBuild), then ``.slnx`` (modern XML
-    solution format used by dotnet/aspnetcore and other newer repos),
-    then per-language project files.
-    """
-    for ext in (".sln", ".slnx", ".csproj", ".vbproj", ".fsproj"):
-        for name in pkg_dir.glob(f"*{ext}"):
-            return name
-    return None
+def _has_marker(pkg_dir: Path, markers=_DOTNET_MARKERS) -> bool:
+    """Whether ``pkg_dir`` holds a file with one of the extensions ``markers``."""
+    return any(any(pkg_dir.glob(f"*{marker}")) for marker in markers)
 
 
 def _has_dotnet_sources(pkg_dir: Path) -> bool:
@@ -77,7 +69,7 @@ def _global_json_satisfiable(project_root: Path, dotnet_root: str | None) -> str
     project fails to restore and the scip index is useless.
     """
     gj = project_root / "global.json"
-    if not gj.exists():
+    if not gj.is_file():
         return None
     try:
         import json as _json
@@ -180,8 +172,7 @@ class DotnetAdapter:
         projects: list[DiscoveredProject] = []
 
         # 1. Root-level solution — treat the whole repo as one project.
-        root_sln = _find_solution_or_project(root)
-        if root_sln and _has_dotnet_sources(root):
+        if _has_marker(root) and _has_dotnet_sources(root):
             projects.append(
                 DiscoveredProject(
                     name=root.name,
@@ -248,7 +239,10 @@ class DotnetAdapter:
             raise RuntimeError(f"scip-dotnet incompatibility: {reason}")
 
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
-        argv.extend(config.extra_args)
+        # It indexes every `.sln` and project file it finds itself, and no
+        # `.slnx`, which it is given where it finds none of those.
+        if not _has_marker(project.root, (".sln", ".csproj", ".vbproj")):
+            argv += sorted(p.name for p in project.root.glob("*.slnx"))
 
         env_extras: dict[str, str] = {"DOTNET_ROLL_FORWARD": "LatestMajor"}
         if dotnet_root:
