@@ -5596,6 +5596,60 @@ class TestRustCallResolution:
         assert candidates["REF:alive"] == [f"{lib}::alive", f"{lib}::alive#2"]
         assert candidates["REF:E::from"] == [f"{lib}::E::from", f"{lib}::E::from#2"]
 
+    def test_impls_apart_by_references_are_told_by_the_call(self, tmp_path):
+        """Impls of one trait that differ only by references, `Shr<i8>` and
+        `Shr<&i8>` for `V` and `&V`, are told apart by the call: an argument
+        written `*x` or a number is a value, `&x` or a string a reference,
+        and a receiver that is the caller's `self`, `(*self)` or `&v` is the
+        type its writing says, found before a method it reaches by a
+        dereference, which it still reaches where no other fits; a reference
+        fits a parameter of a type parameter's type, the type's own method in
+        another file is found before the trait's, and `Self` is the type."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                use std::ops::Shr;
+                pub struct V;
+                impl Shr<i8> for V { type Output = V; fn shr(self, rhs: i8) -> V { todo!() } }
+                impl Shr<&i8> for V {
+                    type Output = V;
+                    fn shr(self, rhs: &i8) -> V { self.shr(*rhs) }
+                }
+                impl Shr<&i8> for &V {
+                    type Output = V;
+                    fn shr(self, rhs: &i8) -> V { (*self).shr(*rhs) }
+                }
+                impl Shr<i8> for &V { type Output = V; fn shr(self, rhs: i8) -> V { todo!() } }
+                impl V {
+                    fn bits(self) -> u8 { 0 }
+                    fn show(&self) { self.bits(); }
+                }
+                pub trait Ctx { fn context<C>(self, c: C); }
+                impl Ctx for V { fn context<C>(self, c: C) {} }
+                pub fn noted(v: V) { v.context("x"); }
+                mod far;
+                pub trait Scale { fn scale(&self, s: &u8) -> V; }
+                impl Scale for V { fn scale(&self, s: &u8) -> V { self.scale(*s) } }
+                use std::ops::Mul;
+                impl Mul for V { type Output = V; fn mul(self, rhs: Self) -> V { todo!() } }
+                impl Mul<&Self> for V {
+                    type Output = V;
+                    fn mul(self, rhs: &Self) -> V { self.mul(*rhs) }
+                }
+                impl Mul<i16> for V { type Output = V; fn mul(self, rhs: i16) -> V { todo!() } }
+                """,
+                "src/far.rs": "use crate::V;\nimpl V { pub fn scale(&self, s: u8) -> V { todo!() } }\n",
+            },
+        )
+        v = "FILE:src/lib.rs::V"
+        assert _calls(builder, f"{v}::shr#2") == [f"{v}::shr"]
+        assert _calls(builder, f"{v}::shr#3") == [f"{v}::shr"]
+        assert _calls(builder, f"{v}::show") == [f"{v}::bits"]
+        assert _calls(builder, "FILE:src/lib.rs::noted") == [f"{v}::context"]
+        assert _calls(builder, f"{v}::scale") == ["FILE:src/far.rs::V::scale"]
+        assert _calls(builder, f"{v}::mul#2") == [f"{v}::mul"]
+
     def test_a_trait_for_an_outside_type_takes_its_argument_type(self, tmp_path):
         """A trait method the project writes for a type from outside, which
         has impls from outside too, is the call only where the argument is

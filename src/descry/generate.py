@@ -7696,6 +7696,7 @@ class BaseParser:
         one, and the edge carries the column of the called name for a SCIP
         lookup."""
         name_start = start + len(callee) - len(_split_callee(callee)[1])
+        written = None
         if origin is None:
             # The code before the callee ends at ``end``, and the code before
             # a `.` there at ``receiver``, or without its `?` at ``called``.
@@ -7705,6 +7706,14 @@ class BaseParser:
             if dot and not receiver and self._tail is None and self._tail_name:
                 # The receiver is the name the line before ends with.
                 callee = f"{self._tail_name}.{callee}"
+            elif (
+                dot
+                and self.language == "rust"
+                and (held := self._parenthesized(receiver))
+            ):
+                # `(*v).m()`: the method of what `v` is, through the borrow
+                # the parentheses write
+                callee, written = f"{held[0]}.{callee}", held[1]
             elif dot and self._code[max(end - 2, 0) : end] != "..":
                 called = receiver
                 while called and self._code[called - 1] == "?":
@@ -7739,10 +7748,31 @@ class BaseParser:
                 "metadata": metadata,
             }
         )
+        if written is not None:
+            metadata["site"] = {"receiver": written}
         if paren in self._pairs:
             self._closes[self._pairs[paren]] = index
         elif paren in self._opens:
             self._opens[paren] = index
+
+    def _parenthesized(self, end):
+        """``(name, whether it is a reference)`` of the receiver the code
+        before column ``end`` of the line closes, `(*v)`, `(&v)`, `(&mut v)`
+        or `(v)`; None for any other."""
+        opened = [start for start, close in self._pairs.items() if close == end - 1]
+        # Parentheses of their own, not a call's or a macro's
+        before = opened and self._code[: opened[0]].rstrip()[-1:]
+        inner = (
+            opened
+            and not re.match(r"[\w)\]>!?]", before or " ")
+            and (self._code[opened[0] + 1 : end - 1])
+        )
+        found = inner and re.fullmatch(
+            r"\s*([*&]?)\s*(?:mut\s+)?([A-Za-z_]\w*)\s*", inner
+        )
+        if not found:
+            return None
+        return found[2], {"*": False, "&": True}.get(found[1])
 
     def add_config_node(
         self,
@@ -9530,6 +9560,24 @@ def _rust_type_declared(text):
     return held and (found[1], params, held[1])
 
 
+def _rust_borrow(written):
+    """Whether the Rust expression ``written``, its string literals' text
+    blanked to `_`, is a reference: True for `&x` and a string literal,
+    False for `*x`, a number and a boolean, what it holds for one in
+    parentheses alone, `(*x)`, None where its writing does not tell."""
+    text = written.strip()
+    if text.startswith("(") and len(_bracketed_parts(text[1:])) == 1:
+        inner = _bracketed_parts(text[1:])[0]
+        if text[1:].rstrip(")").strip() == inner:
+            return _rust_borrow(inner)
+    # A string's text and its quotes are blanked: two `_` at least.
+    if text.startswith("&") or re.fullmatch(r"b?__+", text):
+        return True
+    if text.startswith("*") or re.fullmatch(r"-?\d[\w.]*|true|false", text):
+        return False
+    return None
+
+
 def _rust_declared(declared):
     """The declarations of a Rust alias, but the unit type `()` where a
     `#[cfg]` pair writes it as a stand-in for the other: it has no members."""
@@ -10153,6 +10201,7 @@ class RustParser(BaseParser):
         # The owner of the open `impl` block's items, and its type's name
         impl_id = current_impl_target = impl_bounds = None
         trait_generic = False  # whether the open impl's trait takes type arguments
+        impl_borrowed = False  # whether the open impl is for a reference, `for &T`
         current_trait_impl = (
             None  # Track trait name when in "impl Trait for Struct" block
         )
@@ -10328,11 +10377,12 @@ class RustParser(BaseParser):
         def impl_at(index, line):
             """What ``_rust_impl`` reads in the header of the `impl` block
             that starts with ``line``, line ``index``, the bounds the block
-            gives its type parameters, its own or by `where`, and whether
-            its trait is written with type arguments; five None where none
-            does. The header runs to its `{`, on that line or a later one."""
+            gives its type parameters, its own or by `where`, whether its
+            trait is written with type arguments, and whether its type is a
+            reference, `impl T for &U`; six None where none does. The header
+            runs to its `{`, on that line or a later one."""
             if not _RUST_IMPL_RE.match(line):
-                return None, None, None, None, None
+                return None, None, None, None, None, None
             header = []
             for code, _ in codes[index:]:
                 header.append(code)
@@ -10345,12 +10395,14 @@ class RustParser(BaseParser):
                 bounds[name] = bounds.get(name) or bound
             trait, owner, blanket = _rust_impl(text)
             generic = trait and re.search(rf"\b{re.escape(trait)}\s*<\s*(?!')", text)
+            borrowed = re.search(r"\bfor\s*&", text.partition(" where ")[0])
             return (
                 trait,
                 owner,
                 blanket,
                 {k: v for k, v in bounds.items() if v},
                 generic,
+                borrowed,
             )
 
         i = 0
@@ -10477,6 +10529,9 @@ class RustParser(BaseParser):
                     if trait_generic:
                         # Its trait takes type arguments: `impl From<A> for T`
                         node_kwargs["trait_generic"] = True
+                    if impl_borrowed:
+                        # Its block is for a reference: `impl Add for &T`
+                        node_kwargs["impl_borrowed"] = True
                 if impl_bounds and node_type == "Method":
                     # What its `impl` block bounds the type's parameters by
                     node_kwargs["impl_bounds"] = impl_bounds
@@ -10570,9 +10625,12 @@ class RustParser(BaseParser):
             # 3. Impl
             elif (named := impl_at(i, line))[1]:
                 # The trait is tracked for method metadata.
-                trait, current_impl_target, bounds, impl_bounds, generic = named
+                trait, current_impl_target, bounds, impl_bounds, generic, borrowed = (
+                    named
+                )
                 current_trait_impl = _last_segment(trait)
                 trait_generic = bool(generic)
+                impl_borrowed = bool(borrowed)
                 # The block is for the type its name names in its module.
                 struct_id = seen_type(parent_id, current_impl_target)
                 if struct_id is None:
@@ -10746,7 +10804,7 @@ class RustParser(BaseParser):
                 for closed, index in self._closes.items():
                     if index is None or closed not in opened:
                         continue
-                    at, passed = opened[closed] + 1, []
+                    at, passed, borrows = opened[closed] + 1, [], []
                     if any(start <= at < end for start, end in patterns):
                         continue
                     # A literal's text, blanked, is still an argument.
@@ -10764,9 +10822,11 @@ class RustParser(BaseParser):
                         # A path, `Kind::Unit`, is its own origin.
                         path = _RUST_PATH_ARGUMENT_RE.fullmatch(part)
                         passed.append(origin or (part if path else None))
+                        borrows.append(_rust_borrow(part))
                         at += len(part)
                     site = self.builder.edges[index]["metadata"]
                     site.setdefault("site", {})["arguments"] = passed
+                    site["site"]["borrows"] = borrows
                 if body <= len(code):
                     self._bind_patterns(code, i, fn_start, owner)
             i += 1
@@ -18465,10 +18525,14 @@ class CallResolver:
         within=False,
         lambdas=None,
         passed=None,
+        borrows=None,
+        receiver=None,
     ):
         """``arguments`` is what the call passes, where the parser counted
         it, ``lambdas`` its C# or Java lambdas' parameter counts, ``passed``
-        the origins of a Rust call's arguments. ``within``
+        the origins of a Rust call's arguments, ``borrows`` whether each is
+        written as a reference and ``receiver`` whether its receiver is.
+        ``within``
         resolves a call, at no `#if` arm of its own, while another is being
         resolved: it gives the value the call returns in place of the
         verdict and leaves the state of the other as it was."""
@@ -18486,7 +18550,8 @@ class CallResolver:
         self._name_only = False
         self._arguments = arguments
         self._path_call = "::" in callee and "." not in callee
-        self._passed = passed
+        self._passed, self._borrows, self._callee = passed, borrows, callee
+        self._receiver_written = receiver
         self._typed_call = callee.endswith("<>")
         self._caller, self._looked_up = source_id, None
         if self.lang(source_id) in _GLOBAL_OBJECT:
@@ -18537,9 +18602,14 @@ class CallResolver:
         given = (
             verdict[0]
             and self.lang(verdict[0]) == "rust"
-            and self._given_again(verdict[0])
+            and self._alternatives(verdict[0])
         )
         fitting = [g for g in given or () if self._fits(g)]
+        receiver = given and not self._path_call and self._receiver_borrowed()
+        exact = [g for g in fitting if self._self_borrowed(g) == receiver]
+        # A method whose `self` is the receiver's type, a reference or not, is
+        # found before one the receiver reaches by a borrow or a dereference.
+        fitting = exact if receiver is not None and exact else fitting
         inherent = [
             g for g in fitting if not self.nodes[g]["metadata"].get("trait_impl")
         ]
@@ -18552,7 +18622,17 @@ class CallResolver:
             # `#[cfg]` or trait argument, is any of those that can take what
             # the call passes; what the call returns is what they all do.
             values = [self._called(("def", g), self._receiver) for g in given]
-            self._result = values[0] if values.count(values[0]) == len(values) else None
+            first = values[0]
+            one = all(
+                v == first
+                or isinstance(v, tuple)
+                and isinstance(first, tuple)
+                and v[0] == first[0] == "self"
+                and v[1] in self._declarations(first[1])
+                for v in values
+            )
+            # Declarations of one type in several files are the one type.
+            self._result = first if one else None
             self._candidates_now = fitting or given
             outside = not fitting and self._outside_impls(given[0])
             verdict = None, _EXTERNAL if outside else _UNRESOLVED
@@ -18622,24 +18702,65 @@ class CallResolver:
             given.append(f"{base}#{len(given) + 1}")
         return given
 
+    def _alternatives(self, node_id):
+        """The Rust function ``node_id`` and the others of its name a call
+        that reaches it may be: those its scope gives again, and a method's
+        of the name in the other impl blocks written for its type's name,
+        where the crate defines the type, once."""
+        found = self._given_again(node_id)
+        owner, name = node_id.rpartition("::")[0], self._name(node_id)
+        if self.nodes[node_id]["type"] != "Method" or owner not in self.nodes:
+            return found
+        # Blocks written for the type's own name, not an alias's
+        declarations = [
+            d for d in self._declarations(owner) if self._name(d) == self._name(owner)
+        ]
+        defined = [
+            d for d in declarations if self.nodes[d]["metadata"].get("kind") != "impl"
+        ]
+        if len(defined) != 1:
+            # Blocks for a type from outside may be for its other arguments.
+            return found
+        for declaration in declarations:
+            other = self.members.get(declaration, {}).get(name)
+            if other and other not in found:
+                found += self._given_again(other)
+        return found
+
     def _fits(self, target):
         """Whether the Rust function ``target`` can take what the call being
         resolved passes: as many arguments as it has parameters, `self`
-        among them for a path call, and to a trait impl's method each
-        argument of a known type of its parameter's, to one for a type from
-        outside, which has impls from outside too, of a type known to be
-        its parameter's. True where the parser did not record what the call
-        passes."""
+        among them for a path call, a reference where it takes one and a
+        value where it takes one, `self` too, and to a trait impl's method
+        each argument of a known type of its parameter's, to one for a type
+        from outside, which has impls from outside too, of a type known to
+        be its parameter's. True where the parser did not record what the
+        call passes."""
         metadata = self.nodes[target]["metadata"]
         params = metadata.get("param_types")
         if self._passed is None or params is None or target in self.macro_functions:
             # A macro's function is written with the macro's fragments.
             return True
+        borrowed = bool(metadata.get("impl_borrowed"))
+        by_value = bool(params) and re.fullmatch(r"(?:mut\s+)?self", params[0])
         if not self._path_call and params and re.search(r"\bself\b", params[0]):
             # A method called on a value takes it as its `self`.
             params = params[1:]
         if len(self._passed) != len(params):
             return False
+        borrows = self._borrows or [None] * len(params)
+        for index, (borrow, param) in enumerate(zip(borrows, params)):
+            # A reference is passed where one is taken, and only there: a
+            # path call's `self` by value is the type its block is for.
+            # A reference fits a parameter whose type is a type parameter.
+            receiver = index == 0 and self._path_call and by_value
+            taken = borrowed if receiver else param.lstrip().startswith("&")
+            checked = receiver or (
+                metadata.get("trait_impl") and not re.search(r"\bself\b", param)
+            )
+            typed = taken or receiver or self._returned_type(param, target)
+            if checked and borrow is not None and borrow != taken and typed:
+                return False
         outside = self._outside_impls(target)
         for argument, param in zip(self._passed, params):
             if not metadata.get("trait_impl") or re.search(r"\bself\b", param):
@@ -18649,6 +18770,27 @@ class CallResolver:
                 or self._value(argument, self._caller, set())
             )
             declared = self._returned_type(param, target)
+            # A value of a type the project only writes impl blocks for, `f32`,
+            # is of that type from outside.
+            value, declared = (
+                ("outside", self._name(v[1]), ())
+                if isinstance(v, tuple) and v[0] == "self" and self._impl_only(v[1])
+                else v
+                for v in (value, declared)
+            )
+            written = _rust_type_parts(param)[0].rpartition("::")[2]
+            if (
+                declared is None
+                and isinstance(value, tuple)
+                and value[0] == "self"
+                and written not in self.alias_names
+                and self._types("rust", written)
+                and written != self._name(value[1])
+            ):
+                # A project type the parameter names, which several
+                # definitions leave untold, is not the argument's of another
+                # name.
+                return False
             project = [
                 v[1]
                 for v in (value, declared)
@@ -18672,6 +18814,29 @@ class CallResolver:
             if outside and not same:
                 return False
         return True
+
+    def _self_borrowed(self, node_id):
+        """Whether the `self` the Rust method ``node_id`` takes is a
+        reference: `&self`, or `self` of a block for `&T`; None for none."""
+        metadata = self.nodes[node_id]["metadata"]
+        first = (metadata.get("param_types") or [""])[0]
+        if first.startswith("&"):
+            return True
+        if re.fullmatch(r"(?:mut\s+)?self", first):
+            return bool(metadata.get("impl_borrowed"))
+        return None
+
+    def _receiver_borrowed(self):
+        """Whether the receiver of the method call being resolved is a
+        reference, from how it is written, `(*v)` or `&v`, or for `self` from
+        the caller's own `self`; None where neither tells."""
+        if self._receiver_written is not None:
+            return self._receiver_written
+        receiver = self._callee.rpartition(".")[0]
+        written = _rust_borrow(receiver)
+        if written is not None or receiver != "self":
+            return written
+        return self._self_borrowed(self._caller) if self._caller in self.nodes else None
 
     def _trait_method(self, node_id):
         """Whether ``node_id`` is a method a Rust trait declares, with
@@ -18730,17 +18895,22 @@ class CallResolver:
 
     def _outside_owner(self, node_id):
         """Whether the Rust function ``node_id`` is a trait's for a type from
-        outside, one the project only writes impl blocks for."""
+        outside, one the project only writes impl blocks for; a module of the
+        type's name, `mod f32`, is no type."""
         owner = node_id.rpartition("::")[0]
-        if (
-            not self.nodes[node_id]["metadata"].get("trait_impl")
-            or owner not in self.nodes
-        ):
-            return False
+        return bool(
+            self.nodes[node_id]["metadata"].get("trait_impl")
+            and owner in self.nodes
+            and self._impl_only(owner)
+        )
+
+    def _impl_only(self, type_id):
+        """Whether the project only writes impl blocks for the Rust type
+        ``type_id``, one from outside; a module of its name is no type."""
         kinds = {
-            self.nodes[d]["metadata"].get("kind") for d in self._declarations(owner)
+            self.nodes[d]["metadata"].get("kind") for d in self._declarations(type_id)
         }
-        return kinds == {"impl"}
+        return kinds - {"module"} == {"impl"}
 
     def _accepts(self, target):
         """Whether the definition ``target`` can take the arguments of the
@@ -20920,7 +21090,11 @@ class CallResolver:
             name, generic, _ = name.partition("[" if lang == "go" else "<")
             if self._standard_type(written, scope_id):
                 return self._returned_type(written, scope_id)
-            if lang == "rust" and self._rust_alias(written, scope_id):
+            if lang == "rust" and (
+                written == "Self" or self._rust_alias(written, scope_id)
+            ):
+                # `Self` is the type of the impl block around, an alias the
+                # type it names.
                 return ("returned", self._returned_type(written, scope_id))
             package, _, member = name.rpartition("::")
             if lang == "go" and package:
@@ -25144,6 +25318,8 @@ class CodeGraphBuilder:
                             arguments,
                             lambdas=lambdas,
                             passed=site.get("arguments"),
+                            borrows=site.get("borrows"),
+                            receiver=site.get("receiver"),
                         )
                     call_resolver.keep(idx, resolved)
                     if resolution_source == _EXTERNAL:
