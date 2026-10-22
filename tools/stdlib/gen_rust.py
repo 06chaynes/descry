@@ -35,7 +35,8 @@ processor:
 - `scope` is the prelude of the newest edition and the primitives that have
   a name: a type among them is written by its name there, any other by its
   key. A derive macro of the prelude is in `scope` too, as the trait it
-  implements (`Debug`).
+  implements (`Debug`), and a variant as its enum's key and its name
+  (`std::option::Option::Some`).
 """
 
 import json
@@ -157,6 +158,15 @@ class Generator:
             if identity[0] == "primitive"
         )
         self.short = {key: name for name, key in self.scope.items()}
+        # A variant of the prelude is its enum's key and its name.
+        self.scope.update(
+            (path.rpartition("::")[2], f"{self.keys[enum]}::{identity[1][-1]}")
+            for identity, paths in self.paths.items()
+            for path in paths
+            if identity[0] == "variant"
+            and path.rpartition("::")[0] == prelude
+            and (enum := ("enum", identity[1][:-1])) in self.keys
+        )
         # A derive macro of the prelude is named as the trait it implements,
         # which has its path.
         traits = {

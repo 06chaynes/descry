@@ -3154,9 +3154,9 @@ class TestRustCallResolution:
         ]
         assert _calls(builder, "FILE:src/lib.rs::generic") == [trait_method]
 
-    def test_receiver_typed_by_an_alias_is_not_external(self, tmp_path):
+    def test_receiver_typed_by_an_alias_has_the_type_it_names(self, tmp_path):
         """A method call on a value whose declared type is a project alias
-        stays a project call."""
+        is one of the type the alias names."""
         builder = _index(
             tmp_path,
             {
@@ -3179,7 +3179,9 @@ class TestRustCallResolution:
                 """
             },
         )
-        assert _calls(builder, "FILE:src/lib.rs::span") == ["REF:range.span_start"]
+        assert _calls(builder, "FILE:src/lib.rs::span") == [
+            "FILE:src/lib.rs::Match::span_start"
+        ]
 
     def test_another_functions_variable_does_not_type_the_receiver(self, tmp_path):
         """A parameter declared in one function says nothing about a
@@ -5431,6 +5433,7 @@ class TestRustCallResolution:
                     Wrap(mut held): Wrap<A>,
                 ) { held.go(); }
                 pub fn foreign(State(state): State<A>) { state.go(); }
+                pub fn at(whole @ Pair { x, .. }: Pair<A, B>) { x.go(); }
                 impl S {
                     pub fn method(&self, Wrap(m): Wrap<B>) { m.go(); }
                 }
@@ -5444,7 +5447,50 @@ class TestRustCallResolution:
         assert _calls(builder, "FILE:src/lib.rs::borrowed") == [b]
         assert _calls(builder, "FILE:src/lib.rs::split") == [a]
         assert _calls(builder, "FILE:src/lib.rs::foreign") == ["REF:state.go"]
+        assert _calls(builder, "FILE:src/lib.rs::at") == [a]
         assert _calls(builder, "FILE:src/lib.rs::S::method") == [b]
+
+    def test_a_type_alias_is_the_type_it_names(self, tmp_path):
+        """A Rust type alias, of its module, imported or re-exported by a
+        glob, generic or not, on one line or more, is the type it names, read
+        in its module with its arguments; one its module declares as
+        different types is not known."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub mod model;
+                use crate::model::Shown;
+                pub struct A;
+                impl A { pub fn go(&self) {} }
+                pub struct B;
+                impl B { pub fn go(&self) {} }
+                pub struct Wrap<S>(pub S);
+                type W = Wrap<A>;
+                type Pair<T> = (T, B);
+                pub fn wrapped(Wrap(x): W) { x.go(); }
+                pub fn generic(p: Pair<A>) { let (a, b) = p; a.go(); b.go(); }
+                pub fn shown(s: Shown) { s.go(); }
+                impl<S> Wrap<S> { pub fn send(&self) {} }
+                pub fn held(s: model::Spread<A>) { s.send(); }
+                #[cfg(a)]
+                type Clock = A;
+                #[cfg(not(a))]
+                type Clock = ();
+                pub fn clocked(c: Clock) { c.go(); }
+                """,
+                "src/model.rs": "mod inner;\npub use self::inner::*;\npub type Shown = crate::B;\n",
+                "src/model/inner.rs": "pub type Spread<T> =\n    crate::Wrap<T>;\n",
+            },
+        )
+        a, b = "FILE:src/lib.rs::A::go", "FILE:src/lib.rs::B::go"
+        assert _calls(builder, "FILE:src/lib.rs::wrapped") == [a]
+        assert _calls(builder, "FILE:src/lib.rs::clocked") == ["REF:c.go"]
+        assert _calls(builder, "FILE:src/lib.rs::held") == [
+            "FILE:src/lib.rs::Wrap::send"
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::generic") == [a, b]
+        assert _calls(builder, "FILE:src/lib.rs::shown") == [b]
 
     def test_a_struct_pattern_s_braces_open_no_block(self, tmp_path):
         """The names a struct pattern binds in an `if let`, a `for` or an arm
@@ -5481,11 +5527,17 @@ class TestRustCallResolution:
                     if done || FORCE { let x = B; x.go(); }
                     x.go();
                 }
+                pub fn bitwise(done: bool) {
+                    let x = A;
+                    if done | FORCE { let x = B; x.go(); }
+                    x.go();
+                }
                 """
             },
         )
         a, b = "FILE:src/lib.rs::A::go", "FILE:src/lib.rs::B::go"
         assert _calls(builder, "FILE:src/lib.rs::block") == [a, b]
+        assert _calls(builder, "FILE:src/lib.rs::bitwise") == [a, b]
         assert _calls(builder, "FILE:src/lib.rs::iflet") == [a, "FILE:src/lib.rs::make"]
         assert _calls(builder, "FILE:src/lib.rs::forin") == [b]
         assert _calls(builder, "FILE:src/lib.rs::arm") == [a, "FILE:src/lib.rs::make"]
@@ -5520,6 +5572,44 @@ class TestRustCallResolution:
         )
         for caller in ("tests/t.rs::t", "tests/t.rs::module", "src/lib.rs::rooted"):
             assert _calls(builder, f"FILE:{caller}") == ["FILE:src/svc/batch.rs::run"]
+
+    def test_a_use_of_the_crate_s_own_name_in_its_library(self, tmp_path):
+        """A `use` from the crate's own name in its library binds what the
+        library's modules hold there, and ends."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "app"\n',
+                "src/lib.rs": """
+                mod inner;
+                pub use inner::Vec3;
+                use app::Vec3;
+                pub fn f() { Vec3::new(); }
+                """,
+                "src/inner.rs": "pub struct Vec3;\nimpl Vec3 { pub fn new() {} }\n",
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::f") == ["FILE:src/inner.rs::Vec3::new"]
+
+    def test_a_call_path_from_a_crate_s_name_follows_its_modules(self, tmp_path):
+        """A call written with a path from a project crate's name leads
+        through that crate's modules and re-exports, not to a function of the
+        name around the call."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[workspace]\nmembers = ["base", "web"]\n',
+                "base/Cargo.toml": '[package]\nname = "base"\n',
+                "base/src/lib.rs": "pub mod auth;\n",
+                "base/src/auth/mod.rs": "mod token;\npub use token::make_token;\n",
+                "base/src/auth/token.rs": "pub fn make_token() -> u8 { 0 }\n",
+                "web/Cargo.toml": '[package]\nname = "web"\n',
+                "web/src/lib.rs": "pub fn make_token() -> u8 { base::auth::make_token() }\n",
+            },
+        )
+        assert _calls(builder, "FILE:web/src/lib.rs::make_token") == [
+            "FILE:base/src/auth/token.rs::make_token"
+        ]
 
     def test_a_glob_use_binds_the_names_of_its_module(self, tmp_path):
         """A name a module neither defines nor binds by name is what a glob
@@ -5564,6 +5654,359 @@ class TestRustCallResolution:
         )
         assert _calls(builder, "FILE:src/lib.rs::f") == ["FILE:src/lib.rs::Kind::Held"]
         assert builder.fields["FILE:src/lib.rs::Kind::Named"] == {"a": "u8"}
+
+    def test_bodies_after_patterns_and_braces_on_their_own_line(self, tmp_path):
+        """A body after a parameter pattern's braces ends where it closes; an
+        enum's brace on the line below opens its variants; a declared type
+        whose arguments hold a tuple gives its elements."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct A;
+                impl A { pub fn go(&self) {} }
+                pub struct B;
+                impl B { pub fn go(&self) {} }
+                pub struct Pair { pub x: A, pub y: B }
+                pub fn first(
+                    Pair { y, .. }: Pair) { y.go(); }
+                pub fn second() {}
+                pub enum Kind
+                {
+                    Held(u8),
+                }
+                pub fn made() { Kind::Held(1); }
+                pub fn pairs(ps: Vec<(A, B)>) {
+                    for (a, b) in ps { a.go(); b.go(); }
+                }
+                pub struct Wrap<S>(pub S);
+                impl<S> Wrap<S> { pub fn send(&self) {} }
+                pub struct Queue {
+                    pub sender: Wrap<()>,
+                }
+                pub fn queued(q: Queue) { q.sender.send(); }
+                """
+            },
+        )
+        a, b = "FILE:src/lib.rs::A::go", "FILE:src/lib.rs::B::go"
+        assert "FILE:src/lib.rs::second" in builder.node_registry
+        assert _calls(builder, "FILE:src/lib.rs::first") == [b]
+        assert _calls(builder, "FILE:src/lib.rs::made") == [
+            "FILE:src/lib.rs::Kind::Held"
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::pairs") == [a, b]
+        assert _calls(builder, "FILE:src/lib.rs::queued") == [
+            "FILE:src/lib.rs::Wrap::send"
+        ]
+
+    def test_a_prelude_variant_holds_what_it_is_passed(self, tmp_path):
+        """`Some(x)` is of its enum, holding the value of `x` where the variant
+        holds its type parameter; a bracket a line closes that ends no call
+        is read past."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct A;
+                impl A { pub fn go(&self) {} }
+                pub struct B;
+                impl B { pub fn go(&self) {} }
+                pub fn wrapped(a: A, b: B) {
+                    let some = Some(a);
+                    if let Some(x) = some { x.go(); }
+                    let mut more = Some(b);
+                    while let Some(y) = more { y.go(); more = None; }
+                }
+                pub fn grouped(a: A, n: u8) {
+                    let x = (
+                        n + 1
+                    );
+                    a.go();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::wrapped") == [
+            "FILE:src/lib.rs::A::go",
+            "FILE:src/lib.rs::B::go",
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::grouped") == ["FILE:src/lib.rs::A::go"]
+
+    def test_an_impl_for_an_alias_is_one_for_its_type(self, tmp_path):
+        """A value typed by an alias has the methods of the impl blocks
+        written for the alias, then those of the aliased type; a value of
+        the type, or of another alias of it, has the type's own, then the one
+        alias's that has the member, and of two aliases' not either."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Matrix<T, R>(pub T, pub R);
+                impl<T, R> Matrix<T, R> {
+                    pub fn nrows(&self) {}
+                    pub fn superset(&self) {}
+                }
+                pub type Vector<T> = Matrix<T, u8>;
+                impl<T> Vector<T> {
+                    pub fn gemv(&self) {}
+                    pub fn superset(&self) {}
+                    pub fn split(&self) {}
+                }
+                pub type Square<T> = Matrix<T, T>;
+                impl<T> Square<T> { pub fn split(&self) {} }
+                pub type Four = Matrix<f64, u8>;
+                pub fn f(work: &mut Vector<f32>, m: Four) {
+                    work.gemv();
+                    work.nrows();
+                    work.superset();
+                    m.gemv();
+                    m.split();
+                }
+                pub type View<'a, T, R = u8> =
+                    Matrix<&'a T, R>;
+                impl<'a, T> View<'a, T> { pub fn from_slice(&self) {} }
+                pub fn g(v: View<'_, f32>) { v.from_slice(); v.nrows(); v.gemv(); }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::f") == [
+            "FILE:src/lib.rs::Matrix::nrows",
+            "FILE:src/lib.rs::Vector::gemv",
+            "FILE:src/lib.rs::Vector::gemv",
+            "FILE:src/lib.rs::Vector::superset",
+            "REF:m.split",
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::g") == [
+            "FILE:src/lib.rs::Matrix::nrows",
+            "FILE:src/lib.rs::Vector::gemv",
+            "FILE:src/lib.rs::View::from_slice",
+        ]
+
+    def test_self_s_associated_type_is_the_impl_block_s(self, tmp_path):
+        """`Self::Name` in a method is the associated type its impl block
+        declares, for a project type and for one from outside."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub trait Into2 { type Iter; fn into2(self) -> Self::Iter; }
+                pub struct It;
+                impl It { pub fn chain(&self) {} }
+                pub struct W;
+                impl Into2 for Option<u8> {
+                    type Iter = It;
+                    fn into2(self) -> Self::Iter { It }
+                }
+                impl Into2 for W {
+                    type Iter = It;
+                    fn into2(self) -> Self::Iter { It }
+                }
+                pub fn f() { Some(1u8).into2().chain(); W.into2().chain(); }
+                """
+            },
+        )
+        chain = "FILE:src/lib.rs::It::chain"
+        assert _calls(builder, "FILE:src/lib.rs::f").count(chain) == 2
+
+    def test_a_crate_renamed_by_extern_crate_is_the_project_s(self, tmp_path):
+        """`extern crate name as alias` at a crate's root makes `alias` the
+        project crate `name` there."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[workspace]\nmembers = ["core", "glm"]\n',
+                "core/Cargo.toml": '[package]\nname = "nalg"\n',
+                "core/src/lib.rs": "pub struct Quat;\nimpl Quat { pub fn exp(&self) {} }\n",
+                "glm/Cargo.toml": '[package]\nname = "glm"\n',
+                "glm/src/lib.rs": "extern crate nalg as na;\npub mod ops;\n",
+                "glm/src/ops.rs": "pub fn direct(q: &na::Quat) { q.exp(); }\n",
+            },
+        )
+        assert _calls(builder, "FILE:glm/src/ops.rs::direct") == [
+            "FILE:core/src/lib.rs::Quat::exp"
+        ]
+
+    def test_a_field_after_a_call_chain_holds_over_lines(self, tmp_path):
+        """A name bound to a field of what a call chain returns, on its line
+        or over lines that go on with `.await`, a field alone or a call whose
+        closure spans lines, holds the chain's value."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct A;
+                impl A { pub fn go(&self) {} }
+                pub struct Holder { pub a: A }
+                pub fn res() -> Result<Holder, ()> { todo!() }
+                pub async fn fut() -> Option<A> { None }
+                pub async fn f() {
+                    let w = res().unwrap().a;
+                    w.go();
+                    let z = res()
+                        .unwrap()
+                        .a;
+                    z.go();
+                    let y = fut()
+                        .await
+                        .unwrap();
+                    y.go();
+                    let x = fut()
+                        .await
+                        .ok_or_else(|| {
+                            ()
+                        })
+                        .unwrap();
+                    x.go();
+                }
+                """
+            },
+        )
+        go = "FILE:src/lib.rs::A::go"
+        assert _calls(builder, "FILE:src/lib.rs::f").count(go) == 4
+
+    def test_a_blanket_impl_s_methods_are_a_type_s_that_meets_it(self, tmp_path):
+        """A project type that implements every bound of a blanket impl has
+        the methods of the trait the blanket implements; one that does not,
+        does not."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub trait AsyncRead { fn poll_read(&mut self); }
+                pub trait AsyncReadExt: AsyncRead { fn read(&mut self) {} }
+                impl<R: AsyncRead + ?Sized> AsyncReadExt for R {}
+                pub struct TcpStream;
+                impl AsyncRead for TcpStream { fn poll_read(&mut self) {} }
+                pub struct Other;
+                pub fn f(mut s: TcpStream, mut o: Other) { s.read(); o.read(); }
+                """
+            },
+        )
+        calls = _calls(builder, "FILE:src/lib.rs::f")
+        assert calls[0] == "FILE:src/lib.rs::AsyncReadExt::read"
+        assert calls[1].startswith("REF:o.read")
+
+    def test_the_return_type_ends_before_a_where_clause(self, tmp_path):
+        """A function returns the type after its parameters, which follow its
+        name, not one a callable bound of its `where` clause writes, nor one
+        after the parentheses of a `pub(crate)`."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Builder;
+                impl Builder {
+                    pub fn name<F>(self, f: F) -> Self
+                    where
+                        F: FnMut(usize) -> String,
+                    { self }
+                    pub fn build(self) {}
+                    pub(crate) fn make(n: usize) -> Self { Builder }
+                }
+                pub fn t(b: Builder) {
+                    let named = b.name(|i| i.to_string());
+                    named.build();
+                    let made = Builder::make(1);
+                    made.build();
+                }
+                """
+            },
+        )
+        calls = _calls(builder, "FILE:src/lib.rs::t")
+        assert calls.count("FILE:src/lib.rs::Builder::build") == 2
+
+    def test_an_outside_type_has_the_project_s_trait_methods(self, tmp_path):
+        """A value of a type from outside, however it is reached, has the
+        methods of the traits the project implements for it; its own are
+        outside."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                use remote::Client;
+                pub trait Requests { fn signed_get(&self); }
+                impl Requests for Client { fn signed_get(&self) {} }
+                pub async fn make() -> (u8, Client) { todo!() }
+                pub async fn t() {
+                    let (_c, server) = make().await;
+                    server.signed_get();
+                    server.get();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::t") == [
+            "FILE:src/lib.rs::Client::signed_get",
+            "FILE:src/lib.rs::make",
+        ]
+
+    def test_a_field_of_an_outside_value_is_not_known(self, tmp_path):
+        """A field read on what a crate outside the project returns may hold
+        a project type: a call on it is left unresolved, not dropped."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "app"\n[dependencies]\nremote = "1"\n',
+                "src/lib.rs": """
+                pub struct Part;
+                impl Part { pub fn check(&self) -> bool { true } }
+                pub struct Item { pub part: Part }
+                pub fn fetch(t: &str) -> u8 { 0 }
+                pub fn f(t: &str) -> Result<(), ()> {
+                    let data = remote::fetch::<Item>(t).map_err(|_| ())?;
+                    let item = data.item;
+                    item.part.check();
+                    Ok(())
+                }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::f")[-1].startswith(
+            "REF:item.part.check"
+        )
+
+    def test_an_associated_function_is_no_method_of_a_value(self, tmp_path):
+        """A standard type's function without `self`, as `Box::pin`, is not
+        what a method call on a value of it reaches: that is the method of
+        what the value dereferences to."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub trait Storage { fn pin(&self, k: u8) -> u8; }
+                pub fn f(storage: Box<dyn Storage>) { storage.pin(1); }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::f") == [
+            "FILE:src/lib.rs::Storage::pin"
+        ]
+
+    def test_a_tuple_s_field_is_its_element(self, tmp_path):
+        """`.0` of a tuple is its first element: of a known type a call on it
+        resolves, of an unknown one it is left unresolved, not dropped."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub trait Dim { fn value(&self) -> usize; }
+                pub struct Matrix<R>(pub R);
+                impl<R: Dim> Matrix<R> { pub fn shape(&self) -> (R, R) { todo!() } }
+                pub struct A;
+                impl Dim for A { fn value(&self) -> usize { 0 } }
+                pub fn known(m: Matrix<A>) { m.shape().0.value(); }
+                pub fn unknown<R: Dim>(m: Matrix<R>) { m.shape().0.value(); }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::known") == [
+            "FILE:src/lib.rs::A::value",
+            "FILE:src/lib.rs::Matrix::shape",
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::unknown") == [
+            "FILE:src/lib.rs::Matrix::shape",
+            "REF:0.value",
+        ]
 
     def test_a_field_on_its_type_s_line_is_no_variable(self, tmp_path):
         """A field declared on the line of its struct's name is no name the
@@ -26657,6 +27100,23 @@ class TestProtobufCallResolution:
         edges = [e for e in builder.edges if e["source"] == "FILE:b.proto::S::Do"]
         assert [e["metadata"]["lineno"] for e in edges] == [3, 3]
         assert {e["target"] for e in edges} == {"REF:Req"}
+
+    def test_a_block_closed_on_its_line_and_a_stream(self, tmp_path):
+        """A message closed on its line holds nothing after it, and a
+        streamed request or response is its message."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.proto": (
+                    'syntax = "proto3";\nmessage Req {}\nmessage Res {}\n'
+                    "service S {\n  rpc Do(stream Req) returns (stream Res);\n}\n"
+                ),
+            },
+        )
+        assert _calls(builder, "FILE:a.proto::S::Do") == [
+            "FILE:a.proto::Req",
+            "FILE:a.proto::Res",
+        ]
 
 
 class TestModuleAliases:

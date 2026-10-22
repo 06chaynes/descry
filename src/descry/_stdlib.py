@@ -11,7 +11,8 @@
                    "statics": static method name -> return type
                }
     functions  qualified function name -> return type
-    scope      name visible without an import -> qualified type name
+    scope      name visible without an import -> qualified type name, for
+               an enum's variant the type's and its name
     variants   qualified type name -> {variant name -> the types of the values
                it holds: a list in their order, or by field name}
     callbacks  qualified type name -> {method name -> {argument position ->

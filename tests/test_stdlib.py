@@ -429,14 +429,21 @@ def test_data_has_the_documented_shape(lang):
 @pytest.mark.parametrize("lang", LANGUAGES)
 def test_bases_and_scope_name_what_the_file_holds(lang):
     """A base is a type of the file under its key or its name in `scope`,
-    or in Rust a parameter of the type or an associated type of one."""
+    or in Rust a parameter of the type or an associated type of one; what
+    `scope` names is a type, a function, or an enum's variant."""
     data = load(lang)
     types, scope = data["types"], data["scope"]
     for kind in types.values():
         for base in map(_base_name, kind["bases"]):
             parameter = lang == "rust" and base.partition("::")[0] in kind["params"]
             assert scope.get(base, base) in types or parameter, base
-    assert all(name in types or name in data["functions"] for name in scope.values())
+    variants = data.get("variants", {})
+    assert all(
+        name in types
+        or name in data["functions"]
+        or name.rpartition("::")[0] in variants
+        for name in scope.values()
+    )
 
 
 @pytest.mark.parametrize("lang", LANGUAGES)
