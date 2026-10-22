@@ -1,5 +1,6 @@
 """Tests for the generated standard-library data and its generators."""
 
+import importlib.util
 import json
 import os
 import re
@@ -518,6 +519,17 @@ def test_generator_reproduces_the_file(lang, tmp_path):
         source = roots[-1] if roots else Path("/usr/include")
         if not compiler or not source.is_dir():
             pytest.skip(f"Clang and {source} are not installed to read headers from")
+        # Headers of another toolchain may lack ones the data was read from.
+        spec = importlib.util.spec_from_file_location(
+            lang, GENERATORS / f"gen_{lang}.py"
+        )
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        toolchain = generator._version(Path(compiler).name, source)
+        if toolchain != load(lang)["source"]:
+            pytest.skip(
+                f"this machine's toolchain is {toolchain}, not {load(lang)['source']}"
+            )
     else:
         source = Path(os.environ.get("DESCRY_STDLIB_SOURCES", ""), DOWNLOADS[lang])
         if not source.exists():
@@ -525,10 +537,8 @@ def test_generator_reproduces_the_file(lang, tmp_path):
     out = tmp_path / f"{lang}.json"
     generator = GENERATORS / f"gen_{lang}.py"
     subprocess.run([sys.executable, "-I", generator, source, out], check=True)
-    # The runtime pwsh runs on, and the toolchain Clang reads headers
-    # from, are named as the generator reads them.
+    # The runtime pwsh runs on is named as the generator reads it.
     read_from = load(lang)["source"]
-    toolchain = lang in ("dotnet", "c", "cpp")
-    if toolchain and json.loads(out.read_text("utf-8"))["source"] != read_from:
+    if lang == "dotnet" and json.loads(out.read_text("utf-8"))["source"] != read_from:
         pytest.skip(f"this machine's toolchain is not {read_from}")
     assert out.read_bytes() == _file(lang).read_bytes()
