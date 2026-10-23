@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-10-23
+
 ### Fixed
 
 - A caller that reaches a symbol only as one of an unresolved call's
