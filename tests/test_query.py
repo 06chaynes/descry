@@ -1919,3 +1919,39 @@ def test_output_trimming_reads_code_as_code(tmp_path):
     out = q._truncate_output_progressively(text, max_tokens=40, source_lang="python")
     assert "*(2 more dependencies omitted)*" in out
     assert "**c5**" not in out and "*(token budget reached)*" in out
+
+
+def test_the_node_limit_counts_below_what_it_opened(tmp_path):
+    """A callee opened at the level the limit cuts says what it calls."""
+    (tmp_path / "m.py").write_text("def f():\n    pass\n")
+    small = ("f", "g0", "g1", "g2", "h0", "h1")
+    nodes = [
+        _fn(f"FILE:m.py::{n}", lineno=1, end_lineno=2, token_count=10) for n in small
+    ]
+    nodes.append(_fn("FILE:m.py::m0", token_count=500))
+    pairs = [
+        ("f", "g0"),
+        ("f", "g1"),
+        ("f", "g2"),
+        ("g0", "h0"),
+        ("g0", "h1"),
+        ("h0", "m0"),
+    ]
+    edges = [_calls(f"FILE:m.py::{a}", f"FILE:m.py::{b}") for a, b in pairs]
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path, max_nodes=4)
+    text = q.get_context_prompt("FILE:m.py::f", depth=3)
+    # `h0` leaves out `m0`; `g0`, cut at the limit, leaves out `h1`
+    assert text.count("*(1 more callees)*") == 2
+
+
+def test_output_trimming_finds_sections_by_their_headings_only(tmp_path):
+    """A source line starting with "#### " inside expanded code is code."""
+    q = _querier(tmp_path, [_fn("FILE:x.py::f")])
+    text = (
+        "### Context\n#### Source Code:\n```go\nx\n```\n"
+        "#### Expanded Callees (Full Source):\n### `init`\n```go\nconst s = `\n#### Linux:\n`\n```\n"
+        "#### Related Tests:\n- `x_test.go`\n"
+    )
+    out = q._truncate_output_progressively(text, max_tokens=1, source_lang="go")
+    assert "Linux" not in out and "Expanded Callees" not in out
+    assert "#### Source Code:" in out

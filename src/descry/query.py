@@ -169,6 +169,24 @@ def _ends_at_segment(node_id: str, name: str) -> bool:
     return node_id.endswith(name) and not (before.isalnum() or before == "_")
 
 
+def _section(text: str, heading: str) -> tuple[int, int, int] | None:
+    """``(start, body start, end)`` of the first section of ``text`` whose
+    heading line starts with ``heading``, a heading being a line that
+    starts with "#### " outside a code fence; it runs to the next heading
+    or the end."""
+    found, fenced, offset = None, False, 0
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced and line.startswith("#### "):
+            if found:
+                return found[0], found[1], offset
+            if line.startswith(heading):
+                found = (offset, offset + len(line) + 1)
+        offset += len(line) + 1
+    return (found[0], found[1], len(text)) if found else None
+
+
 def _clean_ref_name(ref_name: str, max_len: int = 60) -> str:
     """Clean up an unresolved reference name for display.
 
@@ -831,130 +849,83 @@ class GraphQuerier:
         """
         current_tokens = _estimate_tokens(result)
 
-        # Priority 1: Remove Expanded Callees section
-        if current_tokens > max_tokens:
-            result = re.sub(
-                r"#### Expanded Callees \(Full Source\):.*?(?=^#### |\Z)",
-                "",
-                result,
-                flags=re.DOTALL | re.MULTILINE,
-            )
-            result = re.sub(r"\n{3,}", "\n\n", result)
+        def drop(heading):
+            nonlocal result, current_tokens
+            if found := _section(result, heading):
+                start, _, end = found
+                result = re.sub(r"\n{3,}", "\n\n", result[:start] + result[end:])
+                current_tokens = _estimate_tokens(result)
+
+        def replace_body(found, body):
+            nonlocal result, current_tokens
+            _, body_start, end = found
+            result = result[:body_start] + body + result[end:]
             current_tokens = _estimate_tokens(result)
 
-        # Priority 2: Reduce Usage Examples to 2
+        # Priority 1: Remove Expanded Callees section
         if current_tokens > max_tokens:
-            # Find and truncate usage examples section
-            match = re.search(
-                r"(#### Usage Examples:.*?)(?=^#### |\Z)",
-                result,
-                re.DOTALL | re.MULTILINE,
-            )
-            if match:
-                examples_section = match.group(1)
-                # Keep header and first 2 code blocks
-                code_blocks = list(
-                    re.finditer(r"```.*?```", examples_section, re.DOTALL)
+            drop("#### Expanded Callees (Full Source):")
+
+        # Priority 2: Reduce Usage Examples to 2
+        if current_tokens > max_tokens and (
+            found := _section(result, "#### Usage Examples:")
+        ):
+            body = result[found[1] : found[2]]
+            closes = [i for i, line in enumerate(body.split("\n")) if line == "```"]
+            if len(closes) > 2:
+                kept = "\n".join(body.split("\n")[: closes[1] + 1])
+                omitted = len(closes) - 2
+                replace_body(
+                    found, f"{kept}\n\n*({omitted} more examples omitted)*\n\n"
                 )
-                if len(code_blocks) > 2:
-                    truncated_examples = examples_section[: code_blocks[1].end()]
-                    truncated_examples += (
-                        f"\n\n*({len(code_blocks) - 2} more examples omitted)*\n\n"
-                    )
-                    result = (
-                        result[: match.start()]
-                        + truncated_examples
-                        + result[match.end() :]
-                    )
-                    current_tokens = _estimate_tokens(result)
 
         # Priority 3: Remove Related Tests section
         if current_tokens > max_tokens:
-            result = re.sub(
-                r"#### Related Tests:.*?(?=^#### |\Z)",
-                "",
-                result,
-                flags=re.DOTALL | re.MULTILINE,
-            )
-            result = re.sub(r"\n{3,}", "\n\n", result)
-            current_tokens = _estimate_tokens(result)
+            drop("#### Related Tests:")
 
         # Priority 4: Remove Related Configuration section
         if current_tokens > max_tokens:
-            result = re.sub(
-                r"#### Related Configuration.*?(?=^#### |\Z)",
-                "",
-                result,
-                flags=re.DOTALL | re.MULTILINE,
-            )
-            result = re.sub(r"\n{3,}", "\n\n", result)
-            current_tokens = _estimate_tokens(result)
+            drop("#### Related Configuration")
 
         # Priority 5: Reduce Callers to 5
-        if current_tokens > max_tokens:
-            match = re.search(
-                r"(#### Callers \(\d+ shown\):)(.*?)(?=^#### |\Z)",
-                result,
-                re.DOTALL | re.MULTILINE,
-            )
-            if match:
-                callers_content = match.group(2)
-                lines = callers_content.strip().split("\n")
-                caller_lines = [line for line in lines if line.startswith("- `")]
-                if len(caller_lines) > 5:
-                    # Keep first 5 callers
-                    new_content = "\n".join(caller_lines[:5])
-                    new_content += (
-                        f"\n  *({len(caller_lines) - 5} more callers omitted)*\n"
-                    )
-                    result = (
-                        result[: match.start()]
-                        + match.group(1)
-                        + "\n"
-                        + new_content
-                        + result[match.end() :]
-                    )
-                    current_tokens = _estimate_tokens(result)
+        if current_tokens > max_tokens and (
+            found := _section(result, "#### Callers (")
+        ):
+            lines = result[found[1] : found[2]].strip().split("\n")
+            caller_lines = [line for line in lines if line.startswith("- `")]
+            if len(caller_lines) > 5:
+                more = len(caller_lines) - 5
+                kept = "\n".join(caller_lines[:5])
+                replace_body(found, f"{kept}\n  *({more} more callers omitted)*\n")
 
         # Priority 6: Reduce Dependencies to 5
-        if current_tokens > max_tokens:
-            match = re.search(
-                r"(#### Dependencies \(Callees\):)(.*?)(?=^#### |\Z)",
-                result,
-                re.DOTALL | re.MULTILINE,
-            )
-            if match:
-                # Each top-level dependency with what is nested under it:
-                # its code and its own callees go with it or not at all; a
-                # note on the section stays.
-                entries, notes, fenced = [], [], False
-                for line in match.group(2).strip().split("\n"):
-                    if line.startswith("*(") and not fenced:
-                        notes.append(line)
-                    elif line.startswith("- ") and not fenced or not entries:
-                        entries.append([line])
-                    else:
-                        entries[-1].append(line)
+        if current_tokens > max_tokens and (
+            found := _section(result, "#### Dependencies (Callees):")
+        ):
+            # Each top-level dependency with what is nested under it: its
+            # code and its own callees go with it or not at all; a note on
+            # the section stays.
+            entries, notes, fenced = [], [], False
+            for line in result[found[1] : found[2]].strip().split("\n"):
+                if line.startswith("*(") and not fenced:
+                    notes.append(line)
+                elif line.startswith("- ") and not fenced or not entries:
+                    entries.append([line])
+                else:
+                    entries[-1].append(line)
+                if line.lstrip().startswith("```"):
+                    fenced = not fenced
+            if len(entries) > 5:
+                dropped, fenced = 0, False
+                for line in (line for entry in entries[5:] for line in entry):
                     if line.lstrip().startswith("```"):
                         fenced = not fenced
-                if len(entries) > 5:
-                    dropped, fenced = 0, False
-                    for line in (line for entry in entries[5:] for line in entry):
-                        if line.lstrip().startswith("```"):
-                            fenced = not fenced
-                        elif not fenced and line.lstrip().startswith("- "):
-                            dropped += 1
-                    kept = ["\n".join(entry) for entry in entries[:5]]
-                    new_content = "\n".join([*kept, *notes])
-                    new_content += f"\n*({dropped} more dependencies omitted)*\n"
-                    result = (
-                        result[: match.start()]
-                        + match.group(1)
-                        + "\n"
-                        + new_content
-                        + result[match.end() :]
-                    )
-                    current_tokens = _estimate_tokens(result)
+                    elif not fenced and line.lstrip().startswith("- "):
+                        dropped += 1
+                kept = "\n".join(["\n".join(entry) for entry in entries[:5]] + notes)
+                replace_body(
+                    found, f"{kept}\n*({dropped} more dependencies omitted)*\n"
+                )
 
         # Priority 7: Truncate source code (last resort)
         if current_tokens > max_tokens:
@@ -1318,6 +1289,11 @@ class GraphQuerier:
                 if "timeout" in cuts:
                     break
             if "timeout" in cuts or "node limit" in cuts:
+                if level < depth:
+                    # Those opened at the cut list their callees as left out
+                    for parent in opened:
+                        callees = self.get_callees(parent)
+                        rows[parent] = ([], callees, self.get_ambiguous_callees(parent))
                 break
             frontier = opened
 
