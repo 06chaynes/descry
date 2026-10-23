@@ -14,8 +14,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   counted again as a graph loads, so a graph from 0.3.1 needs no reindex.
   Every other count gives the others as "(+N possible)": brief `context`
   (callers and callees), `callers`, `callees`, and the web page's headers
-  (`possible` in the web API). Lists mark each one; `changes` does so in text, in its structured
-  form (`candidates`, `callers_possible`) and on the page.
+  (`possible` in the web API). Lists mark each one; `changes` does so in
+  text, in its structured form (`candidates`, `callers_possible`) and on
+  the page.
 - A function no longer counts as a certain caller of a symbol it defines
   when its call to it is unresolved.
 - `callers` of a name lists the calls the resolver left unresolved with no
@@ -40,14 +41,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A callee the resolver left unresolved is no longer shown or counted as
   certain or as external. `context`, at every depth, names it as one of
   its candidates, or "(unresolved)" where it found none. `callees` marks
-  it the same way and counts it apart ("+N unresolved"). Forward `flow`
-  follows a possible callee to each definition it may reach, marked.
+  it the same way and counts it apart ("+N unresolved"). A callee is what
+  a call is written as: calls written apart (`a.add`, `b.add`) are two
+  callees, and calls written alike may reach any definition one of them
+  is narrowed to. Forward `flow` follows a possible callee to each
+  definition it may reach, marked, and `context` at a depth past 1 says
+  how many callees each level leaves out.
 - `callees` says how many callees its `limit` leaves out, and of a name
   several definitions share, which one it answers for (`others` in the web
   API).
 - A `limit`, a `flow` or `context` `depth` or a `path` `max_depth` below 1
-  is refused by every tool; `limit=0` answered as if there were no callers, matches,
-  changes or history.
+  is refused by every tool; `limit=0` answered as if there were no
+  callers, matches, changes or history.
 - The web page's changes view no longer throws for a changed symbol with
   no callers.
 

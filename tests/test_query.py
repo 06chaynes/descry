@@ -1636,3 +1636,44 @@ def test_an_edge_to_a_symbol_the_graph_lacks_does_not_break_context(tmp_path):
         assert "gone`" in q.get_context_prompt(
             "FILE:a.py::f", depth=depth, expand_callees=expand
         )
+
+
+def test_calls_written_alike_reach_what_any_of_them_may(tmp_path):
+    """Calls of `put` narrowed to one definition each, then one to none:
+    the callee `put` may reach either definition."""
+    nodes = [
+        _fn("FILE:a.py::f"),
+        _fn("FILE:b.py::Facet::put"),
+        _fn("FILE:c.py::Sink::put"),
+    ]
+    edges = [
+        {
+            "source": "FILE:a.py::f",
+            "target": "REF:put",
+            "relation": "CALLS",
+            "metadata": {"candidates": ["FILE:b.py::Facet::put"]},
+        },
+        {
+            "source": "FILE:a.py::f",
+            "target": "REF:put",
+            "relation": "CALLS",
+            "metadata": {"candidates": ["FILE:c.py::Sink::put"]},
+        },
+        {"source": "FILE:a.py::f", "target": "REF:put", "relation": "CALLS"},
+    ]
+    assert _querier(tmp_path, nodes, edges).get_ambiguous_callees("FILE:a.py::f") == {
+        "REF:put": 2
+    }
+
+
+def test_a_deep_context_says_what_it_leaves_out(tmp_path):
+    (tmp_path / "a.py").write_text("def f():\n    pass\n")
+    nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
+    nodes += [_fn(f"FILE:a.py::g{i}", token_count=500) for i in range(3)]
+    edges = [_calls("FILE:a.py::f", f"FILE:a.py::g{i}") for i in range(3)]
+    edges.append({"source": "FILE:a.py::f", "target": "REF:x.h", "relation": "CALLS"})
+    q = _querier(
+        tmp_path, nodes, edges, project_root=tmp_path, max_children_per_level=2
+    )
+    text = q.get_context_prompt("FILE:a.py::f", depth=2, expand_callees=True)
+    assert "*(1 more callees, 1 more unresolved callees)*" in text

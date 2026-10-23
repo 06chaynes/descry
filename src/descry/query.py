@@ -1366,8 +1366,10 @@ class GraphQuerier:
             return list(cached_results), budget - cached_cost
 
         results = []
-        callees = self.get_callees(node_id)[: self._max_children_per_level]
+        callees = self.get_callees(node_id)
         unresolved = self.get_ambiguous_callees(node_id)
+        left_out = callees[self._max_children_per_level :]
+        callees = callees[: self._max_children_per_level]
 
         for callee_id in callees:
             if callee_id in expanded:
@@ -1436,6 +1438,10 @@ class GraphQuerier:
                 clean_name = _clean_ref_name(raw_name)
                 note = self.callee_note(unresolved.get(callee_id))
                 results.append(f"{indent_str}- `{clean_name}`{note}")
+        if left_out:
+            certain, possible, none = self.kinds(left_out, unresolved)
+            more = self.more_callers(certain, possible, "callees", none)
+            results.append(f"{'  ' * indent}*({more})*")
 
         # Cache results, with the cost of the whole subtree, unless the
         # timeout cut the expansion short.
@@ -2355,14 +2361,15 @@ class GraphQuerier:
 
     def get_ambiguous_callees(self, func_node_id):
         """``{REF: target: number of candidates}`` of the calls of
-        ``func_node_id`` the resolver left unresolved: each is one call that
-        may reach one of N definitions, or none it found (0)."""
-        ambiguous = {}
+        ``func_node_id`` the resolver left unresolved, by what they are
+        written as: the definitions any of them may reach, or none it found
+        for any (0)."""
+        reach = {}
         for edge in self.outgoing[func_node_id]:
             if edge["relation"] == "CALLS" and edge["target"].startswith("REF:"):
                 candidates = edge.get("metadata", {}).get("candidates") or ()
-                ambiguous[edge["target"]] = len(candidates)
-        return ambiguous
+                reach.setdefault(edge["target"], set()).update(candidates)
+        return {target: len(candidates) for target, candidates in reach.items()}
 
     @classmethod
     def callee_note(cls, candidates):
