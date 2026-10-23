@@ -1836,3 +1836,42 @@ def test_deep_context_lists_an_unresolved_call_met_twice(tmp_path):
     text = q.get_context_prompt("FILE:a.py::two", depth=2)
     assert text.count("`append` (unresolved)") == 2
     assert text.count("gone`") == 2
+
+
+def test_the_node_limit_lists_the_symbols_own_callees(tmp_path):
+    """It cuts the levels below, counting what it did not reach."""
+    (tmp_path / "a.py").write_text("def f():\n    pass\n")
+    nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
+    nodes += [
+        _fn(f"FILE:a.py::g{i}", lineno=1, end_lineno=2, token_count=10)
+        for i in range(3)
+    ]
+    nodes += [_fn(f"FILE:a.py::h{i}", token_count=500) for i in range(3)]
+    edges = [_calls("FILE:a.py::f", f"FILE:a.py::g{i}") for i in range(3)]
+    edges += [_calls("FILE:a.py::g0", f"FILE:a.py::h{i}") for i in range(3)]
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path, max_nodes=2)
+    text = q.get_context_prompt("FILE:a.py::f", depth=2)
+    assert all(f"**g{i}**" in text for i in range(3))
+    assert "*(3 more callees)*" in text
+    assert "*(node limit reached)*" in text
+
+
+def test_output_trimming_keeps_or_drops_a_dependency_whole(tmp_path):
+    q = _querier(tmp_path, [_fn("FILE:x.py::f")])
+    deps = []
+    for i in range(7):
+        deps += [
+            f"- **c{i}** (10 toks):",
+            "  ```python",
+            f"  code {i}",
+            "  ```",
+            f"  - `n{i}(...)` (500 toks)",
+        ]
+    text = (
+        "### Context\n#### Source Code:\n```python\nx\n```\n#### Dependencies (Callees):\n"
+        + "\n".join(deps)
+        + "\n"
+    )
+    out = q._truncate_output_progressively(text, max_tokens=60, source_lang="python")
+    assert "code 4" in out and "- `n4(...)`" in out and "**c5**" not in out
+    assert "*(4 more dependencies omitted)*" in out

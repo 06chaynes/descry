@@ -912,14 +912,21 @@ class GraphQuerier:
                 r"(#### Dependencies \(Callees\):)(.*?)(?=####|\Z)", result, re.DOTALL
             )
             if match:
-                deps_content = match.group(2)
-                lines = deps_content.strip().split("\n")
-                dep_lines = [line for line in lines if line.startswith("- ")]
-                if len(dep_lines) > 5:
-                    new_content = "\n".join(dep_lines[:5])
-                    new_content += (
-                        f"\n*({len(dep_lines) - 5} more dependencies omitted)*\n"
+                # Each top-level dependency with what is nested under it:
+                # its code and its own callees go with it or not at all.
+                entries = []
+                for line in match.group(2).strip().split("\n"):
+                    if line.startswith(("- ", "*(")) or not entries:
+                        entries.append([line])
+                    else:
+                        entries[-1].append(line)
+                if len(entries) > 5:
+                    dropped = sum(
+                        sum(line.lstrip().startswith("- ") for line in entry)
+                        for entry in entries[5:]
                     )
+                    new_content = "\n".join("\n".join(entry) for entry in entries[:5])
+                    new_content += f"\n*({dropped} more dependencies omitted)*\n"
                     result = (
                         result[: match.start()]
                         + match.group(1)
@@ -1230,7 +1237,8 @@ class GraphQuerier:
         """Lines listing the callees of ``node_id``, ``depth`` levels deep.
 
         Planned level by level: the symbol's own callees are all listed, and
-        each level below is cut to the per-level limit with a note. A symbol
+        each level below is cut to the per-level limit, and at the node
+        limit, with a note. A symbol
         is opened (its code inlined, its own callees listed) at the first
         level that reaches it, when it is small
         enough to inline and the token ``budget`` still covers it; a symbol
@@ -1253,7 +1261,7 @@ class GraphQuerier:
                 limit = len(callees) if level == 1 else self._max_children_per_level
                 listed = []
                 rows[parent] = (listed, callees[limit:], marks)
-                for callee in callees[:limit]:
+                for index, callee in enumerate(callees[:limit]):
                     if (time.time() - start_time) * 1000 > self._timeout_ms:
                         cuts.append("timeout")
                         break
@@ -1263,7 +1271,9 @@ class GraphQuerier:
                     if callee in placed:
                         listed.append(("seen", callee))
                         continue
-                    if self._max_nodes and len(placed) > self._max_nodes:
+                    if level > 1 and self._max_nodes and len(placed) > self._max_nodes:
+                        # Those not reached are counted with those left out
+                        rows[parent] = (listed, callees[index:], marks)
                         cuts.append("node limit")
                         break
                     placed[callee] = level

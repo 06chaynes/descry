@@ -74,6 +74,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   callers, matches, changes or history.
 - The web page's changes view no longer throws for a changed symbol with
   no callers.
+- `context --max-output-tokens` trims its dependencies whole, each with its
+  code and its own callees, and counts every one it leaves out; it kept
+  the headings of opened callees without their code and miscounted.
 
 ## [0.3.1] — 2026-10-22
 
