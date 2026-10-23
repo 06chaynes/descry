@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -45,6 +46,9 @@ from descry.scip.adapter import (
 from descry.scip.adapters.rust import crate_dir as rust_crate_dir
 
 logger = logging.getLogger(__name__)
+
+# A line of a JavaScript, JVM or .NET stack trace
+_FRAME = re.compile(r"\s+at ")
 
 
 def _writes_through(path: Path) -> bool:
@@ -421,9 +425,9 @@ class ScipCacheManager:
                 )
             return True
 
-        stderr_tail = (
-            result.stderr[-500:] if len(result.stderr) > 500 else result.stderr
-        )
+        # Without the stack frames that bury the error above them
+        said = [line for line in result.stderr.splitlines() if not _FRAME.match(line)]
+        stderr_tail = "\n".join(said)[-500:]
         logger.warning(
             f"SCIP: Failed to generate {adapter.name} index for {project.name} "
             f"(exit={result.returncode}, output_exists={output_path.exists()}, "

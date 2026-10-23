@@ -1662,8 +1662,8 @@ class GitHistoryAnalyzer:
 
             # Show callers if requested
             if show_callers and self.querier:
-                sym_name = name.split(".")[-1]  # Get base name
-                callers = self.querier.get_callers(sym_name)
+                # The callers of this symbol, not of every one of its name
+                callers = self.querier.get_callers(node_id)
                 if callers:
                     caller_names = []
                     for caller_id in callers[:5]:
@@ -1742,8 +1742,7 @@ class GitHistoryAnalyzer:
             }
 
             if show_callers and self.querier:
-                sym_name = name.split(".")[-1]
-                caller_ids = self.querier.get_callers(sym_name)
+                caller_ids = self.querier.get_callers(node_id)
                 if caller_ids:
                     callers = []
                     for caller_id in caller_ids[:5]:

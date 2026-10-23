@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-10-22
+
+### Fixed
+
+- The callers a change lists (`changes`), and those `context` lists and
+  counts and an upstream `flow` follows, are the callers of that symbol,
+  not of every symbol of its name. `context` marks a caller that reaches
+  the symbol only as one of an unresolved call's candidates, as `callers`
+  does.
+- A symbol's caller count (`in_degree`, shown as "N callers") counts the
+  symbols that call or construct it, not every edge into it: the file
+  defining it was counted as a caller.
+- A Python signature is written as the source writes it, with defaults,
+  `*`, `**`, keyword-only parameters and `async`, and with no `-> None`
+  where no return type is annotated. An unannotated function was recorded
+  as returning `None`.
+- The web UI's Language filter lists the graph's languages, which the
+  graph status now gives (`/api/status`, `/api/health`), instead of four
+  fixed ones.
+- A search during the startup pre-warm, or during the embeddings load
+  after an index, waits for that load (up to `embedding_timeout`) instead
+  of reporting that embeddings are loading. A streamed index reports the
+  embeddings line however long the load takes.
+- scip-python runs without `pip` on PATH and outside a git repository: it
+  is given an empty environment and a project version.
+- A SCIP indexer's failure is reported by its error, without the stack
+  frames that pushed it out of the message.
+- `flatten` takes a class name as `context` does, not only a node ID.
+- `impls` says trait implementations are recorded for Rust only, instead
+  of advising a reindex.
+- An unresolved call with one candidate reads "unresolved; the only
+  candidate", not "one of 1 candidates".
+
 ## [0.3.0] — 2026-10-22
 
 Call resolution is rebuilt for every supported language: a call is

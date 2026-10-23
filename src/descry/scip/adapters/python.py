@@ -15,6 +15,9 @@ from descry.scip.adapters.typescript import parse_backtick_descriptors
 
 logger = logging.getLogger(__name__)
 
+# A Python environment with no packages installed, in scip-python's format
+_EMPTY_ENVIRONMENT = Path(__file__).parent / "_empty_environment.json"
+
 
 def _py_in_scope(root: Path, path: Path, excluded_dirs: set[str]) -> bool:
     """True if `path` is under `root` and not within an excluded/hidden dir."""
@@ -110,7 +113,11 @@ class PythonAdapter:
 
         scip-python accepts `--project-name`, `--output`, and `--cwd`;
         the absolute `--cwd` prevents a leading-dash filename smuggling
-        attack via `os.chdir`. No shell.
+        attack via `os.chdir`. No shell. An empty `--environment` stands
+        in for the `pip list` it otherwise runs, which fails where no pip
+        is on PATH and only names the symbols of other packages; a
+        `--project-version` for the git revision it otherwise reads,
+        without which it fails outside a repository.
         """
         argv: list[str] = [
             self.binary,
@@ -121,6 +128,10 @@ class PythonAdapter:
             str(out_path),
             "--cwd",
             str(project.root),
+            "--environment",
+            str(_EMPTY_ENVIRONMENT),
+            "--project-version",
+            "0",
         ]
         return CommandSpec(argv=argv, cwd=project.root)
 

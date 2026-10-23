@@ -1216,7 +1216,12 @@ class TestUnresolvedCallsInPathsAndFlows:
             _calls("FILE:b.py::helper", "FILE:b.py::leaf"),
             {"source": "FILE:a.py::bare", "target": "REF:leaf", "relation": "CALLS"},
         ]
-        return _querier(tmp_path, nodes, edges)
+        return _querier(tmp_path, nodes, edges, project_root=tmp_path)
+
+    def test_context_marks_a_caller_that_may_reach_it(self, querier, tmp_path):
+        (tmp_path / "b.py").write_text("def helper():\n    leaf()\n")
+        context = querier.get_context_prompt("FILE:b.py::helper")
+        assert "- `start` in a.py (0 toks) (one of 2 candidates)" in context
 
     def test_path_starts_from_every_node_of_the_name(self, querier):
         found = querier.find_call_path_result("helper", "leaf")
@@ -1399,3 +1404,63 @@ class TestCallerOrder:
             [_calls(c, "FILE:m.py::target") for c in callers],
         )
         assert q.get_callers("target") == callers
+
+
+class TestCallersOfOneSymbol:
+    """Of two symbols of one name, each has only its own callers."""
+
+    @pytest.fixture
+    def querier(self, tmp_path):
+        from descry.generate import CodeGraphBuilder
+
+        method = "    def parse(self):\n        return 1\n"
+        (tmp_path / "a.py").write_text("class A:\n" + method)
+        (tmp_path / "b.py").write_text("class B:\n" + method)
+        (tmp_path / "use.py").write_text(
+            "from a import A\nfrom b import B\n\n\n"
+            "def only_a():\n    A().parse()\n\n\n"
+            "def only_b():\n    B().parse()\n"
+        )
+        builder = CodeGraphBuilder(tmp_path)
+        builder.process_directory()
+        builder.export(str(tmp_path / "graph.json"))
+        return GraphQuerier(
+            str(tmp_path / "graph.json"), config=DescryConfig(project_root=tmp_path)
+        )
+
+    def test_the_count_is_of_its_callers(self, querier):
+        meta = querier.nodes["FILE:a.py::A::parse"]["metadata"]
+        assert meta["in_degree"] == 1
+        brief = querier.get_context_prompt("FILE:a.py::A::parse", brief=True)
+        assert "**Callers:** 1 " in brief
+
+    def test_context_and_backward_flow_list_its_callers(self, querier):
+        for text in (
+            querier.get_context_prompt("FILE:a.py::A::parse"),
+            querier.trace_flow("FILE:a.py::A::parse", direction="backward"),
+        ):
+            assert "only_a" in text
+            assert "only_b" not in text
+
+
+def test_a_call_with_one_candidate_is_not_one_of_several():
+    assert GraphQuerier.one_of(1) == " (unresolved; the only candidate)"
+    assert GraphQuerier.one_of(3) == " (one of 3 candidates)"
+    assert GraphQuerier.one_of(None) == ""
+
+
+def test_flatten_takes_a_class_name(tmp_path):
+    widget = {
+        "id": "FILE:w.py::Widget",
+        "type": "Class",
+        "metadata": {"name": "Widget"},
+    }
+    draw = {
+        "id": "FILE:w.py::Widget::draw",
+        "type": "Method",
+        "metadata": {"name": "draw", "signature": "def draw(self)"},
+    }
+    defines = {"source": widget["id"], "target": draw["id"], "relation": "DEFINES"}
+    flat = _querier(tmp_path, [widget, draw], [defines]).flatten_class("Widget")
+    assert "def draw(self)" in flat
+    assert "`FILE:w.py::Widget`" in flat
