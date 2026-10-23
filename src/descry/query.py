@@ -619,6 +619,7 @@ class GraphQuerier:
         # down step by step: what each step drops is said where it was.
         omitted = {}
         source_lines = source_code.rstrip("\n").split("\n")
+        span = end - start + 1
 
         def render():
             output = [f"### Context for `{node['id']}`"]
@@ -630,7 +631,7 @@ class GraphQuerier:
             output.append("#### Source Code:")
             source = "\n".join(source_lines)
             if "source" in omitted:
-                source += f"\n// ... ({omitted['source']} lines omitted, max_output_tokens limit) ..."
+                source += f"\n// ... ({span - len(source_lines)} lines omitted, max_output_tokens limit) ..."
             output.append(f"```{source_lang}\n{source}\n```\n")
 
             if impl_methods:
@@ -686,11 +687,13 @@ class GraphQuerier:
             if callee_blocks or callee_notes:
                 output.append("#### Dependencies (Callees):")
                 output.extend(line for block in callee_blocks for line in block)
-                if "callees" in omitted:
-                    output.append(f"*({omitted['callees']} more callees omitted)*")
                 output.extend(callee_notes)
                 output.append("")
 
+            if "expanded" in omitted:
+                output.append("#### Expanded Callees (Full Source):")
+                output.append("*(omitted, max_output_tokens limit)*")
+                output.append("")
             if expanded_callees:
                 output.append("#### Expanded Callees (Full Source):")
                 for exp in expanded_callees:
@@ -700,11 +703,23 @@ class GraphQuerier:
                     output.append(f"```{exp['lang']}\n{exp['source']}\n```")
                 output.append("")
 
+            if "tests" in omitted:
+                output.extend(
+                    ["#### Related Tests:", "*(omitted, max_output_tokens limit)*", ""]
+                )
             if related_tests:
                 output.append("#### Related Tests:")
                 output.extend(f"- `{t}`" for t in related_tests)
                 output.append("")
 
+            if "configs" in omitted:
+                output.extend(
+                    [
+                        "#### Related Configuration (same file):",
+                        "*(omitted, max_output_tokens limit)*",
+                        "",
+                    ]
+                )
             if related_configs:
                 output.append("#### Related Configuration (same file):")
                 for cfg in related_configs:
@@ -719,13 +734,27 @@ class GraphQuerier:
                 omitted[key] = len(items) - count
                 del items[count:]
 
+        def drop(items, key):
+            if items:
+                omitted[key] = len(items)
+                items.clear()
+
+        def first_callees():
+            # Planned again for five, so marks point only at entries drawn
+            # and the note counts what is left out by kind.
+            nonlocal callee_blocks, callee_notes
+            if len(callee_blocks) > 5:
+                callee_blocks, callee_notes = self._expand_callees(
+                    node_id, depth, max_tokens, inline_threshold, first=5
+                )
+
         steps = [
-            lambda: expanded_callees.clear(),
+            lambda: drop(expanded_callees, "expanded"),
             lambda: keep(usage_examples, 2, "examples"),
-            lambda: related_tests.clear(),
-            lambda: related_configs.clear(),
+            lambda: drop(related_tests, "tests"),
+            lambda: drop(related_configs, "configs"),
             lambda: callers_summary.__delitem__(slice(5, None)),
-            lambda: keep(callee_blocks, 5, "callees"),
+            first_callees,
             lambda: keep(source_lines, 30, "source"),
         ]
         result = render()
@@ -1097,10 +1126,12 @@ class GraphQuerier:
         callers.sort(key=lambda c: (bool(c["candidates"]), c["tokens"], c["name"]))
         return callers[:limit]
 
-    def _expand_callees(self, node_id, depth, budget, inline_threshold):
+    def _expand_callees(self, node_id, depth, budget, inline_threshold, first=None):
         """``(blocks, notes)`` listing the callees of ``node_id``, ``depth``
         levels deep: one block of lines per callee of the symbol, with what
-        is listed under it, and the notes on the whole list.
+        is listed under it, and the notes on the whole list. ``first``, when
+        given, lists only that many of the symbol's own callees and counts
+        the rest as left out.
 
         Planned level by level: the symbol's own callees are all listed, and
         each level below is cut to the per-level limit, and at the node
@@ -1128,7 +1159,10 @@ class GraphQuerier:
                     continue
                 # The symbol's own callees are all listed; below them, each
                 # level is cut to the per-level limit.
-                limit = len(callees) if level == 1 else self._max_children_per_level
+                if level > 1:
+                    limit = self._max_children_per_level
+                else:
+                    limit = len(callees) if first is None else first
                 listed = []
                 rows[parent] = (listed, callees[limit:], marks)
                 for index, callee in enumerate(callees[:limit]):

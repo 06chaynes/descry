@@ -1963,7 +1963,7 @@ class TestOutputCap:
 
     def test_callees_go_whole(self, q):
         out = q.get_context_prompt("FILE:a.py::f", max_output_tokens=1)
-        assert "*(2 more callees omitted)*" in out
+        assert "*(2 more callees)*" in out
         assert "**c4**" in out and "**c5**" not in out
         assert out.count("#### Linux:") == 5
 
@@ -1971,3 +1971,43 @@ class TestOutputCap:
         out = q.get_context_prompt("FILE:a.py::f", max_output_tokens=1)
         assert "#### Callers (5 shown):" in out
         assert "*(2 more callers, 2 more possible callers)*" in out
+
+    def test_a_dropped_section_is_said(self, q, tmp_path):
+        q._find_related_tests = lambda *args: ["tests/test_a.py"]
+        out = q.get_context_prompt("FILE:a.py::f", max_output_tokens=1)
+        assert "#### Related Tests:\n*(omitted, max_output_tokens limit)*" in out
+
+
+def test_the_source_cut_counts_from_the_symbols_lines(tmp_path):
+    """Not from the source already shortened for display."""
+    (tmp_path / "x.py").write_text("\n".join(f"line {i}" for i in range(300)) + "\n")
+    node = _fn("FILE:x.py::f", lineno=1, end_lineno=300, token_count=3000)
+    q = _querier(tmp_path, [node], project_root=tmp_path)
+    out = q.get_context_prompt("FILE:x.py::f", max_output_tokens=50)
+    assert "(270 lines omitted, max_output_tokens limit)" in out
+
+
+def test_a_cut_callee_list_keeps_kinds_and_marks_true(tmp_path):
+    """Possible callees are counted apart, and no mark points at a callee
+    whose entry was cut."""
+    (tmp_path / "a.py").write_text("def f():\n    pass\n")
+    small = [f"a{i}" for i in range(6)]
+    nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
+    nodes += [
+        _fn(f"FILE:a.py::{n}", lineno=1, end_lineno=2, token_count=10) for n in small
+    ]
+    nodes += [_fn("FILE:b.py::p"), _fn("FILE:c.py::p")]
+    edges = [_calls("FILE:a.py::f", f"FILE:a.py::{n}") for n in small]
+    edges.append(_calls("FILE:a.py::a0", "FILE:a.py::a5"))
+    edges.append(
+        {
+            "source": "FILE:a.py::f",
+            "target": "REF:x.p",
+            "relation": "CALLS",
+            "metadata": {"candidates": ["FILE:b.py::p", "FILE:c.py::p"]},
+        }
+    )
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
+    out = q.get_context_prompt("FILE:a.py::f", depth=2, max_output_tokens=1)
+    assert "*(1 more callees, 1 more possible callees)*" in out
+    assert "(at level" not in out

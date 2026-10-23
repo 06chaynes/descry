@@ -77,8 +77,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `context --max-output-tokens` cuts the parts the answer is made of, not
   its text: expanded callees, then usage examples past 2, related tests
   and configuration, callers past 5 (still counting possible callers
-  apart), the symbol's callees past 5, each with its code and its own
-  callees, and the source past 30 lines, saying what each step left out.
+  apart), the symbol's callees past 5 (planned again for those five, so
+  the note counts what is left out by kind and no "(at level N)" mark
+  points at a callee cut away), and the source past 30 of the symbol's
+  lines, saying what each step left out; a section dropped whole keeps its
+  heading with "(omitted, max_output_tokens limit)".
   It read the rendered text back, so code with a heading-like or a fence
   line in it was cut wrongly or not at all, opened callees kept their
   headings without their code, and counts were wrong.
