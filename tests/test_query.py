@@ -2016,3 +2016,18 @@ def test_a_cut_callee_list_keeps_kinds_and_marks_true(tmp_path, a0_calls_p):
     assert ("more possible callees" in out) is not a0_calls_p
     assert "**a5**" in out
     assert "(at level" not in out
+
+
+def test_a_self_call_past_the_callees_cut_is_counted(tmp_path):
+    """The symbol is not drawn as one of its own callees."""
+    (tmp_path / "a.py").write_text("def f():\n    pass\n")
+    small = [f"a{i}" for i in range(6)]
+    nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
+    nodes += [
+        _fn(f"FILE:a.py::{n}", lineno=1, end_lineno=2, token_count=10) for n in small
+    ]
+    edges = [_calls("FILE:a.py::f", f"FILE:a.py::{n}") for n in small]
+    edges.append(_calls("FILE:a.py::f", "FILE:a.py::f"))
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
+    out = q.get_context_prompt("FILE:a.py::f", depth=2, max_output_tokens=1)
+    assert "*(2 more callees)*" in out
