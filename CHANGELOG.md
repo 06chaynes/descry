@@ -40,11 +40,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   may be; a `flow` tree node gives them as `more` and `more_possible`, and
   the web API's `callers` and `callees` as `more`, shown on the page.
 - `flow`, in text and as a tree, places each symbol at the first level
-  that reaches it and shows it again where it is met later as "(shown
-  above)" (`seen` in the tree); a direct callee or caller reached first
-  through another one was dropped from its level, with everything below
-  it. Deep `context` shows a callee met again the same way. The trace
-  stops early with "(timeout)" or "(node limit)" (`cut` in the tree).
+  that reaches it and marks it "(at level N)" where it is met again
+  (`seen`, that level, in the tree); a direct callee or caller reached
+  first through another one was dropped from its level, with everything
+  below it. Deep `context` opens each callee at the first level that
+  reaches it the same way. A trace that stops early says so: "(timeout)"
+  or "(node limit)" in text, `cut` in the tree, a note on the page.
 - A `flow` of `depth` N shows N levels of calls below the start; `depth=1`
   showed the start alone. `[query] max_depth` is that many levels too, for
   `flow` and for `context`'s callee expansion. A depth past it is traced to

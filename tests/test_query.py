@@ -1709,23 +1709,25 @@ class TestEachSymbolAtItsLevel:
             ("b", False),
         ]
         a, b = root["children"]
-        assert [(c["name"], c.get("seen")) for c in a["children"]] == [("b", True)]
+        assert [(c["name"], c.get("seen")) for c in a["children"]] == [("b", 1)]
         assert [c["name"] for c in b["children"]] == ["c"]
         text = q.trace_flow("FILE:m.py::start", depth=2)
-        assert "    ├─[Fun] **b** (shown above)" in text
+        assert "    ├─[Fun] **b** (at level 1)" in text
         assert "    ├─[Fun] **c** (500 toks)" in text
 
     def test_backward(self, q):
         tree = q.trace_flow_structured("FILE:m.py::b", direction="backward", depth=2)
         a, start = tree["root"]["children"]
         assert (a["name"], start["name"], start.get("seen")) == ("a", "start", None)
-        assert [(c["name"], c.get("seen")) for c in a["children"]] == [("start", True)]
+        assert [(c["name"], c.get("seen")) for c in a["children"]] == [("start", 1)]
 
     def test_deep_context_shows_a_callee_met_again(self, q):
         for node in q.nodes.values():
             node["metadata"]["token_count"] = 20
         text = q.get_context_prompt("FILE:m.py::start", depth=2)
-        assert "- `b` (shown above)" in text
+        assert "- `b` (at level 1)" in text
+        # `b` opens at level 1, so its callee is shown
+        assert "**c**" in text
 
 
 def test_usage_examples_are_calls_of_that_symbol(tmp_path):

@@ -607,6 +607,7 @@ class GraphQuerier:
                 current_depth=1,
                 indent=0,
                 inline_threshold=inline_threshold,
+                levels=self._callee_levels(node_id, depth, inline_threshold),
             )
         else:
             # Original single-level expansion
@@ -1283,6 +1284,24 @@ class GraphQuerier:
         callers.sort(key=lambda c: (bool(c["candidates"]), c["tokens"], c["name"]))
         return callers[:limit]
 
+    def _callee_levels(self, node_id, depth, inline_threshold):
+        """``{callee: level}``: the first level of a callee expansion of
+        ``node_id`` that reaches each callee, following only the callees an
+        expansion opens, those small enough to inline."""
+        levels = {node_id: 0}
+        frontier = [node_id]
+        for level in range(1, depth + 1):
+            reached = []
+            for parent in frontier:
+                for callee in self.get_callees(parent)[: self._max_children_per_level]:
+                    if callee in self.nodes and callee not in levels:
+                        levels[callee] = level
+                        tokens = self.nodes[callee]["metadata"].get("token_count", 999)
+                        if tokens <= inline_threshold:
+                            reached.append(callee)
+            frontier = reached
+        return levels
+
     def _expand_callees_recursive(
         self,
         node_id: str,
@@ -1293,6 +1312,7 @@ class GraphQuerier:
         indent: int = 0,
         start_time: float | None = None,
         inline_threshold: int | None = None,
+        levels: dict | None = None,
     ) -> tuple[list[str], int]:
         """Recursively expand callees up to depth limit with token budget.
 
@@ -1305,6 +1325,8 @@ class GraphQuerier:
             indent: Current indentation level
             start_time: Start time for timeout checking
             inline_threshold: Token threshold for inlining code
+            levels: `_callee_levels` of the expansion: a callee is opened only
+                at its level and marked "(at level N)" elsewhere
 
         Returns:
             Tuple of (formatted lines list, remaining budget)
@@ -1313,6 +1335,8 @@ class GraphQuerier:
             start_time = time.time()
         if inline_threshold is None:
             inline_threshold = CALLEE_INLINE_THRESHOLD
+        if levels is None:
+            levels = self._callee_levels(node_id, depth, inline_threshold)
 
         # Check timeout
         elapsed_ms = (time.time() - start_time) * 1000
@@ -1343,6 +1367,7 @@ class GraphQuerier:
             budget,
             inline_threshold,
             expanded_at_entry,
+            tuple(sorted(levels.items())),
         )
         if cache_key in self._expansion_cache:
             cached_results, cached_cost, cached_added = self._expansion_cache[cache_key]
@@ -1356,10 +1381,10 @@ class GraphQuerier:
         callees = callees[: self._max_children_per_level]
 
         for callee_id in callees:
-            if callee_id in expanded:
-                name = self.nodes.get(callee_id, {}).get("metadata", {}).get("name")
-                name = name or _clean_ref_name(callee_id.replace("REF:", ""))
-                results.append(f"{'  ' * indent}- `{name}` (shown above)")
+            level = levels.get(callee_id, current_depth)
+            if callee_id in expanded or level < current_depth:
+                name = self.nodes[callee_id]["metadata"].get("name", "?")
+                results.append(f"{'  ' * indent}- `{name}` (at level {level})")
                 continue
             expanded.add(callee_id)
 
@@ -1412,6 +1437,7 @@ class GraphQuerier:
                             indent + 1,
                             start_time,
                             inline_threshold,
+                            levels,
                         )
                         results.extend(nested)
                 else:
@@ -1490,7 +1516,8 @@ class GraphQuerier:
         self, start_id, direction, depth, target, inline_threshold, timeout_ms
     ):
         """The flow from ``start_id``, level by level: each symbol is placed
-        once, at the first level that reaches it, and met again as `seen`.
+        once, at the first level that reaches it, and met again as `seen`,
+        the level of that entry (the start is level 0).
         Returns ``(root, path, cut)``: the tree, the node IDs from the start
         to the first node named ``target``, and why it stopped early
         ("timeout", "node limit") or None."""
@@ -1544,7 +1571,7 @@ class GraphQuerier:
                         continue
                     if child_id in paths:
                         seen = tree_node(child_id, marks.get(child_id))
-                        seen.update(code=None, seen=True)
+                        seen.update(code=None, seen=len(paths[child_id]) - 1)
                         parent["children"].append(seen)
                         continue
                     if len(paths) > self._max_nodes:
@@ -1628,7 +1655,9 @@ class GraphQuerier:
             arrow = "├─" if level else ""
             head = f"{indent}{arrow}[{node['type']}] **{node['name']}**"
             if node.get("seen"):
-                output.append(f"{head}{self.one_of(node['candidates'])} (shown above)")
+                output.append(
+                    f"{head}{self.one_of(node['candidates'])} (at level {node['seen']})"
+                )
                 return
             output.append(
                 f"{head} ({node['tokens']} toks){self.one_of(node['candidates'])}"
@@ -1669,8 +1698,8 @@ class GraphQuerier:
         path_to_target (symbol names from the start to `target`, when reached),
         cut (why the trace stopped early, when it did). Each tree node has: id,
         name, type, tokens, file, line, code, lang, candidates, children,
-        more, more_possible, and `seen` where it is placed at a shallower
-        level already. The trace stops at the first node named `target`.
+        more, more_possible, and `seen`, the level its entry is at, where it
+        is placed there already. The trace stops at the first node named `target`.
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms

@@ -576,6 +576,7 @@
                 </div>
                 <!-- Disambiguation note -->
                 <div class="flow-note" x-show="results.flow?.tree?.note" x-text="results.flow?.tree?.note"></div>
+                <div class="flow-note" x-show="results.flow?.tree?.cut" x-text="'Stopped early (' + results.flow?.tree?.cut + '): the tree below is not complete'"></div>
                 <div class="flow-note" x-show="results.flow?.tree?.path_to_target" x-text="'Path to target: ' + (results.flow?.tree?.path_to_target || []).join(' → ')"></div>
                 <!-- Alternatives -->
                 <div class="flow-alternatives" x-show="results.flow?.tree?.alternatives?.length">
@@ -1573,7 +1574,7 @@ function app() {
             // Token count
             html += `<span class="flow-tokens">${node.tokens.toLocaleString()} toks</span>`;
             if (node.candidates) html += `<span class="flow-tokens">${this.oneOf(node.candidates)}</span>`;
-            if (node.seen) html += `<span class="flow-tokens">shown above</span>`;
+            if (node.seen) html += `<span class="flow-tokens">at level ${node.seen}</span>`;
             if (node.more) html += `<span class="flow-tokens">${node.more - node.more_possible ? '+' + (node.more - node.more_possible) + ' more' : ''}${node.more_possible ? ' +' + node.more_possible + ' more possible' : ''} not shown</span>`;
 
             // File location - navigates to Source
