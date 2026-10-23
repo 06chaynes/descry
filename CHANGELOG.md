@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   the page.
 - A function no longer counts as a certain caller of a symbol it defines
   when its call to it is unresolved.
+- A node ID names that node alone: `callers`, `callees`, `quick`, `flow`
+  and `path` given one no longer also match other definitions filed under
+  the same owner and name (a Ruby `self.x` beside `x`).
+- `context`'s usage examples are calls of that symbol, those resolved to
+  it first, then those it is one of the candidates of, marked; they were
+  any unresolved call ending in its name.
 - `callers` of a name lists the calls the resolver left unresolved with no
   candidates apart from its callers, marked "(unresolved; same name)" and
   counted as "+N unresolved" (`unresolved` in the web API). Some are calls
@@ -33,6 +39,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   symbol first, and says how many it leaves out and how many of those only
   may be; a `flow` tree node gives them as `more` and `more_possible`, and
   the web API's `callers` and `callees` as `more`, shown on the page.
+- `flow`, in text and as a tree, places each symbol at the first level
+  that reaches it and shows it again where it is met later as "(shown
+  above)" (`seen` in the tree); a direct callee or caller reached first
+  through another one was dropped from its level, with everything below
+  it. Deep `context` shows a callee met again the same way. The trace
+  stops early with "(timeout)" or "(node limit)" (`cut` in the tree).
 - A `flow` of `depth` N shows N levels of calls below the start; `depth=1`
   showed the start alone. `[query] max_depth` is that many levels too, for
   `flow` and for `context`'s callee expansion. A depth past it is traced to

@@ -1677,3 +1677,116 @@ def test_a_deep_context_says_what_it_leaves_out(tmp_path):
     )
     text = q.get_context_prompt("FILE:a.py::f", depth=2, expand_callees=True)
     assert "*(1 more callees, 1 more unresolved callees)*" in text
+
+
+class TestEachSymbolAtItsLevel:
+    """`start` calls `a` and `b`, and `a` calls `b`: `b` is a direct callee,
+    with its own callee `c` below it, and is met again under `a`."""
+
+    @pytest.fixture
+    def q(self, tmp_path):
+        names = ["start", "a", "b", "c"]
+        (tmp_path / "m.py").write_text(
+            "".join(f"def {n}():\n    pass\n" for n in names)
+        )
+        nodes = [
+            _fn(
+                f"FILE:m.py::{n}",
+                lineno=2 * i + 1,
+                end_lineno=2 * i + 2,
+                token_count=500,
+            )
+            for i, n in enumerate(names)
+        ]
+        pairs = [("start", "a"), ("start", "b"), ("a", "b"), ("b", "c")]
+        edges = [_calls(f"FILE:m.py::{x}", f"FILE:m.py::{y}") for x, y in pairs]
+        return _querier(tmp_path, nodes, edges, project_root=tmp_path)
+
+    def test_forward(self, q):
+        root = q.trace_flow_structured("FILE:m.py::start", depth=2)["root"]
+        assert [(c["name"], c.get("seen", False)) for c in root["children"]] == [
+            ("a", False),
+            ("b", False),
+        ]
+        a, b = root["children"]
+        assert [(c["name"], c.get("seen")) for c in a["children"]] == [("b", True)]
+        assert [c["name"] for c in b["children"]] == ["c"]
+        text = q.trace_flow("FILE:m.py::start", depth=2)
+        assert "    ├─[Fun] **b** (shown above)" in text
+        assert "    ├─[Fun] **c** (500 toks)" in text
+
+    def test_backward(self, q):
+        tree = q.trace_flow_structured("FILE:m.py::b", direction="backward", depth=2)
+        a, start = tree["root"]["children"]
+        assert (a["name"], start["name"], start.get("seen")) == ("a", "start", None)
+        assert [(c["name"], c.get("seen")) for c in a["children"]] == [("start", True)]
+
+    def test_deep_context_shows_a_callee_met_again(self, q):
+        for node in q.nodes.values():
+            node["metadata"]["token_count"] = 20
+        text = q.get_context_prompt("FILE:m.py::start", depth=2)
+        assert "- `b` (shown above)" in text
+
+
+def test_usage_examples_are_calls_of_that_symbol(tmp_path):
+    """Not calls left unresolved that end in its name; one it is a
+    candidate of is marked."""
+    (tmp_path / "a.py").write_text("def add():\n    pass\n")
+    (tmp_path / "u.py").write_text(
+        "def use():\n    add()\n    x.add()\n    vary.add('Cookie')\n"
+    )
+    nodes = [
+        _fn("FILE:a.py::add", lineno=1, end_lineno=2, token_count=10),
+        _fn("FILE:u.py::use"),
+        _fn("FILE:b.py::add"),
+    ]
+    edges = [
+        {
+            "source": "FILE:u.py::use",
+            "target": "FILE:a.py::add",
+            "relation": "CALLS_RESOLVED",
+            "metadata": {"lineno": 2},
+        },
+        {
+            "source": "FILE:u.py::use",
+            "target": "REF:x.add",
+            "relation": "CALLS",
+            "metadata": {
+                "lineno": 3,
+                "candidates": ["FILE:a.py::add", "FILE:b.py::add"],
+            },
+        },
+        {
+            "source": "FILE:u.py::use",
+            "target": "REF:vary.add",
+            "relation": "CALLS",
+            "metadata": {"lineno": 4},
+        },
+    ]
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
+    examples = q._get_usage_examples("FILE:a.py::add", limit=5)
+    assert [(e["lineno"], e["candidates"]) for e in examples] == [(2, None), (3, 2)]
+    assert "Line 3: (one of 2 candidates)" in q.get_context_prompt("FILE:a.py::add")
+
+
+def test_a_node_id_names_that_node_alone(tmp_path):
+    """Sinatra's instance `force_encoding` is not its `self.force_encoding`,
+    though both are named `force_encoding` under `Base`."""
+    nodes = [
+        _fn("FILE:base.rb::Base::force_encoding", name="force_encoding"),
+        _fn("FILE:base.rb::Base::self.force_encoding", name="force_encoding"),
+        _fn("FILE:base.rb::Base::dispatch"),
+        _fn("FILE:base.rb::Base::inline_templates="),
+    ]
+    edges = [
+        _calls("FILE:base.rb::Base::dispatch", "FILE:base.rb::Base::force_encoding"),
+        _calls(
+            "FILE:base.rb::Base::inline_templates=",
+            "FILE:base.rb::Base::self.force_encoding",
+        ),
+    ]
+    q = _querier(tmp_path, nodes, edges)
+    instance = "FILE:base.rb::Base::force_encoding"
+    assert [n["id"] for n in q.find_nodes_by_name(instance)] == [instance]
+    assert q.get_callers(instance) == ["FILE:base.rb::Base::dispatch"]
+    assert len(q.get_callers("force_encoding")) == 2

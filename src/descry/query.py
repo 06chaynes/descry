@@ -701,7 +701,9 @@ class GraphQuerier:
                 ex_lang = _get_syntax_lang(file_path, self._syntax_lang_map)
                 output.append(f"\n**From `{file_path}`:**")
                 for ex in examples:
-                    output.append(f"Line {ex['lineno']}:")
+                    output.append(
+                        f"Line {ex['lineno']}:{self.one_of(ex['candidates'])}"
+                    )
                     output.append(f"```{ex_lang}\n{ex['code']}\n```")
             output.append("")
 
@@ -1203,59 +1205,41 @@ class GraphQuerier:
         return None, msg
 
     def _get_usage_examples(self, target_node_id, limit=2):
-        """
-        Finds places where target_node_id is called and extracts code snippets.
-        """
-        target_node = self.nodes.get(target_node_id)
-        if not target_node:
+        """Snippets of the calls of ``target_node_id``: those resolved to it
+        first, then those it is one of the candidates of, each with
+        ``candidates`` (None when resolved); examples and tests first within
+        each."""
+        if target_node_id not in self.nodes:
             return []
+        calls = [
+            edge
+            for index in (self.incoming, self.candidate_incoming)
+            for edge in index.get(target_node_id, [])
+            if edge["relation"] in CALL_RELATIONS
+        ]
 
-        target_name = target_node["metadata"].get("name")
-        if not target_name:
-            return []
-        examples = []
-
-        # We need to find edges that target REF:target_name or REF:parent.target_name
-        # The graph stores targets as "REF:..."
-        # We will scan edges.
-
-        candidates = []
-
-        # Optimization: Pre-filter edges by relation
-        # But we need specific line numbers from the edges now.
-
-        for edge in self.edges:
-            if edge["relation"] == "CALLS":
-                t = edge["target"].replace("REF:", "")
-                # Flexible match: exact or attribute suffix
-                if t == target_name or t.endswith(f".{target_name}"):
-                    candidates.append(edge)
-
-        # Sort candidates to prefer examples/tests if possible, or just by source path
-        # Heuristic: put 'examples' or 'test' paths first
-        def score_candidate(edge):
+        def order(edge):
             src = edge["source"]
-            if "example" in src:
-                return 0
-            if "test" in src:
-                return 1
-            return 2
+            place = 0 if "example" in src else 1 if "test" in src else 2
+            return edge["target"] != target_node_id, place
 
-        candidates.sort(key=score_candidate)
-
-        for edge in candidates[:limit]:
-            source_id = edge["source"]
-            # Source ID is like FILE:path::Func
-            file_path = source_id.split("::")[0].replace("FILE:", "")
+        examples = []
+        for edge in sorted(calls, key=order):
+            if len(examples) == limit:
+                break
+            file_path = edge["source"].split("::")[0].replace("FILE:", "")
             lineno = edge.get("metadata", {}).get("lineno")
-
             if lineno and os.path.exists(self._disk_path(file_path)):
-                # Get context around the call (e.g. -1 to +1 lines)
                 code = self.get_source_segment(file_path, lineno - 1, lineno + 2)
+                candidates = edge.get("metadata", {}).get("candidates")
                 examples.append(
-                    {"file": file_path, "lineno": lineno, "code": code.strip()}
+                    {
+                        "file": file_path,
+                        "lineno": lineno,
+                        "code": code.strip(),
+                        "candidates": len(candidates) if candidates else None,
+                    }
                 )
-
         return examples
 
     def _get_callers_summary(self, target_node_id, limit=None):
@@ -1373,6 +1357,9 @@ class GraphQuerier:
 
         for callee_id in callees:
             if callee_id in expanded:
+                name = self.nodes.get(callee_id, {}).get("metadata", {}).get("name")
+                name = name or _clean_ref_name(callee_id.replace("REF:", ""))
+                results.append(f"{'  ' * indent}- `{name}` (shown above)")
                 continue
             expanded.add(callee_id)
 
@@ -1499,6 +1486,78 @@ class GraphQuerier:
             return callees + list(possible), possible
         return self.ordered_callers(node_id)
 
+    def _flow_tree(
+        self, start_id, direction, depth, target, inline_threshold, timeout_ms
+    ):
+        """The flow from ``start_id``, level by level: each symbol is placed
+        once, at the first level that reaches it, and met again as `seen`.
+        Returns ``(root, path, cut)``: the tree, the node IDs from the start
+        to the first node named ``target``, and why it stopped early
+        ("timeout", "node limit") or None."""
+        start_time = time.time()
+
+        def tree_node(node_id, candidates):
+            node = self.nodes[node_id]
+            meta = node.get("metadata", {})
+            tokens = meta.get("token_count", 0)
+            file_path = node_id.split("::")[0].replace("FILE:", "")
+            code = None
+            if 0 < tokens <= inline_threshold and os.path.exists(
+                self._disk_path(file_path)
+            ):
+                start_line = meta.get("lineno", 1)
+                end_line = meta.get("end_lineno", start_line + 10)
+                code = self.get_source_segment(file_path, start_line, end_line)
+            return {
+                "id": node_id,
+                "name": meta.get("name", "?"),
+                "type": node.get("type", "?")[:3],
+                "tokens": tokens,
+                "file": file_path,
+                "line": meta.get("lineno"),
+                "code": code,
+                "lang": _get_syntax_lang(file_path, self._syntax_lang_map),
+                "candidates": candidates,
+                "children": [],
+                # Those of the next level past the per-level limit, and how
+                # many of them only may be
+                "more": 0,
+                "more_possible": 0,
+            }
+
+        root = tree_node(start_id, None)
+        paths = {start_id: [start_id]}
+        if target and root["name"] == target:
+            return root, paths[start_id], None
+        level = [root]
+        for _ in range(depth):
+            next_level = []
+            for parent in level:
+                next_ids, marks = self._flow_next(parent["id"], direction)
+                left_out = next_ids[self._max_children_per_level :]
+                parent["more"] = len(left_out)
+                parent["more_possible"] = sum(i in marks for i in left_out)
+                for child_id in next_ids[: self._max_children_per_level]:
+                    if (time.time() - start_time) * 1000 > timeout_ms:
+                        return root, None, "timeout"
+                    if child_id not in self.nodes:
+                        continue
+                    if child_id in paths:
+                        seen = tree_node(child_id, marks.get(child_id))
+                        seen.update(code=None, seen=True)
+                        parent["children"].append(seen)
+                        continue
+                    if len(paths) > self._max_nodes:
+                        return root, None, "node limit"
+                    child = tree_node(child_id, marks.get(child_id))
+                    paths[child_id] = [*paths[parent["id"]], child_id]
+                    parent["children"].append(child)
+                    if target and child["name"] == target:
+                        return root, paths[child_id], None
+                    next_level.append(child)
+            level = next_level
+        return root, None, None
+
     def trace_flow(
         self,
         start_name: str,
@@ -1559,90 +1618,39 @@ class GraphQuerier:
                 output.append(f"  - ... and {len(func_nodes) - 5} more")
             output.append("")
 
-        visited = set()
-        path_to_target = []
-        start_time = time.time()
-        nodes_visited = 0
+        root, path, cut = self._flow_tree(
+            start_id, direction, depth, target, inline_threshold, timeout_ms
+        )
+        of = "callees" if direction == "forward" else "callers"
 
-        def trace(
-            node_id: str, current_depth: int, path: list, candidates=None
-        ) -> bool:
-            nonlocal nodes_visited
-
-            # Check limits
-            elapsed_ms = (time.time() - start_time) * 1000
-            if elapsed_ms > timeout_ms:
-                output.append("  " * (current_depth - 1) + "*(timeout)*")
-                return False
-            # The start is level 1: depth counts the levels of calls below it
-            if current_depth > depth + 1 or node_id in visited:
-                return False
-            if nodes_visited >= self._max_nodes:
-                output.append("  " * (current_depth - 1) + "*(node limit)*")
-                return False
-
-            visited.add(node_id)
-            nodes_visited += 1
-
-            node = self.nodes.get(node_id)
-            if not node:
-                return False
-
-            meta = node.get("metadata", {})
-            name = meta.get("name", "?")
-            tokens = meta.get("token_count", 0)
-            node_type = node.get("type", "?")[:3]
-
-            # Check target reached
-            if target and name == target:
-                path_to_target.extend(path + [node_id])
-                return True
-
-            # Get next level
-            next_ids, ambiguous = self._flow_next(node_id, direction)
-            left_out = next_ids[self._max_children_per_level :]
-            next_ids = next_ids[: self._max_children_per_level]
-
-            # Format node
-            indent = "  " * (current_depth - 1)
-            arrow = "├─" if current_depth > 1 else ""
+        def render(node, level):
+            indent = "  " * level
+            arrow = "├─" if level else ""
+            head = f"{indent}{arrow}[{node['type']}] **{node['name']}**"
+            if node.get("seen"):
+                output.append(f"{head}{self.one_of(node['candidates'])} (shown above)")
+                return
             output.append(
-                f"{indent}{arrow}[{node_type}] **{name}** ({tokens} toks)"
-                f"{self.one_of(candidates)}"
+                f"{head} ({node['tokens']} toks){self.one_of(node['candidates'])}"
             )
-
-            # Inline small functions
-            if tokens <= inline_threshold and tokens > 0:
-                file_path = node_id.split("::")[0].replace("FILE:", "")
-                if os.path.exists(self._disk_path(file_path)):
-                    start_line = meta.get("lineno", 1)
-                    end_line = meta.get("end_lineno", start_line + 10)
-                    code = self.get_source_segment(file_path, start_line, end_line)
-                    lang = _get_syntax_lang(file_path, self._syntax_lang_map)
-                    output.append(f"{indent}  ```{lang}")
-                    output.append(code.rstrip())
-                    output.append(f"{indent}  ```")
-
-            # Recurse (limit branching)
-            for next_id in next_ids:
-                if trace(
-                    next_id, current_depth + 1, path + [node_id], ambiguous.get(next_id)
-                ):
-                    return True
-            if left_out and current_depth <= depth:
-                possible = sum(next_id in ambiguous for next_id in left_out)
-                of = "callees" if direction == "forward" else "callers"
-                more = self.more_callers(len(left_out) - possible, possible, of)
+            if node["code"]:
+                output.append(f"{indent}  ```{node['lang']}")
+                output.append(node["code"].rstrip())
+                output.append(f"{indent}  ```")
+            for child in node["children"]:
+                render(child, level + 1)
+            if node["more"]:
+                certain = node["more"] - node["more_possible"]
+                more = self.more_callers(certain, node["more_possible"], of)
                 output.append(f"{indent}  *({more})*")
-            return False
 
-        trace(start_id, 1, [])
-
-        if target and path_to_target:
+        render(root, 0)
+        if cut:
+            output.append(f"*({cut})*")
+        if target and path:
             output.append("")
             output.append(f"#### Path to `{target}`:")
-            path_names = [p.split("::")[-1] for p in path_to_target]
-            output.append(" -> ".join(path_names))
+            output.append(" -> ".join(p.split("::")[-1] for p in path))
 
         return "\n".join(output)
 
@@ -1658,9 +1666,11 @@ class GraphQuerier:
         """Trace call flow, returning a structured tree for UI rendering.
 
         Returns dict with keys: root, alternatives (optional), note (optional),
-        path_to_target (symbol names from the start to `target`, when reached).
-        Each tree node has: id, name, type, tokens, file, line, code, lang, children.
-        The trace stops at the first node named `target`.
+        path_to_target (symbol names from the start to `target`, when reached),
+        cut (why the trace stopped early, when it did). Each tree node has: id,
+        name, type, tokens, file, line, code, lang, candidates, children,
+        more, more_possible, and `seen` where it is placed at a shallower
+        level already. The trace stops at the first node named `target`.
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
@@ -1691,93 +1701,16 @@ class GraphQuerier:
                     }
                 )
 
-        visited = set()
-        path_to_target = []
-        start_time = time.time()
-        nodes_visited = 0
-
-        def build_tree(
-            node_id: str, current_depth: int, path: list, candidates=None
-        ) -> dict | None:
-            nonlocal nodes_visited
-
-            elapsed_ms = (time.time() - start_time) * 1000
-            if elapsed_ms > timeout_ms:
-                return None
-            if current_depth > depth + 1 or node_id in visited:
-                return None
-            if nodes_visited >= self._max_nodes:
-                return None
-
-            visited.add(node_id)
-            nodes_visited += 1
-
-            node = self.nodes.get(node_id)
-            if not node:
-                return None
-
-            meta = node.get("metadata", {})
-            name = meta.get("name", "?")
-            tokens = meta.get("token_count", 0)
-            node_type = node.get("type", "?")[:3]
-            file_path = node_id.split("::")[0].replace("FILE:", "")
-            line = meta.get("lineno")
-            lang = _get_syntax_lang(file_path, self._syntax_lang_map)
-
-            # Inline small functions
-            code = None
-            if (
-                tokens <= inline_threshold
-                and tokens > 0
-                and os.path.exists(self._disk_path(file_path))
-            ):
-                start_line = meta.get("lineno", 1)
-                end_line = meta.get("end_lineno", start_line + 10)
-                code = self.get_source_segment(file_path, start_line, end_line)
-
-            # Recurse into children
-            next_ids, ambiguous = [], {}
-            if target and name == target:
-                path_to_target.extend([*path, name])
-            else:
-                next_ids, ambiguous = self._flow_next(node_id, direction)
-            left_out = next_ids[self._max_children_per_level :]
-            if current_depth > depth:
-                left_out = []
-            next_ids = next_ids[: self._max_children_per_level]
-
-            children = []
-            for next_id in next_ids:
-                child = build_tree(
-                    next_id, current_depth + 1, [*path, name], ambiguous.get(next_id)
-                )
-                if child:
-                    children.append(child)
-                if path_to_target:
-                    break
-
-            return {
-                "id": node_id,
-                "name": name,
-                "type": node_type,
-                "tokens": tokens,
-                "file": file_path,
-                "line": line,
-                "code": code,
-                "lang": lang,
-                "candidates": candidates,
-                "children": children,
-                # Those of the next level past the per-level limit, and how
-                # many of them only may be
-                "more": len(left_out),
-                "more_possible": sum(next_id in ambiguous for next_id in left_out),
-            }
-
-        root = build_tree(start_id, 1, [])
-
+        root, path, cut = self._flow_tree(
+            start_id, direction, depth, target, inline_threshold, timeout_ms
+        )
         result = {"root": root}
-        if path_to_target:
-            result["path_to_target"] = path_to_target
+        if path:
+            result["path_to_target"] = [
+                self.nodes[p]["metadata"].get("name", "?") for p in path
+            ]
+        if cut:
+            result["cut"] = cut
         if note:
             result["note"] = note
         if alternatives:
@@ -2092,6 +2025,9 @@ class GraphQuerier:
         # Empty/whitespace name would match every node (`"" in s` is True).
         if not name or not name.strip():
             return []
+        # A node ID names that node and no other.
+        if name in self.nodes:
+            return [self.nodes[name]]
         exact_matches = []
         variant_matches = []
         fuzzy_matches = []

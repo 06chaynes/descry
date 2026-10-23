@@ -1573,6 +1573,7 @@ function app() {
             // Token count
             html += `<span class="flow-tokens">${node.tokens.toLocaleString()} toks</span>`;
             if (node.candidates) html += `<span class="flow-tokens">${this.oneOf(node.candidates)}</span>`;
+            if (node.seen) html += `<span class="flow-tokens">shown above</span>`;
             if (node.more) html += `<span class="flow-tokens">${node.more - node.more_possible ? '+' + (node.more - node.more_possible) + ' more' : ''}${node.more_possible ? ' +' + node.more_possible + ' more possible' : ''} not shown</span>`;
 
             // File location - navigates to Source
