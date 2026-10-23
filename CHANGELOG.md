@@ -6,6 +6,99 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-10-23
+
+### Fixed
+
+- A caller that reaches a symbol only as one of an unresolved call's
+  candidates is counted apart from its callers. `in_degree` ("N callers")
+  counts the callers whose calls are resolved to the symbol, and is
+  counted again as a graph loads, so a graph from 0.3.1 needs no reindex.
+  Every other count gives the others as "(+N possible)": brief `context`
+  (callers and callees), `callers`, `callees`, and the web page's headers
+  (`possible` in the web API). Lists mark each one; `changes` does so in
+  text, in its structured form (`candidates`, `callers_possible`) and on
+  the page.
+- A function no longer counts as a certain caller of a symbol it defines
+  when its call to it is unresolved.
+- A node ID names that node alone: `callers`, `callees`, `quick`, `flow`
+  and `path` given one no longer also match other definitions filed under
+  the same owner and name (a Ruby `self.x` beside `x`).
+- `context`'s usage examples are calls of that symbol, those resolved to
+  it first, then those it is one of the candidates of, marked; they were
+  any unresolved call ending in its name.
+- `callers` of a name lists the calls the resolver left unresolved with no
+  candidates apart from its callers, marked "(unresolved; same name)" and
+  counted as "+N unresolved" (`unresolved` in the web API). Some are calls
+  of the project's definition the resolver cannot follow (a Rust re-export,
+  a TypeScript static member), some are calls of something else with that
+  name (`loader.list_templates()` on a library's loader). Neither is
+  counted as a caller. An unresolved call with candidates reaches only
+  those. Callers asked for by node ID are those resolved to it or narrowed
+  to it.
+- A list cut short (`callers`, `callees`, `context`'s callers, `changes`,
+  backward `flow` in text and as a tree) keeps the callers resolved to the
+  symbol first, and says how many it leaves out and how many of those only
+  may be; a `flow` tree node gives them as `more` and `more_possible`, and
+  the web API's `callers` and `callees` as `more`, shown on the page.
+- `flow`, in text and as a tree, places each symbol at the first level
+  that reaches it and marks it "(at level N)" where it is met again
+  (`seen`, that level, in the tree); a direct callee or caller reached
+  first through another one was dropped from its level, with everything
+  below it. `context`, at every depth, lists all of the symbol's own
+  callees and cuts each level below to the per-level limit with a note; it
+  opens a callee (inlines it and lists its own callees) at the first level
+  that reaches it while the token budget covers it, lists every other
+  callee by its signature or "(at level N)", and says when the budget, the
+  node limit or the timeout cut it short. Depth 1 ignored `max_tokens`. A
+  `flow` that stops early says so: "(timeout)" or "(node limit)" in text,
+  `cut` in the tree, a note on the page.
+- A `flow` of `depth` N shows N levels of calls below the start; `depth=1`
+  showed the start alone. `[query] max_depth` is that many levels too, for
+  `flow` and for `context`'s callee expansion. A depth past it is traced to
+  it and says so; the web API returns the depth traced, and `/api/health`
+  gives the ceiling the page's depth field is held to.
+- A callee the resolver left unresolved is no longer shown or counted as
+  certain or as external. `context`, at every depth, names it as one of
+  its candidates, or "(unresolved)" where it found none. `callees` marks
+  it the same way and counts it apart ("+N unresolved"). A callee is what
+  a call is written as: calls written apart (`a.add`, `b.add`) are two
+  callees, and calls written alike may reach any definition one of them
+  is narrowed to. Forward `flow` follows a possible callee to each
+  definition it may reach, marked, and `context` at a depth past 1 says
+  how many callees each level leaves out.
+- `callees` says how many callees its `limit` leaves out, and of a name
+  several definitions share, which one it answers for (`others` in the web
+  API).
+- A `limit`, a `flow` or `context` `depth`, a `context` `max_tokens` or
+  `callee_budget`, or a `path` `max_depth` below 1 is refused by every
+  tool; `limit=0` answered as if there were no
+  callers, matches, changes or history.
+- The web page's changes view no longer throws for a changed symbol with
+  no callers.
+- `context --max-output-tokens` cuts the parts the answer is made of, not
+  its text: expanded callees, then usage examples past 2, related tests
+  and configuration, callers past 5 (still counting possible callers
+  apart), the symbol's callees past 5 (planned again for those five, so
+  the note counts by kind only callees drawn nowhere in the answer and no
+  "(at level N)" mark points at a callee cut away), and the source past 30
+  of the symbol's lines, saying what each step left out; a section dropped
+  whole keeps its heading with "(omitted, max_output_tokens limit)".
+  It read the rendered text back, so code with a heading-like or a fence
+  line in it was cut wrongly or not at all, opened callees kept their
+  headings without their code, and counts were wrong.
+- `flow` text indents the code it inlines as deep as its fence. The code
+  was printed from the first column inside an indented fence, so it broke
+  the tree, and below the first level the fence read as an indented code
+  block.
+- A command that loads no embedding model no longer imports
+  sentence-transformers, and with it torch, as the service starts: where
+  they are installed every CLI command spent seconds on it.
+- `churn` ranks symbols, and co-change pairs of symbols, with the same
+  number of commits by node ID, so the same history gives the same list.
+  Their order among ties changed from run to run, and so, at the limit,
+  did which of them were listed.
+
 ## [0.3.1] — 2026-10-22
 
 ### Fixed

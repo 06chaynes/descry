@@ -253,9 +253,6 @@ class GraphQuerier:
         self._index_is_test = None  # Test files and test functions
         self._indices_built = False
 
-        # Memoization cache for recursive expansion
-        self._expansion_cache = {}  # {key: (results, token_cost, nodes_added)}
-
     def _disk_path(self, file_path):
         """Where a graph-relative source path lives on disk; see source_path.
 
@@ -485,7 +482,7 @@ class GraphQuerier:
             max_tokens = DEFAULT_TOKEN_BUDGET
         if inline_threshold is None:
             inline_threshold = CALLEE_INLINE_THRESHOLD
-        depth = min(max(depth, 1), self._max_depth)  # Clamp to 1-3
+        depth = self.flow_depth(depth)
 
         # Resolve node ID with fuzzy matching
         resolved_id, resolve_msg = self._resolve_node_id(node_id)
@@ -526,9 +523,14 @@ class GraphQuerier:
                 if doc_lines:
                     doc_preview = doc_lines[0][:120]
 
-            # Count callers and callees
-            callers_count = len(self.get_callers(node_id))
-            callees_count = len(self.get_callees(node_id))
+            # Callers whose calls are resolved to it, then those that may be
+            possible = len(self.get_ambiguous_callers(node_id))
+            certain = len(self.get_callers(node_id)) - possible
+            callers_count = f"{certain}{self.possible(possible)}"
+            certain, possible, unresolved = self.kinds(
+                self.get_callees(node_id), self.get_ambiguous_callees(node_id)
+            )
+            callees_count = f"{certain}{self.possible(possible, unresolved)}"
 
             output = [
                 f"### Brief: `{node_id}`",
@@ -592,65 +594,19 @@ class GraphQuerier:
 
         # 3. Find Dependencies (Callees) with Smart Inlining - deduplicated
         # Use recursive expansion if depth > 1
-        if depth > 1:
-            expanded = {node_id}  # Prevent cycles
-            callee_info, _ = self._expand_callees_recursive(
-                node_id,
-                depth=depth,
-                budget=max_tokens,
-                expanded=expanded,
-                current_depth=1,
-                indent=0,
-                inline_threshold=inline_threshold,
-            )
-        else:
-            # Original single-level expansion
-            callees = self.get_callees(node_id)
-            callee_info = []
-
-            for callee_id in callees:
-                # Check if we have the node (resolved)
-                callee_node = self.nodes.get(callee_id)
-
-                if callee_node:
-                    # Resolve file path for inlining
-                    c_file = callee_node["id"].split("::")[0].replace("FILE:", "")
-                    c_meta = callee_node["metadata"]
-                    c_tokens = c_meta.get("token_count", 999)
-                    c_lang = _get_syntax_lang(c_file, self._syntax_lang_map)
-
-                    # Header info
-                    sig = c_meta.get("signature", f"{c_meta.get('name')}(...)")
-
-                    # INLINING LOGIC: If small (< threshold tokens), show code.
-                    if c_tokens < inline_threshold and os.path.exists(
-                        self._disk_path(c_file)
-                    ):
-                        c_start = c_meta.get("lineno", 1)
-                        c_end = c_meta.get("end_lineno", c_start)
-                        c_code = self.get_source_segment(c_file, c_start, c_end)
-                        # Indent code content for proper markdown list nesting
-                        c_code_indented = "\n".join(
-                            "  " + line for line in c_code.split("\n")
-                        )
-                        callee_info.append(
-                            f"- **{c_meta.get('name')}** (Inlined, {c_tokens} toks):\n  ```{c_lang}\n{c_code_indented}\n  ```"
-                        )
-                    else:
-                        # Summary mode
-                        doc = c_meta.get("docstring", "").split("\n")[0]
-                        callee_info.append(f"- `{sig}`\n  > {doc}")
-                else:
-                    # Unresolved REF - clean up for display
-                    raw_name = callee_id.replace("REF:", "")
-                    clean_name = _clean_ref_name(raw_name)
-                    callee_info.append(f"- `{clean_name}` (External/Unresolved)")
+        callee_blocks, callee_notes = self._expand_callees(
+            node_id, depth, max_tokens, inline_threshold
+        )
 
         # 4. Find Usage Examples (Callers) - grouped by file
         usage_examples = self._get_usage_examples(node_id, limit=4)
 
         # 4b. Get callers summary for explicit caller list
         callers_summary = self._get_callers_summary(node_id)
+        callers, ambiguous = self.ordered_callers(node_id)
+        expanded_callees = (
+            self._expand_callees_full(node_id, callee_budget) if expand_callees else []
+        )
 
         # 5. Find Related Tests
         related_tests = self._find_related_tests(file_path_rel, meta.get("name"))
@@ -659,73 +615,85 @@ class GraphQuerier:
         file_id = f"FILE:{file_path_rel}"
         related_configs = self._find_related_configs(file_id, node_id)
 
-        # 6. Format Output
-        output = []
-        output.append(f"### Context for `{node['id']}`")
-        if fuzzy_match_note:
-            output.append(fuzzy_match_note)
-        output.append(
-            f"**Tokens:** {meta.get('token_count', '?')} | **In-Degree:** {meta.get('in_degree', 0)}\n"
-        )
-        output.append("#### Source Code:")
-        output.append(f"```{source_lang}\n{source_code}\n```\n")
+        # 6. Format Output, and if it is over max_output_tokens, cut it
+        # down step by step: what each step drops is said where it was.
+        omitted = {}
+        source_lines = source_code.rstrip("\n").split("\n")
+        span = end - start + 1
 
-        # For Classes/Structs, show impl methods
-        if impl_methods:
-            output.append(f"#### Implementation Methods ({len(impl_methods)} methods):")
-            for method in impl_methods:
-                sig = method["signature"]
-                doc = method["docstring"]
-                tokens = method["tokens"]
-                # Show signature and brief doc
-                output.append(f"- `{sig}` ({tokens} toks)")
-                if doc:
-                    output.append(f"  > {doc}")
-            output.append("")
+        def render():
+            output = [f"### Context for `{node['id']}`"]
+            if fuzzy_match_note:
+                output.append(fuzzy_match_note)
+            output.append(
+                f"**Tokens:** {meta.get('token_count', '?')} | **In-Degree:** {meta.get('in_degree', 0)}\n"
+            )
+            output.append("#### Source Code:")
+            source = "\n".join(source_lines)
+            if "source" in omitted:
+                source += f"\n// ... ({span - len(source_lines)} lines omitted, max_output_tokens limit) ..."
+            output.append(f"```{source_lang}\n{source}\n```\n")
 
-        if usage_examples:
-            output.append("#### Usage Examples:")
-            # Group examples by file for better readability
-            by_file = defaultdict(list)
-            for ex in usage_examples:
-                by_file[ex["file"]].append(ex)
-
-            for file_path, examples in by_file.items():
-                ex_lang = _get_syntax_lang(file_path, self._syntax_lang_map)
-                output.append(f"\n**From `{file_path}`:**")
-                for ex in examples:
-                    output.append(f"Line {ex['lineno']}:")
-                    output.append(f"```{ex_lang}\n{ex['code']}\n```")
-            output.append("")
-
-        # Add explicit callers section
-        if callers_summary:
-            total_callers = len(self.get_callers(node_id))
-            output.append(f"#### Callers ({len(callers_summary)} shown):")
-            for caller in callers_summary:
-                loc = (
-                    f"{caller['file']}:{caller['lineno']}"
-                    if caller["lineno"]
-                    else caller["file"]
-                )
+            if impl_methods:
                 output.append(
-                    f"- `{caller['name']}` in {loc} ({caller['tokens']} toks)"
-                    f"{self.one_of(caller['candidates'])}"
+                    f"#### Implementation Methods ({len(impl_methods)} methods):"
                 )
-            if total_callers > len(callers_summary):
-                output.append(
-                    f"  *({total_callers - len(callers_summary)} more callers)*"
-                )
-            output.append("")
+                for method in impl_methods:
+                    output.append(
+                        f"- `{method['signature']}` ({method['tokens']} toks)"
+                    )
+                    if method["docstring"]:
+                        output.append(f"  > {method['docstring']}")
+                output.append("")
 
-        if callee_info:
-            output.append("#### Dependencies (Callees):")
-            output.append("\n".join(callee_info))
-            output.append("")
+            if usage_examples:
+                output.append("#### Usage Examples:")
+                by_file = defaultdict(list)
+                for ex in usage_examples:
+                    by_file[ex["file"]].append(ex)
+                for file_path, examples in by_file.items():
+                    ex_lang = _get_syntax_lang(file_path, self._syntax_lang_map)
+                    output.append(f"\n**From `{file_path}`:**")
+                    for ex in examples:
+                        output.append(
+                            f"Line {ex['lineno']}:{self.one_of(ex['candidates'])}"
+                        )
+                        output.append(f"```{ex_lang}\n{ex['code']}\n```")
+                if "examples" in omitted:
+                    output.append(f"\n*({omitted['examples']} more examples omitted)*")
+                output.append("")
 
-        # Expanded callees - inline full source of direct callees
-        if expand_callees:
-            expanded_callees = self._expand_callees_full(node_id, callee_budget)
+            if callers_summary:
+                output.append(f"#### Callers ({len(callers_summary)} shown):")
+                for caller in callers_summary:
+                    loc = (
+                        f"{caller['file']}:{caller['lineno']}"
+                        if caller["lineno"]
+                        else caller["file"]
+                    )
+                    output.append(
+                        f"- `{caller['name']}` in {loc} ({caller['tokens']} toks)"
+                        f"{self.one_of(caller['candidates'])}"
+                    )
+                if len(callers) > len(callers_summary):
+                    shown = {caller["id"] for caller in callers_summary}
+                    more = [caller for caller in callers if caller not in shown]
+                    possible = sum(caller in ambiguous for caller in more)
+                    output.append(
+                        f"  *({self.more_callers(len(more) - possible, possible)})*"
+                    )
+                output.append("")
+
+            if callee_blocks or callee_notes:
+                output.append("#### Dependencies (Callees):")
+                output.extend(line for block in callee_blocks for line in block)
+                output.extend(callee_notes)
+                output.append("")
+
+            if "expanded" in omitted:
+                output.append("#### Expanded Callees (Full Source):")
+                output.append("*(omitted, max_output_tokens limit)*")
+                output.append("")
             if expanded_callees:
                 output.append("#### Expanded Callees (Full Source):")
                 for exp in expanded_callees:
@@ -735,32 +703,69 @@ class GraphQuerier:
                     output.append(f"```{exp['lang']}\n{exp['source']}\n```")
                 output.append("")
 
-        if related_tests:
-            output.append("#### Related Tests:")
-            for t in related_tests:
-                output.append(f"- `{t}`")
-            output.append("")
+            if "tests" in omitted:
+                output.extend(
+                    ["#### Related Tests:", "*(omitted, max_output_tokens limit)*", ""]
+                )
+            if related_tests:
+                output.append("#### Related Tests:")
+                output.extend(f"- `{t}`" for t in related_tests)
+                output.append("")
 
-        if related_configs:
-            output.append("#### Related Configuration (same file):")
-            for cfg in related_configs:
-                cfg_type = f" [{cfg['config_type']}]" if cfg["config_type"] else ""
-                output.append(f"- L{cfg['lineno']}: `{cfg['signature']}`{cfg_type}")
-                output.append(f"  Node: `{cfg['id']}`")
-            output.append("")
+            if "configs" in omitted:
+                output.extend(
+                    [
+                        "#### Related Configuration (same file):",
+                        "*(omitted, max_output_tokens limit)*",
+                        "",
+                    ]
+                )
+            if related_configs:
+                output.append("#### Related Configuration (same file):")
+                for cfg in related_configs:
+                    cfg_type = f" [{cfg['config_type']}]" if cfg["config_type"] else ""
+                    output.append(f"- L{cfg['lineno']}: `{cfg['signature']}`{cfg_type}")
+                    output.append(f"  Node: `{cfg['id']}`")
+                output.append("")
+            return "\n".join(output)
 
-        # Apply max_output_tokens progressive truncation if specified
-        result = "\n".join(output)
-        if (
-            max_output_tokens is not None
-            and _estimate_tokens(result) > max_output_tokens
-        ):
-            result = self._truncate_output_progressively(
-                result,
-                max_output_tokens,
-                source_lang,
-            )
+        def keep(items, count, key):
+            if len(items) > count:
+                omitted[key] = len(items) - count
+                del items[count:]
 
+        def drop(items, key):
+            if items:
+                omitted[key] = len(items)
+                items.clear()
+
+        def first_callees():
+            # Planned again for five, so marks point only at entries drawn
+            # and the note counts what is left out by kind.
+            nonlocal callee_blocks, callee_notes
+            if len(callee_blocks) > 5:
+                callee_blocks, callee_notes = self._expand_callees(
+                    node_id, depth, max_tokens, inline_threshold, first=5
+                )
+
+        steps = [
+            lambda: drop(expanded_callees, "expanded"),
+            lambda: keep(usage_examples, 2, "examples"),
+            lambda: drop(related_tests, "tests"),
+            lambda: drop(related_configs, "configs"),
+            lambda: callers_summary.__delitem__(slice(5, None)),
+            first_callees,
+            lambda: keep(source_lines, 30, "source"),
+        ]
+        result = render()
+        if max_output_tokens is not None:
+            for step in steps:
+                if _estimate_tokens(result) <= max_output_tokens:
+                    break
+                step()
+                result = render()
+            if _estimate_tokens(result) > max_output_tokens:
+                result += f"\n\n*[Output truncated to ~{max_output_tokens} tokens]*"
         return result
 
     def _find_related_tests(self, source_file, symbol_name):
@@ -851,156 +856,6 @@ class GraphQuerier:
         # Sort by line number
         configs.sort(key=lambda c: c["lineno"])
         return configs[:5]  # Limit to 5 config nodes
-
-    def _truncate_output_progressively(
-        self,
-        result: str,
-        max_tokens: int,
-        source_lang: str,
-    ) -> str:
-        """Apply progressive truncation to fit within token budget.
-
-        Truncation priority (remove in order):
-        1. Expanded Callees (Full Source) section
-        2. Usage Examples - reduce to 2
-        3. Related Tests section
-        4. Related Configuration section
-        5. Callers - reduce to 5
-        6. Dependencies (Callees) - reduce to 5
-        7. Source code - apply head_lines truncation
-
-        Args:
-            result: Full output text
-            max_tokens: Target token budget
-            source_lang: Language for the Source-Code fenced block match.
-        """
-        current_tokens = _estimate_tokens(result)
-
-        # Priority 1: Remove Expanded Callees section
-        if current_tokens > max_tokens:
-            result = re.sub(
-                r"#### Expanded Callees \(Full Source\):.*?(?=####|\Z)",
-                "",
-                result,
-                flags=re.DOTALL,
-            )
-            result = re.sub(r"\n{3,}", "\n\n", result)
-            current_tokens = _estimate_tokens(result)
-
-        # Priority 2: Reduce Usage Examples to 2
-        if current_tokens > max_tokens:
-            # Find and truncate usage examples section
-            match = re.search(
-                r"(#### Usage Examples:.*?)(?=####|\Z)", result, re.DOTALL
-            )
-            if match:
-                examples_section = match.group(1)
-                # Keep header and first 2 code blocks
-                code_blocks = list(
-                    re.finditer(r"```.*?```", examples_section, re.DOTALL)
-                )
-                if len(code_blocks) > 2:
-                    truncated_examples = examples_section[: code_blocks[1].end()]
-                    truncated_examples += (
-                        f"\n\n*({len(code_blocks) - 2} more examples omitted)*\n\n"
-                    )
-                    result = (
-                        result[: match.start()]
-                        + truncated_examples
-                        + result[match.end() :]
-                    )
-                    current_tokens = _estimate_tokens(result)
-
-        # Priority 3: Remove Related Tests section
-        if current_tokens > max_tokens:
-            result = re.sub(
-                r"#### Related Tests:.*?(?=####|\Z)", "", result, flags=re.DOTALL
-            )
-            result = re.sub(r"\n{3,}", "\n\n", result)
-            current_tokens = _estimate_tokens(result)
-
-        # Priority 4: Remove Related Configuration section
-        if current_tokens > max_tokens:
-            result = re.sub(
-                r"#### Related Configuration.*?(?=####|\Z)", "", result, flags=re.DOTALL
-            )
-            result = re.sub(r"\n{3,}", "\n\n", result)
-            current_tokens = _estimate_tokens(result)
-
-        # Priority 5: Reduce Callers to 5
-        if current_tokens > max_tokens:
-            match = re.search(
-                r"(#### Callers \(\d+ shown\):)(.*?)(?=####|\Z)", result, re.DOTALL
-            )
-            if match:
-                callers_content = match.group(2)
-                lines = callers_content.strip().split("\n")
-                caller_lines = [line for line in lines if line.startswith("- `")]
-                if len(caller_lines) > 5:
-                    # Keep first 5 callers
-                    new_content = "\n".join(caller_lines[:5])
-                    new_content += (
-                        f"\n  *({len(caller_lines) - 5} more callers omitted)*\n"
-                    )
-                    result = (
-                        result[: match.start()]
-                        + match.group(1)
-                        + "\n"
-                        + new_content
-                        + result[match.end() :]
-                    )
-                    current_tokens = _estimate_tokens(result)
-
-        # Priority 6: Reduce Dependencies to 5
-        if current_tokens > max_tokens:
-            match = re.search(
-                r"(#### Dependencies \(Callees\):)(.*?)(?=####|\Z)", result, re.DOTALL
-            )
-            if match:
-                deps_content = match.group(2)
-                lines = deps_content.strip().split("\n")
-                dep_lines = [line for line in lines if line.startswith("- ")]
-                if len(dep_lines) > 5:
-                    new_content = "\n".join(dep_lines[:5])
-                    new_content += (
-                        f"\n*({len(dep_lines) - 5} more dependencies omitted)*\n"
-                    )
-                    result = (
-                        result[: match.start()]
-                        + match.group(1)
-                        + "\n"
-                        + new_content
-                        + result[match.end() :]
-                    )
-                    current_tokens = _estimate_tokens(result)
-
-        # Priority 7: Truncate source code (last resort)
-        if current_tokens > max_tokens:
-            # Apply aggressive head_lines truncation
-            match = re.search(
-                r"(#### Source Code:\n```" + re.escape(source_lang) + r"\n)(.*?)(```)",
-                result,
-                re.DOTALL,
-            )
-            if match:
-                source = match.group(2)
-                lines = source.split("\n")
-                if len(lines) > 30:
-                    truncated = "\n".join(lines[:30])
-                    truncated += f"\n// ... ({len(lines) - 30} lines omitted, max_output_tokens limit) ...\n"
-                    result = (
-                        result[: match.start()]
-                        + match.group(1)
-                        + truncated
-                        + match.group(3)
-                        + result[match.end() :]
-                    )
-
-        # Add truncation note if we applied truncation
-        if current_tokens > max_tokens:
-            result += f"\n\n*[Output truncated to ~{max_tokens} tokens]*"
-
-        return result
 
     def _expand_callees_full(self, node_id: str, budget: int = 2000) -> list[dict]:
         """Expand direct callees with their full source code.
@@ -1193,59 +1048,41 @@ class GraphQuerier:
         return None, msg
 
     def _get_usage_examples(self, target_node_id, limit=2):
-        """
-        Finds places where target_node_id is called and extracts code snippets.
-        """
-        target_node = self.nodes.get(target_node_id)
-        if not target_node:
+        """Snippets of the calls of ``target_node_id``: those resolved to it
+        first, then those it is one of the candidates of, each with
+        ``candidates`` (None when resolved); examples and tests first within
+        each."""
+        if target_node_id not in self.nodes:
             return []
+        calls = [
+            edge
+            for index in (self.incoming, self.candidate_incoming)
+            for edge in index.get(target_node_id, [])
+            if edge["relation"] in CALL_RELATIONS
+        ]
 
-        target_name = target_node["metadata"].get("name")
-        if not target_name:
-            return []
-        examples = []
-
-        # We need to find edges that target REF:target_name or REF:parent.target_name
-        # The graph stores targets as "REF:..."
-        # We will scan edges.
-
-        candidates = []
-
-        # Optimization: Pre-filter edges by relation
-        # But we need specific line numbers from the edges now.
-
-        for edge in self.edges:
-            if edge["relation"] == "CALLS":
-                t = edge["target"].replace("REF:", "")
-                # Flexible match: exact or attribute suffix
-                if t == target_name or t.endswith(f".{target_name}"):
-                    candidates.append(edge)
-
-        # Sort candidates to prefer examples/tests if possible, or just by source path
-        # Heuristic: put 'examples' or 'test' paths first
-        def score_candidate(edge):
+        def order(edge):
             src = edge["source"]
-            if "example" in src:
-                return 0
-            if "test" in src:
-                return 1
-            return 2
+            place = 0 if "example" in src else 1 if "test" in src else 2
+            return edge["target"] != target_node_id, place
 
-        candidates.sort(key=score_candidate)
-
-        for edge in candidates[:limit]:
-            source_id = edge["source"]
-            # Source ID is like FILE:path::Func
-            file_path = source_id.split("::")[0].replace("FILE:", "")
+        examples = []
+        for edge in sorted(calls, key=order):
+            if len(examples) == limit:
+                break
+            file_path = edge["source"].split("::")[0].replace("FILE:", "")
             lineno = edge.get("metadata", {}).get("lineno")
-
             if lineno and os.path.exists(self._disk_path(file_path)):
-                # Get context around the call (e.g. -1 to +1 lines)
                 code = self.get_source_segment(file_path, lineno - 1, lineno + 2)
+                candidates = edge.get("metadata", {}).get("candidates")
                 examples.append(
-                    {"file": file_path, "lineno": lineno, "code": code.strip()}
+                    {
+                        "file": file_path,
+                        "lineno": lineno,
+                        "code": code.strip(),
+                        "candidates": len(candidates) if candidates else None,
+                    }
                 )
-
         return examples
 
     def _get_callers_summary(self, target_node_id, limit=None):
@@ -1285,156 +1122,159 @@ class GraphQuerier:
                     }
                 )
 
-        # Sort by tokens (simpler callers first), then by name for consistency
-        callers.sort(key=lambda c: (c["tokens"], c["name"]))
+        # Those resolved to it first, then simpler callers, then by name
+        callers.sort(key=lambda c: (bool(c["candidates"]), c["tokens"], c["name"]))
         return callers[:limit]
 
-    def _expand_callees_recursive(
-        self,
-        node_id: str,
-        depth: int,
-        budget: int,
-        expanded: set,
-        current_depth: int = 1,
-        indent: int = 0,
-        start_time: float | None = None,
-        inline_threshold: int | None = None,
-    ) -> tuple[list[str], int]:
-        """Recursively expand callees up to depth limit with token budget.
+    def _expand_callees(self, node_id, depth, budget, inline_threshold, first=None):
+        """``(blocks, notes)`` listing the callees of ``node_id``, ``depth``
+        levels deep: one block of lines per callee of the symbol, with what
+        is listed under it, and the notes on the whole list. ``first``, when
+        given, lists only that many of the symbol's own callees and counts
+        the rest as left out.
 
-        Args:
-            node_id: The node to expand callees for
-            depth: Maximum recursion depth (1-3)
-            budget: Remaining token budget
-            expanded: Set of already expanded node IDs (cycle prevention)
-            current_depth: Current recursion level
-            indent: Current indentation level
-            start_time: Start time for timeout checking
-            inline_threshold: Token threshold for inlining code
-
-        Returns:
-            Tuple of (formatted lines list, remaining budget)
+        Planned level by level: the symbol's own callees are all listed, and
+        each level below is cut to the per-level limit, and at the node
+        limit, with a note. A symbol
+        is opened (its code inlined, its own callees listed) at the first
+        level that reaches it, when it is small
+        enough to inline and the token ``budget`` still covers it; a symbol
+        not opened is listed by its signature, one met again as "(at level
+        N)", and an unresolved call where it is made. A note says what cut
+        the expansion short: the budget, the node limit or the timeout.
         """
-        if start_time is None:
-            start_time = time.time()
-        if inline_threshold is None:
-            inline_threshold = CALLEE_INLINE_THRESHOLD
-
-        # Check timeout
-        elapsed_ms = (time.time() - start_time) * 1000
-        if elapsed_ms > self._timeout_ms:
-            return [f"{'  ' * indent}*(timeout reached)*"], 0
-
-        # Check depth / budget / visited-node ceiling. `expanded` accumulates
-        # every callee visited across the entire expansion; capping on
-        # `_max_nodes` prevents a wide+deep graph from running the caller
-        # out of budget even though each branch respected its own limits.
-        if current_depth > depth or budget <= 0:
-            return [], budget
-        if self._max_nodes and len(expanded) >= self._max_nodes:
-            return [f"{'  ' * indent}*(node budget reached)*"], budget
-
-        # Check memoization cache. Key includes indent because rendered
-        # output lines contain indentation prefixes; caching without the
-        # indent would produce wrong-depth whitespace on re-use. It includes
-        # the budget and threshold because they decide what is inlined, and
-        # the already-expanded set because those nodes are skipped; the nodes
-        # an expansion adds are stored so a hit adds them too.
-        expanded_at_entry = frozenset(expanded)
-        budget_at_entry = budget
-        cache_key = (
-            node_id,
-            depth - current_depth + 1,
-            indent,
-            budget,
-            inline_threshold,
-            expanded_at_entry,
-        )
-        if cache_key in self._expansion_cache:
-            cached_results, cached_cost, cached_added = self._expansion_cache[cache_key]
-            expanded |= cached_added
-            return list(cached_results), budget - cached_cost
-
-        results = []
-        callees = self.get_callees(node_id)[: self._max_children_per_level]
-
-        for callee_id in callees:
-            if callee_id in expanded:
-                continue
-            expanded.add(callee_id)
-
-            # Check timeout periodically
-            if (time.time() - start_time) * 1000 > self._timeout_ms:
-                results.append(f"{'  ' * indent}*(timeout)*")
-                break
-
-            callee_node = self.nodes.get(callee_id)
-            indent_str = "  " * indent
-
-            if callee_node:
-                # Resolved node
-                c_file = callee_node["id"].split("::")[0].replace("FILE:", "")
-                c_meta = callee_node.get("metadata", {})
-                c_tokens = c_meta.get("token_count", 999)
-                c_name = c_meta.get("name", "?")
-                c_sig = c_meta.get("signature", f"{c_name}(...)")
-                c_doc = (c_meta.get("docstring", "") or "").split("\n")[0][:80]
-                c_lang = _get_syntax_lang(c_file, self._syntax_lang_map)
-
-                # Inline small functions if budget allows
-                if (
-                    c_tokens <= inline_threshold
-                    and c_tokens <= budget
-                    and os.path.exists(self._disk_path(c_file))
-                ):
-                    c_start = c_meta.get("lineno", 1)
-                    c_end = c_meta.get("end_lineno", c_start + 10)
-                    code = self.get_source_segment(c_file, c_start, c_end)
-                    # Indent code content for proper markdown list nesting
-                    code_indent = indent_str + "  "
-                    code_indented = "\n".join(
-                        code_indent + line for line in code.rstrip().split("\n")
-                    )
-                    results.append(f"{indent_str}- **{c_name}** ({c_tokens} toks):")
-                    results.append(f"{indent_str}  ```{c_lang}")
-                    results.append(code_indented)
-                    results.append(f"{indent_str}  ```")
-                    budget -= c_tokens
-
-                    # Recurse if depth allows
-                    if current_depth < depth and budget > 0:
-                        nested, budget = self._expand_callees_recursive(
-                            callee_id,
-                            depth,
-                            budget,
-                            expanded,
-                            current_depth + 1,
-                            indent + 1,
-                            start_time,
-                            inline_threshold,
-                        )
-                        results.extend(nested)
+        start_time = time.time()
+        placed = {node_id: 0}
+        rows = {}  # parent -> ([(kind, callee)], callees left out, marks)
+        cuts = []
+        frontier = [node_id]
+        for level in range(1, depth + 1):
+            opened = []
+            for parent in frontier:
+                callees = self.get_callees(parent)
+                marks = self.get_ambiguous_callees(parent)
+                if "node limit" in cuts or "timeout" in cuts:
+                    # Past a cut, a parent's callees are all left out
+                    rows[parent] = ([], callees, marks)
+                    continue
+                # The symbol's own callees are all listed; below them, each
+                # level is cut to the per-level limit.
+                if level > 1:
+                    limit = self._max_children_per_level
                 else:
-                    # Summary mode for larger functions
-                    results.append(f"{indent_str}- `{c_sig}` ({c_tokens} toks)")
-                    if c_doc:
-                        results.append(f"{indent_str}  > {c_doc}")
-            else:
-                # Unresolved REF
-                raw_name = callee_id.replace("REF:", "")
-                clean_name = _clean_ref_name(raw_name)
-                results.append(f"{indent_str}- `{clean_name}` (External)")
+                    limit = len(callees) if first is None else first
+                listed = []
+                rows[parent] = (listed, callees[limit:], marks)
+                for index, callee in enumerate(callees[:limit]):
+                    if callee not in self.nodes:
+                        listed.append(("call", callee))
+                        continue
+                    if callee in placed:
+                        listed.append(("seen", callee))
+                        continue
+                    # The symbol's own callees are listed whatever the limits
+                    cut = level > 1 and (
+                        "timeout"
+                        if (time.time() - start_time) * 1000 > self._timeout_ms
+                        else "node limit"
+                        if self._max_nodes and len(placed) > self._max_nodes
+                        else None
+                    )
+                    if cut:
+                        # Those not reached are counted with those left out
+                        rows[parent] = (listed, callees[index:], marks)
+                        cuts.append(cut)
+                        break
+                    placed[callee] = level
+                    meta = self.nodes[callee]["metadata"]
+                    tokens = meta.get("token_count", 999)
+                    on_disk = os.path.exists(
+                        self._disk_path(callee.split("::")[0].replace("FILE:", ""))
+                    )
+                    if tokens <= inline_threshold and on_disk:
+                        if tokens <= budget:
+                            budget -= tokens
+                            listed.append(("open", callee))
+                            opened.append(callee)
+                            continue
+                        if "token budget" not in cuts:
+                            cuts.append("token budget")
+                    listed.append(("summary", callee))
+            if "timeout" in cuts or "node limit" in cuts:
+                if level < depth:
+                    # Those opened at the cut list their callees as left out
+                    for parent in opened:
+                        callees = self.get_callees(parent)
+                        rows[parent] = ([], callees, self.get_ambiguous_callees(parent))
+                break
+            frontier = opened
 
-        # Cache results, with the cost of the whole subtree, unless the
-        # timeout cut the expansion short.
-        if (time.time() - start_time) * 1000 <= self._timeout_ms:
-            self._expansion_cache[cache_key] = (
-                results.copy(),
-                budget_at_entry - budget,
-                expanded - expanded_at_entry,
-            )
+        # The symbol's callees left out of its list but reached under one
+        # kept are drawn there, so they are not counted as left out.
+        drawn = {c for listed, _, _ in rows.values() for _, c in listed}
+        listed, left_out, marks = rows[node_id]
+        rows[node_id] = (listed, [c for c in left_out if c not in drawn], marks)
 
-        return results, budget
+        blocks, notes = [], []
+        lines = []
+
+        def render(parent, indent):
+            nonlocal lines
+            listed, left_out, marks = rows.get(parent, ([], [], {}))
+            pad = "  " * indent
+            for kind, callee in listed:
+                if indent == 0:
+                    lines = []
+                    blocks.append(lines)
+                meta = self.nodes.get(callee, {}).get("metadata", {})
+                name = meta.get("name", "?")
+                if kind == "call":
+                    clean = _clean_ref_name(callee.replace("REF:", ""))
+                    lines.append(
+                        f"{pad}- `{clean}`{self.callee_note(marks.get(callee))}"
+                    )
+                elif kind == "seen":
+                    lines.append(f"{pad}- `{name}` (at level {placed[callee]})")
+                elif kind == "summary":
+                    sig = meta.get("signature", f"{name}(...)")
+                    lines.append(
+                        f"{pad}- `{sig}` ({meta.get('token_count', 999)} toks)"
+                    )
+                    doc = (meta.get("docstring", "") or "").split("\n")[0][:80]
+                    if doc:
+                        lines.append(f"{pad}  > {doc}")
+                else:
+                    file_path = callee.split("::")[0].replace("FILE:", "")
+                    start_line = meta.get("lineno", 1)
+                    code = self.get_source_segment(
+                        file_path, start_line, meta.get("end_lineno", start_line + 10)
+                    )
+                    lang = _get_syntax_lang(file_path, self._syntax_lang_map)
+                    lines.append(
+                        f"{pad}- **{name}** ({meta.get('token_count', 999)} toks):"
+                    )
+                    lines.append(f"{pad}  ```{lang}")
+                    lines.extend(f"{pad}  {line}" for line in code.rstrip().split("\n"))
+                    lines.append(f"{pad}  ```")
+                    render(callee, indent + 1)
+            if left_out:
+                certain, possible, none = self.kinds(left_out, marks)
+                more = self.more_callers(certain, possible, "callees", none)
+                (lines if indent else notes).append(f"{pad}*({more})*")
+
+        render(node_id, 0)
+        notes.extend(f"*({cut} reached)*" for cut in cuts)
+        return blocks, notes
+
+    @property
+    def max_flow_depth(self):
+        """The most levels of calls a flow or context goes: the project's
+        `[query] max_depth`, or 5 when unset."""
+        return self._max_depth or 5
+
+    def flow_depth(self, depth):
+        """The depth a flow of ``depth`` is traced to."""
+        return min(depth, self.max_flow_depth)
 
     def _resolve_flow_start(self, start_name, depth):
         """Clamp depth to the configured ceiling and resolve the start symbol.
@@ -1442,9 +1282,7 @@ class GraphQuerier:
         Returns ``(func_nodes, depth)``; ``func_nodes`` is empty when nothing
         matched, leaving each caller to raise its own error shape.
         """
-        # The project's `[query] max_depth` is the ceiling, or 5 when unset.
-        effective_max = self._max_depth if self._max_depth else 5
-        depth = min(depth, effective_max)
+        depth = self.flow_depth(depth)
 
         start_nodes = self.find_nodes_by_name(start_name)
         if not start_nodes:
@@ -1455,6 +1293,96 @@ class GraphQuerier:
             # Fall back to the first match even when it is not a function.
             func_nodes = start_nodes[:1]
         return func_nodes, depth
+
+    def _flow_next(self, node_id, direction):
+        """The next level of a flow from ``node_id``: its callees, or its
+        callers, those resolved first; and ``{id: number of candidates}`` of
+        those that only may be."""
+        if direction == "forward":
+            # Those resolved, then each definition an unresolved call may reach
+            callees = [c for c in self.get_callees(node_id) if c in self.nodes]
+            possible = {}
+            for edge in self.outgoing[node_id]:
+                candidates = edge.get("metadata", {}).get("candidates")
+                if edge["relation"] == "CALLS" and candidates:
+                    for candidate in candidates:
+                        if candidate not in callees:
+                            possible.setdefault(candidate, len(candidates))
+            return callees + list(possible), possible
+        return self.ordered_callers(node_id)
+
+    def _flow_tree(
+        self, start_id, direction, depth, target, inline_threshold, timeout_ms
+    ):
+        """The flow from ``start_id``, level by level: each symbol is placed
+        once, at the first level that reaches it, and met again as `seen`,
+        the level of that entry (the start is level 0).
+        Returns ``(root, path, cut)``: the tree, the node IDs from the start
+        to the first node named ``target``, and why it stopped early
+        ("timeout", "node limit") or None."""
+        start_time = time.time()
+
+        def tree_node(node_id, candidates):
+            node = self.nodes[node_id]
+            meta = node.get("metadata", {})
+            tokens = meta.get("token_count", 0)
+            file_path = node_id.split("::")[0].replace("FILE:", "")
+            code = None
+            if 0 < tokens <= inline_threshold and os.path.exists(
+                self._disk_path(file_path)
+            ):
+                start_line = meta.get("lineno", 1)
+                end_line = meta.get("end_lineno", start_line + 10)
+                code = self.get_source_segment(file_path, start_line, end_line)
+            return {
+                "id": node_id,
+                "name": meta.get("name", "?"),
+                "type": node.get("type", "?")[:3],
+                "tokens": tokens,
+                "file": file_path,
+                "line": meta.get("lineno"),
+                "code": code,
+                "lang": _get_syntax_lang(file_path, self._syntax_lang_map),
+                "candidates": candidates,
+                "children": [],
+                # Those of the next level past the per-level limit, and how
+                # many of them only may be
+                "more": 0,
+                "more_possible": 0,
+            }
+
+        root = tree_node(start_id, None)
+        paths = {start_id: [start_id]}
+        if target and root["name"] == target:
+            return root, paths[start_id], None
+        level = [root]
+        for _ in range(depth):
+            next_level = []
+            for parent in level:
+                next_ids, marks = self._flow_next(parent["id"], direction)
+                left_out = next_ids[self._max_children_per_level :]
+                parent["more"] = len(left_out)
+                parent["more_possible"] = sum(i in marks for i in left_out)
+                for child_id in next_ids[: self._max_children_per_level]:
+                    if (time.time() - start_time) * 1000 > timeout_ms:
+                        return root, None, "timeout"
+                    if child_id not in self.nodes:
+                        continue
+                    if child_id in paths:
+                        seen = tree_node(child_id, marks.get(child_id))
+                        seen.update(code=None, seen=len(paths[child_id]) - 1)
+                        parent["children"].append(seen)
+                        continue
+                    if len(paths) > self._max_nodes:
+                        return root, None, "node limit"
+                    child = tree_node(child_id, marks.get(child_id))
+                    paths[child_id] = [*paths[parent["id"]], child_id]
+                    parent["children"].append(child)
+                    if target and child["name"] == target:
+                        return root, paths[child_id], None
+                    next_level.append(child)
+            level = next_level
+        return root, None, None
 
     def trace_flow(
         self,
@@ -1470,7 +1398,8 @@ class GraphQuerier:
         Args:
             start_name: Starting symbol name or node ID
             direction: 'forward' traces callees, 'backward' traces callers
-            depth: Maximum depth (1-5, default: 3)
+            depth: Levels of calls below the start (default: 3), at most
+                `flow_depth` allows
             target: Optional target to stop when reached
             inline_threshold: Inline code below this token count (default: 100)
             timeout_ms: Timeout in milliseconds (default: TIMEOUT_MS)
@@ -1480,6 +1409,7 @@ class GraphQuerier:
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
+        asked = depth
         func_nodes, depth = self._resolve_flow_start(start_name, depth)
         if not func_nodes:
             return f"No function '{start_name}' found."
@@ -1492,6 +1422,11 @@ class GraphQuerier:
             f"### Call Flow: `{start_meta.get('name', start_name)}` ({direction})"
         ]
         output.append("")
+        if depth < asked:
+            output.append(
+                f"**Note:** depth {asked} is past `[query] max_depth`; traced to {depth}."
+            )
+            output.append("")
 
         # Show disambiguation info if multiple matches
         if len(func_nodes) > 1:
@@ -1509,87 +1444,43 @@ class GraphQuerier:
                 output.append(f"  - ... and {len(func_nodes) - 5} more")
             output.append("")
 
-        visited = set()
-        path_to_target = []
-        start_time = time.time()
-        nodes_visited = 0
+        root, path, cut = self._flow_tree(
+            start_id, direction, depth, target, inline_threshold, timeout_ms
+        )
+        of = "callees" if direction == "forward" else "callers"
 
-        def trace(
-            node_id: str, current_depth: int, path: list, candidates=None
-        ) -> bool:
-            nonlocal nodes_visited
-
-            # Check limits
-            elapsed_ms = (time.time() - start_time) * 1000
-            if elapsed_ms > timeout_ms:
-                output.append("  " * (current_depth - 1) + "*(timeout)*")
-                return False
-            if current_depth > depth or node_id in visited:
-                return False
-            if nodes_visited >= self._max_nodes:
-                output.append("  " * (current_depth - 1) + "*(node limit)*")
-                return False
-
-            visited.add(node_id)
-            nodes_visited += 1
-
-            node = self.nodes.get(node_id)
-            if not node:
-                return False
-
-            meta = node.get("metadata", {})
-            name = meta.get("name", "?")
-            tokens = meta.get("token_count", 0)
-            node_type = node.get("type", "?")[:3]
-
-            # Check target reached
-            if target and name == target:
-                path_to_target.extend(path + [node_id])
-                return True
-
-            # Get next level
-            ambiguous = {}
-            if direction == "forward":
-                next_ids = self.get_callees(node_id)[: self._max_children_per_level]
-            else:
-                next_ids = self.get_callers(node_id)[: self._max_children_per_level]
-                ambiguous = self.get_ambiguous_callers(node_id)
-
-            # Format node
-            indent = "  " * (current_depth - 1)
-            arrow = "├─" if current_depth > 1 else ""
+        def render(node, level):
+            indent = "  " * level
+            arrow = "├─" if level else ""
+            head = f"{indent}{arrow}[{node['type']}] **{node['name']}**"
+            if node.get("seen") is not None:
+                output.append(
+                    f"{head}{self.one_of(node['candidates'])} (at level {node['seen']})"
+                )
+                return
             output.append(
-                f"{indent}{arrow}[{node_type}] **{name}** ({tokens} toks)"
-                f"{self.one_of(candidates)}"
+                f"{head} ({node['tokens']} toks){self.one_of(node['candidates'])}"
             )
+            if node["code"]:
+                output.append(f"{indent}  ```{node['lang']}")
+                output.extend(
+                    f"{indent}  {line}" for line in node["code"].rstrip().split("\n")
+                )
+                output.append(f"{indent}  ```")
+            for child in node["children"]:
+                render(child, level + 1)
+            if node["more"]:
+                certain = node["more"] - node["more_possible"]
+                more = self.more_callers(certain, node["more_possible"], of)
+                output.append(f"{indent}  *({more})*")
 
-            # Inline small functions
-            if tokens <= inline_threshold and tokens > 0:
-                file_path = node_id.split("::")[0].replace("FILE:", "")
-                if os.path.exists(self._disk_path(file_path)):
-                    start_line = meta.get("lineno", 1)
-                    end_line = meta.get("end_lineno", start_line + 10)
-                    code = self.get_source_segment(file_path, start_line, end_line)
-                    lang = _get_syntax_lang(file_path, self._syntax_lang_map)
-                    output.append(f"{indent}  ```{lang}")
-                    output.append(code.rstrip())
-                    output.append(f"{indent}  ```")
-
-            # Recurse (limit branching)
-            for next_id in next_ids:
-                if trace(
-                    next_id, current_depth + 1, path + [node_id], ambiguous.get(next_id)
-                ):
-                    return True
-            return False
-
-        trace(start_id, 1, [])
-
-        if target and path_to_target:
+        render(root, 0)
+        if cut:
+            output.append(f"*({cut})*")
+        if target and path:
             output.append("")
             output.append(f"#### Path to `{target}`:")
-            path_names = [p.split("::")[-1] for p in path_to_target]
-            output.append(" -> ".join(path_names))
+            output.append(" -> ".join(p.split("::")[-1] for p in path))
 
         return "\n".join(output)
 
@@ -1605,9 +1496,11 @@ class GraphQuerier:
         """Trace call flow, returning a structured tree for UI rendering.
 
         Returns dict with keys: root, alternatives (optional), note (optional),
-        path_to_target (symbol names from the start to `target`, when reached).
-        Each tree node has: id, name, type, tokens, file, line, code, lang, children.
-        The trace stops at the first node named `target`.
+        path_to_target (symbol names from the start to `target`, when reached),
+        cut (why the trace stopped early, when it did). Each tree node has: id,
+        name, type, tokens, file, line, code, lang, candidates, children,
+        more, more_possible, and `seen`, the level its entry is at, where it
+        is placed there already. The trace stops at the first node named `target`.
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
@@ -1638,89 +1531,16 @@ class GraphQuerier:
                     }
                 )
 
-        visited = set()
-        path_to_target = []
-        start_time = time.time()
-        nodes_visited = 0
-
-        def build_tree(
-            node_id: str, current_depth: int, path: list, candidates=None
-        ) -> dict | None:
-            nonlocal nodes_visited
-
-            elapsed_ms = (time.time() - start_time) * 1000
-            if elapsed_ms > timeout_ms:
-                return None
-            if current_depth > depth or node_id in visited:
-                return None
-            if nodes_visited >= self._max_nodes:
-                return None
-
-            visited.add(node_id)
-            nodes_visited += 1
-
-            node = self.nodes.get(node_id)
-            if not node:
-                return None
-
-            meta = node.get("metadata", {})
-            name = meta.get("name", "?")
-            tokens = meta.get("token_count", 0)
-            node_type = node.get("type", "?")[:3]
-            file_path = node_id.split("::")[0].replace("FILE:", "")
-            line = meta.get("lineno")
-            lang = _get_syntax_lang(file_path, self._syntax_lang_map)
-
-            # Inline small functions
-            code = None
-            if (
-                tokens <= inline_threshold
-                and tokens > 0
-                and os.path.exists(self._disk_path(file_path))
-            ):
-                start_line = meta.get("lineno", 1)
-                end_line = meta.get("end_lineno", start_line + 10)
-                code = self.get_source_segment(file_path, start_line, end_line)
-
-            # Recurse into children
-            ambiguous = {}
-            if target and name == target:
-                path_to_target.extend([*path, name])
-                next_ids = []
-            elif direction == "forward":
-                next_ids = self.get_callees(node_id)[: self._max_children_per_level]
-            else:
-                next_ids = self.get_callers(node_id)[: self._max_children_per_level]
-                ambiguous = self.get_ambiguous_callers(node_id)
-
-            children = []
-            for next_id in next_ids:
-                child = build_tree(
-                    next_id, current_depth + 1, [*path, name], ambiguous.get(next_id)
-                )
-                if child:
-                    children.append(child)
-                if path_to_target:
-                    break
-
-            return {
-                "id": node_id,
-                "name": name,
-                "type": node_type,
-                "tokens": tokens,
-                "file": file_path,
-                "line": line,
-                "code": code,
-                "lang": lang,
-                "candidates": candidates,
-                "children": children,
-            }
-
-        root = build_tree(start_id, 1, [])
-
+        root, path, cut = self._flow_tree(
+            start_id, direction, depth, target, inline_threshold, timeout_ms
+        )
         result = {"root": root}
-        if path_to_target:
-            result["path_to_target"] = path_to_target
+        if path:
+            result["path_to_target"] = [
+                self.nodes[p]["metadata"].get("name", "?") for p in path
+            ]
+        if cut:
+            result["cut"] = cut
         if note:
             result["note"] = note
         if alternatives:
@@ -2035,6 +1855,9 @@ class GraphQuerier:
         # Empty/whitespace name would match every node (`"" in s` is True).
         if not name or not name.strip():
             return []
+        # A node ID names that node and no other.
+        if name in self.nodes:
+            return [self.nodes[name]]
         exact_matches = []
         variant_matches = []
         fuzzy_matches = []
@@ -2160,55 +1983,91 @@ class GraphQuerier:
             func_name: Function/method name to find callers for
             fuzzy: If True, also matches names that start with the search term
         """
-        # Step 1: Find all target node IDs that match func_name
-        target_ids = self._resolve_target_ids(func_name, fuzzy)
+        return sorted(self._caller_marks(func_name, fuzzy))
 
-        # Step 2: Use incoming index to find callers - O(in-degree) per target
-        callers = set()
-        for target_id in target_ids:
-            for edge in self.incoming.get(target_id, []):
-                if edge["relation"] in CALL_RELATIONS:
-                    callers.add(edge["source"])
+    @staticmethod
+    def possible(count, unresolved=0):
+        """The note on a count of callers or callees of those that only may
+        be: ``count`` of them, and ``unresolved`` calls of the name the
+        resolver found no candidates for; empty for none."""
+        extra = [f"+{count} possible"] if count else []
+        if unresolved:
+            extra.append(f"+{unresolved} unresolved")
+        return f" ({', '.join(extra)})" if extra else ""
 
-        # A call the resolver left unresolved but narrowed to candidates
-        # reaches each one.
-        for target_id in target_ids:
-            if target_id.startswith("REF:"):
-                continue
-            for edge in self.candidate_incoming.get(target_id, []):
-                if edge["relation"] in CALL_RELATIONS:
-                    callers.add(edge["source"])
+    @staticmethod
+    def more_callers(certain, possible, of="callers", unresolved=0):
+        """The note on the callers, or callees, a list leaves out: ``certain``
+        of them, ``possible`` that only may be, and ``unresolved`` calls of
+        the name."""
+        parts = [f"{certain} more {of}"] if certain else []
+        if possible:
+            parts.append(f"{possible} more possible {of}")
+        if unresolved:
+            parts.append(f"{unresolved} more unresolved {of}")
+        return ", ".join(parts)
 
-        return sorted(callers)
+    @staticmethod
+    def kinds(ids, marks):
+        """``(certain, possible, unresolved)`` of ``ids``, by the ``marks`` of
+        `get_ambiguous_callers`."""
+        possible = sum(bool(marks.get(i)) for i in ids)
+        unresolved = sum(marks.get(i) == 0 for i in ids)
+        return len(ids) - possible - unresolved, possible, unresolved
 
     @staticmethod
     def one_of(candidates):
         """The note on a call that is one of ``candidates`` definitions an
-        unresolved edge names; empty for a call that is certain."""
+        unresolved edge names, or of the name only (0); empty for a call
+        that is certain (None)."""
+        if candidates == 0:
+            return " (unresolved; same name)"
         if candidates == 1:
             return " (unresolved; the only candidate)"
         return f" (one of {candidates} candidates)" if candidates else ""
 
+    def ordered_callers(self, func_name, fuzzy=False):
+        """The callers of a symbol matching ``func_name``: those its calls are
+        resolved to, then those that may be, then unresolved calls of the
+        name; and the `get_ambiguous_callers` marks of all but the first."""
+        ambiguous = self.get_ambiguous_callers(func_name, fuzzy)
+        callers = self.get_callers(func_name, fuzzy)
+        order = {caller: (True, mark == 0) for caller, mark in ambiguous.items()}
+        return sorted(callers, key=lambda c: order.get(c, (False, False))), ambiguous
+
     def get_ambiguous_callers(self, func_name, fuzzy=False):
-        """``{caller: number of candidates}`` of the calls that may reach a
-        symbol matching ``func_name`` only through an unresolved edge's
-        candidates — the call is one of N, not a caller for sure."""
+        """``{caller: candidates}`` of the callers of a symbol matching
+        ``func_name`` that are not certain: the number of candidates of an
+        unresolved call it is one of, or 0 for an unresolved call of its name
+        with no candidates at all."""
+        marks = self._caller_marks(func_name, fuzzy)
+        return {caller: mark for caller, mark in marks.items() if mark is not None}
+
+    def _caller_marks(self, func_name, fuzzy=False):
+        """``{caller: mark}`` of the callers of a symbol matching
+        ``func_name``: None for a call resolved to it, the number of
+        candidates for an unresolved call it is one of, 0 for an unresolved
+        call of the name the resolver found no candidates for."""
         target_ids = self._resolve_target_ids(func_name, fuzzy)
-        relations = {"CALLS", "INSTANTIATES"}
-        certain = {
-            edge["source"]
-            for target_id in target_ids
-            if not target_id.startswith("REF:")
-            for edge in self.incoming.get(target_id, [])
-        }
-        ambiguous = {}
-        for target_id in target_ids:
-            if target_id.startswith("REF:"):
-                continue
+        defined = [t for t in target_ids if not t.startswith("REF:")]
+        marks = {}
+        for target_id in defined:
+            for edge in self.incoming.get(target_id, []):
+                if edge["relation"] in CALL_RELATIONS:
+                    marks[edge["source"]] = None
+        for target_id in defined:
             for edge in self.candidate_incoming.get(target_id, []):
-                if edge["relation"] in relations and edge["source"] not in certain:
-                    ambiguous[edge["source"]] = len(edge["metadata"]["candidates"])
-        return ambiguous
+                if edge["relation"] in CALL_RELATIONS:
+                    marks.setdefault(
+                        edge["source"], len(edge["metadata"]["candidates"])
+                    )
+        for target_id in target_ids - set(defined):
+            for edge in self.incoming.get(target_id, []):
+                if edge["relation"] in CALL_RELATIONS and not edge.get(
+                    "metadata", {}
+                ).get("candidates"):
+                    marks.setdefault(edge["source"], 0)
+        return marks
 
     def _resolve_target_ids(self, func_name: str, fuzzy: bool = False) -> set:
         """Resolve a function name to all possible target IDs in the graph.
@@ -2255,49 +2114,34 @@ class GraphQuerier:
         return target_ids
 
     def get_callees(self, func_node_id):
-        """Get unique callees for a function, deduplicated.
-
-        For unresolved references (REF:...), deduplicates by cleaned/normalized name
-        to avoid showing iter_mut and plan.steps.iter_mut as separate entries,
-        and to handle duplicates like Uuid::parse_str appearing multiple times.
-        """
-        seen_ids = set()  # Full target IDs
-        seen_clean_names = set()  # Cleaned names for unresolved refs
+        """The callees of a function: each definition a call is resolved to,
+        and each unresolved call by what it is written as, once. Two calls
+        written apart (`a.add`, `b.add`) are two callees, whatever method
+        name they end in."""
         callees = []
-
         for edge in self.outgoing[func_node_id]:
-            # Updated to support both resolved and unresolved edges
-            if edge["relation"] in ("CALLS", "CALLS_RESOLVED"):
-                target = edge["target"]
-
-                # For resolved references, dedupe by exact ID
-                if not target.startswith("REF:"):
-                    if target not in seen_ids:
-                        seen_ids.add(target)
-                        callees.append(target)
-                else:
-                    # For unresolved refs, use cleaned name for deduplication
-                    # This handles both method chains (a.b.method) and qualified names (Type::method)
-                    ref_name = target.replace("REF:", "")
-                    clean_name = _clean_ref_name(ref_name)
-
-                    if clean_name not in seen_clean_names:
-                        seen_clean_names.add(clean_name)
-                        callees.append(target)
-
+            relation, target = edge["relation"], edge["target"]
+            if relation in ("CALLS", "CALLS_RESOLVED") and target not in callees:
+                callees.append(target)
         return callees
 
     def get_ambiguous_callees(self, func_node_id):
         """``{REF: target: number of candidates}`` of the calls of
-        ``func_node_id`` the resolver left unresolved but narrowed — each
-        is one call that may reach one of N definitions, not N calls."""
-        ambiguous = {}
+        ``func_node_id`` the resolver left unresolved, by what they are
+        written as: the definitions any of them may reach, or none it found
+        for any (0)."""
+        reach = {}
         for edge in self.outgoing[func_node_id]:
             if edge["relation"] == "CALLS" and edge["target"].startswith("REF:"):
-                candidates = edge.get("metadata", {}).get("candidates")
-                if candidates:
-                    ambiguous[edge["target"]] = len(candidates)
-        return ambiguous
+                candidates = edge.get("metadata", {}).get("candidates") or ()
+                reach.setdefault(edge["target"], set()).update(candidates)
+        return {target: len(candidates) for target, candidates in reach.items()}
+
+    @classmethod
+    def callee_note(cls, candidates):
+        """The note on a callee: one of ``candidates`` definitions an
+        unresolved call names, unresolved with none (0), or certain (None)."""
+        return " (unresolved)" if candidates == 0 else cls.one_of(candidates)
 
     def find_call_path_result(
         self,

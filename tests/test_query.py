@@ -49,8 +49,8 @@ class TestGraphQuerier:
                 },
                 {
                     "source": "FILE:test.py::main",
-                    "target": "REF:helper",
-                    "relation": "CALLS",
+                    "target": "FILE:test.py::helper",
+                    "relation": "CALLS_RESOLVED",
                     "metadata": {"lineno": 10},
                 },
             ],
@@ -953,7 +953,15 @@ class TestSourcePathsResolveAgainstProjectRoot:
         assert "return helper()" in context
         assert "return 42" in context
 
-        assert "return 42" in querier.trace_flow("caller", inline_threshold=100)
+        flow = querier.trace_flow("caller", inline_threshold=100)
+        assert "return 42" in flow
+        # Inlined code is indented as its fence is, at every level
+        fence = None
+        for line in flow.splitlines():
+            if line.lstrip().startswith("```"):
+                fence = None if fence is not None else line[: line.index("`")]
+            elif fence is not None:
+                assert line.startswith(fence), line
         tree = querier.trace_flow_structured("caller", inline_threshold=100)
         assert "return helper()" in tree["root"]["code"]
 
@@ -1109,83 +1117,82 @@ class TestCallPathDepthAndOutcome:
         assert slow.find_call_path_result("n0", "n29")["status"] == "timeout"
 
 
-class TestExpansionMemo:
+class TestCalleeExpansion:
+    """Deep `context` opens each callee at the first level that reaches it,
+    while the token budget covers it, and lists every callee it does not
+    open."""
+
     @pytest.fixture
     def querier(self, tmp_path):
-        (tmp_path / "m.py").write_text("".join(f"def f{i}(): pass\n" for i in range(4)))
+        # start -> x (120 toks), w; x -> y; w -> z -> y
+        sizes = {"start": 10, "x": 120, "w": 20, "z": 20, "y": 20}
+        (tmp_path / "m.py").write_text(
+            "".join(f"def {n}():\n    pass\n" for n in sizes)
+        )
         nodes = [
-            _fn(f"FILE:m.py::{name}", lineno=i + 1, end_lineno=i + 1, token_count=10)
-            for i, name in enumerate(("root", "mid", "leaf", "other"))
+            _fn(
+                f"FILE:m.py::{n}", lineno=2 * i + 1, end_lineno=2 * i + 2, token_count=t
+            )
+            for i, (n, t) in enumerate(sizes.items())
         ]
-        edges = [
-            _calls("FILE:m.py::root", "FILE:m.py::mid"),
-            _calls("FILE:m.py::mid", "FILE:m.py::leaf"),
-            _calls("FILE:m.py::root", "FILE:m.py::other"),
-        ]
+        pairs = [("start", "x"), ("start", "w"), ("x", "y"), ("w", "z"), ("z", "y")]
+        edges = [_calls(f"FILE:m.py::{a}", f"FILE:m.py::{b}") for a, b in pairs]
         return _querier(tmp_path, nodes, edges, project_root=tmp_path)
 
-    def _expand(self, querier, expanded, budget=1000):
-        return querier._expand_callees_recursive(
-            "FILE:m.py::root", depth=3, budget=budget, expanded=expanded
+    def expand(self, q, budget, inline_threshold=200):
+        blocks, notes = q._expand_callees(
+            "FILE:m.py::start", 3, budget, inline_threshold
         )
+        return "\n".join([*(line for block in blocks for line in block), *notes])
 
-    def test_memoized_cost_includes_nested_callees(self, querier):
-        first_lines, first_left = self._expand(querier, {"FILE:m.py::root"})
-        again_lines, again_left = self._expand(querier, {"FILE:m.py::root"})
-        # mid, leaf and other are inlined at 10 tokens each.
-        assert first_left == again_left == 1000 - 30
-        assert again_lines == first_lines
+    def test_a_mark_points_at_an_entry(self, querier):
+        """Under a budget that cannot open `x`, `y` opens under `z`, not as a
+        mark of an entry no one drew."""
+        text = self.expand(querier, 100)
+        assert "- `x(...)` (120 toks)" in text
+        assert "**y** (20 toks):" in text
+        assert "(at level" not in text
+        assert "*(token budget reached)*" in text
 
-    def test_memo_hit_marks_the_same_nodes_expanded(self, querier):
-        fresh, cached = {"FILE:m.py::root"}, {"FILE:m.py::root"}
-        self._expand(querier, fresh)
-        self._expand(querier, cached)
-        assert cached == fresh
-        assert "FILE:m.py::leaf" in cached
+    def test_a_symbol_opens_once_at_its_level(self, querier):
+        text = self.expand(querier, 1000)
+        assert text.count("**y** (20 toks):") == 1
+        assert "- `y` (at level 2)" in text
 
-    def test_memo_is_keyed_on_the_already_expanded_nodes(self, querier):
-        self._expand(querier, {"FILE:m.py::root"})
-        lines, _ = self._expand(querier, {"FILE:m.py::root", "FILE:m.py::leaf"})
-        assert not any("**leaf**" in line for line in lines)
-        assert any("**mid**" in line for line in lines)
+    def test_depth_one_holds_to_the_budget(self, querier):
+        text = querier.get_context_prompt("FILE:m.py::start", max_tokens=5)
+        assert "*(token budget reached)*" in text
+        assert "- `w(...)` (20 toks)" in text
 
-    def test_memo_is_keyed_on_the_budget(self, querier):
-        tight, _ = self._expand(querier, {"FILE:m.py::root"}, budget=15)
-        roomy, _ = self._expand(querier, {"FILE:m.py::root"}, budget=1000)
-        inlined = [line for line in roomy if "toks):" in line]
-        assert len(inlined) == 3
-        assert roomy != tight
-
-    def test_expansion_cut_short_by_the_timeout_is_not_memoized(
-        self, querier, monkeypatch
-    ):
+    def test_the_timeout_is_said(self, querier, monkeypatch):
         import itertools
 
         import descry.query
 
-        # A clock that advances one second per reading runs out mid-expansion.
         ticks = itertools.count()
-        with monkeypatch.context() as patched:
-            patched.setattr(
-                descry.query, "time", SimpleNamespace(time=lambda: next(ticks))
-            )
-            querier._timeout_ms = 2500
-            cut_short, _ = self._expand(querier, {"FILE:m.py::root"})
-        assert any("timeout" in line for line in cut_short)
-
-        querier._timeout_ms = 4000
-        complete, _ = self._expand(querier, {"FILE:m.py::root"})
-        assert not any("timeout" in line for line in complete)
+        monkeypatch.setattr(
+            descry.query, "time", SimpleNamespace(time=lambda: next(ticks))
+        )
+        querier._timeout_ms = 1500
+        text = self.expand(querier, 1000)
+        assert "*(timeout reached)*" in text
+        # The symbol's own callees are listed whatever the clock says
+        assert "x" in text and "**w**" in text
 
 
 class TestLangMapValueInTruncation:
     @pytest.mark.parametrize("lang", ["(", "c++", "[a-"])
     def test_source_block_is_truncated_whatever_the_fence_tag(self, tmp_path, lang):
-        q = _querier(tmp_path, [_fn("FILE:x.py::f")])
-        body = "\n".join(f"line {i}" for i in range(200))
-        text = f"### Context\n#### Source Code:\n```{lang}\n{body}\n```\n"
-        out = q._truncate_output_progressively(text, max_tokens=50, source_lang=lang)
-        assert "lines omitted, max_output_tokens limit" in out
+        lines = [f"line {i}" for i in range(200)]
+        lines[50] = "```{source_lang}"
+        (tmp_path / "x.py").write_text("\n".join(lines) + "\n")
+        node = _fn("FILE:x.py::f", lineno=1, end_lineno=200, token_count=2000)
+        q = _querier(
+            tmp_path, [node], project_root=tmp_path, syntax_lang_map={".py": lang}
+        )
+        out = q.get_context_prompt("FILE:x.py::f", full=True, max_output_tokens=50)
+        assert f"```{lang}" in out
+        assert "(170 lines omitted, max_output_tokens limit)" in out
         assert "line 199" not in out
 
 
@@ -1249,7 +1256,9 @@ class TestUnresolvedCallsInPathsAndFlows:
             },
         ]
         querier = _querier(tmp_path, nodes, edges)
+        # `three`'s call is left unresolved: a call of the name, not certain.
         assert querier.get_callers(asked) == ["FILE:a.py::one", "FILE:a.py::three"]
+        assert querier.get_ambiguous_callers(asked) == {"FILE:a.py::three": 0}
         found = querier.find_nodes_by_name(asked)
         assert [node["id"] for node in found] == ["FILE:a.py::Store::get"]
 
@@ -1434,6 +1443,16 @@ class TestCallersOfOneSymbol:
         brief = querier.get_context_prompt("FILE:a.py::A::parse", brief=True)
         assert "**Callers:** 1 " in brief
 
+    @pytest.mark.parametrize("direction", ["forward", "backward"])
+    def test_a_flow_of_depth_one_is_the_calls_one_level_away(self, querier, direction):
+        start = (
+            "FILE:use.py::only_a" if direction == "forward" else "FILE:a.py::A::parse"
+        )
+        tree = querier.trace_flow_structured(start, direction=direction, depth=1)
+        names = [child["name"] for child in tree["root"]["children"]]
+        assert ("parse" in names) if direction == "forward" else names == ["only_a"]
+        assert all(not child["children"] for child in tree["root"]["children"])
+
     def test_context_and_backward_flow_list_its_callers(self, querier):
         for text in (
             querier.get_context_prompt("FILE:a.py::A::parse"),
@@ -1464,3 +1483,559 @@ def test_flatten_takes_a_class_name(tmp_path):
     flat = _querier(tmp_path, [widget, draw], [defines]).flatten_class("Widget")
     assert "def draw(self)" in flat
     assert "`FILE:w.py::Widget`" in flat
+
+
+class TestCertainBeforePossible:
+    """A caller is certain only by a call resolved to the symbol; a list cut
+    short keeps the certain ones."""
+
+    def _graph(self, tmp_path, **config):
+        nodes = [
+            _fn("FILE:a.py::outer"),
+            _fn("FILE:a.py::outer::imp"),
+            _fn("FILE:b.py::imp"),
+            _fn("FILE:c.py::sure", token_count=500),
+            *(_fn(f"FILE:d.py::maybe{i}", token_count=1) for i in range(3)),
+        ]
+        for name, line in [
+            ("a.py", "def outer():\n    pass\n"),
+            ("b.py", "def imp():\n    pass\n"),
+        ]:
+            (tmp_path / name).write_text(line)
+        unresolved = [
+            {
+                "source": source,
+                "target": "REF:imp",
+                "relation": "CALLS",
+                "metadata": {"candidates": ["FILE:a.py::outer::imp", "FILE:b.py::imp"]},
+            }
+            for source in [
+                "FILE:a.py::outer",
+                *(f"FILE:d.py::maybe{i}" for i in range(3)),
+            ]
+        ]
+        edges = [
+            {
+                "source": "FILE:a.py::outer",
+                "target": "FILE:a.py::outer::imp",
+                "relation": "DEFINES",
+            },
+            _calls("FILE:c.py::sure", "FILE:b.py::imp"),
+            *unresolved,
+        ]
+        return _querier(tmp_path, nodes, edges, project_root=tmp_path, **config)
+
+    def test_defining_a_symbol_is_not_calling_it(self, tmp_path):
+        q = self._graph(tmp_path)
+        assert q.get_ambiguous_callers("FILE:a.py::outer::imp")["FILE:a.py::outer"] == 2
+        assert "**Callers:** 0 (+4 possible)" in q.get_context_prompt(
+            "FILE:a.py::outer::imp", brief=True
+        )
+        assert q.nodes["FILE:a.py::outer::imp"]["metadata"]["in_degree"] == 0
+
+    def test_a_cut_list_keeps_the_certain_callers(self, tmp_path):
+        q = self._graph(tmp_path, max_callers_shown=1, max_children_per_level=1)
+        context = q.get_context_prompt("FILE:b.py::imp")
+        assert "- `sure` in c.py" in context
+        assert "(4 more possible callers)" in context
+        flow = q.trace_flow("FILE:b.py::imp", direction="backward", depth=1)
+        assert "**sure**" in flow and "*(4 more possible callers)*" in flow
+        tree = q.trace_flow_structured("FILE:b.py::imp", direction="backward", depth=1)
+        assert [c["name"] for c in tree["root"]["children"]] == ["sure"]
+        assert (tree["root"]["more"], tree["root"]["more_possible"]) == (4, 4)
+
+
+def test_a_graph_is_counted_as_it_loads(tmp_path):
+    """A graph an older descry wrote, with possible callers in its counts,
+    is counted again."""
+    nodes = [_fn("FILE:a.py::f", in_degree=7), _fn("FILE:a.py::g")]
+    q = _querier(tmp_path, nodes, [_calls("FILE:a.py::g", "FILE:a.py::f")])
+    assert q.nodes["FILE:a.py::f"]["metadata"]["in_degree"] == 1
+
+
+def test_a_call_left_unresolved_is_one_of_the_name_only(tmp_path):
+    """A call the resolver found no candidates for is listed by its name,
+    marked apart from the callers resolved or narrowed to a definition; one
+    with candidates reaches only those."""
+    nodes = [
+        _fn("FILE:a.py::list_templates"),
+        _fn("FILE:c.py::Other::list_templates"),
+        _fn("FILE:b.py::render"),
+        _fn("FILE:b.py::narrowed"),
+    ]
+    edges = [
+        {
+            "source": "FILE:b.py::render",
+            "target": "REF:loader.list_templates",
+            "relation": "CALLS",
+        },
+        {
+            "source": "FILE:b.py::narrowed",
+            "target": "REF:held.list_templates",
+            "relation": "CALLS",
+            "metadata": {"candidates": ["FILE:c.py::Other::list_templates"]},
+        },
+    ]
+    q = _querier(tmp_path, nodes, edges)
+    callers, marks = q.ordered_callers("list_templates")
+    assert callers == ["FILE:b.py::narrowed", "FILE:b.py::render"]
+    assert marks == {"FILE:b.py::narrowed": 1, "FILE:b.py::render": 0}
+    assert q.one_of(0) == " (unresolved; same name)"
+    assert q.get_callers("FILE:a.py::list_templates") == []
+
+
+def test_a_forward_flow_cut_short_says_what_it_leaves_out(tmp_path):
+    nodes = [_fn("FILE:a.py::start"), *(_fn(f"FILE:a.py::sure{i}") for i in range(2))]
+    nodes += [_fn("FILE:b.py::maybe"), _fn("FILE:c.py::maybe")]
+    edges = [_calls("FILE:a.py::start", f"FILE:a.py::sure{i}") for i in range(2)]
+    edges.append(
+        {
+            "source": "FILE:a.py::start",
+            "target": "REF:x.maybe",
+            "relation": "CALLS",
+            "metadata": {"candidates": ["FILE:b.py::maybe", "FILE:c.py::maybe"]},
+        }
+    )
+    q = _querier(tmp_path, nodes, edges, max_children_per_level=1)
+    assert "*(1 more callees, 2 more possible callees)*" in q.trace_flow(
+        "FILE:a.py::start", depth=1
+    )
+    root = q.trace_flow_structured("FILE:a.py::start", depth=1)["root"]
+    assert (root["more"], root["more_possible"]) == (3, 2)
+
+
+def test_calls_written_apart_are_callees_apart(tmp_path):
+    """`a.add` and `b.add` end in one method name but are two calls: one
+    the resolver narrowed, one it found nothing for."""
+    nodes = [
+        _fn("FILE:a.py::f"),
+        _fn("FILE:b.py::Set::add"),
+        _fn("FILE:c.py::List::add"),
+    ]
+    edges = [
+        {
+            "source": "FILE:a.py::f",
+            "target": "REF:a.add",
+            "relation": "CALLS",
+            "metadata": {"candidates": ["FILE:b.py::Set::add", "FILE:c.py::List::add"]},
+        },
+        {"source": "FILE:a.py::f", "target": "REF:b.add", "relation": "CALLS"},
+        {"source": "FILE:a.py::f", "target": "REF:b.add", "relation": "CALLS"},
+    ]
+    q = _querier(tmp_path, nodes, edges)
+    callees = q.get_callees("FILE:a.py::f")
+    assert callees == ["REF:a.add", "REF:b.add"]
+    assert q.kinds(callees, q.get_ambiguous_callees("FILE:a.py::f")) == (0, 1, 1)
+
+
+def test_an_edge_to_a_symbol_the_graph_lacks_does_not_break_context(tmp_path):
+    """A graph is untrusted: a resolved edge may name a node it does not
+    have."""
+    (tmp_path / "a.py").write_text("def f():\n    gone()\n")
+    nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
+    q = _querier(
+        tmp_path,
+        nodes,
+        [_calls("FILE:a.py::f", "FILE:a.py::gone")],
+        project_root=tmp_path,
+    )
+    for depth, expand in ((1, False), (2, True)):
+        assert "gone`" in q.get_context_prompt(
+            "FILE:a.py::f", depth=depth, expand_callees=expand
+        )
+
+
+def test_calls_written_alike_reach_what_any_of_them_may(tmp_path):
+    """Calls of `put` narrowed to one definition each, then one to none:
+    the callee `put` may reach either definition."""
+    nodes = [
+        _fn("FILE:a.py::f"),
+        _fn("FILE:b.py::Facet::put"),
+        _fn("FILE:c.py::Sink::put"),
+    ]
+    edges = [
+        {
+            "source": "FILE:a.py::f",
+            "target": "REF:put",
+            "relation": "CALLS",
+            "metadata": {"candidates": ["FILE:b.py::Facet::put"]},
+        },
+        {
+            "source": "FILE:a.py::f",
+            "target": "REF:put",
+            "relation": "CALLS",
+            "metadata": {"candidates": ["FILE:c.py::Sink::put"]},
+        },
+        {"source": "FILE:a.py::f", "target": "REF:put", "relation": "CALLS"},
+    ]
+    assert _querier(tmp_path, nodes, edges).get_ambiguous_callees("FILE:a.py::f") == {
+        "REF:put": 2
+    }
+
+
+def test_a_deep_context_says_what_it_leaves_out(tmp_path):
+    """The symbol's own callees are all listed; a level below is cut to the
+    per-level limit, with a note."""
+    (tmp_path / "a.py").write_text("def f():\n    pass\n")
+    nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
+    nodes += [
+        _fn(f"FILE:a.py::g{i}", lineno=1, end_lineno=2, token_count=10)
+        for i in range(3)
+    ]
+    nodes += [_fn(f"FILE:a.py::h{i}", token_count=500) for i in range(3)]
+    edges = [_calls("FILE:a.py::f", f"FILE:a.py::g{i}") for i in range(3)]
+    edges += [_calls("FILE:a.py::g0", f"FILE:a.py::h{i}") for i in range(3)]
+    edges.append({"source": "FILE:a.py::g0", "target": "REF:x.h", "relation": "CALLS"})
+    q = _querier(
+        tmp_path, nodes, edges, project_root=tmp_path, max_children_per_level=2
+    )
+    text = q.get_context_prompt("FILE:a.py::f", depth=2)
+    assert all(f"**g{i}**" in text for i in range(3))
+    assert "*(1 more callees, 1 more unresolved callees)*" in text
+
+
+class TestEachSymbolAtItsLevel:
+    """`start` calls `a` and `b`, and `a` calls `b`: `b` is a direct callee,
+    with its own callee `c` below it, and is met again under `a`."""
+
+    @pytest.fixture
+    def q(self, tmp_path):
+        names = ["start", "a", "b", "c"]
+        (tmp_path / "m.py").write_text(
+            "".join(f"def {n}():\n    pass\n" for n in names)
+        )
+        nodes = [
+            _fn(
+                f"FILE:m.py::{n}",
+                lineno=2 * i + 1,
+                end_lineno=2 * i + 2,
+                token_count=500,
+            )
+            for i, n in enumerate(names)
+        ]
+        pairs = [("start", "a"), ("start", "b"), ("a", "b"), ("b", "c")]
+        edges = [_calls(f"FILE:m.py::{x}", f"FILE:m.py::{y}") for x, y in pairs]
+        return _querier(tmp_path, nodes, edges, project_root=tmp_path)
+
+    def test_forward(self, q):
+        root = q.trace_flow_structured("FILE:m.py::start", depth=2)["root"]
+        assert [(c["name"], c.get("seen", False)) for c in root["children"]] == [
+            ("a", False),
+            ("b", False),
+        ]
+        a, b = root["children"]
+        assert [(c["name"], c.get("seen")) for c in a["children"]] == [("b", 1)]
+        assert a["children"][0]["seen"] is not True
+        assert [c["name"] for c in b["children"]] == ["c"]
+        text = q.trace_flow("FILE:m.py::start", depth=2)
+        assert "    ├─[Fun] **b** (at level 1)" in text
+        assert "    ├─[Fun] **c** (500 toks)" in text
+
+    def test_backward(self, q):
+        tree = q.trace_flow_structured("FILE:m.py::b", direction="backward", depth=2)
+        a, start = tree["root"]["children"]
+        assert (a["name"], start["name"], start.get("seen")) == ("a", "start", None)
+        assert [(c["name"], c.get("seen")) for c in a["children"]] == [("start", 1)]
+        assert a["children"][0]["seen"] is not True
+
+    def test_deep_context_shows_a_callee_met_again(self, q):
+        for node in q.nodes.values():
+            node["metadata"]["token_count"] = 20
+        text = q.get_context_prompt("FILE:m.py::start", depth=2)
+        assert "- `b` (at level 1)" in text
+        # `b` opens at level 1, so its callee is shown
+        assert "**c**" in text
+
+
+def test_usage_examples_are_calls_of_that_symbol(tmp_path):
+    """Not calls left unresolved that end in its name; one it is a
+    candidate of is marked."""
+    (tmp_path / "a.py").write_text("def add():\n    pass\n")
+    (tmp_path / "u.py").write_text(
+        "def use():\n    add()\n    x.add()\n    vary.add('Cookie')\n"
+    )
+    nodes = [
+        _fn("FILE:a.py::add", lineno=1, end_lineno=2, token_count=10),
+        _fn("FILE:u.py::use"),
+        _fn("FILE:b.py::add"),
+    ]
+    edges = [
+        {
+            "source": "FILE:u.py::use",
+            "target": "FILE:a.py::add",
+            "relation": "CALLS_RESOLVED",
+            "metadata": {"lineno": 2},
+        },
+        {
+            "source": "FILE:u.py::use",
+            "target": "REF:x.add",
+            "relation": "CALLS",
+            "metadata": {
+                "lineno": 3,
+                "candidates": ["FILE:a.py::add", "FILE:b.py::add"],
+            },
+        },
+        {
+            "source": "FILE:u.py::use",
+            "target": "REF:vary.add",
+            "relation": "CALLS",
+            "metadata": {"lineno": 4},
+        },
+    ]
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
+    examples = q._get_usage_examples("FILE:a.py::add", limit=5)
+    assert [(e["lineno"], e["candidates"]) for e in examples] == [(2, None), (3, 2)]
+    assert "Line 3: (one of 2 candidates)" in q.get_context_prompt("FILE:a.py::add")
+
+
+def test_a_node_id_names_that_node_alone(tmp_path):
+    """Sinatra's instance `force_encoding` is not its `self.force_encoding`,
+    though both are named `force_encoding` under `Base`."""
+    nodes = [
+        _fn("FILE:base.rb::Base::force_encoding", name="force_encoding"),
+        _fn("FILE:base.rb::Base::self.force_encoding", name="force_encoding"),
+        _fn("FILE:base.rb::Base::dispatch"),
+        _fn("FILE:base.rb::Base::inline_templates="),
+    ]
+    edges = [
+        _calls("FILE:base.rb::Base::dispatch", "FILE:base.rb::Base::force_encoding"),
+        _calls(
+            "FILE:base.rb::Base::inline_templates=",
+            "FILE:base.rb::Base::self.force_encoding",
+        ),
+    ]
+    q = _querier(tmp_path, nodes, edges)
+    instance = "FILE:base.rb::Base::force_encoding"
+    assert [n["id"] for n in q.find_nodes_by_name(instance)] == [instance]
+    assert q.get_callers(instance) == ["FILE:base.rb::Base::dispatch"]
+    assert len(q.get_callers("force_encoding")) == 2
+
+
+def test_a_recursive_start_is_marked_at_level_zero(tmp_path):
+    nodes = [_fn("FILE:a.py::fact"), _fn("FILE:a.py::helper")]
+    edges = [
+        _calls("FILE:a.py::fact", "FILE:a.py::fact"),
+        _calls("FILE:a.py::fact", "FILE:a.py::helper"),
+    ]
+    q = _querier(tmp_path, nodes, edges)
+    root = q.trace_flow_structured("FILE:a.py::fact", depth=2)["root"]
+    assert [(c["name"], c.get("seen")) for c in root["children"]] == [
+        ("fact", 0),
+        ("helper", None),
+    ]
+    assert "**fact** (at level 0)" in q.trace_flow("FILE:a.py::fact", depth=2)
+
+
+def test_deep_context_lists_an_unresolved_call_met_twice(tmp_path):
+    """Unresolved calls, and calls of a symbol the graph lacks, are not
+    symbols to open: each is listed where it is made."""
+    (tmp_path / "a.py").write_text(
+        "".join(f"def {n}():\n    pass\n" for n in ("two", "c1", "c2"))
+    )
+    nodes = [
+        _fn(f"FILE:a.py::{n}", lineno=2 * i + 1, end_lineno=2 * i + 2, token_count=20)
+        for i, n in enumerate(("two", "c1", "c2"))
+    ]
+    edges = [
+        _calls("FILE:a.py::two", "FILE:a.py::c1"),
+        _calls("FILE:a.py::two", "FILE:a.py::c2"),
+    ]
+    for caller in ("c1", "c2"):
+        edges.append(
+            {
+                "source": f"FILE:a.py::{caller}",
+                "target": "REF:items.append",
+                "relation": "CALLS",
+            }
+        )
+        edges.append(_calls(f"FILE:a.py::{caller}", "FILE:a.py::gone"))
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
+    text = q.get_context_prompt("FILE:a.py::two", depth=2)
+    assert text.count("`append` (unresolved)") == 2
+    assert text.count("gone`") == 2
+
+
+def test_the_node_limit_lists_the_symbols_own_callees(tmp_path):
+    """It cuts the levels below, counting what it did not reach."""
+    (tmp_path / "a.py").write_text("def f():\n    pass\n")
+    nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
+    nodes += [
+        _fn(f"FILE:a.py::g{i}", lineno=1, end_lineno=2, token_count=10)
+        for i in range(3)
+    ]
+    nodes += [_fn(f"FILE:a.py::h{i}", token_count=500) for i in range(3)]
+    edges = [_calls("FILE:a.py::f", f"FILE:a.py::g{i}") for i in range(3)]
+    edges += [_calls("FILE:a.py::g0", f"FILE:a.py::h{i}") for i in range(3)]
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path, max_nodes=2)
+    text = q.get_context_prompt("FILE:a.py::f", depth=2)
+    assert all(f"**g{i}**" in text for i in range(3))
+    assert "*(3 more callees)*" in text
+    assert "*(node limit reached)*" in text
+
+
+def test_the_node_limit_counts_what_each_parent_leaves(tmp_path):
+    """Past the limit, a parent opened at the level above lists its
+    callees as left out, not as nothing."""
+    (tmp_path / "a.py").write_text("def f():\n    pass\n")
+    nodes = [
+        _fn(f"FILE:a.py::{n}", lineno=1, end_lineno=2, token_count=10)
+        for n in ("f", "g0", "g1", "g2")
+    ]
+    nodes += [_fn(f"FILE:a.py::{n}", token_count=500) for n in ("h0", "h1", "k0", "k1")]
+    pairs = [
+        ("f", "g0"),
+        ("f", "g1"),
+        ("f", "g2"),
+        ("g0", "h0"),
+        ("g0", "h1"),
+        ("g1", "k0"),
+        ("g1", "k1"),
+    ]
+    edges = [_calls(f"FILE:a.py::{a}", f"FILE:a.py::{b}") for a, b in pairs]
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path, max_nodes=2)
+    text = q.get_context_prompt("FILE:a.py::f", depth=2)
+    assert text.count("*(2 more callees)*") == 2
+
+
+def test_the_node_limit_counts_below_what_it_opened(tmp_path):
+    """A callee opened at the level the limit cuts says what it calls."""
+    (tmp_path / "m.py").write_text("def f():\n    pass\n")
+    small = ("f", "g0", "g1", "g2", "h0", "h1")
+    nodes = [
+        _fn(f"FILE:m.py::{n}", lineno=1, end_lineno=2, token_count=10) for n in small
+    ]
+    nodes.append(_fn("FILE:m.py::m0", token_count=500))
+    pairs = [
+        ("f", "g0"),
+        ("f", "g1"),
+        ("f", "g2"),
+        ("g0", "h0"),
+        ("g0", "h1"),
+        ("h0", "m0"),
+    ]
+    edges = [_calls(f"FILE:m.py::{a}", f"FILE:m.py::{b}") for a, b in pairs]
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path, max_nodes=4)
+    text = q.get_context_prompt("FILE:m.py::f", depth=3)
+    # `h0` leaves out `m0`; `g0`, cut at the limit, leaves out `h1`
+    assert text.count("*(1 more callees)*") == 2
+
+
+class TestOutputCap:
+    """`max_output_tokens` cuts the parts `context` is made of, not its text:
+    code inside them is never read as structure."""
+
+    @pytest.fixture
+    def q(self, tmp_path):
+        code = ["    - a bullet", "#### Linux:", "```", "    return 1"]
+        source = ["def f():", "    pass"]
+        for i in range(7):
+            source += [f"def c{i}():", *code]
+        for i in range(9):
+            source += [f"def u{i}():", "    f()"]
+        (tmp_path / "a.py").write_text("\n".join(source) + "\n")
+        nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
+        nodes += [
+            _fn(
+                f"FILE:a.py::c{i}",
+                lineno=3 + 5 * i,
+                end_lineno=7 + 5 * i,
+                token_count=20,
+            )
+            for i in range(7)
+        ]
+        nodes += [
+            _fn(
+                f"FILE:a.py::u{i}",
+                lineno=38 + 2 * i,
+                end_lineno=39 + 2 * i,
+                token_count=10,
+            )
+            for i in range(9)
+        ]
+        nodes.append(_fn("FILE:b.py::f"))
+        edges = [_calls("FILE:a.py::f", f"FILE:a.py::c{i}") for i in range(7)]
+        edges += [_calls(f"FILE:a.py::u{i}", "FILE:a.py::f") for i in range(7)]
+        edges += [
+            {
+                "source": f"FILE:a.py::u{i}",
+                "target": "REF:x.f",
+                "relation": "CALLS",
+                "metadata": {
+                    "lineno": 39 + 2 * i,
+                    "candidates": ["FILE:a.py::f", "FILE:b.py::f"],
+                },
+            }
+            for i in (7, 8)
+        ]
+        return _querier(tmp_path, nodes, edges, project_root=tmp_path)
+
+    def test_callees_go_whole(self, q):
+        out = q.get_context_prompt("FILE:a.py::f", max_output_tokens=1)
+        assert "*(2 more callees)*" in out
+        assert "**c4**" in out and "**c5**" not in out
+        assert out.count("#### Linux:") == 5
+
+    def test_a_cut_caller_list_keeps_possible_callers_apart(self, q):
+        out = q.get_context_prompt("FILE:a.py::f", max_output_tokens=1)
+        assert "#### Callers (5 shown):" in out
+        assert "*(2 more callers, 2 more possible callers)*" in out
+
+    def test_a_dropped_section_is_said(self, q, tmp_path):
+        q._find_related_tests = lambda *args: ["tests/test_a.py"]
+        out = q.get_context_prompt("FILE:a.py::f", max_output_tokens=1)
+        assert "#### Related Tests:\n*(omitted, max_output_tokens limit)*" in out
+
+
+def test_the_source_cut_counts_from_the_symbols_lines(tmp_path):
+    """Not from the source already shortened for display."""
+    (tmp_path / "x.py").write_text("\n".join(f"line {i}" for i in range(300)) + "\n")
+    node = _fn("FILE:x.py::f", lineno=1, end_lineno=300, token_count=3000)
+    q = _querier(tmp_path, [node], project_root=tmp_path)
+    out = q.get_context_prompt("FILE:x.py::f", max_output_tokens=50)
+    assert "(270 lines omitted, max_output_tokens limit)" in out
+
+
+@pytest.mark.parametrize("a0_calls_p", [False, True])
+def test_a_cut_callee_list_keeps_kinds_and_marks_true(tmp_path, a0_calls_p):
+    """Possible callees are counted apart, no mark points at a callee whose
+    entry was cut, and a call drawn under a kept callee is not counted."""
+    (tmp_path / "a.py").write_text("def f():\n    pass\n")
+    small = [f"a{i}" for i in range(6)]
+    nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
+    nodes += [
+        _fn(f"FILE:a.py::{n}", lineno=1, end_lineno=2, token_count=10) for n in small
+    ]
+    nodes += [_fn("FILE:b.py::p"), _fn("FILE:c.py::p")]
+    edges = [_calls("FILE:a.py::f", f"FILE:a.py::{n}") for n in small]
+    edges.append(_calls("FILE:a.py::a0", "FILE:a.py::a5"))
+    for source in ["FILE:a.py::f"] + ["FILE:a.py::a0"] * a0_calls_p:
+        edges.append(
+            {
+                "source": source,
+                "target": "REF:x.p",
+                "relation": "CALLS",
+                "metadata": {"candidates": ["FILE:b.py::p", "FILE:c.py::p"]},
+            }
+        )
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
+    out = q.get_context_prompt("FILE:a.py::f", depth=2, max_output_tokens=1)
+    # `a5`, cut from f's list, is drawn under `a0`, and so is `x.p` when
+    # `a0` makes the call
+    assert ("more possible callees" in out) is not a0_calls_p
+    assert "**a5**" in out
+    assert "(at level" not in out
+
+
+def test_a_self_call_past_the_callees_cut_is_counted(tmp_path):
+    """The symbol is not drawn as one of its own callees."""
+    (tmp_path / "a.py").write_text("def f():\n    pass\n")
+    small = [f"a{i}" for i in range(6)]
+    nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
+    nodes += [
+        _fn(f"FILE:a.py::{n}", lineno=1, end_lineno=2, token_count=10) for n in small
+    ]
+    edges = [_calls("FILE:a.py::f", f"FILE:a.py::{n}") for n in small]
+    edges.append(_calls("FILE:a.py::f", "FILE:a.py::f"))
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
+    out = q.get_context_prompt("FILE:a.py::f", depth=2, max_output_tokens=1)
+    assert "*(2 more callees)*" in out

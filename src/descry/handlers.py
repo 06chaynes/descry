@@ -946,10 +946,12 @@ _GRAPH_NOT_FOUND = "Graph not found. Run descry ensure first."
 _INDEX_BUSY = "An index run is already in progress"
 
 
-def _limit_error(limit: int) -> str | None:
-    """Why `limit` cannot be used, or None. A negative one slices from the end."""
-    if limit < 0:
-        return f"limit must not be negative, got {limit}."
+def limit_error(limit: int, name: str = "limit") -> str | None:
+    """Why the limit or depth ``name`` cannot be ``limit``, or None: a
+    negative one slices from the end, and none at all answers as if there
+    were nothing to show."""
+    if limit < 1:
+        return f"{name} must be at least 1, got {limit}."
     return None
 
 
@@ -1712,7 +1714,7 @@ class DescryService:
 
     async def callers_data(self, name: str, limit: int = 20) -> dict:
         """Callers of a symbol, as data. An exact miss retries with fuzzy=True."""
-        if error := _limit_error(limit):
+        if error := limit_error(limit):
             return {"ok": False, "error": error, "reason": "invalid"}
         q = await self._get_querier()
         if not q:
@@ -1721,15 +1723,11 @@ class DescryService:
 
     @staticmethod
     def _callers_from(q, name: str, limit: int) -> dict:
-        all_callers = q.get_callers(name)
-        ambiguous = q.get_ambiguous_callers(name)
+        all_callers, ambiguous = q.ordered_callers(name)
         fuzzy = False
         if not all_callers:
-            all_callers = q.get_callers(name, fuzzy=True)
-            ambiguous = q.get_ambiguous_callers(name, fuzzy=True)
+            all_callers, ambiguous = q.ordered_callers(name, fuzzy=True)
             fuzzy = bool(all_callers)
-        # Certain callers come before those that are one of several candidates.
-        all_callers = sorted(all_callers, key=ambiguous.__contains__)
 
         return {
             "ok": True,
@@ -1738,12 +1736,13 @@ class DescryService:
             "fuzzy": fuzzy,
             "total": len(all_callers),
             "callers": all_callers[:limit],
-            "ambiguous": {c: ambiguous[c] for c in all_callers if c in ambiguous},
+            "left_out": all_callers[limit:],
+            "ambiguous": ambiguous,
         }
 
     async def callees_data(self, name: str, limit: int = 20) -> dict:
         """Callees of a symbol, as data. Same fuzzy fallback as callers_data."""
-        if error := _limit_error(limit):
+        if error := limit_error(limit):
             return {"ok": False, "error": error, "reason": "invalid"}
         q = await self._get_querier()
         if not q:
@@ -1784,12 +1783,15 @@ class DescryService:
             "node": node,
             "total": len(callees),
             "callees": callees[:limit],
-            "ambiguous": {c: ambiguous[c] for c in callees if c in ambiguous},
+            "left_out": callees[limit:],
+            "ambiguous": ambiguous,
+            # The definitions of the name besides the one answered for
+            "others": len(func_matches) - 1,
         }
 
     async def callers(self, name: str, limit: int = 20) -> str:
         """Find all callers of a symbol."""
-        if error := _limit_error(limit):
+        if error := limit_error(limit):
             return ServiceError(f"ERROR: {error}")
         # One querier for lookup and rendering: a second fetch returns None
         # if the graph file has been removed in between.
@@ -1808,7 +1810,11 @@ class DescryService:
                 f"No callers of '{name}'. Try descry search to verify symbol exists."
             )
         else:
-            lines = [f"{len(callers)} caller(s) of '{name}'{fuzzy_note}:"]
+            certain, possible, unresolved = q.kinds(
+                callers + data["left_out"], ambiguous
+            )
+            extra = q.possible(possible, unresolved)
+            lines = [f"{certain} caller(s) of '{name}'{fuzzy_note}{extra}:"]
             for caller in callers:
                 node_info = q.get_node_info(caller)
                 one_of = q.one_of(ambiguous.get(caller))
@@ -1822,16 +1828,16 @@ class DescryService:
                 else:
                     lines.append(f"  {caller}{one_of}")
             if len(callers) < total_count:
-                lines.append(
-                    f"  ... ({total_count - len(callers)} more, limit {limit})"
-                )
+                certain, possible, unresolved = q.kinds(data["left_out"], ambiguous)
+                more = q.more_callers(certain, possible, unresolved=unresolved)
+                lines.append(f"  ... ({more}, limit {limit})")
             result = "\n".join(lines)
 
         return await self._format_response(result)
 
     async def callees(self, name: str, limit: int = 20) -> str:
         """Find what a symbol calls."""
-        if error := _limit_error(limit):
+        if error := limit_error(limit):
             return ServiceError(f"ERROR: {error}")
         q = await self._get_querier()
         if not q:
@@ -1842,15 +1848,32 @@ class DescryService:
 
         node = data["node"]
         callees = data["callees"]
+        total = data["total"]
         ambiguous = data.get("ambiguous", {})
         fuzzy_note = " (fuzzy match)" if data["fuzzy"] else ""
-        display_name = node.get("metadata", {}).get("name", name)
-        if not callees:
-            result = f"'{display_name}'{fuzzy_note} calls no tracked functions."
+        # A name several definitions have is answered for one, named by ID
+        display_name = (
+            node["id"] if data["others"] else node.get("metadata", {}).get("name", name)
+        )
+        others = (
+            f"\n({data['others']} other "
+            f"{'match(es) for' if data['fuzzy'] else 'definition(s) of'} '{name}'; "
+            "use a node ID to choose)"
+            if data["others"]
+            else ""
+        )
+        if not total:
+            result = f"'{display_name}'{fuzzy_note} calls no tracked functions.{others}"
         else:
-            lines = [f"'{display_name}'{fuzzy_note} calls {len(callees)} function(s):"]
+            certain, possible, unresolved = q.kinds(
+                callees + data["left_out"], ambiguous
+            )
+            possible = q.possible(possible, unresolved)
+            lines = [
+                f"'{display_name}'{fuzzy_note} calls {certain} function(s){possible}:"
+            ]
             for callee in callees:
-                one_of = q.one_of(ambiguous.get(callee))
+                one_of = q.callee_note(ambiguous.get(callee))
                 callee_info = q.get_node_info(callee)
                 if callee_info:
                     lineno = callee_info.get("metadata", {}).get("lineno")
@@ -1861,7 +1884,11 @@ class DescryService:
                         lines.append(f"  {callee}{one_of}")
                 else:
                     lines.append(f"  {callee}{one_of}")
-            result = "\n".join(lines)
+            if len(callees) < total:
+                certain, possible, unresolved = q.kinds(data["left_out"], ambiguous)
+                more = q.more_callers(certain, possible, "callees", unresolved)
+                lines.append(f"  ... ({more}, limit {limit})")
+            result = "\n".join(lines) + others
 
         return await self._format_response(result)
 
@@ -1879,6 +1906,13 @@ class DescryService:
         max_output_tokens: int | None = None,
     ) -> str:
         """Get full context for a symbol."""
+        for value, name in (
+            (depth, "depth"),
+            (max_tokens, "max_tokens"),
+            (callee_budget, "callee_budget"),
+        ):
+            if error := limit_error(value, name):
+                return ServiceError(f"ERROR: {error}")
         q = await self._get_querier()
         if not q:
             return ServiceError(f"ERROR: {self._no_graph_error()}")
@@ -1928,7 +1962,10 @@ class DescryService:
                 result, include_header=False, max_lines=50
             )
 
-        depth_note = f" [depth={depth}]" if depth > 1 else ""
+        traced = q.flow_depth(depth)
+        depth_note = f" [depth={traced}]" if traced > 1 else ""
+        if traced < depth:
+            depth_note += f" [depth {depth} is past [query] max_depth]"
         full_note = " [full=true]" if full else ""
         head_note = f" [head_lines={head_lines}]" if head_lines else ""
         expand_note = " [expand_callees=true]" if expand_callees else ""
@@ -1951,8 +1988,11 @@ class DescryService:
         """Call flow from a starting symbol, as data.
 
         `result` is the markdown trace, or the tree of
-        `GraphQuerier.trace_flow_structured` when `structured`.
+        `GraphQuerier.trace_flow_structured` when `structured`; `depth` is
+        the depth traced, at most the project's ceiling.
         """
+        if error := limit_error(depth, "depth"):
+            return {"ok": False, "error": error, "reason": "invalid"}
         q = await self._get_querier()
         if not q:
             return {"ok": False, "error": self._no_graph_error()}
@@ -1965,7 +2005,12 @@ class DescryService:
             target=target,
             inline_threshold=inline_threshold,
         )
-        return {"ok": True, "error": None, "result": result}
+        return {
+            "ok": True,
+            "error": None,
+            "result": result,
+            "depth": q.flow_depth(depth),
+        }
 
     async def flow(
         self,
@@ -1998,7 +2043,7 @@ class DescryService:
         Returns `{"ok", "error", "results", "method"}`; `method` is "keyword"
         or "hybrid".
         """
-        if error := _limit_error(limit):
+        if error := limit_error(limit):
             return {
                 "ok": False,
                 "error": error,
@@ -2334,8 +2379,8 @@ class DescryService:
         reported as a missing graph; `reason` classifies it as "invalid",
         "unavailable", "no_graph", "loading" or "failed".
         """
-        if limit_error := _limit_error(limit):
-            reason, error = "invalid", limit_error
+        if refused := limit_error(limit):
+            reason, error = "invalid", refused
         elif not self._semantic_available or not self._SemanticSearcher:
             reason, error = "unavailable", "Semantic search not available."
         elif not self.config.graph_path.exists():
@@ -2644,6 +2689,8 @@ class DescryService:
         `status` and `path` are those of `GraphQuerier.find_call_path_result`.
         Unless `status` is "found", `message` says why there is no path.
         """
+        if error := limit_error(max_depth, "max_depth"):
+            return {"ok": False, "error": error, "reason": "invalid"}
         q = await self._get_querier()
         if not q:
             return {"ok": False, "error": self._no_graph_error()}
@@ -2925,10 +2972,10 @@ class DescryService:
         """Run a GitHistoryAnalyzer method off the event loop, as data.
 
         `result` is what the method returned. On failure `reason` is
-        "invalid" for a negative `limit`, "unavailable" when the git history
+        "invalid" for a `limit` below 1, "unavailable" when the git history
         module is missing and "failed" when the analysis raised.
         """
-        if error := _limit_error(kwargs["limit"]):
+        if error := limit_error(kwargs["limit"]):
             return {"ok": False, "error": error, "reason": "invalid"}
         if not self._git_available:
             return {

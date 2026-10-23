@@ -54,7 +54,7 @@ SERVER_VERSION = __version__
 
 # --- Import shared modules ---
 
-from descry.handlers import DescryConfig, DescryService, ServiceError
+from descry.handlers import DescryConfig, DescryService, ServiceError, limit_error
 from descry.query import GraphQuerier, _get_syntax_lang
 
 # --- Project config (lazy-loaded via DescryConfig) ---
@@ -163,10 +163,18 @@ def _node_to_dict(node: dict) -> dict:
     }
 
 
-def _caller_to_dict(caller_id: str, q: GraphQuerier, candidates: int = 0) -> dict:
-    """Convert a caller node ID to a dict with location info."""
+def _kinds(q: GraphQuerier, ids: list, marks: dict) -> dict:
+    """How many of ``ids`` are certain, possible, and unresolved calls of the
+    name."""
+    return dict(zip(("certain", "possible", "unresolved"), q.kinds(ids, marks)))
+
+
+def _caller_to_dict(caller_id: str, q: GraphQuerier, candidates: int | None) -> dict:
+    """Convert a caller node ID to a dict with location info. `candidates`
+    is absent on a certain call, else the number its unresolved call may
+    reach, 0 for a call of the name only."""
     result = {"id": caller_id, "name": caller_id}
-    if candidates:
+    if candidates is not None:
         result["candidates"] = candidates
     file_path = ""
     if caller_id.startswith("FILE:"):
@@ -202,6 +210,7 @@ async def api_health(_request: Request) -> JSONResponse:
             "version": SERVER_VERSION,
             "project_root": str(_get_config().project_root),
             "graph": await _get_service().status_data(),
+            "max_depth": q.max_flow_depth if (q := await _get_querier()) else None,
             "features": features,
         }
     )
@@ -338,8 +347,10 @@ async def api_callers(request: Request) -> JSONResponse:
             "symbol": data["symbol"],
             "fuzzy": data["fuzzy"],
             "total": data["total"],
+            **_kinds(q, data["callers"] + data["left_out"], ambiguous),
+            "more": _kinds(q, data["left_out"], ambiguous),
             "callers": [
-                _caller_to_dict(c, q, ambiguous.get(c, 0)) for c in data["callers"]
+                _caller_to_dict(c, q, ambiguous.get(c)) for c in data["callers"]
             ],
         }
     )
@@ -369,8 +380,11 @@ async def api_callees(request: Request) -> JSONResponse:
             "node_id": node["id"],
             "fuzzy": data["fuzzy"],
             "total": data["total"],
+            **_kinds(q, data["callees"] + data["left_out"], ambiguous),
+            "more": _kinds(q, data["left_out"], ambiguous),
+            "others": data["others"],
             "callees": [
-                _caller_to_dict(c, q, ambiguous.get(c, 0)) for c in data["callees"]
+                _caller_to_dict(c, q, ambiguous.get(c)) for c in data["callees"]
             ],
         }
     )
@@ -386,6 +400,9 @@ async def api_context(request: Request) -> JSONResponse:
     expand_callees = request.query_params.get("expand_callees", "").lower() == "true"
     depth = _int_param(request, "depth", 1)
     max_tokens = _int_param(request, "max_tokens", 2000)
+    for value, name in ((depth, "depth"), (max_tokens, "max_tokens")):
+        if error := limit_error(value, name):
+            return JSONResponse({"error": error}, status_code=400)
 
     result = await _get_service().context(
         node_id,
@@ -515,13 +532,13 @@ async def api_flow(request: Request) -> JSONResponse:
         structured=structured,
     )
     if not data["ok"]:
-        return JSONResponse({"error": data["error"]}, status_code=503)
+        return _graph_failure(data)
 
     return JSONResponse(
         {
             "start": start,
             "direction": direction,
-            "depth": depth,
+            "depth": data["depth"],
             "tree" if structured else "markdown": data["result"],
         }
     )
@@ -544,7 +561,7 @@ async def api_path(request: Request) -> JSONResponse:
         start, end, max_depth=max_depth, direction=direction
     )
     if not data["ok"]:
-        return JSONResponse({"error": data["error"]}, status_code=503)
+        return _graph_failure(data)
 
     if data["status"] != "found":
         return JSONResponse(

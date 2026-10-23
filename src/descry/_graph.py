@@ -112,4 +112,18 @@ def load_graph_with_schema(path: Path | str) -> dict:
             f"run 'descry index' to rebuild."
         )
     _check_shape(data)
+    count_callers(data["nodes"], data["edges"])
     return data
+
+
+def count_callers(nodes: list, edges: list) -> None:
+    """Set each node's `in_degree` to the number of its callers: the
+    symbols whose calls are resolved to it, not those an unresolved call
+    only may be. A graph is counted again as it loads, so one written by an
+    older descry counts them the same way."""
+    callers: dict[str, set] = {}
+    for edge in edges:
+        if edge["relation"] in CALL_RELATIONS:
+            callers.setdefault(edge["target"], set()).add(edge["source"])
+    for node in nodes:
+        node["metadata"]["in_degree"] = len(callers.get(node["id"], ()))

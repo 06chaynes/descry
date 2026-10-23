@@ -326,15 +326,16 @@
             </div>
             <div class="results" x-show="results.callers">
                 <div class="results-header">
-                    <span x-text="results.callers?.total + ' caller(s) of ' + results.callers?.symbol + (results.callers?.fuzzy ? ' (fuzzy)' : '')"></span>
+                    <span x-text="results.callers?.certain + ' caller(s) of ' + results.callers?.symbol + (results.callers?.fuzzy ? ' (fuzzy)' : '') + extraNote(results.callers)"></span>
                 </div>
                 <div class="results-body">
                     <template x-for="c in results.callers?.callers || []" :key="c.id">
                         <div class="symbol-list-item" @click="viewContext(c.id)">
                             <span x-text="c.name"></span>
-                            <span class="sl-location" x-text="c.location + (c.candidates ? ' · ' + oneOf(c.candidates) : '')"></span>
+                            <span class="sl-location" x-text="c.location + (c.candidates != null ? ' · ' + oneOf(c.candidates) : '')"></span>
                         </div>
                     </template>
+                    <div class="sl-location" x-show="moreNote(results.callers?.more, 'callers')" x-text="'(' + moreNote(results.callers?.more, 'callers') + ')'"></div>
                 </div>
             </div>
         </div>
@@ -367,15 +368,16 @@
             </div>
             <div class="results" x-show="results.callees">
                 <div class="results-header">
-                    <span x-text="results.callees?.total + ' callee(s) of ' + results.callees?.symbol + (results.callees?.fuzzy ? ' (fuzzy)' : '')"></span>
+                    <span x-text="results.callees?.certain + ' callee(s) of ' + (results.callees?.others ? results.callees.node_id : results.callees?.symbol) + (results.callees?.fuzzy ? ' (fuzzy)' : '') + extraNote(results.callees) + (results.callees?.others ? ' (' + results.callees.others + (results.callees.fuzzy ? ' other matches' : ' other definitions of the name') + '; use a node ID to choose)' : '')"></span>
                 </div>
                 <div class="results-body">
                     <template x-for="c in results.callees?.callees || []" :key="c.id">
                         <div class="symbol-list-item" @click="viewContext(c.id)">
                             <span x-text="c.name"></span>
-                            <span class="sl-location" x-text="c.location + (c.candidates ? ' · ' + oneOf(c.candidates) : '')"></span>
+                            <span class="sl-location" x-text="c.location + (c.candidates != null ? ' · ' + oneOf(c.candidates, false) : '')"></span>
                         </div>
                     </template>
+                    <div class="sl-location" x-show="moreNote(results.callees?.more, 'callees')" x-text="'(' + moreNote(results.callees?.more, 'callees') + ')'"></div>
                 </div>
             </div>
         </div>
@@ -558,7 +560,7 @@
                     </div>
                     <div class="form-group">
                         <label>Depth</label>
-                        <input type="number" x-model.number="forms.flow.depth" min="1" max="10" style="width:70px">
+                        <input type="number" x-model.number="forms.flow.depth" min="1" :max="health?.max_depth" style="width:70px">
                     </div>
                     <div class="form-group">
                         <label>Target (optional)</label>
@@ -574,6 +576,7 @@
                 </div>
                 <!-- Disambiguation note -->
                 <div class="flow-note" x-show="results.flow?.tree?.note" x-text="results.flow?.tree?.note"></div>
+                <div class="flow-note" x-show="results.flow?.tree?.cut" x-text="'Stopped early (' + results.flow?.tree?.cut + '): the tree below is not complete'"></div>
                 <div class="flow-note" x-show="results.flow?.tree?.path_to_target" x-text="'Path to target: ' + (results.flow?.tree?.path_to_target || []).join(' → ')"></div>
                 <!-- Alternatives -->
                 <div class="flow-alternatives" x-show="results.flow?.tree?.alternatives?.length">
@@ -1031,9 +1034,9 @@
                                         <div class="changes-callers" x-show="sym.callers?.length">
                                             <span class="changes-callers-label">Callers:</span>
                                             <template x-for="c in (sym.callers || [])" :key="c.id">
-                                                <span class="changes-caller" @click="forms.context.node_id = c.id; setTool('context'); runContext()" x-text="c.name"></span>
+                                                <span class="changes-caller" @click="forms.context.node_id = c.id; setTool('context'); runContext()" x-text="c.name + (c.candidates ? ' (' + oneOf(c.candidates) + ')' : '')"></span>
                                             </template>
-                                            <span class="changes-callers-more" x-show="sym.callers_total > 5" x-text="'+' + (sym.callers_total - 5) + ' more'"></span>
+                                            <span class="changes-callers-more" x-show="sym.callers_total > (sym.callers || []).length" x-text="changesMore(sym)"></span>
                                         </div>
                                     </div>
                                 </template>
@@ -1495,8 +1498,27 @@ function app() {
             return this._renderNode(node, depth);
         },
 
+        // What a change's callers past those listed are: certain, then possible.
+        changesMore(sym) {
+            const shown = sym.callers || [];
+            const possible = (sym.callers_possible || 0) - shown.filter(c => c.candidates).length;
+            return this.moreNote({certain: (sym.callers_total || 0) - shown.length - possible, possible}, 'callers');
+        },
+
+        // The note on a count of those that only may be, and of those left unresolved.
+        extraNote(counts) {
+            const extra = [counts?.possible ? '+' + counts.possible + ' possible' : '', counts?.unresolved ? '+' + counts.unresolved + ' unresolved' : ''].filter(Boolean);
+            return extra.length ? ' (' + extra.join(', ') + ')' : '';
+        },
+
+        // The note on what a list leaves out: certain, possible, unresolved.
+        moreNote(more, of) {
+            return [more?.certain ? more.certain + ' more ' + of : '', more?.possible ? more.possible + ' more possible ' + of : '', more?.unresolved ? more.unresolved + ' more unresolved ' + of : ''].filter(Boolean).join(', ');
+        },
+
         // The note on an unresolved call that has `count` candidates.
-        oneOf(count) {
+        oneOf(count, ofName = true) {
+            if (count === 0) return ofName ? 'unresolved; same name' : 'unresolved';
             return count === 1 ? 'unresolved; the only candidate' : `one of ${count} candidates`;
         },
 
@@ -1552,6 +1574,8 @@ function app() {
             // Token count
             html += `<span class="flow-tokens">${node.tokens.toLocaleString()} toks</span>`;
             if (node.candidates) html += `<span class="flow-tokens">${this.oneOf(node.candidates)}</span>`;
+            if (node.seen != null) html += `<span class="flow-tokens">at level ${node.seen}</span>`;
+            if (node.more) html += `<span class="flow-tokens">${node.more - node.more_possible ? '+' + (node.more - node.more_possible) + ' more' : ''}${node.more_possible ? ' +' + node.more_possible + ' more possible' : ''} not shown</span>`;
 
             // File location - navigates to Source
             if (fileLoc) {

@@ -1099,16 +1099,30 @@ class TestNegativeLimit:
         data = await getattr(svc, f"{tool}_data")(**args, limit=-1)
 
         assert isinstance(result, ServiceError)
-        assert "limit must not be negative, got -1." in result
+        assert "limit must be at least 1, got -1." in result
         assert (data["ok"], data["reason"]) == (False, "invalid")
-        assert data["error"] == "limit must not be negative, got -1."
+        assert data["error"] == "limit must be at least 1, got -1."
 
     @pytest.mark.asyncio
-    async def test_zero_is_still_an_empty_answer(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("tool", "args"),
+        [
+            ("search", (["f"],)),
+            ("callers", ("f",)),
+            ("callees", ("f",)),
+            ("semantic", ("f",)),
+            ("churn", ()),
+            ("evolution", ("f",)),
+            ("changes", ()),
+        ],
+    )
+    async def test_zero_is_refused_not_answered_as_nothing(self, tmp_path, tool, args):
+        """A limit of zero would answer "no matches" where there are some."""
         config = _plain_config(tmp_path)
         _write_graph(config)
-        result = await DescryService(config).search(["f"], limit=0)
-        assert not isinstance(result, ServiceError)
+        result = await getattr(DescryService(config), tool)(*args, limit=0)
+        assert isinstance(result, ServiceError)
+        assert "limit must be at least 1, got 0." in result
 
 
 class TestCallersCalleesUseOneQuerier:
@@ -1598,3 +1612,100 @@ async def test_no_impls_says_they_are_recorded_for_rust(tmp_path):
     result = await DescryService(config).impls("f")
     assert "recorded for Rust code only" in result
     assert "index" not in result
+
+
+class TestUnresolvedCallsInText:
+    """An unresolved call with no candidates is neither a caller nor a
+    callee for sure: it is marked and counted apart, at every depth."""
+
+    @pytest.fixture
+    def svc(self, tmp_path):
+        config = _plain_config(tmp_path)
+        (tmp_path / "a.py").write_text(
+            "def parse():\n    pass\n\n\ndef run(x, y):\n    x.parse()\n    y.read()\n"
+            "    helper()\n\n\ndef helper():\n    z.parse()\n"
+        )
+
+        def fn(name, line):
+            return {
+                "id": f"FILE:a.py::{name}",
+                "type": "Function",
+                "metadata": {
+                    "name": name,
+                    "lineno": line,
+                    "end_lineno": line + 1,
+                    "token_count": 10,
+                },
+            }
+
+        def call(source, target, line, **meta):
+            return {
+                "source": f"FILE:a.py::{source}",
+                "target": target,
+                "relation": "CALLS",
+                "metadata": {"lineno": line, **meta},
+            }
+
+        _write_graph(
+            config,
+            nodes=[fn("parse", 1), fn("run", 5), fn("helper", 11)],
+            edges=[
+                call(
+                    "run",
+                    "REF:x.parse",
+                    6,
+                    candidates=["FILE:a.py::parse", "FILE:b.py::parse"],
+                ),
+                call("run", "REF:y.read", 7),
+                {
+                    "source": "FILE:a.py::run",
+                    "target": "FILE:a.py::helper",
+                    "relation": "CALLS_RESOLVED",
+                    "metadata": {"lineno": 8},
+                },
+                call("helper", "REF:z.parse", 12),
+            ],
+        )
+        return DescryService(config)
+
+    @pytest.mark.asyncio
+    async def test_callers_of_a_name(self, svc):
+        text = await svc.callers("parse", limit=1)
+        assert "0 caller(s) of 'parse' (+1 possible, +1 unresolved):" in text
+        assert "FILE:a.py::run (a.py:5) (one of 2 candidates)" in text
+        assert "(1 more unresolved callers, limit 1)" in text
+        assert (
+            "FILE:a.py::helper (a.py:11) (unresolved; same name)"
+            in await svc.callers("parse")
+        )
+
+    @pytest.mark.asyncio
+    async def test_callees(self, svc):
+        text = await svc.callees("run", limit=2)
+        assert "'run' calls 1 function(s) (+1 possible, +1 unresolved):" in text
+        assert "(1 more unresolved callees, limit 2)" in text
+        assert "REF:y.read (unresolved)" in await svc.callees("run")
+
+    @pytest.mark.asyncio
+    async def test_context_at_each_depth(self, svc):
+        brief = await svc.context("FILE:a.py::run", brief=True)
+        assert "**Callees:** 1 (+1 possible, +1 unresolved)" in brief
+        for depth in (1, 2):
+            text = await svc.context(
+                "FILE:a.py::run", depth=depth, expand_callees=depth == 2
+            )
+            assert "external" not in text.lower(), depth
+            assert "`read` (unresolved)" in text, depth
+        deep = await svc.context("FILE:a.py::run", depth=2, expand_callees=True)
+        assert "`parse` (unresolved)" in deep
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound", ["max_tokens", "callee_budget"])
+async def test_a_context_budget_below_one_is_refused(tmp_path, bound):
+    """One of zero listed no callees, as if the symbol called nothing."""
+    config = _plain_config(tmp_path)
+    _write_graph(config, nodes=[TestSemanticText.NODE])
+    result = await DescryService(config).context("FILE:x.py::f", depth=2, **{bound: 0})
+    assert isinstance(result, ServiceError)
+    assert f"{bound} must be at least 1, got 0." in result

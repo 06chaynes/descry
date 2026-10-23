@@ -746,7 +746,7 @@ class TestServiceBackedEndpoints:
     def test_negative_limit_is_400(self, client, url):
         r = client.get(url)
         assert r.status_code == 400
-        assert r.json() == {"error": "limit must not be negative, got -1."}
+        assert r.json() == {"error": "limit must be at least 1, got -1."}
 
     def test_semantic_while_the_model_loads_says_what_the_service_says(self, client):
         class Slow:
@@ -1114,11 +1114,11 @@ class TestGraphEndpoints:
         _write_web_graph(
             web_project,
             nodes=[
-                _fn("parse", in_degree=1),
-                _fn("load", in_degree=3),
-                _fn("run", in_degree=2),
-                _fn("_hidden", in_degree=9),
-                _fn("checks", file="test_app.py", in_degree=9),
+                _fn("parse"),
+                _fn("load"),
+                _fn("run"),
+                _fn("_hidden"),
+                _fn("checks", file="test_app.py"),
                 {
                     "id": "FILE:app.py::Engine",
                     "type": "Class",
@@ -1127,9 +1127,20 @@ class TestGraphEndpoints:
                 method("Engine"),
                 method("Other"),
             ],
+            # Callers: parse 1, load 3, run 2, _hidden and checks 4
             edges=[
                 {"source": "FILE:app.py::run", "target": target, "relation": "CALLS"}
                 for target in ("FILE:app.py::load", "FILE:app.py::parse")
+            ]
+            + [
+                {"source": f"FILE:c.py::c{i}", "target": target, "relation": "CALLS"}
+                for target, count in [
+                    ("FILE:app.py::load", 2),
+                    ("FILE:app.py::run", 2),
+                    ("FILE:app.py::_hidden", 4),
+                    ("FILE:test_app.py::checks", 4),
+                ]
+                for i in range(count)
             ],
         )
 
@@ -1989,3 +2000,45 @@ class TestStartup:
 
         assert resolve("verbose") == logging.WARNING
         assert resolve("debug") == logging.DEBUG
+
+
+def test_callers_of_a_name_count_each_kind_apart(client, web_project):
+    """Resolved, one of an unresolved call's candidates, and an unresolved
+    call of the name with no candidates."""
+    _write_web_graph(
+        web_project,
+        nodes=[_fn("parse"), _fn("sure"), _fn("maybe"), _fn("stray")],
+        edges=[
+            {
+                "source": "FILE:app.py::sure",
+                "target": "FILE:app.py::parse",
+                "relation": "CALLS_RESOLVED",
+            },
+            {
+                "source": "FILE:app.py::maybe",
+                "target": "REF:x.parse",
+                "relation": "CALLS",
+                "metadata": {"candidates": ["FILE:app.py::parse", "FILE:b.py::parse"]},
+            },
+            {
+                "source": "FILE:app.py::stray",
+                "target": "REF:y.parse",
+                "relation": "CALLS",
+            },
+        ],
+    )
+    answer = client.get("/api/callers", params={"name": "parse", "limit": 1}).json()
+    assert [answer[k] for k in ("total", "certain", "possible", "unresolved")] == [
+        3,
+        1,
+        1,
+        1,
+    ]
+    assert answer["more"] == {"certain": 0, "possible": 1, "unresolved": 1}
+    assert [c.get("candidates") for c in answer["callers"]] == [None]
+    full = client.get("/api/callers", params={"name": "parse"}).json()["callers"]
+    assert [(c["id"].split("::")[-1], c.get("candidates")) for c in full] == [
+        ("sure", None),
+        ("maybe", 2),
+        ("stray", 0),
+    ]

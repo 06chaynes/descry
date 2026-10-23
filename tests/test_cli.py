@@ -165,7 +165,7 @@ class TestCliExitStatus:
         with pytest.raises(SystemExit) as exit_info:
             cli.main()
         assert exit_info.value.code == 2
-        assert "limit must not be negative" in capsys.readouterr().out
+        assert "limit must be at least 1" in capsys.readouterr().out
 
 
 # `descry index` in a project whose indexer is the stand-in named by argv[1].

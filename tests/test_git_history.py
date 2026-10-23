@@ -64,8 +64,8 @@ class FakeQuerier:
     def find_nodes_by_name(self, name, fuzzy=False):
         return [n for n in self.data["nodes"] if n["metadata"]["name"] == name]
 
-    def get_callers(self, name):
-        return []
+    def ordered_callers(self, name):
+        return [], {}
 
 
 def _function_node(file_path, name, lineno, end_lineno):
@@ -1282,3 +1282,17 @@ class TestChangeImpactCallers:
         assert callers["FILE:b.py::B::parse"] == ["only_b"]
         text = analyzer.get_changes(commit_range="HEAD~1..HEAD")
         assert text.count("Callers: only_a") == text.count("Callers: only_b") == 1
+
+
+def test_tied_co_change_pairs_are_listed_by_name(tmp_path):
+    """The same history lists the same pairs, whatever order sets iterate in."""
+    analyzer = GitHistoryAnalyzer(str(tmp_path))
+    symbol_commits = {
+        "FILE:a.py::d": {"x1", "x2"},
+        "FILE:a.py::c": {"x1", "x2"},
+        "FILE:a.py::b": {"y1", "y2"},
+        "FILE:a.py::a": {"y1", "y2"},
+    }
+    pairs = analyzer._structured_co_change(symbol_commits, 1, {}, {})["pairs"]
+    assert [(p["a_name"], p["b_name"]) for p in pairs] == [("a", "b")]
+    assert "1. a (a.py) <-> b (a.py)" in analyzer._format_co_change(symbol_commits, 1)
