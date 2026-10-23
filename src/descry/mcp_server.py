@@ -243,7 +243,7 @@ async def descry_flow(
     target: str | None = None,
     inline_threshold: int = 100,
 ) -> str:
-    """Trace call flow from a starting symbol. Shows call chains with inline code for small functions. Use for 'how does X reach Y' queries, impact analysis, and understanding execution paths. Direction 'forward' traces callees (what this calls), 'backward' traces callers (what calls this)."""
+    """Trace call flow from a starting symbol. Shows call chains with inline code for small functions. Use for 'how does X reach Y' queries, impact analysis, and understanding execution paths. Direction 'forward' traces callees (what this calls), 'backward' traces callers (what calls this). depth is the levels of calls below the start, at most the project's [query] max_depth (default 3)."""
     return _fenced(
         await _svc().flow(start, direction.value, depth, target, inline_threshold)
     )

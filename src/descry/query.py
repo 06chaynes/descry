@@ -485,7 +485,7 @@ class GraphQuerier:
             max_tokens = DEFAULT_TOKEN_BUDGET
         if inline_threshold is None:
             inline_threshold = CALLEE_INLINE_THRESHOLD
-        depth = min(max(depth, 1), self._max_depth)  # Clamp to 1-3
+        depth = self.flow_depth(depth)
 
         # Resolve node ID with fuzzy matching
         resolved_id, resolve_msg = self._resolve_node_id(node_id)
@@ -530,7 +530,9 @@ class GraphQuerier:
             possible = len(self.get_ambiguous_callers(node_id))
             certain = len(self.get_callers(node_id)) - possible
             callers_count = f"{certain}{self.possible(possible)}"
-            callees_count = len(self.get_callees(node_id))
+            possible = len(self.get_ambiguous_callees(node_id))
+            certain = len(self.get_callees(node_id)) - possible
+            callees_count = f"{certain}{self.possible(possible)}"
 
             output = [
                 f"### Brief: `{node_id}`",
@@ -1441,10 +1443,15 @@ class GraphQuerier:
 
         return results, budget
 
-    def flow_depth(self, depth):
-        """The depth a flow of ``depth`` is traced to: at most the project's
+    @property
+    def max_flow_depth(self):
+        """The most levels of calls a flow or context goes: the project's
         `[query] max_depth`, or 5 when unset."""
-        return min(depth, self._max_depth or 5)
+        return self._max_depth or 5
+
+    def flow_depth(self, depth):
+        """The depth a flow of ``depth`` is traced to."""
+        return min(depth, self.max_flow_depth)
 
     def _resolve_flow_start(self, start_name, depth):
         """Clamp depth to the configured ceiling and resolve the start symbol.
@@ -1573,7 +1580,7 @@ class GraphQuerier:
 
             # Get next level
             next_ids, ambiguous = self._flow_next(node_id, direction)
-            hidden = len(next_ids) - self._max_children_per_level
+            left_out = next_ids[self._max_children_per_level :]
             next_ids = next_ids[: self._max_children_per_level]
 
             # Format node
@@ -1602,8 +1609,11 @@ class GraphQuerier:
                     next_id, current_depth + 1, path + [node_id], ambiguous.get(next_id)
                 ):
                     return True
-            if hidden > 0 and current_depth <= depth:
-                output.append(f"{indent}  *({hidden} more)*")
+            if left_out and current_depth <= depth:
+                possible = sum(next_id in ambiguous for next_id in left_out)
+                of = "callees" if direction == "forward" else "callers"
+                more = self.more_callers(len(left_out) - possible, possible, of)
+                output.append(f"{indent}  *({more})*")
             return False
 
         trace(start_id, 1, [])
@@ -1711,9 +1721,9 @@ class GraphQuerier:
                 path_to_target.extend([*path, name])
             else:
                 next_ids, ambiguous = self._flow_next(node_id, direction)
-            hidden = max(len(next_ids) - self._max_children_per_level, 0)
+            left_out = next_ids[self._max_children_per_level :]
             if current_depth > depth:
-                hidden = 0
+                left_out = []
             next_ids = next_ids[: self._max_children_per_level]
 
             children = []
@@ -1737,8 +1747,10 @@ class GraphQuerier:
                 "lang": lang,
                 "candidates": candidates,
                 "children": children,
-                # Those of the next level past the per-level limit
-                "more": hidden,
+                # Those of the next level past the per-level limit, and how
+                # many of them only may be
+                "more": len(left_out),
+                "more_possible": sum(next_id in ambiguous for next_id in left_out),
             }
 
         root = build_tree(start_id, 1, [])
@@ -2187,6 +2199,10 @@ class GraphQuerier:
         """
         # Step 1: Find all target node IDs that match func_name
         target_ids = self._resolve_target_ids(func_name, fuzzy)
+        if any(target_id in self.nodes for target_id in target_ids):
+            # A call the resolver left unresolved with no candidates is no
+            # call of a definition the project has, whatever its name.
+            target_ids = {t for t in target_ids if not t.startswith("REF:")}
 
         # Step 2: Use incoming index to find callers - O(in-degree) per target
         callers = set()
@@ -2213,12 +2229,12 @@ class GraphQuerier:
         return f" (+{count} possible)" if count else ""
 
     @staticmethod
-    def more_callers(certain, possible):
-        """The note on callers a list leaves out: ``certain`` of them and
-        ``possible`` that only may be."""
-        parts = [f"{certain} more callers"] if certain else []
+    def more_callers(certain, possible, of="callers"):
+        """The note on the callers, or callees, a list leaves out: ``certain``
+        of them and ``possible`` that only may be."""
+        parts = [f"{certain} more {of}"] if certain else []
         if possible:
-            parts.append(f"{possible} more possible callers")
+            parts.append(f"{possible} more possible {of}")
         return ", ".join(parts)
 
     @staticmethod

@@ -195,7 +195,7 @@ def test_callees_say_what_they_leave_out_and_which_they_answer(project, interfac
         "cli": lambda *a: _cli(project, "callees", a[0], "--limit", str(a[1])),
         "mcp": lambda *a: _mcp(project, "callees", name=a[0], limit=a[1]),
     }[interface]
-    assert "(1 more, limit 1)" in ask("only_a", 1)
+    assert "(1 more callees, limit 1)" in ask("only_a", 1)
     assert "1 other definition(s) of 'parse'" in ask("parse", 5)
 
 
@@ -256,3 +256,32 @@ def test_a_depth_past_the_ceiling_says_so(project, web):
         project, "flow", start=A, direction="backward", depth=9
     )
     assert json.loads(web("/api/flow", start=A, depth=9))["depth"] == 3
+
+
+def test_what_is_left_out_and_what_only_may_be_is_said(project):
+    assert "(1 more possible callers, limit 1)" in _mcp(
+        project, "callers", name=A, limit=1
+    )
+    assert "**Callees:** 0 (+1 possible)" in _mcp(
+        project, "context", node_id="FILE:use.py::guess", brief=True
+    )
+
+
+@pytest.mark.parametrize("interface", ["cli", "mcp", "web"])
+def test_context_depth_is_bounded_as_flow_is(project, web, interface):
+    refused, capped = {
+        "cli": lambda: (
+            _cli(project, "context", A, "--depth", "0"),
+            _cli(project, "context", A, "--depth", "9"),
+        ),
+        "mcp": lambda: (
+            _mcp(project, "context", node_id=A, depth=0),
+            _mcp(project, "context", node_id=A, depth=9),
+        ),
+        "web": lambda: (
+            web("/api/context", node_id=A, depth=0),
+            web("/api/context", node_id=A, depth=9),
+        ),
+    }[interface]()
+    assert "depth must be at least 1, got 0." in refused
+    assert "[depth=3] [depth 9 is past [query] max_depth]" in capped

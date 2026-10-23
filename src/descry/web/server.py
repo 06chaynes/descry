@@ -54,7 +54,7 @@ SERVER_VERSION = __version__
 
 # --- Import shared modules ---
 
-from descry.handlers import DescryConfig, DescryService, ServiceError
+from descry.handlers import DescryConfig, DescryService, ServiceError, limit_error
 from descry.query import GraphQuerier, _get_syntax_lang
 
 # --- Project config (lazy-loaded via DescryConfig) ---
@@ -202,6 +202,7 @@ async def api_health(_request: Request) -> JSONResponse:
             "version": SERVER_VERSION,
             "project_root": str(_get_config().project_root),
             "graph": await _get_service().status_data(),
+            "max_depth": q.max_flow_depth if (q := await _get_querier()) else None,
             "features": features,
         }
     )
@@ -388,6 +389,8 @@ async def api_context(request: Request) -> JSONResponse:
     brief = request.query_params.get("brief", "").lower() == "true"
     expand_callees = request.query_params.get("expand_callees", "").lower() == "true"
     depth = _int_param(request, "depth", 1)
+    if error := limit_error(depth, "depth"):
+        return JSONResponse({"error": error}, status_code=400)
     max_tokens = _int_param(request, "max_tokens", 2000)
 
     result = await _get_service().context(

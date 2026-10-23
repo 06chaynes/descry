@@ -49,8 +49,8 @@ class TestGraphQuerier:
                 },
                 {
                     "source": "FILE:test.py::main",
-                    "target": "REF:helper",
-                    "relation": "CALLS",
+                    "target": "FILE:test.py::helper",
+                    "relation": "CALLS_RESOLVED",
                     "metadata": {"lineno": 10},
                 },
             ],
@@ -1249,7 +1249,8 @@ class TestUnresolvedCallsInPathsAndFlows:
             },
         ]
         querier = _querier(tmp_path, nodes, edges)
-        assert querier.get_callers(asked) == ["FILE:a.py::one", "FILE:a.py::three"]
+        # `three`'s call is left unresolved: it is no call of `Store::get`.
+        assert querier.get_callers(asked) == ["FILE:a.py::one"]
         found = querier.find_nodes_by_name(asked)
         assert [node["id"] for node in found] == ["FILE:a.py::Store::get"]
 
@@ -1530,10 +1531,10 @@ class TestCertainBeforePossible:
         assert "- `sure` in c.py" in context
         assert "(4 more possible callers)" in context
         flow = q.trace_flow("FILE:b.py::imp", direction="backward", depth=1)
-        assert "**sure**" in flow and "*(4 more)*" in flow
+        assert "**sure**" in flow and "*(4 more possible callers)*" in flow
         tree = q.trace_flow_structured("FILE:b.py::imp", direction="backward", depth=1)
         assert [c["name"] for c in tree["root"]["children"]] == ["sure"]
-        assert tree["root"]["more"] == 4
+        assert (tree["root"]["more"], tree["root"]["more_possible"]) == (4, 4)
 
 
 def test_a_graph_is_counted_as_it_loads(tmp_path):
@@ -1542,3 +1543,25 @@ def test_a_graph_is_counted_as_it_loads(tmp_path):
     nodes = [_fn("FILE:a.py::f", in_degree=7), _fn("FILE:a.py::g")]
     q = _querier(tmp_path, nodes, [_calls("FILE:a.py::g", "FILE:a.py::f")])
     assert q.nodes["FILE:a.py::f"]["metadata"]["in_degree"] == 1
+
+
+def test_a_call_left_unresolved_is_no_call_of_a_definition_of_its_name(tmp_path):
+    """Unless the project defines no symbol of the name: then the calls of
+    it are what there is to find."""
+    nodes = [_fn("FILE:a.py::list_templates"), _fn("FILE:b.py::render")]
+    edges = [
+        {
+            "source": "FILE:b.py::render",
+            "target": "REF:loader.list_templates",
+            "relation": "CALLS",
+        },
+        {
+            "source": "FILE:b.py::render",
+            "target": "REF:requests.get",
+            "relation": "CALLS",
+        },
+    ]
+    q = _querier(tmp_path, nodes, edges)
+    assert q.get_callers("list_templates") == []
+    assert q.get_callers("list_t", fuzzy=True) == []
+    assert q.get_callers("requests.get") == ["FILE:b.py::render"]

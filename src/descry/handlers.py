@@ -946,7 +946,7 @@ _GRAPH_NOT_FOUND = "Graph not found. Run descry ensure first."
 _INDEX_BUSY = "An index run is already in progress"
 
 
-def _limit_error(limit: int, name: str = "limit") -> str | None:
+def limit_error(limit: int, name: str = "limit") -> str | None:
     """Why the limit or depth ``name`` cannot be ``limit``, or None: a
     negative one slices from the end, and none at all answers as if there
     were nothing to show."""
@@ -1714,7 +1714,7 @@ class DescryService:
 
     async def callers_data(self, name: str, limit: int = 20) -> dict:
         """Callers of a symbol, as data. An exact miss retries with fuzzy=True."""
-        if error := _limit_error(limit):
+        if error := limit_error(limit):
             return {"ok": False, "error": error, "reason": "invalid"}
         q = await self._get_querier()
         if not q:
@@ -1741,7 +1741,7 @@ class DescryService:
 
     async def callees_data(self, name: str, limit: int = 20) -> dict:
         """Callees of a symbol, as data. Same fuzzy fallback as callers_data."""
-        if error := _limit_error(limit):
+        if error := limit_error(limit):
             return {"ok": False, "error": error, "reason": "invalid"}
         q = await self._get_querier()
         if not q:
@@ -1787,9 +1787,16 @@ class DescryService:
             "others": len(func_matches) - 1,
         }
 
+    @staticmethod
+    def _left_out(data, shown, total):
+        """``(certain, possible)`` of the callers or callees of ``data`` past
+        the ``shown`` ones."""
+        possible = len(data["ambiguous"]) - sum(s in data["ambiguous"] for s in shown)
+        return total - len(shown) - possible, possible
+
     async def callers(self, name: str, limit: int = 20) -> str:
         """Find all callers of a symbol."""
-        if error := _limit_error(limit):
+        if error := limit_error(limit):
             return ServiceError(f"ERROR: {error}")
         # One querier for lookup and rendering: a second fetch returns None
         # if the graph file has been removed in between.
@@ -1825,7 +1832,8 @@ class DescryService:
                     lines.append(f"  {caller}{one_of}")
             if len(callers) < total_count:
                 lines.append(
-                    f"  ... ({total_count - len(callers)} more, limit {limit})"
+                    f"  ... ({q.more_callers(*self._left_out(data, callers, total_count))}"
+                    f", limit {limit})"
                 )
             result = "\n".join(lines)
 
@@ -1833,7 +1841,7 @@ class DescryService:
 
     async def callees(self, name: str, limit: int = 20) -> str:
         """Find what a symbol calls."""
-        if error := _limit_error(limit):
+        if error := limit_error(limit):
             return ServiceError(f"ERROR: {error}")
         q = await self._get_querier()
         if not q:
@@ -1879,7 +1887,8 @@ class DescryService:
                 else:
                     lines.append(f"  {callee}{one_of}")
             if len(callees) < total:
-                lines.append(f"  ... ({total - len(callees)} more, limit {limit})")
+                more = q.more_callers(*self._left_out(data, callees, total), "callees")
+                lines.append(f"  ... ({more}, limit {limit})")
             result = "\n".join(lines) + others
 
         return await self._format_response(result)
@@ -1898,6 +1907,8 @@ class DescryService:
         max_output_tokens: int | None = None,
     ) -> str:
         """Get full context for a symbol."""
+        if error := limit_error(depth, "depth"):
+            return ServiceError(f"ERROR: {error}")
         q = await self._get_querier()
         if not q:
             return ServiceError(f"ERROR: {self._no_graph_error()}")
@@ -1947,7 +1958,10 @@ class DescryService:
                 result, include_header=False, max_lines=50
             )
 
-        depth_note = f" [depth={depth}]" if depth > 1 else ""
+        traced = q.flow_depth(depth)
+        depth_note = f" [depth={traced}]" if traced > 1 else ""
+        if traced < depth:
+            depth_note += f" [depth {depth} is past [query] max_depth]"
         full_note = " [full=true]" if full else ""
         head_note = f" [head_lines={head_lines}]" if head_lines else ""
         expand_note = " [expand_callees=true]" if expand_callees else ""
@@ -1973,7 +1987,7 @@ class DescryService:
         `GraphQuerier.trace_flow_structured` when `structured`; `depth` is
         the depth traced, at most the project's ceiling.
         """
-        if error := _limit_error(depth, "depth"):
+        if error := limit_error(depth, "depth"):
             return {"ok": False, "error": error, "reason": "invalid"}
         q = await self._get_querier()
         if not q:
@@ -2025,7 +2039,7 @@ class DescryService:
         Returns `{"ok", "error", "results", "method"}`; `method` is "keyword"
         or "hybrid".
         """
-        if error := _limit_error(limit):
+        if error := limit_error(limit):
             return {
                 "ok": False,
                 "error": error,
@@ -2361,8 +2375,8 @@ class DescryService:
         reported as a missing graph; `reason` classifies it as "invalid",
         "unavailable", "no_graph", "loading" or "failed".
         """
-        if limit_error := _limit_error(limit):
-            reason, error = "invalid", limit_error
+        if refused := limit_error(limit):
+            reason, error = "invalid", refused
         elif not self._semantic_available or not self._SemanticSearcher:
             reason, error = "unavailable", "Semantic search not available."
         elif not self.config.graph_path.exists():
@@ -2671,7 +2685,7 @@ class DescryService:
         `status` and `path` are those of `GraphQuerier.find_call_path_result`.
         Unless `status` is "found", `message` says why there is no path.
         """
-        if error := _limit_error(max_depth, "max_depth"):
+        if error := limit_error(max_depth, "max_depth"):
             return {"ok": False, "error": error, "reason": "invalid"}
         q = await self._get_querier()
         if not q:
@@ -2957,7 +2971,7 @@ class DescryService:
         "invalid" for a `limit` below 1, "unavailable" when the git history
         module is missing and "failed" when the analysis raised.
         """
-        if error := _limit_error(kwargs["limit"]):
+        if error := limit_error(kwargs["limit"]):
             return {"ok": False, "error": error, "reason": "invalid"}
         if not self._git_available:
             return {
