@@ -650,7 +650,7 @@ class GraphQuerier:
                     # Unresolved REF - clean up for display
                     raw_name = callee_id.replace("REF:", "")
                     clean_name = _clean_ref_name(raw_name)
-                    note = self.callee_note(possible[callee_id])
+                    note = self.callee_note(possible.get(callee_id))
                     callee_info.append(f"- `{clean_name}`{note}")
 
         # 4. Find Usage Examples (Callers) - grouped by file
@@ -1434,7 +1434,7 @@ class GraphQuerier:
                 # Unresolved REF
                 raw_name = callee_id.replace("REF:", "")
                 clean_name = _clean_ref_name(raw_name)
-                note = self.callee_note(unresolved[callee_id])
+                note = self.callee_note(unresolved.get(callee_id))
                 results.append(f"{indent_str}- `{clean_name}`{note}")
 
         # Cache results, with the cost of the whole subtree, unless the
@@ -2342,36 +2342,15 @@ class GraphQuerier:
         return target_ids
 
     def get_callees(self, func_node_id):
-        """Get unique callees for a function, deduplicated.
-
-        For unresolved references (REF:...), deduplicates by cleaned/normalized name
-        to avoid showing iter_mut and plan.steps.iter_mut as separate entries,
-        and to handle duplicates like Uuid::parse_str appearing multiple times.
-        """
-        seen_ids = set()  # Full target IDs
-        seen_clean_names = set()  # Cleaned names for unresolved refs
+        """The callees of a function: each definition a call is resolved to,
+        and each unresolved call by what it is written as, once. Two calls
+        written apart (`a.add`, `b.add`) are two callees, whatever method
+        name they end in."""
         callees = []
-
         for edge in self.outgoing[func_node_id]:
-            # Updated to support both resolved and unresolved edges
-            if edge["relation"] in ("CALLS", "CALLS_RESOLVED"):
-                target = edge["target"]
-
-                # For resolved references, dedupe by exact ID
-                if not target.startswith("REF:"):
-                    if target not in seen_ids:
-                        seen_ids.add(target)
-                        callees.append(target)
-                else:
-                    # For unresolved refs, use cleaned name for deduplication
-                    # This handles both method chains (a.b.method) and qualified names (Type::method)
-                    ref_name = target.replace("REF:", "")
-                    clean_name = _clean_ref_name(ref_name)
-
-                    if clean_name not in seen_clean_names:
-                        seen_clean_names.add(clean_name)
-                        callees.append(target)
-
+            relation, target = edge["relation"], edge["target"]
+            if relation in ("CALLS", "CALLS_RESOLVED") and target not in callees:
+                callees.append(target)
         return callees
 
     def get_ambiguous_callees(self, func_node_id):

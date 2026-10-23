@@ -1595,3 +1595,44 @@ def test_a_forward_flow_cut_short_says_what_it_leaves_out(tmp_path):
     )
     root = q.trace_flow_structured("FILE:a.py::start", depth=1)["root"]
     assert (root["more"], root["more_possible"]) == (3, 2)
+
+
+def test_calls_written_apart_are_callees_apart(tmp_path):
+    """`a.add` and `b.add` end in one method name but are two calls: one
+    the resolver narrowed, one it found nothing for."""
+    nodes = [
+        _fn("FILE:a.py::f"),
+        _fn("FILE:b.py::Set::add"),
+        _fn("FILE:c.py::List::add"),
+    ]
+    edges = [
+        {
+            "source": "FILE:a.py::f",
+            "target": "REF:a.add",
+            "relation": "CALLS",
+            "metadata": {"candidates": ["FILE:b.py::Set::add", "FILE:c.py::List::add"]},
+        },
+        {"source": "FILE:a.py::f", "target": "REF:b.add", "relation": "CALLS"},
+        {"source": "FILE:a.py::f", "target": "REF:b.add", "relation": "CALLS"},
+    ]
+    q = _querier(tmp_path, nodes, edges)
+    callees = q.get_callees("FILE:a.py::f")
+    assert callees == ["REF:a.add", "REF:b.add"]
+    assert q.kinds(callees, q.get_ambiguous_callees("FILE:a.py::f")) == (0, 1, 1)
+
+
+def test_an_edge_to_a_symbol_the_graph_lacks_does_not_break_context(tmp_path):
+    """A graph is untrusted: a resolved edge may name a node it does not
+    have."""
+    (tmp_path / "a.py").write_text("def f():\n    gone()\n")
+    nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
+    q = _querier(
+        tmp_path,
+        nodes,
+        [_calls("FILE:a.py::f", "FILE:a.py::gone")],
+        project_root=tmp_path,
+    )
+    for depth, expand in ((1, False), (2, True)):
+        assert "gone`" in q.get_context_prompt(
+            "FILE:a.py::f", depth=depth, expand_callees=expand
+        )
