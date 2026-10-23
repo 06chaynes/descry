@@ -302,7 +302,12 @@ def main():
         choices=["forward", "backward"],
         help="Trace direction (default: forward)",
     )
-    sub.add_argument("--depth", type=int, default=3, help="Trace depth (default: 3)")
+    sub.add_argument(
+        "--depth",
+        type=int,
+        default=3,
+        help="Levels of calls below the start (default: 3)",
+    )
     sub.add_argument("--target", default=None, help="Target symbol to reach")
     sub.add_argument(
         "--inline-threshold",

@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- A caller that reaches a symbol only as one of an unresolved call's
+  candidates is no longer counted or listed as a caller: `in_degree`
+  ("N callers") counts the callers whose calls are resolved to the symbol,
+  the brief `context` gives the others as "(+N possible)", `callers` says
+  how many of those it lists are possible, and `changes` marks each, in
+  text and in its structured form (`candidates`).
+- A `flow` of `depth` N shows N levels of calls below the start; `depth=1`
+  showed the start alone.
+- `callees` says how many callees its `limit` leaves out, and of a name
+  several definitions share, which one it answers for.
+- A `limit` below 1 is refused by every tool; `0` answered as if there
+  were no callers, matches, changes or history.
+
 ## [0.3.1] — 2026-10-22
 
 ### Fixed

@@ -1434,6 +1434,16 @@ class TestCallersOfOneSymbol:
         brief = querier.get_context_prompt("FILE:a.py::A::parse", brief=True)
         assert "**Callers:** 1 " in brief
 
+    @pytest.mark.parametrize("direction", ["forward", "backward"])
+    def test_a_flow_of_depth_one_is_the_calls_one_level_away(self, querier, direction):
+        start = (
+            "FILE:use.py::only_a" if direction == "forward" else "FILE:a.py::A::parse"
+        )
+        tree = querier.trace_flow_structured(start, direction=direction, depth=1)
+        names = [child["name"] for child in tree["root"]["children"]]
+        assert ("parse" in names) if direction == "forward" else names == ["only_a"]
+        assert all(not child["children"] for child in tree["root"]["children"])
+
     def test_context_and_backward_flow_list_its_callers(self, querier):
         for text in (
             querier.get_context_prompt("FILE:a.py::A::parse"),

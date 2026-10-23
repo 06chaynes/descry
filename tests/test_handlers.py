@@ -1099,16 +1099,30 @@ class TestNegativeLimit:
         data = await getattr(svc, f"{tool}_data")(**args, limit=-1)
 
         assert isinstance(result, ServiceError)
-        assert "limit must not be negative, got -1." in result
+        assert "limit must be at least 1, got -1." in result
         assert (data["ok"], data["reason"]) == (False, "invalid")
-        assert data["error"] == "limit must not be negative, got -1."
+        assert data["error"] == "limit must be at least 1, got -1."
 
     @pytest.mark.asyncio
-    async def test_zero_is_still_an_empty_answer(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("tool", "args"),
+        [
+            ("search", (["f"],)),
+            ("callers", ("f",)),
+            ("callees", ("f",)),
+            ("semantic", ("f",)),
+            ("churn", ()),
+            ("evolution", ("f",)),
+            ("changes", ()),
+        ],
+    )
+    async def test_zero_is_refused_not_answered_as_nothing(self, tmp_path, tool, args):
+        """A limit of zero would answer "no matches" where there are some."""
         config = _plain_config(tmp_path)
         _write_graph(config)
-        result = await DescryService(config).search(["f"], limit=0)
-        assert not isinstance(result, ServiceError)
+        result = await getattr(DescryService(config), tool)(*args, limit=0)
+        assert isinstance(result, ServiceError)
+        assert "limit must be at least 1, got 0." in result
 
 
 class TestCallersCalleesUseOneQuerier:

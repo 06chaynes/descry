@@ -746,7 +746,7 @@ class TestServiceBackedEndpoints:
     def test_negative_limit_is_400(self, client, url):
         r = client.get(url)
         assert r.status_code == 400
-        assert r.json() == {"error": "limit must not be negative, got -1."}
+        assert r.json() == {"error": "limit must be at least 1, got -1."}
 
     def test_semantic_while_the_model_loads_says_what_the_service_says(self, client):
         class Slow:

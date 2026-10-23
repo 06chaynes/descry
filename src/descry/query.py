@@ -526,8 +526,11 @@ class GraphQuerier:
                 if doc_lines:
                     doc_preview = doc_lines[0][:120]
 
-            # Count callers and callees
-            callers_count = len(self.get_callers(node_id))
+            # Callers whose calls are resolved to it, then those that may be
+            possible = len(self.get_ambiguous_callers(node_id))
+            callers_count = len(self.get_callers(node_id)) - possible
+            if possible:
+                callers_count = f"{callers_count} (+{possible} possible)"
             callees_count = len(self.get_callees(node_id))
 
             output = [
@@ -1470,7 +1473,7 @@ class GraphQuerier:
         Args:
             start_name: Starting symbol name or node ID
             direction: 'forward' traces callees, 'backward' traces callers
-            depth: Maximum depth (1-5, default: 3)
+            depth: Levels of calls below the start (1-5, default: 3)
             target: Optional target to stop when reached
             inline_threshold: Inline code below this token count (default: 100)
             timeout_ms: Timeout in milliseconds (default: TIMEOUT_MS)
@@ -1524,7 +1527,8 @@ class GraphQuerier:
             if elapsed_ms > timeout_ms:
                 output.append("  " * (current_depth - 1) + "*(timeout)*")
                 return False
-            if current_depth > depth or node_id in visited:
+            # The start is level 1: depth counts the levels of calls below it
+            if current_depth > depth + 1 or node_id in visited:
                 return False
             if nodes_visited >= self._max_nodes:
                 output.append("  " * (current_depth - 1) + "*(node limit)*")
@@ -1651,7 +1655,7 @@ class GraphQuerier:
             elapsed_ms = (time.time() - start_time) * 1000
             if elapsed_ms > timeout_ms:
                 return None
-            if current_depth > depth or node_id in visited:
+            if current_depth > depth + 1 or node_id in visited:
                 return None
             if nodes_visited >= self._max_nodes:
                 return None

@@ -23,13 +23,14 @@ def _a(body):
 
 
 def _b(body):
-    return f"class B:\n    def parse(self):\n        return {body}\n"
+    return f"class B:\n    def parse(self, text):\n        return {body}\n"
 
 
 @pytest.fixture(scope="module")
 def project(tmp_path_factory):
-    """Two methods named `parse`, each with one caller, changed by the last
-    commit; and a class that inherits a method."""
+    """Two methods named `parse`, each with one caller and one that may be
+    either's, changed by the last commit; and a class that inherits a
+    method."""
     repo = _init_repo(tmp_path_factory.mktemp("interfaces") / "repo")
     _commit(
         repo,
@@ -41,7 +42,8 @@ def project(tmp_path_factory):
             "class Derived(Base):\n    def own(self):\n        pass\n",
             "use.py": "from a import A\nfrom b import B\n\n\n"
             "def only_a():\n    A().parse('x')\n\n\n"
-            "def only_b():\n    B().parse()\n",
+            "def only_b():\n    B().parse('y')\n\n\n"
+            "def guess(x):\n    x.parse('z')\n",
         },
     )
     _commit(repo, "two", **{"a.py": _a("text.strip()"), "b.py": _b(2)})
@@ -114,9 +116,9 @@ QUESTIONS = {
         ("/api/context", {"node_id": A, "brief": "true"}),
     ),
     "upstream": (
-        ("flow", A, "--direction", "backward"),
-        ("flow", {"start": A, "direction": "backward"}),
-        ("/api/flow", {"start": A, "direction": "backward"}),
+        ("flow", A, "--direction", "backward", "--depth", "1"),
+        ("flow", {"start": A, "direction": "backward", "depth": 1}),
+        ("/api/flow", {"start": A, "direction": "backward", "depth": 1}),
     ),
     "changes": (
         ("changes", "--commit-range", "HEAD~1..HEAD"),
@@ -137,10 +139,19 @@ QUESTIONS = {
 
 # What each answer says, and what it must not
 ANSWERS = {
-    "context": (["only_a"], ["only_b"]),
-    "brief": (["**Callers:** 1 "], []),
-    "upstream": (["only_a"], ["only_b"]),
-    "changes": (["Callers: only_a", "Callers: only_b"], ["only_a, only_b"]),
+    "context": (
+        ["only_a", "`guess` in use.py:13 (20 toks) (one of 2 candidates)"],
+        ["only_b"],
+    ),
+    "brief": (["**Callers:** 1 (+1 possible)"], []),
+    "upstream": (["only_a", "guess", "(one of 2 candidates)"], ["only_b"]),
+    "changes": (
+        [
+            "Callers: only_a, guess (one of 2 candidates)",
+            "Callers: only_b, guess (one of 2 candidates)",
+        ],
+        ["only_a, only_b"],
+    ),
     "signature": (["def parse(self, text, strict=False)"], ["-> None"]),
     "flatten": (["inherited", "own"], ["ERROR"]),
 }
@@ -176,3 +187,25 @@ def test_impls_says_where_it_applies(project, interface):
         else _mcp(project, "impls", method="parse")
     )
     assert "recorded for Rust code only" in answer
+
+
+@pytest.mark.parametrize("interface", ["cli", "mcp"])
+def test_callees_say_what_they_leave_out_and_which_they_answer(project, interface):
+    ask = {
+        "cli": lambda *a: _cli(project, "callees", a[0], "--limit", str(a[1])),
+        "mcp": lambda *a: _mcp(project, "callees", name=a[0], limit=a[1]),
+    }[interface]
+    assert "(1 more, limit 1)" in ask("only_a", 1)
+    assert "1 other definition(s) of 'parse'" in ask("parse", 5)
+
+
+def test_the_web_gives_the_callees_it_leaves_out(web):
+    answer = json.loads(web("/api/callees", name="only_a", limit=1))
+    assert (answer["total"], len(answer["callees"])) == (2, 1)
+
+
+def test_the_count_is_of_the_callers_resolved_to_it(project, web):
+    """`guess` may call it but is not counted."""
+    assert "(20 toks, 1 caller)" in _cli(project, "quick", A)
+    assert "(20 toks, 1 caller)" in _mcp(project, "quick", name=A)
+    assert json.loads(web("/api/quick", name=A))["symbol"]["in_degree"] == 1

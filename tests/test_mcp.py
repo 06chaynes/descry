@@ -210,7 +210,7 @@ class TestLifespan:
             assert "max_age_hours must be a finite" in await mod.descry_ensure(
                 float("nan")
             )
-            assert "limit must not be negative" in await mod.descry_callers("x", -1)
+            assert "limit must be at least 1" in await mod.descry_callers("x", -1)
 
     @pytest.mark.asyncio
     async def test_server_starts_when_the_graph_is_removed_during_startup(

@@ -25436,14 +25436,12 @@ class CodeGraphBuilder:
         from descry._graph import CALL_RELATIONS, CURRENT_SCHEMA
 
         self.resolve_references(scip_index=scip_index)
-        # The number of its callers: those certain and those it is one of
-        # the candidates of
+        # The number of its callers, those its calls are resolved to: not
+        # those an unresolved call only may be one of
         callers = {}
         for edge in self.edges:
             if edge["relation"] in CALL_RELATIONS:
-                candidates = edge.get("metadata", {}).get("candidates", ())
-                for target in (edge["target"], *candidates):
-                    callers.setdefault(target, set()).add(edge["source"])
+                callers.setdefault(edge["target"], set()).add(edge["source"])
         for node in self.nodes:
             node["metadata"]["in_degree"] = len(callers.get(node["id"], ()))
         # Atomic write: stream to a sibling tmp file then os.replace. A

@@ -947,9 +947,10 @@ _INDEX_BUSY = "An index run is already in progress"
 
 
 def _limit_error(limit: int) -> str | None:
-    """Why `limit` cannot be used, or None. A negative one slices from the end."""
-    if limit < 0:
-        return f"limit must not be negative, got {limit}."
+    """Why `limit` cannot be used, or None: a negative one slices from the
+    end, and none at all would answer as if there were nothing to show."""
+    if limit < 1:
+        return f"limit must be at least 1, got {limit}."
     return None
 
 
@@ -1785,6 +1786,8 @@ class DescryService:
             "total": len(callees),
             "callees": callees[:limit],
             "ambiguous": {c: ambiguous[c] for c in callees if c in ambiguous},
+            # The definitions of the name besides the one answered for
+            "others": len(func_matches) - 1,
         }
 
     async def callers(self, name: str, limit: int = 20) -> str:
@@ -1808,7 +1811,9 @@ class DescryService:
                 f"No callers of '{name}'. Try descry search to verify symbol exists."
             )
         else:
-            lines = [f"{len(callers)} caller(s) of '{name}'{fuzzy_note}:"]
+            possible = sum(caller in ambiguous for caller in callers)
+            of_them = f", {possible} of them possible" if possible else ""
+            lines = [f"{len(callers)} caller(s) of '{name}'{fuzzy_note}{of_them}:"]
             for caller in callers:
                 node_info = q.get_node_info(caller)
                 one_of = q.one_of(ambiguous.get(caller))
@@ -1842,13 +1847,23 @@ class DescryService:
 
         node = data["node"]
         callees = data["callees"]
+        total = data["total"]
         ambiguous = data.get("ambiguous", {})
         fuzzy_note = " (fuzzy match)" if data["fuzzy"] else ""
-        display_name = node.get("metadata", {}).get("name", name)
-        if not callees:
-            result = f"'{display_name}'{fuzzy_note} calls no tracked functions."
+        # A name several definitions have is answered for one, named by ID
+        display_name = (
+            node["id"] if data["others"] else node.get("metadata", {}).get("name", name)
+        )
+        others = (
+            f"\n({data['others']} other definition(s) of '{name}'; "
+            "use a node ID to choose)"
+            if data["others"]
+            else ""
+        )
+        if not total:
+            result = f"'{display_name}'{fuzzy_note} calls no tracked functions.{others}"
         else:
-            lines = [f"'{display_name}'{fuzzy_note} calls {len(callees)} function(s):"]
+            lines = [f"'{display_name}'{fuzzy_note} calls {total} function(s):"]
             for callee in callees:
                 one_of = q.one_of(ambiguous.get(callee))
                 callee_info = q.get_node_info(callee)
@@ -1861,7 +1876,9 @@ class DescryService:
                         lines.append(f"  {callee}{one_of}")
                 else:
                     lines.append(f"  {callee}{one_of}")
-            result = "\n".join(lines)
+            if len(callees) < total:
+                lines.append(f"  ... ({total - len(callees)} more, limit {limit})")
+            result = "\n".join(lines) + others
 
         return await self._format_response(result)
 

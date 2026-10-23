@@ -67,6 +67,9 @@ class FakeQuerier:
     def get_callers(self, name):
         return []
 
+    def get_ambiguous_callers(self, name):
+        return {}
+
 
 def _function_node(file_path, name, lineno, end_lineno):
     return {
