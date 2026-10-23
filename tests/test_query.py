@@ -1710,6 +1710,7 @@ class TestEachSymbolAtItsLevel:
         ]
         a, b = root["children"]
         assert [(c["name"], c.get("seen")) for c in a["children"]] == [("b", 1)]
+        assert a["children"][0]["seen"] is not True
         assert [c["name"] for c in b["children"]] == ["c"]
         text = q.trace_flow("FILE:m.py::start", depth=2)
         assert "    ├─[Fun] **b** (at level 1)" in text
@@ -1720,6 +1721,7 @@ class TestEachSymbolAtItsLevel:
         a, start = tree["root"]["children"]
         assert (a["name"], start["name"], start.get("seen")) == ("a", "start", None)
         assert [(c["name"], c.get("seen")) for c in a["children"]] == [("start", 1)]
+        assert a["children"][0]["seen"] is not True
 
     def test_deep_context_shows_a_callee_met_again(self, q):
         for node in q.nodes.values():
@@ -1792,3 +1794,47 @@ def test_a_node_id_names_that_node_alone(tmp_path):
     assert [n["id"] for n in q.find_nodes_by_name(instance)] == [instance]
     assert q.get_callers(instance) == ["FILE:base.rb::Base::dispatch"]
     assert len(q.get_callers("force_encoding")) == 2
+
+
+def test_a_recursive_start_is_marked_at_level_zero(tmp_path):
+    nodes = [_fn("FILE:a.py::fact"), _fn("FILE:a.py::helper")]
+    edges = [
+        _calls("FILE:a.py::fact", "FILE:a.py::fact"),
+        _calls("FILE:a.py::fact", "FILE:a.py::helper"),
+    ]
+    q = _querier(tmp_path, nodes, edges)
+    root = q.trace_flow_structured("FILE:a.py::fact", depth=2)["root"]
+    assert [(c["name"], c.get("seen")) for c in root["children"]] == [
+        ("fact", 0),
+        ("helper", None),
+    ]
+    assert "**fact** (at level 0)" in q.trace_flow("FILE:a.py::fact", depth=2)
+
+
+def test_deep_context_lists_an_unresolved_call_met_twice(tmp_path):
+    """Unresolved calls, and calls of a symbol the graph lacks, are not
+    symbols to open: each is listed where it is made."""
+    (tmp_path / "a.py").write_text(
+        "".join(f"def {n}():\n    pass\n" for n in ("two", "c1", "c2"))
+    )
+    nodes = [
+        _fn(f"FILE:a.py::{n}", lineno=2 * i + 1, end_lineno=2 * i + 2, token_count=20)
+        for i, n in enumerate(("two", "c1", "c2"))
+    ]
+    edges = [
+        _calls("FILE:a.py::two", "FILE:a.py::c1"),
+        _calls("FILE:a.py::two", "FILE:a.py::c2"),
+    ]
+    for caller in ("c1", "c2"):
+        edges.append(
+            {
+                "source": f"FILE:a.py::{caller}",
+                "target": "REF:items.append",
+                "relation": "CALLS",
+            }
+        )
+        edges.append(_calls(f"FILE:a.py::{caller}", "FILE:a.py::gone"))
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
+    text = q.get_context_prompt("FILE:a.py::two", depth=2)
+    assert text.count("`append` (unresolved)") == 2
+    assert text.count("gone`") == 2

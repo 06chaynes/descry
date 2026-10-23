@@ -1381,8 +1381,12 @@ class GraphQuerier:
         callees = callees[: self._max_children_per_level]
 
         for callee_id in callees:
+            # A symbol opens at its level and is marked elsewhere; an
+            # unresolved call opens nothing and is listed where it is made.
             level = levels.get(callee_id, current_depth)
-            if callee_id in expanded or level < current_depth:
+            if callee_id in self.nodes and (
+                callee_id in expanded or level < current_depth
+            ):
                 name = self.nodes[callee_id]["metadata"].get("name", "?")
                 results.append(f"{'  ' * indent}- `{name}` (at level {level})")
                 continue
@@ -1654,7 +1658,7 @@ class GraphQuerier:
             indent = "  " * level
             arrow = "├─" if level else ""
             head = f"{indent}{arrow}[{node['type']}] **{node['name']}**"
-            if node.get("seen"):
+            if node.get("seen") is not None:
                 output.append(
                     f"{head}{self.one_of(node['candidates'])} (at level {node['seen']})"
                 )
