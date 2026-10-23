@@ -758,7 +758,7 @@ class GitHistoryAnalyzer:
 
             # Sort by commit count
             sorted_symbols = sorted(
-                symbol_commits.items(), key=lambda x: len(x[1]), reverse=True
+                symbol_commits.items(), key=lambda x: (-len(x[1]), x[0])
             )[:limit]
 
             lines = []
@@ -923,7 +923,7 @@ class GitHistoryAnalyzer:
 
         # SYMBOLS MODE
         sorted_symbols = sorted(
-            symbol_commits.items(), key=lambda x: len(x[1]), reverse=True
+            symbol_commits.items(), key=lambda x: (-len(x[1]), x[0])
         )[:limit]
 
         symbols = []
@@ -983,7 +983,7 @@ class GitHistoryAnalyzer:
             frequent_pairs = [
                 (pair, count) for pair, count in pair_counts.items() if count >= 2
             ]
-            frequent_pairs.sort(key=lambda x: x[1], reverse=True)
+            frequent_pairs.sort(key=lambda x: (-x[1], x[0]))
 
             for (sym_a, sym_b), count in frequent_pairs[:limit]:
                 _, name_a, loc_a = self._get_node_display(sym_a)
@@ -1081,7 +1081,7 @@ class GitHistoryAnalyzer:
             frequent_pairs = [
                 (pair, count) for pair, count in pair_counts.items() if count >= 2
             ]
-            frequent_pairs.sort(key=lambda x: x[1], reverse=True)
+            frequent_pairs.sort(key=lambda x: (-x[1], x[0]))
             frequent_pairs = frequent_pairs[:limit]
 
         if frequent_pairs:

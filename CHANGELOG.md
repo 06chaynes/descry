@@ -79,12 +79,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   and configuration, callers past 5 (still counting possible callers
   apart), the symbol's callees past 5 (planned again for those five, so
   the note counts by kind only callees drawn nowhere in the answer and no
-  "(at level N)" mark points at a callee cut away), and the source past 30 of the symbol's
-  lines, saying what each step left out; a section dropped whole keeps its
-  heading with "(omitted, max_output_tokens limit)".
+  "(at level N)" mark points at a callee cut away), and the source past 30
+  of the symbol's lines, saying what each step left out; a section dropped
+  whole keeps its heading with "(omitted, max_output_tokens limit)".
   It read the rendered text back, so code with a heading-like or a fence
   line in it was cut wrongly or not at all, opened callees kept their
   headings without their code, and counts were wrong.
+- `churn` ranks symbols, and co-change pairs of symbols, with the same
+  number of commits by node ID, so the same history gives the same list.
+  Their order among ties changed from run to run, and so, at the limit,
+  did which of them were listed.
 
 ## [0.3.1] — 2026-10-22
 
