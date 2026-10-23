@@ -37,9 +37,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `flow` and for `context`'s callee expansion. A depth past it is traced to
   it and says so; the web API returns the depth traced, and `/api/health`
   gives the ceiling the page's depth field is held to.
-- `context` names each possible callee as one of its candidates instead of
-  "(External/Unresolved)", and forward `flow` follows a possible callee to
-  each definition it may reach, marked.
+- A callee the resolver left unresolved is no longer shown or counted as
+  certain or as external. `context`, at every depth, names it as one of
+  its candidates, or "(unresolved)" where it found none. `callees` marks
+  it the same way and counts it apart ("+N unresolved"). Forward `flow`
+  follows a possible callee to each definition it may reach, marked.
 - `callees` says how many callees its `limit` leaves out, and of a name
   several definitions share, which one it answers for (`others` in the web
   API).

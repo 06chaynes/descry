@@ -374,7 +374,7 @@
                     <template x-for="c in results.callees?.callees || []" :key="c.id">
                         <div class="symbol-list-item" @click="viewContext(c.id)">
                             <span x-text="c.name"></span>
-                            <span class="sl-location" x-text="c.location + (c.candidates != null ? ' · ' + oneOf(c.candidates) : '')"></span>
+                            <span class="sl-location" x-text="c.location + (c.candidates != null ? ' · ' + oneOf(c.candidates, false) : '')"></span>
                         </div>
                     </template>
                     <div class="sl-location" x-show="moreNote(results.callees?.more, 'callees')" x-text="'(' + moreNote(results.callees?.more, 'callees') + ')'"></div>
@@ -1504,20 +1504,20 @@ function app() {
             return this.moreNote({certain: (sym.callers_total || 0) - shown.length - possible, possible}, 'callers');
         },
 
-        // The note on a count of those that only may be, and of unresolved calls of the name.
+        // The note on a count of those that only may be, and of those left unresolved.
         extraNote(counts) {
             const extra = [counts?.possible ? '+' + counts.possible + ' possible' : '', counts?.unresolved ? '+' + counts.unresolved + ' unresolved' : ''].filter(Boolean);
             return extra.length ? ' (' + extra.join(', ') + ')' : '';
         },
 
-        // The note on what a list leaves out: certain, possible, unresolved calls of the name.
+        // The note on what a list leaves out: certain, possible, unresolved.
         moreNote(more, of) {
-            return [more?.certain ? more.certain + ' more ' + of : '', more?.possible ? more.possible + ' more possible ' + of : '', more?.unresolved ? more.unresolved + ' more unresolved calls of the name' : ''].filter(Boolean).join(', ');
+            return [more?.certain ? more.certain + ' more ' + of : '', more?.possible ? more.possible + ' more possible ' + of : '', more?.unresolved ? more.unresolved + ' more unresolved ' + of : ''].filter(Boolean).join(', ');
         },
 
         // The note on an unresolved call that has `count` candidates.
-        oneOf(count) {
-            if (count === 0) return 'unresolved; same name';
+        oneOf(count, ofName = true) {
+            if (count === 0) return ofName ? 'unresolved; same name' : 'unresolved';
             return count === 1 ? 'unresolved; the only candidate' : `one of ${count} candidates`;
         },
 

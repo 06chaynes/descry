@@ -1827,12 +1827,10 @@ class DescryService:
                         lines.append(f"  {caller}{one_of}")
                 else:
                     lines.append(f"  {caller}{one_of}")
-            left_out = q.kinds(data["left_out"], ambiguous)
             if len(callers) < total_count:
-                lines.append(
-                    f"  ... ({q.more_callers(*left_out[:2], unresolved=left_out[2])}"
-                    f", limit {limit})"
-                )
+                certain, possible, unresolved = q.kinds(data["left_out"], ambiguous)
+                more = q.more_callers(certain, possible, unresolved=unresolved)
+                lines.append(f"  ... ({more}, limit {limit})")
             result = "\n".join(lines)
 
         return await self._format_response(result)
@@ -1867,13 +1865,15 @@ class DescryService:
         if not total:
             result = f"'{display_name}'{fuzzy_note} calls no tracked functions.{others}"
         else:
-            certain, possible, _ = q.kinds(callees + data["left_out"], ambiguous)
-            possible = q.possible(possible)
+            certain, possible, unresolved = q.kinds(
+                callees + data["left_out"], ambiguous
+            )
+            possible = q.possible(possible, unresolved)
             lines = [
                 f"'{display_name}'{fuzzy_note} calls {certain} function(s){possible}:"
             ]
             for callee in callees:
-                one_of = q.one_of(ambiguous.get(callee))
+                one_of = q.callee_note(ambiguous.get(callee))
                 callee_info = q.get_node_info(callee)
                 if callee_info:
                     lineno = callee_info.get("metadata", {}).get("lineno")
@@ -1885,8 +1885,8 @@ class DescryService:
                 else:
                     lines.append(f"  {callee}{one_of}")
             if len(callees) < total:
-                certain_left, possible_left, _ = q.kinds(data["left_out"], ambiguous)
-                more = q.more_callers(certain_left, possible_left, "callees")
+                certain, possible, unresolved = q.kinds(data["left_out"], ambiguous)
+                more = q.more_callers(certain, possible, "callees", unresolved)
                 lines.append(f"  ... ({more}, limit {limit})")
             result = "\n".join(lines) + others
 

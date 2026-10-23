@@ -530,9 +530,10 @@ class GraphQuerier:
             possible = len(self.get_ambiguous_callers(node_id))
             certain = len(self.get_callers(node_id)) - possible
             callers_count = f"{certain}{self.possible(possible)}"
-            possible = len(self.get_ambiguous_callees(node_id))
-            certain = len(self.get_callees(node_id)) - possible
-            callees_count = f"{certain}{self.possible(possible)}"
+            certain, possible, unresolved = self.kinds(
+                self.get_callees(node_id), self.get_ambiguous_callees(node_id)
+            )
+            callees_count = f"{certain}{self.possible(possible, unresolved)}"
 
             output = [
                 f"### Brief: `{node_id}`",
@@ -649,9 +650,8 @@ class GraphQuerier:
                     # Unresolved REF - clean up for display
                     raw_name = callee_id.replace("REF:", "")
                     clean_name = _clean_ref_name(raw_name)
-                    # One of the definitions it names, or none of the project's
-                    kind = self.one_of(possible.get(callee_id)).strip() or "(external)"
-                    callee_info.append(f"- `{clean_name}` {kind}")
+                    note = self.callee_note(possible[callee_id])
+                    callee_info.append(f"- `{clean_name}`{note}")
 
         # 4. Find Usage Examples (Callers) - grouped by file
         usage_examples = self._get_usage_examples(node_id, limit=4)
@@ -1367,6 +1367,7 @@ class GraphQuerier:
 
         results = []
         callees = self.get_callees(node_id)[: self._max_children_per_level]
+        unresolved = self.get_ambiguous_callees(node_id)
 
         for callee_id in callees:
             if callee_id in expanded:
@@ -1433,7 +1434,8 @@ class GraphQuerier:
                 # Unresolved REF
                 raw_name = callee_id.replace("REF:", "")
                 clean_name = _clean_ref_name(raw_name)
-                results.append(f"{indent_str}- `{clean_name}` (External)")
+                note = self.callee_note(unresolved[callee_id])
+                results.append(f"{indent_str}- `{clean_name}`{note}")
 
         # Cache results, with the cost of the whole subtree, unless the
         # timeout cut the expansion short.
@@ -2230,7 +2232,7 @@ class GraphQuerier:
         if possible:
             parts.append(f"{possible} more possible {of}")
         if unresolved:
-            parts.append(f"{unresolved} more unresolved calls of the name")
+            parts.append(f"{unresolved} more unresolved {of}")
         return ", ".join(parts)
 
     @staticmethod
@@ -2374,15 +2376,20 @@ class GraphQuerier:
 
     def get_ambiguous_callees(self, func_node_id):
         """``{REF: target: number of candidates}`` of the calls of
-        ``func_node_id`` the resolver left unresolved but narrowed — each
-        is one call that may reach one of N definitions, not N calls."""
+        ``func_node_id`` the resolver left unresolved: each is one call that
+        may reach one of N definitions, or none it found (0)."""
         ambiguous = {}
         for edge in self.outgoing[func_node_id]:
             if edge["relation"] == "CALLS" and edge["target"].startswith("REF:"):
-                candidates = edge.get("metadata", {}).get("candidates")
-                if candidates:
-                    ambiguous[edge["target"]] = len(candidates)
+                candidates = edge.get("metadata", {}).get("candidates") or ()
+                ambiguous[edge["target"]] = len(candidates)
         return ambiguous
+
+    @classmethod
+    def callee_note(cls, candidates):
+        """The note on a callee: one of ``candidates`` definitions an
+        unresolved call names, unresolved with none (0), or certain (None)."""
+        return " (unresolved)" if candidates == 0 else cls.one_of(candidates)
 
     def find_call_path_result(
         self,

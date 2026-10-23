@@ -1612,3 +1612,89 @@ async def test_no_impls_says_they_are_recorded_for_rust(tmp_path):
     result = await DescryService(config).impls("f")
     assert "recorded for Rust code only" in result
     assert "index" not in result
+
+
+class TestUnresolvedCallsInText:
+    """An unresolved call with no candidates is neither a caller nor a
+    callee for sure: it is marked and counted apart, at every depth."""
+
+    @pytest.fixture
+    def svc(self, tmp_path):
+        config = _plain_config(tmp_path)
+        (tmp_path / "a.py").write_text(
+            "def parse():\n    pass\n\n\ndef run(x, y):\n    x.parse()\n    y.read()\n"
+            "    helper()\n\n\ndef helper():\n    z.parse()\n"
+        )
+
+        def fn(name, line):
+            return {
+                "id": f"FILE:a.py::{name}",
+                "type": "Function",
+                "metadata": {
+                    "name": name,
+                    "lineno": line,
+                    "end_lineno": line + 1,
+                    "token_count": 10,
+                },
+            }
+
+        def call(source, target, line, **meta):
+            return {
+                "source": f"FILE:a.py::{source}",
+                "target": target,
+                "relation": "CALLS",
+                "metadata": {"lineno": line, **meta},
+            }
+
+        _write_graph(
+            config,
+            nodes=[fn("parse", 1), fn("run", 5), fn("helper", 11)],
+            edges=[
+                call(
+                    "run",
+                    "REF:x.parse",
+                    6,
+                    candidates=["FILE:a.py::parse", "FILE:b.py::parse"],
+                ),
+                call("run", "REF:y.read", 7),
+                {
+                    "source": "FILE:a.py::run",
+                    "target": "FILE:a.py::helper",
+                    "relation": "CALLS_RESOLVED",
+                    "metadata": {"lineno": 8},
+                },
+                call("helper", "REF:z.parse", 12),
+            ],
+        )
+        return DescryService(config)
+
+    @pytest.mark.asyncio
+    async def test_callers_of_a_name(self, svc):
+        text = await svc.callers("parse", limit=1)
+        assert "0 caller(s) of 'parse' (+1 possible, +1 unresolved):" in text
+        assert "FILE:a.py::run (a.py:5) (one of 2 candidates)" in text
+        assert "(1 more unresolved callers, limit 1)" in text
+        assert (
+            "FILE:a.py::helper (a.py:11) (unresolved; same name)"
+            in await svc.callers("parse")
+        )
+
+    @pytest.mark.asyncio
+    async def test_callees(self, svc):
+        text = await svc.callees("run", limit=2)
+        assert "'run' calls 1 function(s) (+1 possible, +1 unresolved):" in text
+        assert "(1 more unresolved callees, limit 2)" in text
+        assert "REF:y.read (unresolved)" in await svc.callees("run")
+
+    @pytest.mark.asyncio
+    async def test_context_at_each_depth(self, svc):
+        brief = await svc.context("FILE:a.py::run", brief=True)
+        assert "**Callees:** 1 (+1 possible, +1 unresolved)" in brief
+        for depth in (1, 2):
+            text = await svc.context(
+                "FILE:a.py::run", depth=depth, expand_callees=depth == 2
+            )
+            assert "external" not in text.lower(), depth
+            assert "`read` (unresolved)" in text, depth
+        deep = await svc.context("FILE:a.py::run", depth=2, expand_callees=True)
+        assert "`parse` (unresolved)" in deep

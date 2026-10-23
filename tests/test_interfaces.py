@@ -293,4 +293,4 @@ def test_a_possible_callee_is_named_and_followed(project):
     assert flow.count("(one of 2 candidates)") == 2
     context = _mcp(project, "context", node_id="FILE:use.py::guess")
     assert "`parse` (one of 2 candidates)" in context
-    assert "External" not in context
+    assert "external" not in context.lower()

@@ -1575,3 +1575,23 @@ def test_a_call_left_unresolved_is_one_of_the_name_only(tmp_path):
     assert marks == {"FILE:b.py::narrowed": 1, "FILE:b.py::render": 0}
     assert q.one_of(0) == " (unresolved; same name)"
     assert q.get_callers("FILE:a.py::list_templates") == []
+
+
+def test_a_forward_flow_cut_short_says_what_it_leaves_out(tmp_path):
+    nodes = [_fn("FILE:a.py::start"), *(_fn(f"FILE:a.py::sure{i}") for i in range(2))]
+    nodes += [_fn("FILE:b.py::maybe"), _fn("FILE:c.py::maybe")]
+    edges = [_calls("FILE:a.py::start", f"FILE:a.py::sure{i}") for i in range(2)]
+    edges.append(
+        {
+            "source": "FILE:a.py::start",
+            "target": "REF:x.maybe",
+            "relation": "CALLS",
+            "metadata": {"candidates": ["FILE:b.py::maybe", "FILE:c.py::maybe"]},
+        }
+    )
+    q = _querier(tmp_path, nodes, edges, max_children_per_level=1)
+    assert "*(1 more callees, 2 more possible callees)*" in q.trace_flow(
+        "FILE:a.py::start", depth=1
+    )
+    root = q.trace_flow_structured("FILE:a.py::start", depth=1)["root"]
+    assert (root["more"], root["more_possible"]) == (3, 2)
