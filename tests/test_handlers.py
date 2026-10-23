@@ -361,7 +361,7 @@ class TestDescryServiceIndex:
             def __init__(self, graph_path, **kwargs):
                 self.kwargs = kwargs
                 self.model_loads = 0
-                self.loading = svc._semantic_cache["loading"]
+                self.loading = svc._semantic_cache["load"] is not None
                 built.append(self)
 
             def ensure_model(self):
@@ -389,6 +389,7 @@ class TestDescryServiceIndex:
         svc._SemanticSearcher, searcher = Earlier, svc._SemanticSearcher
         svc.config.embedding_timeout = 0.01
         assert await svc._get_semantic_searcher() is None
+        earlier = svc._semantic_cache["load"]
 
         class Rewritten(searcher):
             def __init__(self, graph_path, **kwargs):
@@ -398,7 +399,7 @@ class TestDescryServiceIndex:
         svc._SemanticSearcher = Rewritten
         result = await svc.index()
         release.set()
-        await svc._semantic_load
+        await earlier
         assert "Index complete" in result
         assert len(built) == 1
         assert built[0].loading
@@ -964,6 +965,7 @@ class TestEnsure:
             "age_hours": 2.0,
             "nodes": 0,
             "edges": 0,
+            "languages": [],
             "stale": False,
             "error": None,
         }
@@ -1471,7 +1473,7 @@ class TestSemanticText:
         """Nor is a retry of a failed load."""
         svc = self._svc(tmp_path, "load-fails-silently")
         assert (await svc.semantic_data("q"))["reason"] == "loading"
-        await svc._semantic_load
+        await svc._semantic_cache["load"]
         data = await svc.semantic_data("q")
         assert (data["ok"], data["reason"]) == (False, "failed")
         assert data["error"] == "Semantic search unavailable."
@@ -1557,3 +1559,42 @@ class TestCrossLangSpecDiscovery:
 
         assert (data["ok"], data["reason"]) == (False, "unavailable")
         assert "not configured" in data["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_search_during_the_pre_warm_waits_for_it(tmp_path):
+    """The first search after the server starts is answered from the load
+    the pre-warm began, not told the embeddings are loading."""
+    config = _plain_config(tmp_path)
+    _write_graph(config, nodes=[TestSemanticText.NODE])
+    svc = DescryService(config)
+    built = []
+
+    class Searcher:
+        def __init__(self, graph_path, **kwargs):
+            time.sleep(0.2)
+            built.append(self)
+
+        def ensure_model(self):
+            pass
+
+        def search(self, query, limit=10):
+            return [(TestSemanticText.NODE, 0.9)]
+
+    svc._semantic_available, svc._SemanticSearcher = True, Searcher
+    warm = asyncio.create_task(svc._load_embeddings_background())
+    await asyncio.sleep(0)
+
+    data = await svc.semantic_data("q")
+    await warm
+    assert data["ok"]
+    assert len(built) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_impls_says_they_are_recorded_for_rust(tmp_path):
+    config = _plain_config(tmp_path)
+    _write_graph(config, nodes=[TestSemanticText.NODE])
+    result = await DescryService(config).impls("f")
+    assert "recorded for Rust code only" in result
+    assert "index" not in result

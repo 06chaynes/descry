@@ -8388,15 +8388,6 @@ class PythonParser(BaseParser):
             return f"[{elts}]"
         return "Complex"
 
-    def _get_args_info(self, args_node):
-        args_list = []
-        for arg in args_node.args:
-            arg_str = arg.arg
-            if arg.annotation:
-                arg_str += f": {self._get_type_annotation(arg.annotation)}"
-            args_list.append(arg_str)
-        return args_list
-
     def _get_param_types(self, args_node):
         """Extract parameter types as a list for metadata storage."""
         param_types = []
@@ -8492,12 +8483,14 @@ class PythonParser(BaseParser):
             is_method = parent_id in self.class_ids
             node_type = "Method" if is_method else "Function"
 
-            args = self._get_args_info(node.args)
             param_types = self._get_param_types(node.args)
             return_type = (
-                self._get_type_annotation(node.returns) if node.returns else "None"
+                self._get_type_annotation(node.returns) if node.returns else ""
             )
-            signature = f"def {node.name}({', '.join(args)}) -> {return_type}"
+            keyword = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+            signature = f"{keyword} {node.name}({ast.unparse(node.args)})"
+            if node.returns:
+                signature += f" -> {ast.unparse(node.returns)}"
 
             self.builder.add_node(
                 func_id,
@@ -25440,16 +25433,19 @@ class CodeGraphBuilder:
             output_path: Path to write the graph JSON
             scip_index: Optional ScipIndex for type-aware resolution
         """
-        from descry._graph import CURRENT_SCHEMA
+        from descry._graph import CALL_RELATIONS, CURRENT_SCHEMA
 
         self.resolve_references(scip_index=scip_index)
-        in_degree = {}
+        # The number of its callers: those certain and those it is one of
+        # the candidates of
+        callers = {}
         for edge in self.edges:
-            t = edge["target"]
-            if t:
-                in_degree[t] = in_degree.get(t, 0) + 1
+            if edge["relation"] in CALL_RELATIONS:
+                candidates = edge.get("metadata", {}).get("candidates", ())
+                for target in (edge["target"], *candidates):
+                    callers.setdefault(target, set()).add(edge["source"])
         for node in self.nodes:
-            node["metadata"]["in_degree"] = in_degree.get(node["id"], 0)
+            node["metadata"]["in_degree"] = len(callers.get(node["id"], ()))
         # Atomic write: stream to a sibling tmp file then os.replace. A
         # concurrent reader (MCP prewarm, web `/api/health`, another CLI
         # invocation) that stats the destination mid-write would otherwise

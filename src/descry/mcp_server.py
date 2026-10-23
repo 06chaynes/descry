@@ -218,7 +218,7 @@ async def descry_context(
     head_lines: int | None = None,
     max_output_tokens: int | None = None,
 ) -> str:
-    """Get full context for a symbol: source code, callers, callees, tests (~500+ tokens). Use brief=true (~50 tokens) to quickly verify a symbol before fetching full context. Options: full=true (no truncation), expand_callees=true (inline dependencies), head_lines=N (preview first N lines)."""
+    """Get full context for a symbol: source code, callers, callees, tests (~500+ tokens). Use brief=true (~50 tokens) to quickly verify a symbol before fetching full context. Options: full=true (no truncation), expand_callees=true (inline dependencies), head_lines=N (preview first N lines). node_id takes a node ID or a symbol name."""
     return _fenced(
         await _svc().context(
             node_id,
@@ -281,7 +281,7 @@ async def descry_structure(filename: str) -> str:
 
 @mcp.tool()
 async def descry_flatten(class_node_id: str) -> str:
-    """Show the effective API of a class including inherited methods. Use for understanding class hierarchies in OOP codebases."""
+    """Show the effective API of a class including inherited methods. Use for understanding class hierarchies in OOP codebases. class_node_id takes a node ID or a class name."""
     return _fenced(await _svc().flatten(class_node_id))
 
 
@@ -308,7 +308,7 @@ async def descry_quick(name: str, full: bool = False, brief: bool = False) -> st
 
 @mcp.tool()
 async def descry_impls(method: str, trait_name: str | None = None) -> str:
-    """Find all implementations of a trait method across the codebase. Use when you know a trait method name (e.g., 'from_request_parts') but need to find which types implement it. Optionally filter by trait name."""
+    """Find all implementations of a Rust trait method across the codebase. Use when you know a trait method name (e.g., 'from_request_parts') but need to find which types implement it. Optionally filter by trait name."""
     return _fenced(await _svc().impls(method, trait_name))
 
 

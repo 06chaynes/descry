@@ -172,10 +172,9 @@
                         <label>Language</label>
                         <select x-model="forms.search.lang">
                             <option value="">All</option>
-                            <option value="rust">Rust</option>
-                            <option value="typescript">TypeScript</option>
-                            <option value="python">Python</option>
-                            <option value="svelte">Svelte</option>
+                            <template x-for="lang in health?.graph?.languages || []" :key="lang">
+                                <option :value="lang" x-text="lang"></option>
+                            </template>
                         </select>
                     </div>
                     <div class="form-group">
@@ -333,7 +332,7 @@
                     <template x-for="c in results.callers?.callers || []" :key="c.id">
                         <div class="symbol-list-item" @click="viewContext(c.id)">
                             <span x-text="c.name"></span>
-                            <span class="sl-location" x-text="c.location + (c.candidates ? ' · one of ' + c.candidates + ' candidates' : '')"></span>
+                            <span class="sl-location" x-text="c.location + (c.candidates ? ' · ' + oneOf(c.candidates) : '')"></span>
                         </div>
                     </template>
                 </div>
@@ -374,7 +373,7 @@
                     <template x-for="c in results.callees?.callees || []" :key="c.id">
                         <div class="symbol-list-item" @click="viewContext(c.id)">
                             <span x-text="c.name"></span>
-                            <span class="sl-location" x-text="c.location + (c.candidates ? ' · one of ' + c.candidates + ' candidates' : '')"></span>
+                            <span class="sl-location" x-text="c.location + (c.candidates ? ' · ' + oneOf(c.candidates) : '')"></span>
                         </div>
                     </template>
                 </div>
@@ -492,7 +491,7 @@
         <div>
             <div class="tool-form">
                 <h3>Trait Implementations</h3>
-                <p class="tool-desc">Find every type (struct, class) that implements a given trait or interface method across the codebase. Essential for polymorphic code where grep matches dozens of false positives. For example, searching a method name shows all types implementing it. Optionally filter by trait name. Use this to find all concrete implementations of an abstract method.</p>
+                <p class="tool-desc">Find every Rust type that implements a given trait method across the codebase. Essential for polymorphic code where grep matches dozens of false positives. Optionally filter by trait name.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Method Name</label>
@@ -1233,7 +1232,7 @@ function app() {
             { slug: 'context', title: 'Context', category: 'tools', desc: 'Full node dossier: source, callers, callees', keywords: ['details', 'source', 'node', 'dossier'] },
             { slug: 'structure', title: 'Structure', category: 'tools', desc: 'File skeleton with all symbols', keywords: ['file', 'skeleton', 'outline', 'symbols', 'imports'] },
             { slug: 'flatten', title: 'Flatten', category: 'tools', desc: 'Inheritance and trait hierarchy', keywords: ['inheritance', 'trait', 'interface', 'hierarchy', 'class'] },
-            { slug: 'impls', title: 'Implementations', category: 'tools', desc: 'Find all implementations of a method', keywords: ['trait', 'interface', 'implement', 'polymorphic', 'concrete'] },
+            { slug: 'impls', title: 'Implementations', category: 'tools', desc: 'Find all implementations of a Rust trait method', keywords: ['trait', 'implement', 'polymorphic', 'concrete'] },
             { slug: 'flow', title: 'Flow Trace', category: 'tools', desc: 'Forward/backward call tree visualization', keywords: ['trace', 'call tree', 'dataflow', 'forward', 'backward'] },
             { slug: 'path', title: 'Call Path', category: 'tools', desc: 'Shortest call chain between two symbols', keywords: ['path', 'route', 'chain', 'between', 'connection'] },
             { slug: 'cross-lang', title: 'Cross-Language', category: 'tools', desc: 'Frontend-to-backend API call tracing', keywords: ['api', 'frontend', 'backend', 'openapi', 'endpoint', 'cross'] },
@@ -1496,6 +1495,11 @@ function app() {
             return this._renderNode(node, depth);
         },
 
+        // The note on an unresolved call that has `count` candidates.
+        oneOf(count) {
+            return count === 1 ? 'unresolved; the only candidate' : `one of ${count} candidates`;
+        },
+
         // Escape a value for use as HTML text or inside a quoted attribute.
         _esc(value) {
             return String(value).replace(/[&<>"']/g, c => (
@@ -1547,7 +1551,7 @@ function app() {
 
             // Token count
             html += `<span class="flow-tokens">${node.tokens.toLocaleString()} toks</span>`;
-            if (node.candidates) html += `<span class="flow-tokens">one of ${node.candidates} candidates</span>`;
+            if (node.candidates) html += `<span class="flow-tokens">${this.oneOf(node.candidates)}</span>`;
 
             // File location - navigates to Source
             if (fileLoc) {
@@ -2095,16 +2099,16 @@ function app() {
             <!-- Implementations -->
             <div class="ency-article" x-show="helpArticle === 'impls'">
                 <h2>Implementations</h2>
-                <p class="ency-oneliner">Find all types that implement a trait or interface method.</p>
+                <p class="ency-oneliner">Find all Rust types that implement a trait method.</p>
                 <h3>Parameters</h3>
                 <table>
                     <tr><th>Field</th><th>Description</th></tr>
                     <tr><td>method</td><td>Method name to find implementations of</td></tr>
-                    <tr><td>trait_name</td><td>Optional: filter to a specific trait or interface</td></tr>
+                    <tr><td>trait_name</td><td>Optional: filter to a specific trait</td></tr>
                 </table>
                 <h3>Example</h3>
                 <div class="ency-example">
-                    Impls of <code>parse</code> &rarr; shows every struct, class, or type that has a <code>parse</code> method, grouped by trait when applicable.
+                    Impls of <code>parse</code> &rarr; shows every type whose trait implementation has a <code>parse</code> method, grouped by trait.
                 </div>
                 <h3>Tips</h3>
                 <ul class="ency-tips">

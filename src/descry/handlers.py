@@ -749,7 +749,9 @@ def format_search_result(
 
     score_str = f"[{score:.2f}] " if show_score else ""
     metrics_str = (
-        f"({token_count} toks, {in_degree} callers)" if token_count or in_degree else ""
+        f"({token_count} toks, {in_degree} caller{'' if in_degree == 1 else 's'})"
+        if token_count or in_degree
+        else ""
     )
 
     lines = [f"{score_str}[{node_type}] {name} | {location} {metrics_str}".rstrip()]
@@ -1050,17 +1052,7 @@ class DescryService:
         self._git_cache_lock = asyncio.Lock()
         self._dedup_cache_lock = asyncio.Lock()
 
-        self._graph_cache = {"mtime": 0, "nodes": 0, "edges": 0, "error": None}
-        self._querier_cache = {"mtime": 0, "instance": None, "error": None}
-        self._semantic_cache = {
-            "mtime": 0,
-            "instance": None,
-            "loading": False,
-            "error": None,
-        }
-        self._semantic_load = None
-        self._git_cache = {"analyzer": None, "graph_mtime": None}
-        self._dedup_cache: dict[str, tuple[float, str]] = {}
+        self.reset_caches()
         self._max_dedup_entries = 100
 
         # Index runs write the same cache directory, so one runs at a time
@@ -1095,6 +1087,7 @@ class DescryService:
                         "mtime": mtime,
                         "nodes": len(data.get("nodes", [])),
                         "edges": len(data.get("edges", [])),
+                        "languages": self._graph_languages(data),
                         "error": None,
                     }
                 # ValueError: invalid JSON or invalid UTF-8.
@@ -1105,8 +1098,23 @@ class DescryService:
                         "mtime": mtime,
                         "nodes": 0,
                         "edges": 0,
+                        "languages": [],
                         "error": str(e),
                     }
+
+    def _graph_languages(self, data) -> list[str]:
+        """The languages of the graph's nodes, as the `lang` search filter
+        names them and finds them: by the extension of the file a node is
+        in."""
+        if self._get_syntax_lang is None:
+            return []
+        paths = {
+            node["id"][5:].split("::")[0]
+            for node in data.get("nodes", [])
+            if node.get("id", "").startswith("FILE:")
+        }
+        langs = {self._get_syntax_lang(p, self.config.syntax_lang_map) for p in paths}
+        return sorted(langs - {""})
 
     async def _get_querier(self):
         """The cached GraphQuerier; None if the graph is missing or unloadable."""
@@ -1174,17 +1182,24 @@ class DescryService:
             self._dedup_cache[content_hash] = (graph_mtime, node_id)
 
     def reset_caches(self):
-        """Reset all cached instances. Call after reindex."""
-        self._graph_cache = {"mtime": 0, "nodes": 0, "edges": 0, "error": None}
+        """Reset all cached instances. Called on construction and after a
+        reindex."""
+        self._graph_cache = {
+            "mtime": 0,
+            "nodes": 0,
+            "edges": 0,
+            "languages": [],
+            "error": None,
+        }
         self._querier_cache = {"mtime": 0, "instance": None, "error": None}
         self._semantic_cache = {
             "mtime": 0,
             "instance": None,
-            "loading": False,
+            "load": None,
             "error": None,
         }
         self._git_cache = {"analyzer": None, "graph_mtime": None}
-        self._dedup_cache = {}
+        self._dedup_cache: dict[str, tuple[float, str]] = {}
         # The module-level file-content cache in query.py is keyed on mtime,
         # so it self-invalidates after an edit; but a reindex can shift file
         # contents even without an mtime bump (copies, git checkouts). Clear
@@ -1229,55 +1244,93 @@ class DescryService:
             source_root=str(self.config.project_root),
         )
 
-    async def _load_embeddings_background(self):
-        async with self._semantic_cache_lock:
-            # A reindex replaces the cache, so a load writes only to its own.
-            cache = self._semantic_cache
-            if cache["instance"] is not None or cache["loading"]:
-                return
-            cache["loading"] = True
-            mtime = self._graph_mtime() or 0
+    def _start_semantic_load(self, cache, build):
+        """Run ``build`` in a thread as the load of ``cache``, which holds
+        what it builds, or the error it raises, as of the graph it began
+        on. Called holding the lock; returns the task."""
+        mtime = self._graph_mtime() or 0
 
-        try:
-
-            def load_sync():
-                searcher = self._new_searcher()
-                # On a warm cache the constructor never touches the model, so
-                # without this the pre-warm reports "ready" while the first
-                # real query still pays the full model load.
-                searcher.ensure_model()
+        async def load():
+            try:
+                # No timeout: the thread cannot be stopped, so a load given
+                # up on would go on while another started.
+                searcher = await asyncio.to_thread(build)
+                async with self._semantic_cache_lock:
+                    cache.update(mtime=mtime, instance=searcher, error=None)
                 return searcher
+            except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and logged
+                async with self._semantic_cache_lock:
+                    cache["error"] = str(e)
+                logger.warning(f"Embeddings load failed: {e}")
+                return None
+            finally:
+                async with self._semantic_cache_lock:
+                    cache["load"] = None
 
-            # No timeout: the thread cannot be stopped, so a load given up on
-            # would go on building the cache while a search started another.
-            searcher = await asyncio.to_thread(load_sync)
+        cache["load"] = asyncio.create_task(load())
+        return cache["load"]
 
-            async with self._semantic_cache_lock:
-                cache["mtime"] = mtime
-                cache["instance"] = searcher
-                cache["error"] = None
-                logger.info("Pre-warm: embeddings ready")
-        except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and logged
-            async with self._semantic_cache_lock:
-                cache["error"] = str(e)
-            logger.warning(f"Pre-warm: embeddings failed: {e}")
-        finally:
-            async with self._semantic_cache_lock:
-                cache["loading"] = False
+    async def _load_embeddings_background(self):
+        """Load the searcher and its model, so the first search pays for
+        neither."""
+
+        def build():
+            searcher = self._new_searcher()
+            # On a warm cache the constructor never touches the model.
+            searcher.ensure_model()
+            return searcher
+
+        async with self._semantic_cache_lock:
+            cache = self._semantic_cache
+            if cache["instance"] is not None:
+                return
+            load = cache["load"] or self._start_semantic_load(cache, build)
+        if await asyncio.shield(load) is not None:
+            logger.info("Pre-warm: embeddings ready")
+
+    async def _load_indexed_embeddings(self, model_was_loaded):
+        """Load the embeddings of a graph just indexed, and the model where
+        it was loaded before; returns the line on them for the index's
+        summary, empty without embeddings."""
+        if not (
+            self._semantic_available
+            and self._SemanticSearcher
+            and self.config.graph_path.exists()
+        ):
+            return ""
+        logger.info("Loading embeddings for semantic search...")
+
+        def build():
+            # The child process has just embedded this graph and cached the
+            # vectors under a key derived from the graph's content, so this
+            # loads them. It encodes only when the child could not, since no
+            # cache then matches.
+            searcher = self._new_searcher()
+            # Loading from cache never touches the model. A server that had
+            # it loaded keeps it loaded, so the first search after a reindex
+            # does not pay for the load; a one-shot `descry index` skips it.
+            if model_was_loaded:
+                searcher.ensure_model()
+            return searcher
+
+        async with self._semantic_cache_lock:
+            cache = self._semantic_cache
+            load = cache["load"] or self._start_semantic_load(cache, build)
+        searcher = await asyncio.shield(load)
+        if searcher is None:
+            return f"Embeddings: Failed ({cache['error']})"
+        return f"Embeddings: {len(searcher.nodes):,} nodes indexed"
 
     async def _get_semantic_searcher(self):
         """Single-flight accessor for the semantic searcher.
 
-        Returns the cached SemanticSearcher, rebuilding if
-        codebase_graph.json mtime changed. Returns None if embeddings are
-        unavailable (module missing or disabled), if the graph file does
-        not exist, or while a load is not done.
-
-        Uses _semantic_cache_lock; construction runs in asyncio.to_thread so
-        the event loop is not blocked by model load. Callers that want to
-        surface an "embeddings loading" UX string should check
-        _semantic_cache["error"] when this returns None: it is the last
-        failed load's until a load succeeds.
+        Returns the cached SemanticSearcher, loading it again if
+        codebase_graph.json mtime changed, and waits up to
+        `embedding_timeout` for a load under way. Returns None if
+        embeddings are unavailable (module missing or disabled), if the
+        graph file does not exist, or while a load is not done; then
+        _semantic_cache["error"] is the last failed load's until a load
+        succeeds.
         """
         if not self._semantic_available or self._SemanticSearcher is None:
             return None
@@ -1289,34 +1342,10 @@ class DescryService:
             cache = self._semantic_cache
             if cache["instance"] is not None and cache["mtime"] == mtime:
                 return cache["instance"]
-            if cache["loading"]:
-                return None
-            cache["loading"] = True
-
-        async def load():
-            try:
-                searcher = await asyncio.to_thread(self._new_searcher)
-                async with self._semantic_cache_lock:
-                    cache["mtime"] = mtime
-                    cache["instance"] = searcher
-                    cache["error"] = None
-                return searcher
-            except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch model load; error is cached and returned
-                async with self._semantic_cache_lock:
-                    cache["error"] = str(e)
-                logger.warning(f"Embeddings load failed: {e}")
-                return None
-            finally:
-                async with self._semantic_cache_lock:
-                    cache["loading"] = False
-
-        # The thread cannot be stopped: a load not done in time goes on and
-        # caches what it builds, and a search meanwhile is told it is loading.
-        self._semantic_load = asyncio.create_task(load())
+            load = cache["load"] or self._start_semantic_load(cache, self._new_searcher)
         try:
             return await asyncio.wait_for(
-                asyncio.shield(self._semantic_load),
-                timeout=self.config.embedding_timeout,
+                asyncio.shield(load), timeout=self.config.embedding_timeout
             )
         except TimeoutError:
             logger.warning(
@@ -1394,7 +1423,9 @@ class DescryService:
             health["features"]["embeddings"] = (
                 self._semantic_cache["instance"] is not None
             )
-            health["features"]["embeddings_loading"] = self._semantic_cache["loading"]
+            health["features"]["embeddings_loading"] = (
+                self._semantic_cache["load"] is not None
+            )
             health["features"]["embeddings_error"] = self._semantic_cache.get("error")
 
         if not self._semantic_available:
@@ -1439,6 +1470,7 @@ class DescryService:
             "age_hours": round(age_hours, 2),
             "nodes": self._graph_cache["nodes"],
             "edges": self._graph_cache["edges"],
+            "languages": self._graph_cache["languages"],
             "stale": age_hours > self.config.max_stale_hours,
             "error": self._graph_cache["error"],
         }
@@ -1665,56 +1697,8 @@ class DescryService:
                                 f"\nSCIP: {len(scip_files)} project(s) indexed"
                             )
 
-                embeddings_status = ""
-                if (
-                    self._semantic_available
-                    and self._SemanticSearcher
-                    and self.config.graph_path.exists()
-                ):
-                    try:
-                        # Reset the cache, then construct in a thread so the
-                        # event loop is not blocked.
-                        async with self._semantic_cache_lock:
-                            cache = self._semantic_cache = {
-                                "mtime": 0,
-                                "instance": None,
-                                "loading": True,
-                                "error": None,
-                            }
-                        logger.info("Generating embeddings for semantic search...")
-                        mtime = self._graph_mtime() or 0
-
-                        def _build_searcher():
-                            # The child process has just embedded this graph
-                            # and cached the vectors under a key derived from
-                            # the graph's content, so this loads them. It
-                            # encodes only when the child could not, since no
-                            # cache then matches.
-                            searcher = self._new_searcher()
-                            # Loading from cache never touches the model. A
-                            # server that had it loaded keeps it loaded, so
-                            # the first search after a reindex does not pay
-                            # for the load; a one-shot `descry index` skips it.
-                            if model_was_loaded:
-                                searcher.ensure_model()
-                            return searcher
-
-                        searcher = await asyncio.to_thread(_build_searcher)
-                        # Seed the cache with the freshly-built instance so
-                        # the next search() call reuses it.
-                        async with self._semantic_cache_lock:
-                            cache["mtime"] = mtime
-                            cache["instance"] = searcher
-                        embeddings_status = (
-                            f"\nEmbeddings: {len(searcher.nodes):,} nodes indexed"
-                        )
-                    except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch; reported in the index summary
-                        embeddings_status = f"\nEmbeddings: Failed ({e})"
-                        logger.warning(f"Embeddings generation failed: {e}")
-                    finally:
-                        async with self._semantic_cache_lock:
-                            cache["loading"] = False
-
+                embeddings = await self._load_indexed_embeddings(model_was_loaded)
+                embeddings_status = f"\n{embeddings}" if embeddings else ""
                 return f"Index complete.{scip_status}{embeddings_status}\n{output}"
             else:
                 return ServiceError(f"Index failed:\n{stderr}")
@@ -2584,16 +2568,8 @@ class DescryService:
                 return
 
             self.reset_caches()
-            # The child has cached this graph's vectors, so this loads them.
-            searcher = await self._get_semantic_searcher()
-            if searcher is not None:
-                line = f"Embeddings: {len(searcher.nodes):,} nodes indexed"
-                if model_was_loaded:
-                    try:
-                        await asyncio.to_thread(searcher.ensure_model)
-                    except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch; reported in the stream
-                        line = f"Embeddings: Failed ({e})"
-                yield {"type": "output", "line": line}
+            if embeddings := await self._load_indexed_embeddings(model_was_loaded):
+                yield {"type": "output", "line": embeddings}
             yield {"type": "done", "success": True, "message": "Index complete."}
         finally:
             self._index_lock.release()
@@ -2619,9 +2595,8 @@ class DescryService:
         if not results:
             trait_filter = f" for trait '{trait_name}'" if trait_name else ""
             return (
-                f"No trait implementations found for method '{method}'{trait_filter}.\n\n"
-                f"Note: trait_impl metadata is only available for recently indexed code. "
-                f"Run descry index to regenerate the graph with this metadata."
+                f"No trait implementations found for method '{method}'{trait_filter}. "
+                "Trait implementations are recorded for Rust code only."
             )
 
         by_trait = defaultdict(list)

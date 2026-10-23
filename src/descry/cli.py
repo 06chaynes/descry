@@ -368,7 +368,7 @@ def main():
 
     # impls
     sub = subparsers.add_parser(
-        "impls", help="Find all implementations of a trait method"
+        "impls", help="Find all implementations of a Rust trait method"
     )
     sub.add_argument("method", help="Method name")
     sub.add_argument("--trait-name", default=None, help="Filter by trait name")

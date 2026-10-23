@@ -71,8 +71,6 @@ def web_project(tmp_path, monkeypatch):
     # a fresh view pinned at tmp_path.
     web_server._config = None
     web_server._service = None
-    web_server._querier = None
-    web_server._querier_mtime = None
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -672,6 +670,7 @@ class TestServiceBackedEndpoints:
             "age_hours": 0.0,
             "nodes": 1,
             "edges": 0,
+            "languages": ["python"],
             "stale": False,
             "error": None,
         }
@@ -692,6 +691,30 @@ class TestServiceBackedEndpoints:
             "nodes": 0,
             "edges": 0,
         }
+
+    def test_status_lists_the_languages_the_search_filter_finds(
+        self, client, web_project
+    ):
+        """The status lists each language of the graph's nodes once, as the
+        search `lang` filter names it, and the page offers those, not a list
+        of its own."""
+        graph = web_project / ".descry_cache" / "codebase_graph.json"
+        data = json.loads(graph.read_text())
+        data["nodes"] += [
+            {"id": f"FILE:{path}::f", "type": "Function", "metadata": {"name": "f"}}
+            for path in ("b.py", "src/c.rs", "D.java", "notes.txt")
+        ]
+        graph.write_text(json.dumps(data))
+        later = time.time() + 5
+        os.utime(graph, (later, later))
+        assert client.get("/api/status").json()["languages"] == [
+            "java",
+            "python",
+            "rust",
+        ]
+        page = (Path(web_server.__file__).parent / "web" / "index.html").read_text()
+        assert 'x-for="lang in health?.graph?.languages' in page
+        assert '<option value="rust">' not in page
 
     def test_status_when_the_graph_vanishes_mid_request(
         self, client, web_project, monkeypatch
@@ -726,17 +749,18 @@ class TestServiceBackedEndpoints:
         assert r.json() == {"error": "limit must not be negative, got -1."}
 
     def test_semantic_while_the_model_loads_says_what_the_service_says(self, client):
+        class Slow:
+            def __init__(self, *args, **kwargs):
+                time.sleep(0.2)
+
         svc = web_server._get_service()
-        svc._semantic_available = True
-        svc._SemanticSearcher = object
-        svc._semantic_cache["loading"] = True
+        svc._semantic_available, svc._SemanticSearcher = True, Slow
+        svc.config.embedding_timeout = 0.01
 
         r = client.get("/api/semantic?query=greeting")
-        said = asyncio.run(svc.semantic("greeting"))
 
         assert r.status_code == 503
-        assert isinstance(said, ServiceError)
-        assert r.json() == {"error": said}
+        assert r.json() == {"error": "Embeddings are loading. Try again shortly."}
 
     def test_semantic_reports_why_the_model_did_not_load(self, client):
         class GatedModel:
@@ -1600,7 +1624,7 @@ class TestIndexRuns:
 
     @pytest.mark.asyncio
     async def test_stream_spawns_the_indexer_safely_and_reloads_the_caches(
-        self, web_project, fake_indexer, monkeypatch
+        self, web_project, fake_indexer
     ):
         spawned = fake_indexer("print('Parsed 1 file')")
         svc = web_server._get_service()
@@ -1610,14 +1634,13 @@ class TestIndexRuns:
         class Searcher:
             nodes = (object(),)
 
+            def __init__(self, graph_path, **kwargs):
+                reloaded.append("vectors")
+
             def ensure_model(self):
                 reloaded.append("model")
 
-        async def fake_searcher():
-            reloaded.append("vectors")
-            return Searcher()
-
-        monkeypatch.setattr(svc, "_get_semantic_searcher", fake_searcher)
+        svc._semantic_available, svc._SemanticSearcher = True, Searcher
         svc._semantic_cache["instance"] = object()
 
         events = [event async for event in svc.index_stream()]
@@ -1636,7 +1659,7 @@ class TestIndexRuns:
 
     @pytest.mark.asyncio
     async def test_stream_ends_normally_when_the_model_cannot_be_reloaded(
-        self, web_project, fake_indexer, monkeypatch
+        self, web_project, fake_indexer
     ):
         fake_indexer("print('Parsed 1 file')")
         svc = web_server._get_service()
@@ -1644,13 +1667,13 @@ class TestIndexRuns:
         class Searcher:
             nodes = ()
 
+            def __init__(self, graph_path, **kwargs):
+                pass
+
             def ensure_model(self):
                 raise RuntimeError("out of memory")
 
-        async def fake_searcher():
-            return Searcher()
-
-        monkeypatch.setattr(svc, "_get_semantic_searcher", fake_searcher)
+        svc._semantic_available, svc._SemanticSearcher = True, Searcher
         svc._semantic_cache["instance"] = object()
 
         events = [event async for event in svc.index_stream()]

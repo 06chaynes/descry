@@ -11,6 +11,11 @@ from pathlib import Path
 
 CURRENT_SCHEMA = 2
 
+# The edges by which one symbol calls or constructs another: its callers
+CALL_RELATIONS = frozenset(
+    {"CALLS", "CALLS_RESOLVED", "INSTANTIATES", "INSTANTIATES_RESOLVED"}
+)
+
 
 class GraphSchemaError(Exception):
     """Raised when a graph file is not a graph this version can read.

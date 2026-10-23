@@ -75,6 +75,15 @@ class TestStaleIndex:
 
         assert mgr._generate_scip(adapter, _project(tmp_path, adapter)) is False
 
+    def test_a_failure_reports_the_error_above_its_stack(self, tmp_path, caplog):
+        frames = "".join(f"    at frame{i} (file.js:{i}:1)\\n" for i in range(40))
+        adapter = _StubAdapter(f"printf 'Error: the cause\\n{frames}' >&2; exit 1")
+
+        mgr = ScipCacheManager(tmp_path)
+        assert mgr._generate_scip(adapter, _project(tmp_path, adapter)) is False
+        assert "Error: the cause" in caplog.text
+        assert "frame" not in caplog.text
+
     def test_failed_run_leaves_project_needing_update(self, tmp_path, stub_adapter):
         mgr = ScipCacheManager(tmp_path)
         adapter = stub_adapter("exit 1")
@@ -398,3 +407,32 @@ class TestCommand:
 
         assert mgr._generate_scip(adapter, _project(tmp_path, adapter)) is True
         assert mgr._index_path(adapter.name, "proj").read_text() == "ran"
+
+
+def test_scip_python_runs_without_pip_or_git(tmp_path):
+    """scip-python is given the environment and version it would otherwise
+    read from `pip list` and git."""
+    import shutil
+    import subprocess
+
+    from descry.scip.adapter import AdapterConfig
+    from descry.scip.adapters.python import PythonAdapter
+
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "p"\n')
+    (tmp_path / "a.py").write_text("def f():\n    return 1\n")
+    project = DiscoveredProject(name="p", root=tmp_path, language="python")
+    out = tmp_path / "out.scip"
+    spec = PythonAdapter().build_command(project, out, AdapterConfig())
+    environment = Path(spec.argv[spec.argv.index("--environment") + 1])
+    assert json.loads(environment.read_text()) == []
+    binary, node = shutil.which("scip-python"), shutil.which("node")
+    if not (binary and node):
+        pytest.skip("scip-python is not installed")
+    subprocess.run(
+        [binary, *spec.argv[1:]],
+        cwd=spec.cwd,
+        env={"PATH": str(Path(node).parent), "HOME": str(tmp_path)},
+        check=True,
+        capture_output=True,
+    )
+    assert out.stat().st_size > 0

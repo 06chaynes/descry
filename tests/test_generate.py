@@ -129,6 +129,25 @@ def add(a: int, b: int) -> int:
         assert func["metadata"]["param_types"] == ["int", "int"]
         assert "Add two numbers" in func["metadata"]["docstring"]
 
+    def test_signature_is_written_as_in_source(self):
+        """A signature keeps defaults, `*`, `**` and `async`, and declares
+        no return type the source does not write."""
+        content = """
+def plain(a, b=1, *rest, key: str = "k", **extra):
+    pass
+
+async def fetch(url) -> bytes:
+    pass
+"""
+        builder = CodeGraphBuilder(".")
+        PythonParser(builder).parse(Path("test.py"), "test.py", content)
+        meta = {n["metadata"]["name"]: n["metadata"] for n in builder.nodes}
+        assert meta["plain"]["signature"] == (
+            "def plain(a, b=1, *rest, key: str='k', **extra)"
+        )
+        assert meta["plain"]["return_type"] == ""
+        assert meta["fetch"]["signature"] == "async def fetch(url) -> bytes"
+
     def test_parses_class_with_methods(self):
         """Should parse class definitions with methods."""
         content = '''

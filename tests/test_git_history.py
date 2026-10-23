@@ -1237,3 +1237,48 @@ class TestChurnLimits:
         assert f"a.py ({self.COMMITS} commits)" in result
         assert "Partial results" not in result
         assert diffed == []
+
+
+@pytest.mark.usefixtures("isolated_git")
+class TestChangeImpactCallers:
+    def test_a_changed_symbol_lists_its_own_callers(self, tmp_path):
+        """Each changed symbol lists the callers of that symbol, not those
+        of every symbol of its name."""
+        from descry.generate import CodeGraphBuilder
+        from descry.query import GraphQuerier
+
+        def parse(value):
+            return f"    def parse(self):\n        return {value}\n"
+
+        repo = _init_repo(tmp_path / "repo")
+        _commit(
+            repo,
+            "one",
+            **{
+                "a.py": "class A:\n" + parse(1),
+                "b.py": "class B:\n" + parse(1),
+                "use.py": "from a import A\nfrom b import B\n\n\n"
+                "def only_a():\n    A().parse()\n\n\n"
+                "def only_b():\n    B().parse()\n",
+            },
+        )
+        _commit(
+            repo,
+            "two",
+            **{"a.py": "class A:\n" + parse(2), "b.py": "class B:\n" + parse(2)},
+        )
+        builder = CodeGraphBuilder(repo)
+        builder.process_directory()
+        graph = tmp_path / "graph.json"
+        builder.export(str(graph))
+        analyzer = GitHistoryAnalyzer(str(repo), graph_querier=GraphQuerier(str(graph)))
+
+        result = analyzer.get_changes_structured(commit_range="HEAD~1..HEAD")
+        callers = {
+            s["id"]: [c["name"] for c in s.get("callers", [])]
+            for s in result["symbols"]
+        }
+        assert callers["FILE:a.py::A::parse"] == ["only_a"]
+        assert callers["FILE:b.py::B::parse"] == ["only_b"]
+        text = analyzer.get_changes(commit_range="HEAD~1..HEAD")
+        assert text.count("Callers: only_a") == text.count("Callers: only_b") == 1

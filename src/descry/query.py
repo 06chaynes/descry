@@ -7,6 +7,8 @@ from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 
+from descry._graph import CALL_RELATIONS, load_graph_with_schema
+
 logger = logging.getLogger(__name__)
 
 # --- Module-level Constants ---
@@ -207,8 +209,6 @@ def _clean_ref_name(ref_name: str, max_len: int = 60) -> str:
 
 class GraphQuerier:
     def __init__(self, graph_file, config=None):
-        from descry._graph import load_graph_with_schema
-
         self.data = load_graph_with_schema(graph_file)
 
         # Paths in node IDs are relative to the project root.
@@ -527,7 +527,7 @@ class GraphQuerier:
                     doc_preview = doc_lines[0][:120]
 
             # Count callers and callees
-            callers_count = len(self.get_callers(meta.get("name", "")))
+            callers_count = len(self.get_callers(node_id))
             callees_count = len(self.get_callees(node_id))
 
             output = [
@@ -700,7 +700,7 @@ class GraphQuerier:
 
         # Add explicit callers section
         if callers_summary:
-            total_callers = len(self.get_callers(meta.get("name", "")))
+            total_callers = len(self.get_callers(node_id))
             output.append(f"#### Callers ({len(callers_summary)} shown):")
             for caller in callers_summary:
                 loc = (
@@ -710,6 +710,7 @@ class GraphQuerier:
                 )
                 output.append(
                     f"- `{caller['name']}` in {loc} ({caller['tokens']} toks)"
+                    f"{self.one_of(caller['candidates'])}"
                 )
             if total_callers > len(callers_summary):
                 output.append(
@@ -1248,7 +1249,8 @@ class GraphQuerier:
         return examples
 
     def _get_callers_summary(self, target_node_id, limit=None):
-        """Get summary of callers: name, file, lineno, tokens.
+        """Get summary of callers: name, file, lineno, tokens, and the
+        number of candidates of a call that may reach the target.
 
         Args:
             target_node_id: The node ID to find callers for
@@ -1260,16 +1262,10 @@ class GraphQuerier:
         if limit is None:
             limit = self._max_callers_shown
 
-        target_node = self.nodes.get(target_node_id)
-        if not target_node:
+        if target_node_id not in self.nodes:
             return []
-
-        target_name = target_node.get("metadata", {}).get("name")
-        if not target_name:
-            return []
-
-        # Use the optimized get_callers method
-        caller_ids = self.get_callers(target_name)
+        caller_ids = self.get_callers(target_node_id)
+        ambiguous = self.get_ambiguous_callers(target_node_id)
 
         callers = []
         for caller_id in caller_ids:
@@ -1285,6 +1281,7 @@ class GraphQuerier:
                         "lineno": meta.get("lineno", 0),
                         "tokens": meta.get("token_count", 0),
                         "type": caller_node.get("type", "?"),
+                        "candidates": ambiguous.get(caller_id),
                     }
                 )
 
@@ -1555,8 +1552,8 @@ class GraphQuerier:
             if direction == "forward":
                 next_ids = self.get_callees(node_id)[: self._max_children_per_level]
             else:
-                next_ids = self.get_callers(name)[: self._max_children_per_level]
-                ambiguous = self.get_ambiguous_callers(name)
+                next_ids = self.get_callers(node_id)[: self._max_children_per_level]
+                ambiguous = self.get_ambiguous_callers(node_id)
 
             # Format node
             indent = "  " * (current_depth - 1)
@@ -1693,8 +1690,8 @@ class GraphQuerier:
             elif direction == "forward":
                 next_ids = self.get_callees(node_id)[: self._max_children_per_level]
             else:
-                next_ids = self.get_callers(name)[: self._max_children_per_level]
-                ambiguous = self.get_ambiguous_callers(name)
+                next_ids = self.get_callers(node_id)[: self._max_children_per_level]
+                ambiguous = self.get_ambiguous_callers(node_id)
 
             children = []
             for next_id in next_ids:
@@ -1735,9 +1732,10 @@ class GraphQuerier:
         """
         Traverses INHERITS edges to build a full list of methods for a class.
         """
-        class_node = self.nodes.get(class_node_id)
-        if not class_node:
-            return f"ERROR: Node '{class_node_id}' not found in graph."
+        class_node_id, resolve_msg = self._resolve_node_id(class_node_id)
+        if class_node_id is None:
+            return f"ERROR: {resolve_msg}"
+        class_node = self.nodes[class_node_id]
         if class_node["type"] != "Class":
             return f"ERROR: '{class_node_id}' is a {class_node['type']}, not a Class."
 
@@ -1783,6 +1781,8 @@ class GraphQuerier:
         output.append(
             f"### Flattened View: `{class_node['metadata'].get('name', class_node_id)}`"
         )
+        if resolve_msg:
+            output.append(f"> **Note:** {resolve_msg}")
         output.append("#### Inheritance Chain:")
         output.append(
             " -> ".join(
@@ -2160,14 +2160,6 @@ class GraphQuerier:
             func_name: Function/method name to find callers for
             fuzzy: If True, also matches names that start with the search term
         """
-        # Include INSTANTIATES for struct/class usage tracking
-        relevant_relations = {
-            "CALLS",
-            "CALLS_RESOLVED",
-            "INSTANTIATES",
-            "INSTANTIATES_RESOLVED",
-        }
-
         # Step 1: Find all target node IDs that match func_name
         target_ids = self._resolve_target_ids(func_name, fuzzy)
 
@@ -2175,7 +2167,7 @@ class GraphQuerier:
         callers = set()
         for target_id in target_ids:
             for edge in self.incoming.get(target_id, []):
-                if edge["relation"] in relevant_relations:
+                if edge["relation"] in CALL_RELATIONS:
                     callers.add(edge["source"])
 
         # A call the resolver left unresolved but narrowed to candidates
@@ -2184,7 +2176,7 @@ class GraphQuerier:
             if target_id.startswith("REF:"):
                 continue
             for edge in self.candidate_incoming.get(target_id, []):
-                if edge["relation"] in relevant_relations:
+                if edge["relation"] in CALL_RELATIONS:
                     callers.add(edge["source"])
 
         return sorted(callers)
@@ -2193,6 +2185,8 @@ class GraphQuerier:
     def one_of(candidates):
         """The note on a call that is one of ``candidates`` definitions an
         unresolved edge names; empty for a call that is certain."""
+        if candidates == 1:
+            return " (unresolved; the only candidate)"
         return f" (one of {candidates} candidates)" if candidates else ""
 
     def get_ambiguous_callers(self, func_name, fuzzy=False):

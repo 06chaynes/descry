@@ -186,7 +186,7 @@ Descry provides 19 tools, available through all interfaces:
 | `path` | Find shortest call path between two symbols |
 | `structure` | Show file structure — imports, classes, functions |
 | `flatten` | Show effective API of a class including inherited methods |
-| `impls` | Find all implementations of a trait/interface method |
+| `impls` | Find all implementations of a Rust trait method |
 | `cross-lang` | Trace frontend API calls to backend handlers via OpenAPI |
 | `churn` | Find code churn hotspots (symbols, files, or co-change pairs) |
 | `evolution` | Track how a symbol has changed over time |
