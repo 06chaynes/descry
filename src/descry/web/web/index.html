@@ -326,7 +326,7 @@
             </div>
             <div class="results" x-show="results.callers">
                 <div class="results-header">
-                    <span x-text="results.callers?.total + ' caller(s) of ' + results.callers?.symbol + (results.callers?.fuzzy ? ' (fuzzy)' : '')"></span>
+                    <span x-text="(results.callers?.total - results.callers?.possible) + ' caller(s) of ' + results.callers?.symbol + (results.callers?.fuzzy ? ' (fuzzy)' : '') + (results.callers?.possible ? ' (+' + results.callers.possible + ' possible)' : '')"></span>
                 </div>
                 <div class="results-body">
                     <template x-for="c in results.callers?.callers || []" :key="c.id">
@@ -367,7 +367,7 @@
             </div>
             <div class="results" x-show="results.callees">
                 <div class="results-header">
-                    <span x-text="results.callees?.total + ' callee(s) of ' + results.callees?.symbol + (results.callees?.fuzzy ? ' (fuzzy)' : '')"></span>
+                    <span x-text="(results.callees?.total - results.callees?.possible) + ' callee(s) of ' + (results.callees?.others ? results.callees.node_id : results.callees?.symbol) + (results.callees?.fuzzy ? ' (fuzzy)' : '') + (results.callees?.possible ? ' (+' + results.callees.possible + ' possible)' : '') + (results.callees?.others ? ' (' + results.callees.others + (results.callees.fuzzy ? ' other matches' : ' other definitions of the name') + '; use a node ID to choose)' : '')"></span>
                 </div>
                 <div class="results-body">
                     <template x-for="c in results.callees?.callees || []" :key="c.id">
@@ -1031,9 +1031,9 @@
                                         <div class="changes-callers" x-show="sym.callers?.length">
                                             <span class="changes-callers-label">Callers:</span>
                                             <template x-for="c in (sym.callers || [])" :key="c.id">
-                                                <span class="changes-caller" @click="forms.context.node_id = c.id; setTool('context'); runContext()" x-text="c.name"></span>
+                                                <span class="changes-caller" @click="forms.context.node_id = c.id; setTool('context'); runContext()" x-text="c.name + (c.candidates ? ' (' + oneOf(c.candidates) + ')' : '')"></span>
                                             </template>
-                                            <span class="changes-callers-more" x-show="sym.callers_total > 5" x-text="'+' + (sym.callers_total - 5) + ' more'"></span>
+                                            <span class="changes-callers-more" x-show="sym.callers_total > sym.callers.length" x-text="changesMore(sym)"></span>
                                         </div>
                                     </div>
                                 </template>
@@ -1495,6 +1495,13 @@ function app() {
             return this._renderNode(node, depth);
         },
 
+        // What a change's callers past those listed are: certain, then possible.
+        changesMore(sym) {
+            const possible = sym.callers_possible - sym.callers.filter(c => c.candidates).length;
+            const certain = sym.callers_total - sym.callers.length - possible;
+            return [certain ? certain + ' more callers' : '', possible ? possible + ' more possible callers' : ''].filter(Boolean).join(', ');
+        },
+
         // The note on an unresolved call that has `count` candidates.
         oneOf(count) {
             return count === 1 ? 'unresolved; the only candidate' : `one of ${count} candidates`;
@@ -1552,6 +1559,7 @@ function app() {
             // Token count
             html += `<span class="flow-tokens">${node.tokens.toLocaleString()} toks</span>`;
             if (node.candidates) html += `<span class="flow-tokens">${this.oneOf(node.candidates)}</span>`;
+            if (node.more) html += `<span class="flow-tokens">+${node.more} more not shown</span>`;
 
             // File location - navigates to Source
             if (fileLoc) {

@@ -25433,17 +25433,10 @@ class CodeGraphBuilder:
             output_path: Path to write the graph JSON
             scip_index: Optional ScipIndex for type-aware resolution
         """
-        from descry._graph import CALL_RELATIONS, CURRENT_SCHEMA
+        from descry._graph import CURRENT_SCHEMA, count_callers
 
         self.resolve_references(scip_index=scip_index)
-        # The number of its callers, those its calls are resolved to: not
-        # those an unresolved call only may be one of
-        callers = {}
-        for edge in self.edges:
-            if edge["relation"] in CALL_RELATIONS:
-                callers.setdefault(edge["target"], set()).add(edge["source"])
-        for node in self.nodes:
-            node["metadata"]["in_degree"] = len(callers.get(node["id"], ()))
+        count_callers(self.nodes, self.edges)
         # Atomic write: stream to a sibling tmp file then os.replace. A
         # concurrent reader (MCP prewarm, web `/api/health`, another CLI
         # invocation) that stats the destination mid-write would otherwise

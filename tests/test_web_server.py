@@ -1114,11 +1114,11 @@ class TestGraphEndpoints:
         _write_web_graph(
             web_project,
             nodes=[
-                _fn("parse", in_degree=1),
-                _fn("load", in_degree=3),
-                _fn("run", in_degree=2),
-                _fn("_hidden", in_degree=9),
-                _fn("checks", file="test_app.py", in_degree=9),
+                _fn("parse"),
+                _fn("load"),
+                _fn("run"),
+                _fn("_hidden"),
+                _fn("checks", file="test_app.py"),
                 {
                     "id": "FILE:app.py::Engine",
                     "type": "Class",
@@ -1127,9 +1127,20 @@ class TestGraphEndpoints:
                 method("Engine"),
                 method("Other"),
             ],
+            # Callers: parse 1, load 3, run 2, _hidden and checks 4
             edges=[
                 {"source": "FILE:app.py::run", "target": target, "relation": "CALLS"}
                 for target in ("FILE:app.py::load", "FILE:app.py::parse")
+            ]
+            + [
+                {"source": f"FILE:c.py::c{i}", "target": target, "relation": "CALLS"}
+                for target, count in [
+                    ("FILE:app.py::load", 2),
+                    ("FILE:app.py::run", 2),
+                    ("FILE:app.py::_hidden", 4),
+                    ("FILE:test_app.py::checks", 4),
+                ]
+                for i in range(count)
             ],
         )
 

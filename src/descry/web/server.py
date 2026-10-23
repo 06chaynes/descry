@@ -338,6 +338,7 @@ async def api_callers(request: Request) -> JSONResponse:
             "symbol": data["symbol"],
             "fuzzy": data["fuzzy"],
             "total": data["total"],
+            "possible": len(ambiguous),
             "callers": [
                 _caller_to_dict(c, q, ambiguous.get(c, 0)) for c in data["callers"]
             ],
@@ -369,6 +370,8 @@ async def api_callees(request: Request) -> JSONResponse:
             "node_id": node["id"],
             "fuzzy": data["fuzzy"],
             "total": data["total"],
+            "possible": len(ambiguous),
+            "others": data["others"],
             "callees": [
                 _caller_to_dict(c, q, ambiguous.get(c, 0)) for c in data["callees"]
             ],
@@ -515,13 +518,13 @@ async def api_flow(request: Request) -> JSONResponse:
         structured=structured,
     )
     if not data["ok"]:
-        return JSONResponse({"error": data["error"]}, status_code=503)
+        return _graph_failure(data)
 
     return JSONResponse(
         {
             "start": start,
             "direction": direction,
-            "depth": depth,
+            "depth": data["depth"],
             "tree" if structured else "markdown": data["result"],
         }
     )
@@ -544,7 +547,7 @@ async def api_path(request: Request) -> JSONResponse:
         start, end, max_depth=max_depth, direction=direction
     )
     if not data["ok"]:
-        return JSONResponse({"error": data["error"]}, status_code=503)
+        return _graph_failure(data)
 
     if data["status"] != "found":
         return JSONResponse(

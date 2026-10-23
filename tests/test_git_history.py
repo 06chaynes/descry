@@ -64,11 +64,8 @@ class FakeQuerier:
     def find_nodes_by_name(self, name, fuzzy=False):
         return [n for n in self.data["nodes"] if n["metadata"]["name"] == name]
 
-    def get_callers(self, name):
-        return []
-
-    def get_ambiguous_callers(self, name):
-        return {}
+    def ordered_callers(self, name):
+        return [], {}
 
 
 def _function_node(file_path, name, lineno, end_lineno):

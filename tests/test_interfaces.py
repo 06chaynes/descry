@@ -209,3 +209,50 @@ def test_the_count_is_of_the_callers_resolved_to_it(project, web):
     assert "(20 toks, 1 caller)" in _cli(project, "quick", A)
     assert "(20 toks, 1 caller)" in _mcp(project, "quick", name=A)
     assert json.loads(web("/api/quick", name=A))["symbol"]["in_degree"] == 1
+
+
+def test_callers_say_how_many_are_possible(project, web):
+    said = f"1 caller(s) of '{A}' (+1 possible):"
+    assert said in _cli(project, "callers", A)
+    assert said in _mcp(project, "callers", name=A)
+    answer = json.loads(web("/api/callers", name=A))
+    assert (answer["total"], answer["possible"]) == (2, 1)
+
+
+def test_a_change_marks_its_possible_callers_on_the_page(web):
+    """The page renders the structured form: each caller carries its
+    candidates, and the change how many of its callers only may be."""
+    data = json.loads(
+        web("/api/changes", commit_range="HEAD~1..HEAD", format="structured")
+    )
+    symbols = {s["id"]: s for s in data["data"]["symbols"]}
+    callers = {c["name"]: c["candidates"] for c in symbols[A]["callers"]}
+    assert callers == {"only_a": None, "guess": 2}
+    assert symbols[A]["callers_possible"] == 1
+
+
+@pytest.mark.parametrize("interface", ["cli", "mcp", "web"])
+def test_a_depth_below_one_is_refused(project, web, interface):
+    answer = {
+        "cli": lambda: (
+            _cli(project, "flow", A, "--depth", "0")
+            + _cli(project, "path", "only_a", A, "--max-depth", "0")
+        ),
+        "mcp": lambda: (
+            _mcp(project, "flow", start=A, depth=0)
+            + _mcp(project, "path", start="only_a", end=A, max_depth=0)
+        ),
+        "web": lambda: (
+            web("/api/flow", start=A, depth=0)
+            + web("/api/path", start="only_a", end=A, max_depth=0)
+        ),
+    }[interface]()
+    assert "depth must be at least 1, got 0." in answer
+    assert "max_depth must be at least 1, got 0." in answer
+
+
+def test_a_depth_past_the_ceiling_says_so(project, web):
+    assert "is past `[query] max_depth`; traced to 3." in _mcp(
+        project, "flow", start=A, direction="backward", depth=9
+    )
+    assert json.loads(web("/api/flow", start=A, depth=9))["depth"] == 3

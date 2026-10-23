@@ -1474,3 +1474,71 @@ def test_flatten_takes_a_class_name(tmp_path):
     flat = _querier(tmp_path, [widget, draw], [defines]).flatten_class("Widget")
     assert "def draw(self)" in flat
     assert "`FILE:w.py::Widget`" in flat
+
+
+class TestCertainBeforePossible:
+    """A caller is certain only by a call resolved to the symbol; a list cut
+    short keeps the certain ones."""
+
+    def _graph(self, tmp_path, **config):
+        nodes = [
+            _fn("FILE:a.py::outer"),
+            _fn("FILE:a.py::outer::imp"),
+            _fn("FILE:b.py::imp"),
+            _fn("FILE:c.py::sure", token_count=500),
+            *(_fn(f"FILE:d.py::maybe{i}", token_count=1) for i in range(3)),
+        ]
+        for name, line in [
+            ("a.py", "def outer():\n    pass\n"),
+            ("b.py", "def imp():\n    pass\n"),
+        ]:
+            (tmp_path / name).write_text(line)
+        unresolved = [
+            {
+                "source": source,
+                "target": "REF:imp",
+                "relation": "CALLS",
+                "metadata": {"candidates": ["FILE:a.py::outer::imp", "FILE:b.py::imp"]},
+            }
+            for source in [
+                "FILE:a.py::outer",
+                *(f"FILE:d.py::maybe{i}" for i in range(3)),
+            ]
+        ]
+        edges = [
+            {
+                "source": "FILE:a.py::outer",
+                "target": "FILE:a.py::outer::imp",
+                "relation": "DEFINES",
+            },
+            _calls("FILE:c.py::sure", "FILE:b.py::imp"),
+            *unresolved,
+        ]
+        return _querier(tmp_path, nodes, edges, project_root=tmp_path, **config)
+
+    def test_defining_a_symbol_is_not_calling_it(self, tmp_path):
+        q = self._graph(tmp_path)
+        assert q.get_ambiguous_callers("FILE:a.py::outer::imp")["FILE:a.py::outer"] == 2
+        assert "**Callers:** 0 (+4 possible)" in q.get_context_prompt(
+            "FILE:a.py::outer::imp", brief=True
+        )
+        assert q.nodes["FILE:a.py::outer::imp"]["metadata"]["in_degree"] == 0
+
+    def test_a_cut_list_keeps_the_certain_callers(self, tmp_path):
+        q = self._graph(tmp_path, max_callers_shown=1, max_children_per_level=1)
+        context = q.get_context_prompt("FILE:b.py::imp")
+        assert "- `sure` in c.py" in context
+        assert "(4 more possible callers)" in context
+        flow = q.trace_flow("FILE:b.py::imp", direction="backward", depth=1)
+        assert "**sure**" in flow and "*(4 more)*" in flow
+        tree = q.trace_flow_structured("FILE:b.py::imp", direction="backward", depth=1)
+        assert [c["name"] for c in tree["root"]["children"]] == ["sure"]
+        assert tree["root"]["more"] == 4
+
+
+def test_a_graph_is_counted_as_it_loads(tmp_path):
+    """A graph an older descry wrote, with possible callers in its counts,
+    is counted again."""
+    nodes = [_fn("FILE:a.py::f", in_degree=7), _fn("FILE:a.py::g")]
+    q = _querier(tmp_path, nodes, [_calls("FILE:a.py::g", "FILE:a.py::f")])
+    assert q.nodes["FILE:a.py::f"]["metadata"]["in_degree"] == 1

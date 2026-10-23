@@ -528,9 +528,8 @@ class GraphQuerier:
 
             # Callers whose calls are resolved to it, then those that may be
             possible = len(self.get_ambiguous_callers(node_id))
-            callers_count = len(self.get_callers(node_id)) - possible
-            if possible:
-                callers_count = f"{callers_count} (+{possible} possible)"
+            certain = len(self.get_callers(node_id)) - possible
+            callers_count = f"{certain}{self.possible(possible)}"
             callees_count = len(self.get_callees(node_id))
 
             output = [
@@ -703,7 +702,7 @@ class GraphQuerier:
 
         # Add explicit callers section
         if callers_summary:
-            total_callers = len(self.get_callers(node_id))
+            callers, ambiguous = self.ordered_callers(node_id)
             output.append(f"#### Callers ({len(callers_summary)} shown):")
             for caller in callers_summary:
                 loc = (
@@ -715,9 +714,12 @@ class GraphQuerier:
                     f"- `{caller['name']}` in {loc} ({caller['tokens']} toks)"
                     f"{self.one_of(caller['candidates'])}"
                 )
-            if total_callers > len(callers_summary):
+            if len(callers) > len(callers_summary):
+                shown = {caller["id"] for caller in callers_summary}
+                more = [caller for caller in callers if caller not in shown]
+                possible = sum(caller in ambiguous for caller in more)
                 output.append(
-                    f"  *({total_callers - len(callers_summary)} more callers)*"
+                    f"  *({self.more_callers(len(more) - possible, possible)})*"
                 )
             output.append("")
 
@@ -1288,8 +1290,8 @@ class GraphQuerier:
                     }
                 )
 
-        # Sort by tokens (simpler callers first), then by name for consistency
-        callers.sort(key=lambda c: (c["tokens"], c["name"]))
+        # Those resolved to it first, then simpler callers, then by name
+        callers.sort(key=lambda c: (bool(c["candidates"]), c["tokens"], c["name"]))
         return callers[:limit]
 
     def _expand_callees_recursive(
@@ -1439,15 +1441,18 @@ class GraphQuerier:
 
         return results, budget
 
+    def flow_depth(self, depth):
+        """The depth a flow of ``depth`` is traced to: at most the project's
+        `[query] max_depth`, or 5 when unset."""
+        return min(depth, self._max_depth or 5)
+
     def _resolve_flow_start(self, start_name, depth):
         """Clamp depth to the configured ceiling and resolve the start symbol.
 
         Returns ``(func_nodes, depth)``; ``func_nodes`` is empty when nothing
         matched, leaving each caller to raise its own error shape.
         """
-        # The project's `[query] max_depth` is the ceiling, or 5 when unset.
-        effective_max = self._max_depth if self._max_depth else 5
-        depth = min(depth, effective_max)
+        depth = self.flow_depth(depth)
 
         start_nodes = self.find_nodes_by_name(start_name)
         if not start_nodes:
@@ -1458,6 +1463,14 @@ class GraphQuerier:
             # Fall back to the first match even when it is not a function.
             func_nodes = start_nodes[:1]
         return func_nodes, depth
+
+    def _flow_next(self, node_id, direction):
+        """The next level of a flow from ``node_id``: its callees, or its
+        callers with those resolved to it first; and ``{caller: number of
+        candidates}`` of the callers that only may be."""
+        if direction == "forward":
+            return self.get_callees(node_id), {}
+        return self.ordered_callers(node_id)
 
     def trace_flow(
         self,
@@ -1473,7 +1486,8 @@ class GraphQuerier:
         Args:
             start_name: Starting symbol name or node ID
             direction: 'forward' traces callees, 'backward' traces callers
-            depth: Levels of calls below the start (1-5, default: 3)
+            depth: Levels of calls below the start (default: 3), at most
+                `flow_depth` allows
             target: Optional target to stop when reached
             inline_threshold: Inline code below this token count (default: 100)
             timeout_ms: Timeout in milliseconds (default: TIMEOUT_MS)
@@ -1483,6 +1497,7 @@ class GraphQuerier:
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
+        asked = depth
         func_nodes, depth = self._resolve_flow_start(start_name, depth)
         if not func_nodes:
             return f"No function '{start_name}' found."
@@ -1495,6 +1510,11 @@ class GraphQuerier:
             f"### Call Flow: `{start_meta.get('name', start_name)}` ({direction})"
         ]
         output.append("")
+        if depth < asked:
+            output.append(
+                f"**Note:** depth {asked} is past `[query] max_depth`; traced to {depth}."
+            )
+            output.append("")
 
         # Show disambiguation info if multiple matches
         if len(func_nodes) > 1:
@@ -1552,12 +1572,9 @@ class GraphQuerier:
                 return True
 
             # Get next level
-            ambiguous = {}
-            if direction == "forward":
-                next_ids = self.get_callees(node_id)[: self._max_children_per_level]
-            else:
-                next_ids = self.get_callers(node_id)[: self._max_children_per_level]
-                ambiguous = self.get_ambiguous_callers(node_id)
+            next_ids, ambiguous = self._flow_next(node_id, direction)
+            hidden = len(next_ids) - self._max_children_per_level
+            next_ids = next_ids[: self._max_children_per_level]
 
             # Format node
             indent = "  " * (current_depth - 1)
@@ -1585,6 +1602,8 @@ class GraphQuerier:
                     next_id, current_depth + 1, path + [node_id], ambiguous.get(next_id)
                 ):
                     return True
+            if hidden > 0 and current_depth <= depth:
+                output.append(f"{indent}  *({hidden} more)*")
             return False
 
         trace(start_id, 1, [])
@@ -1687,15 +1706,15 @@ class GraphQuerier:
                 code = self.get_source_segment(file_path, start_line, end_line)
 
             # Recurse into children
-            ambiguous = {}
+            next_ids, ambiguous = [], {}
             if target and name == target:
                 path_to_target.extend([*path, name])
-                next_ids = []
-            elif direction == "forward":
-                next_ids = self.get_callees(node_id)[: self._max_children_per_level]
             else:
-                next_ids = self.get_callers(node_id)[: self._max_children_per_level]
-                ambiguous = self.get_ambiguous_callers(node_id)
+                next_ids, ambiguous = self._flow_next(node_id, direction)
+            hidden = max(len(next_ids) - self._max_children_per_level, 0)
+            if current_depth > depth:
+                hidden = 0
+            next_ids = next_ids[: self._max_children_per_level]
 
             children = []
             for next_id in next_ids:
@@ -1718,6 +1737,8 @@ class GraphQuerier:
                 "lang": lang,
                 "candidates": candidates,
                 "children": children,
+                # Those of the next level past the per-level limit
+                "more": hidden,
             }
 
         root = build_tree(start_id, 1, [])
@@ -2186,12 +2207,35 @@ class GraphQuerier:
         return sorted(callers)
 
     @staticmethod
+    def possible(count):
+        """The note on a count of callers or callees of those that only may
+        be: ``count`` of them; empty for none."""
+        return f" (+{count} possible)" if count else ""
+
+    @staticmethod
+    def more_callers(certain, possible):
+        """The note on callers a list leaves out: ``certain`` of them and
+        ``possible`` that only may be."""
+        parts = [f"{certain} more callers"] if certain else []
+        if possible:
+            parts.append(f"{possible} more possible callers")
+        return ", ".join(parts)
+
+    @staticmethod
     def one_of(candidates):
         """The note on a call that is one of ``candidates`` definitions an
         unresolved edge names; empty for a call that is certain."""
         if candidates == 1:
             return " (unresolved; the only candidate)"
         return f" (one of {candidates} candidates)" if candidates else ""
+
+    def ordered_callers(self, func_name, fuzzy=False):
+        """The callers of a symbol matching ``func_name``, those its calls are
+        resolved to first, and ``{caller: number of candidates}`` of the
+        others."""
+        ambiguous = self.get_ambiguous_callers(func_name, fuzzy)
+        callers = self.get_callers(func_name, fuzzy)
+        return sorted(callers, key=ambiguous.__contains__), ambiguous
 
     def get_ambiguous_callers(self, func_name, fuzzy=False):
         """``{caller: number of candidates}`` of the calls that may reach a
@@ -2204,6 +2248,7 @@ class GraphQuerier:
             for target_id in target_ids
             if not target_id.startswith("REF:")
             for edge in self.incoming.get(target_id, [])
+            if edge["relation"] in CALL_RELATIONS
         }
         ambiguous = {}
         for target_id in target_ids:

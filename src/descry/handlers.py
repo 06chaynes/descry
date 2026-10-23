@@ -946,11 +946,12 @@ _GRAPH_NOT_FOUND = "Graph not found. Run descry ensure first."
 _INDEX_BUSY = "An index run is already in progress"
 
 
-def _limit_error(limit: int) -> str | None:
-    """Why `limit` cannot be used, or None: a negative one slices from the
-    end, and none at all would answer as if there were nothing to show."""
+def _limit_error(limit: int, name: str = "limit") -> str | None:
+    """Why the limit or depth ``name`` cannot be ``limit``, or None: a
+    negative one slices from the end, and none at all answers as if there
+    were nothing to show."""
     if limit < 1:
-        return f"limit must be at least 1, got {limit}."
+        return f"{name} must be at least 1, got {limit}."
     return None
 
 
@@ -1722,15 +1723,11 @@ class DescryService:
 
     @staticmethod
     def _callers_from(q, name: str, limit: int) -> dict:
-        all_callers = q.get_callers(name)
-        ambiguous = q.get_ambiguous_callers(name)
+        all_callers, ambiguous = q.ordered_callers(name)
         fuzzy = False
         if not all_callers:
-            all_callers = q.get_callers(name, fuzzy=True)
-            ambiguous = q.get_ambiguous_callers(name, fuzzy=True)
+            all_callers, ambiguous = q.ordered_callers(name, fuzzy=True)
             fuzzy = bool(all_callers)
-        # Certain callers come before those that are one of several candidates.
-        all_callers = sorted(all_callers, key=ambiguous.__contains__)
 
         return {
             "ok": True,
@@ -1811,9 +1808,9 @@ class DescryService:
                 f"No callers of '{name}'. Try descry search to verify symbol exists."
             )
         else:
-            possible = sum(caller in ambiguous for caller in callers)
-            of_them = f", {possible} of them possible" if possible else ""
-            lines = [f"{len(callers)} caller(s) of '{name}'{fuzzy_note}{of_them}:"]
+            certain = total_count - len(ambiguous)
+            possible = q.possible(len(ambiguous))
+            lines = [f"{certain} caller(s) of '{name}'{fuzzy_note}{possible}:"]
             for caller in callers:
                 node_info = q.get_node_info(caller)
                 one_of = q.one_of(ambiguous.get(caller))
@@ -1855,7 +1852,8 @@ class DescryService:
             node["id"] if data["others"] else node.get("metadata", {}).get("name", name)
         )
         others = (
-            f"\n({data['others']} other definition(s) of '{name}'; "
+            f"\n({data['others']} other "
+            f"{'match(es) for' if data['fuzzy'] else 'definition(s) of'} '{name}'; "
             "use a node ID to choose)"
             if data["others"]
             else ""
@@ -1863,7 +1861,11 @@ class DescryService:
         if not total:
             result = f"'{display_name}'{fuzzy_note} calls no tracked functions.{others}"
         else:
-            lines = [f"'{display_name}'{fuzzy_note} calls {total} function(s):"]
+            certain = total - len(ambiguous)
+            possible = q.possible(len(ambiguous))
+            lines = [
+                f"'{display_name}'{fuzzy_note} calls {certain} function(s){possible}:"
+            ]
             for callee in callees:
                 one_of = q.one_of(ambiguous.get(callee))
                 callee_info = q.get_node_info(callee)
@@ -1968,8 +1970,11 @@ class DescryService:
         """Call flow from a starting symbol, as data.
 
         `result` is the markdown trace, or the tree of
-        `GraphQuerier.trace_flow_structured` when `structured`.
+        `GraphQuerier.trace_flow_structured` when `structured`; `depth` is
+        the depth traced, at most the project's ceiling.
         """
+        if error := _limit_error(depth, "depth"):
+            return {"ok": False, "error": error, "reason": "invalid"}
         q = await self._get_querier()
         if not q:
             return {"ok": False, "error": self._no_graph_error()}
@@ -1982,7 +1987,12 @@ class DescryService:
             target=target,
             inline_threshold=inline_threshold,
         )
-        return {"ok": True, "error": None, "result": result}
+        return {
+            "ok": True,
+            "error": None,
+            "result": result,
+            "depth": q.flow_depth(depth),
+        }
 
     async def flow(
         self,
@@ -2661,6 +2671,8 @@ class DescryService:
         `status` and `path` are those of `GraphQuerier.find_call_path_result`.
         Unless `status` is "found", `message` says why there is no path.
         """
+        if error := _limit_error(max_depth, "max_depth"):
+            return {"ok": False, "error": error, "reason": "invalid"}
         q = await self._get_querier()
         if not q:
             return {"ok": False, "error": self._no_graph_error()}
@@ -2942,7 +2954,7 @@ class DescryService:
         """Run a GitHistoryAnalyzer method off the event loop, as data.
 
         `result` is what the method returned. On failure `reason` is
-        "invalid" for a negative `limit`, "unavailable" when the git history
+        "invalid" for a `limit` below 1, "unavailable" when the git history
         module is missing and "failed" when the analysis raised.
         """
         if error := _limit_error(kwargs["limit"]):

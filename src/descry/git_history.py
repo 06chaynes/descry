@@ -1661,14 +1661,16 @@ class GitHistoryAnalyzer:
             )
 
             if show_callers and self.querier:
-                callers, total = self._symbol_callers(node_id)
+                callers, total, possible = self._symbol_callers(node_id)
                 if callers:
                     names = ", ".join(
                         c["name"] + self.querier.one_of(c["candidates"])
                         for c in callers
                     )
+                    hidden = possible - sum(bool(c["candidates"]) for c in callers)
+                    hidden_certain = total - len(callers) - hidden
                     more = (
-                        f", +{total - len(callers)} more"
+                        f"; {self.querier.more_callers(hidden_certain, hidden)}"
                         if total > len(callers)
                         else ""
                     )
@@ -1679,12 +1681,11 @@ class GitHistoryAnalyzer:
     def _symbol_callers(self, node_id):
         """The first five callers of the symbol ``node_id``, certain ones
         first, each ``{"id", "name", "candidates"}`` where ``candidates`` is
-        the number an unresolved call reaching it only may be one of; and the
-        number of its callers."""
-        caller_ids = self.querier.get_callers(node_id)
-        ambiguous = self.querier.get_ambiguous_callers(node_id)
+        the number an unresolved call reaching it only may be one of; the
+        number of its callers; and how many of those only may be."""
+        caller_ids, ambiguous = self.querier.ordered_callers(node_id)
         callers = []
-        for caller_id in sorted(caller_ids, key=ambiguous.__contains__)[:5]:
+        for caller_id in caller_ids[:5]:
             c_node = self.querier.get_node_info(caller_id)
             name = (
                 c_node["metadata"].get("name", "?")
@@ -1694,7 +1695,7 @@ class GitHistoryAnalyzer:
             callers.append(
                 {"id": caller_id, "name": name, "candidates": ambiguous.get(caller_id)}
             )
-        return callers, len(caller_ids)
+        return callers, len(caller_ids), len(ambiguous)
 
     def get_changes_structured(
         self,
@@ -1758,10 +1759,11 @@ class GitHistoryAnalyzer:
             }
 
             if show_callers and self.querier:
-                callers, total = self._symbol_callers(node_id)
+                callers, total, possible = self._symbol_callers(node_id)
                 if callers:
                     entry["callers"] = callers
                     entry["callers_total"] = total
+                    entry["callers_possible"] = possible
 
             symbols.append(entry)
 

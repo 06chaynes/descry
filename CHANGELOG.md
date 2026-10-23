@@ -9,17 +9,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - A caller that reaches a symbol only as one of an unresolved call's
-  candidates is no longer counted or listed as a caller: `in_degree`
-  ("N callers") counts the callers whose calls are resolved to the symbol,
-  the brief `context` gives the others as "(+N possible)", `callers` says
-  how many of those it lists are possible, and `changes` marks each, in
-  text and in its structured form (`candidates`).
+  candidates is counted apart from its callers. `in_degree` ("N callers")
+  counts the callers whose calls are resolved to the symbol, and is
+  counted again as a graph loads, so a graph from 0.3.1 needs no reindex.
+  Every other count gives the others as "(+N possible)": brief `context`,
+  `callers`, `callees`, and the web page's headers (`possible` in the web
+  API). Lists mark each one; `changes` does so in text, in its structured
+  form (`candidates`, `callers_possible`) and on the page.
+- A function no longer counts as a certain caller of a symbol it defines
+  when its call to it is unresolved.
+- A list cut short (`context`'s callers, backward `flow` in text and as a
+  tree) keeps the callers resolved to the symbol first, and says how many
+  callers, and possible callers, it leaves out; a `flow` tree node gives
+  them as `more`.
 - A `flow` of `depth` N shows N levels of calls below the start; `depth=1`
-  showed the start alone.
+  showed the start alone. `[query] max_depth` is that many levels too. A
+  depth past it is traced to it and says so; the web API returns the depth
+  traced.
 - `callees` says how many callees its `limit` leaves out, and of a name
-  several definitions share, which one it answers for.
-- A `limit` below 1 is refused by every tool; `0` answered as if there
-  were no callers, matches, changes or history.
+  several definitions share, which one it answers for (`others` in the web
+  API).
+- A `limit`, a `flow` `depth` or a `path` `max_depth` below 1 is refused by
+  every tool; `limit=0` answered as if there were no callers, matches,
+  changes or history.
 
 ## [0.3.1] — 2026-10-22
 
