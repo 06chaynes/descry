@@ -1132,9 +1132,10 @@ class TestCalleeExpansion:
         return _querier(tmp_path, nodes, edges, project_root=tmp_path)
 
     def expand(self, q, budget, inline_threshold=200):
-        return "\n".join(
-            q._expand_callees("FILE:m.py::start", 3, budget, inline_threshold)
+        blocks, notes = q._expand_callees(
+            "FILE:m.py::start", 3, budget, inline_threshold
         )
+        return "\n".join([*(line for block in blocks for line in block), *notes])
 
     def test_a_mark_points_at_an_entry(self, querier):
         """Under a budget that cannot open `x`, `y` opens under `z`, not as a
@@ -1165,17 +1166,25 @@ class TestCalleeExpansion:
             descry.query, "time", SimpleNamespace(time=lambda: next(ticks))
         )
         querier._timeout_ms = 1500
-        assert "*(timeout reached)*" in self.expand(querier, 1000)
+        text = self.expand(querier, 1000)
+        assert "*(timeout reached)*" in text
+        # The symbol's own callees are listed whatever the clock says
+        assert "x" in text and "**w**" in text
 
 
 class TestLangMapValueInTruncation:
     @pytest.mark.parametrize("lang", ["(", "c++", "[a-"])
     def test_source_block_is_truncated_whatever_the_fence_tag(self, tmp_path, lang):
-        q = _querier(tmp_path, [_fn("FILE:x.py::f")])
-        body = "\n".join(f"line {i}" for i in range(200))
-        text = f"### Context\n#### Source Code:\n```{lang}\n{body}\n```\n"
-        out = q._truncate_output_progressively(text, max_tokens=50, source_lang=lang)
-        assert "lines omitted, max_output_tokens limit" in out
+        lines = [f"line {i}" for i in range(200)]
+        lines[50] = "```{source_lang}"
+        (tmp_path / "x.py").write_text("\n".join(lines) + "\n")
+        node = _fn("FILE:x.py::f", lineno=1, end_lineno=200, token_count=2000)
+        q = _querier(
+            tmp_path, [node], project_root=tmp_path, syntax_lang_map={".py": lang}
+        )
+        out = q.get_context_prompt("FILE:x.py::f", full=True, max_output_tokens=50)
+        assert f"```{lang}" in out
+        assert "(170 lines omitted, max_output_tokens limit)" in out
         assert "line 199" not in out
 
 
@@ -1856,27 +1865,6 @@ def test_the_node_limit_lists_the_symbols_own_callees(tmp_path):
     assert "*(node limit reached)*" in text
 
 
-def test_output_trimming_keeps_or_drops_a_dependency_whole(tmp_path):
-    q = _querier(tmp_path, [_fn("FILE:x.py::f")])
-    deps = []
-    for i in range(7):
-        deps += [
-            f"- **c{i}** (10 toks):",
-            "  ```python",
-            f"  code {i}",
-            "  ```",
-            f"  - `n{i}(...)` (500 toks)",
-        ]
-    text = (
-        "### Context\n#### Source Code:\n```python\nx\n```\n#### Dependencies (Callees):\n"
-        + "\n".join(deps)
-        + "\n"
-    )
-    out = q._truncate_output_progressively(text, max_tokens=60, source_lang="python")
-    assert "code 4" in out and "- `n4(...)`" in out and "**c5**" not in out
-    assert "*(4 more dependencies omitted)*" in out
-
-
 def test_the_node_limit_counts_what_each_parent_leaves(tmp_path):
     """Past the limit, a parent opened at the level above lists its
     callees as left out, not as nothing."""
@@ -1899,26 +1887,6 @@ def test_the_node_limit_counts_what_each_parent_leaves(tmp_path):
     q = _querier(tmp_path, nodes, edges, project_root=tmp_path, max_nodes=2)
     text = q.get_context_prompt("FILE:a.py::f", depth=2)
     assert text.count("*(2 more callees)*") == 2
-
-
-def test_output_trimming_reads_code_as_code(tmp_path):
-    """Lines inside inlined code are neither dependencies nor headings, and
-    a note on the section stays."""
-    q = _querier(tmp_path, [_fn("FILE:x.py::f")])
-    deps = []
-    for i in range(7):
-        code = (
-            ["  - a bullet in a docstring", "  # #### not a heading"]
-            if i in (0, 6)
-            else ["  code"]
-        )
-        deps += [f"- **c{i}** (10 toks):", "  ```python", *code, "  ```"]
-    deps.append("*(token budget reached)*")
-    body = "\n".join(deps)
-    text = f"### Context\n#### Source Code:\n```python\nx\n```\n#### Dependencies (Callees):\n{body}\n"
-    out = q._truncate_output_progressively(text, max_tokens=40, source_lang="python")
-    assert "*(2 more dependencies omitted)*" in out
-    assert "**c5**" not in out and "*(token budget reached)*" in out
 
 
 def test_the_node_limit_counts_below_what_it_opened(tmp_path):
@@ -1944,14 +1912,62 @@ def test_the_node_limit_counts_below_what_it_opened(tmp_path):
     assert text.count("*(1 more callees)*") == 2
 
 
-def test_output_trimming_finds_sections_by_their_headings_only(tmp_path):
-    """A source line starting with "#### " inside expanded code is code."""
-    q = _querier(tmp_path, [_fn("FILE:x.py::f")])
-    text = (
-        "### Context\n#### Source Code:\n```go\nx\n```\n"
-        "#### Expanded Callees (Full Source):\n### `init`\n```go\nconst s = `\n#### Linux:\n`\n```\n"
-        "#### Related Tests:\n- `x_test.go`\n"
-    )
-    out = q._truncate_output_progressively(text, max_tokens=1, source_lang="go")
-    assert "Linux" not in out and "Expanded Callees" not in out
-    assert "#### Source Code:" in out
+class TestOutputCap:
+    """`max_output_tokens` cuts the parts `context` is made of, not its text:
+    code inside them is never read as structure."""
+
+    @pytest.fixture
+    def q(self, tmp_path):
+        code = ["    - a bullet", "#### Linux:", "```", "    return 1"]
+        source = ["def f():", "    pass"]
+        for i in range(7):
+            source += [f"def c{i}():", *code]
+        for i in range(9):
+            source += [f"def u{i}():", "    f()"]
+        (tmp_path / "a.py").write_text("\n".join(source) + "\n")
+        nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
+        nodes += [
+            _fn(
+                f"FILE:a.py::c{i}",
+                lineno=3 + 5 * i,
+                end_lineno=7 + 5 * i,
+                token_count=20,
+            )
+            for i in range(7)
+        ]
+        nodes += [
+            _fn(
+                f"FILE:a.py::u{i}",
+                lineno=38 + 2 * i,
+                end_lineno=39 + 2 * i,
+                token_count=10,
+            )
+            for i in range(9)
+        ]
+        nodes.append(_fn("FILE:b.py::f"))
+        edges = [_calls("FILE:a.py::f", f"FILE:a.py::c{i}") for i in range(7)]
+        edges += [_calls(f"FILE:a.py::u{i}", "FILE:a.py::f") for i in range(7)]
+        edges += [
+            {
+                "source": f"FILE:a.py::u{i}",
+                "target": "REF:x.f",
+                "relation": "CALLS",
+                "metadata": {
+                    "lineno": 39 + 2 * i,
+                    "candidates": ["FILE:a.py::f", "FILE:b.py::f"],
+                },
+            }
+            for i in (7, 8)
+        ]
+        return _querier(tmp_path, nodes, edges, project_root=tmp_path)
+
+    def test_callees_go_whole(self, q):
+        out = q.get_context_prompt("FILE:a.py::f", max_output_tokens=1)
+        assert "*(2 more callees omitted)*" in out
+        assert "**c4**" in out and "**c5**" not in out
+        assert out.count("#### Linux:") == 5
+
+    def test_a_cut_caller_list_keeps_possible_callers_apart(self, q):
+        out = q.get_context_prompt("FILE:a.py::f", max_output_tokens=1)
+        assert "#### Callers (5 shown):" in out
+        assert "*(2 more callers, 2 more possible callers)*" in out

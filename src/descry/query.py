@@ -169,24 +169,6 @@ def _ends_at_segment(node_id: str, name: str) -> bool:
     return node_id.endswith(name) and not (before.isalnum() or before == "_")
 
 
-def _section(text: str, heading: str) -> tuple[int, int, int] | None:
-    """``(start, body start, end)`` of the first section of ``text`` whose
-    heading line starts with ``heading``, a heading being a line that
-    starts with "#### " outside a code fence; it runs to the next heading
-    or the end."""
-    found, fenced, offset = None, False, 0
-    for line in text.split("\n"):
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-        elif not fenced and line.startswith("#### "):
-            if found:
-                return found[0], found[1], offset
-            if line.startswith(heading):
-                found = (offset, offset + len(line) + 1)
-        offset += len(line) + 1
-    return (found[0], found[1], len(text)) if found else None
-
-
 def _clean_ref_name(ref_name: str, max_len: int = 60) -> str:
     """Clean up an unresolved reference name for display.
 
@@ -612,13 +594,19 @@ class GraphQuerier:
 
         # 3. Find Dependencies (Callees) with Smart Inlining - deduplicated
         # Use recursive expansion if depth > 1
-        callee_info = self._expand_callees(node_id, depth, max_tokens, inline_threshold)
+        callee_blocks, callee_notes = self._expand_callees(
+            node_id, depth, max_tokens, inline_threshold
+        )
 
         # 4. Find Usage Examples (Callers) - grouped by file
         usage_examples = self._get_usage_examples(node_id, limit=4)
 
         # 4b. Get callers summary for explicit caller list
         callers_summary = self._get_callers_summary(node_id)
+        callers, ambiguous = self.ordered_callers(node_id)
+        expanded_callees = (
+            self._expand_callees_full(node_id, callee_budget) if expand_callees else []
+        )
 
         # 5. Find Related Tests
         related_tests = self._find_related_tests(file_path_rel, meta.get("name"))
@@ -627,78 +615,82 @@ class GraphQuerier:
         file_id = f"FILE:{file_path_rel}"
         related_configs = self._find_related_configs(file_id, node_id)
 
-        # 6. Format Output
-        output = []
-        output.append(f"### Context for `{node['id']}`")
-        if fuzzy_match_note:
-            output.append(fuzzy_match_note)
-        output.append(
-            f"**Tokens:** {meta.get('token_count', '?')} | **In-Degree:** {meta.get('in_degree', 0)}\n"
-        )
-        output.append("#### Source Code:")
-        output.append(f"```{source_lang}\n{source_code}\n```\n")
+        # 6. Format Output, and if it is over max_output_tokens, cut it
+        # down step by step: what each step drops is said where it was.
+        omitted = {}
+        source_lines = source_code.rstrip("\n").split("\n")
 
-        # For Classes/Structs, show impl methods
-        if impl_methods:
-            output.append(f"#### Implementation Methods ({len(impl_methods)} methods):")
-            for method in impl_methods:
-                sig = method["signature"]
-                doc = method["docstring"]
-                tokens = method["tokens"]
-                # Show signature and brief doc
-                output.append(f"- `{sig}` ({tokens} toks)")
-                if doc:
-                    output.append(f"  > {doc}")
-            output.append("")
+        def render():
+            output = [f"### Context for `{node['id']}`"]
+            if fuzzy_match_note:
+                output.append(fuzzy_match_note)
+            output.append(
+                f"**Tokens:** {meta.get('token_count', '?')} | **In-Degree:** {meta.get('in_degree', 0)}\n"
+            )
+            output.append("#### Source Code:")
+            source = "\n".join(source_lines)
+            if "source" in omitted:
+                source += f"\n// ... ({omitted['source']} lines omitted, max_output_tokens limit) ..."
+            output.append(f"```{source_lang}\n{source}\n```\n")
 
-        if usage_examples:
-            output.append("#### Usage Examples:")
-            # Group examples by file for better readability
-            by_file = defaultdict(list)
-            for ex in usage_examples:
-                by_file[ex["file"]].append(ex)
-
-            for file_path, examples in by_file.items():
-                ex_lang = _get_syntax_lang(file_path, self._syntax_lang_map)
-                output.append(f"\n**From `{file_path}`:**")
-                for ex in examples:
+            if impl_methods:
+                output.append(
+                    f"#### Implementation Methods ({len(impl_methods)} methods):"
+                )
+                for method in impl_methods:
                     output.append(
-                        f"Line {ex['lineno']}:{self.one_of(ex['candidates'])}"
+                        f"- `{method['signature']}` ({method['tokens']} toks)"
                     )
-                    output.append(f"```{ex_lang}\n{ex['code']}\n```")
-            output.append("")
+                    if method["docstring"]:
+                        output.append(f"  > {method['docstring']}")
+                output.append("")
 
-        # Add explicit callers section
-        if callers_summary:
-            callers, ambiguous = self.ordered_callers(node_id)
-            output.append(f"#### Callers ({len(callers_summary)} shown):")
-            for caller in callers_summary:
-                loc = (
-                    f"{caller['file']}:{caller['lineno']}"
-                    if caller["lineno"]
-                    else caller["file"]
-                )
-                output.append(
-                    f"- `{caller['name']}` in {loc} ({caller['tokens']} toks)"
-                    f"{self.one_of(caller['candidates'])}"
-                )
-            if len(callers) > len(callers_summary):
-                shown = {caller["id"] for caller in callers_summary}
-                more = [caller for caller in callers if caller not in shown]
-                possible = sum(caller in ambiguous for caller in more)
-                output.append(
-                    f"  *({self.more_callers(len(more) - possible, possible)})*"
-                )
-            output.append("")
+            if usage_examples:
+                output.append("#### Usage Examples:")
+                by_file = defaultdict(list)
+                for ex in usage_examples:
+                    by_file[ex["file"]].append(ex)
+                for file_path, examples in by_file.items():
+                    ex_lang = _get_syntax_lang(file_path, self._syntax_lang_map)
+                    output.append(f"\n**From `{file_path}`:**")
+                    for ex in examples:
+                        output.append(
+                            f"Line {ex['lineno']}:{self.one_of(ex['candidates'])}"
+                        )
+                        output.append(f"```{ex_lang}\n{ex['code']}\n```")
+                if "examples" in omitted:
+                    output.append(f"\n*({omitted['examples']} more examples omitted)*")
+                output.append("")
 
-        if callee_info:
-            output.append("#### Dependencies (Callees):")
-            output.append("\n".join(callee_info))
-            output.append("")
+            if callers_summary:
+                output.append(f"#### Callers ({len(callers_summary)} shown):")
+                for caller in callers_summary:
+                    loc = (
+                        f"{caller['file']}:{caller['lineno']}"
+                        if caller["lineno"]
+                        else caller["file"]
+                    )
+                    output.append(
+                        f"- `{caller['name']}` in {loc} ({caller['tokens']} toks)"
+                        f"{self.one_of(caller['candidates'])}"
+                    )
+                if len(callers) > len(callers_summary):
+                    shown = {caller["id"] for caller in callers_summary}
+                    more = [caller for caller in callers if caller not in shown]
+                    possible = sum(caller in ambiguous for caller in more)
+                    output.append(
+                        f"  *({self.more_callers(len(more) - possible, possible)})*"
+                    )
+                output.append("")
 
-        # Expanded callees - inline full source of direct callees
-        if expand_callees:
-            expanded_callees = self._expand_callees_full(node_id, callee_budget)
+            if callee_blocks or callee_notes:
+                output.append("#### Dependencies (Callees):")
+                output.extend(line for block in callee_blocks for line in block)
+                if "callees" in omitted:
+                    output.append(f"*({omitted['callees']} more callees omitted)*")
+                output.extend(callee_notes)
+                output.append("")
+
             if expanded_callees:
                 output.append("#### Expanded Callees (Full Source):")
                 for exp in expanded_callees:
@@ -708,32 +700,43 @@ class GraphQuerier:
                     output.append(f"```{exp['lang']}\n{exp['source']}\n```")
                 output.append("")
 
-        if related_tests:
-            output.append("#### Related Tests:")
-            for t in related_tests:
-                output.append(f"- `{t}`")
-            output.append("")
+            if related_tests:
+                output.append("#### Related Tests:")
+                output.extend(f"- `{t}`" for t in related_tests)
+                output.append("")
 
-        if related_configs:
-            output.append("#### Related Configuration (same file):")
-            for cfg in related_configs:
-                cfg_type = f" [{cfg['config_type']}]" if cfg["config_type"] else ""
-                output.append(f"- L{cfg['lineno']}: `{cfg['signature']}`{cfg_type}")
-                output.append(f"  Node: `{cfg['id']}`")
-            output.append("")
+            if related_configs:
+                output.append("#### Related Configuration (same file):")
+                for cfg in related_configs:
+                    cfg_type = f" [{cfg['config_type']}]" if cfg["config_type"] else ""
+                    output.append(f"- L{cfg['lineno']}: `{cfg['signature']}`{cfg_type}")
+                    output.append(f"  Node: `{cfg['id']}`")
+                output.append("")
+            return "\n".join(output)
 
-        # Apply max_output_tokens progressive truncation if specified
-        result = "\n".join(output)
-        if (
-            max_output_tokens is not None
-            and _estimate_tokens(result) > max_output_tokens
-        ):
-            result = self._truncate_output_progressively(
-                result,
-                max_output_tokens,
-                source_lang,
-            )
+        def keep(items, count, key):
+            if len(items) > count:
+                omitted[key] = len(items) - count
+                del items[count:]
 
+        steps = [
+            lambda: expanded_callees.clear(),
+            lambda: keep(usage_examples, 2, "examples"),
+            lambda: related_tests.clear(),
+            lambda: related_configs.clear(),
+            lambda: callers_summary.__delitem__(slice(5, None)),
+            lambda: keep(callee_blocks, 5, "callees"),
+            lambda: keep(source_lines, 30, "source"),
+        ]
+        result = render()
+        if max_output_tokens is not None:
+            for step in steps:
+                if _estimate_tokens(result) <= max_output_tokens:
+                    break
+                step()
+                result = render()
+            if _estimate_tokens(result) > max_output_tokens:
+                result += f"\n\n*[Output truncated to ~{max_output_tokens} tokens]*"
         return result
 
     def _find_related_tests(self, source_file, symbol_name):
@@ -824,136 +827,6 @@ class GraphQuerier:
         # Sort by line number
         configs.sort(key=lambda c: c["lineno"])
         return configs[:5]  # Limit to 5 config nodes
-
-    def _truncate_output_progressively(
-        self,
-        result: str,
-        max_tokens: int,
-        source_lang: str,
-    ) -> str:
-        """Apply progressive truncation to fit within token budget.
-
-        Truncation priority (remove in order):
-        1. Expanded Callees (Full Source) section
-        2. Usage Examples - reduce to 2
-        3. Related Tests section
-        4. Related Configuration section
-        5. Callers - reduce to 5
-        6. Dependencies (Callees) - reduce to 5
-        7. Source code - apply head_lines truncation
-
-        Args:
-            result: Full output text
-            max_tokens: Target token budget
-            source_lang: Language for the Source-Code fenced block match.
-        """
-        current_tokens = _estimate_tokens(result)
-
-        def drop(heading):
-            nonlocal result, current_tokens
-            if found := _section(result, heading):
-                start, _, end = found
-                result = re.sub(r"\n{3,}", "\n\n", result[:start] + result[end:])
-                current_tokens = _estimate_tokens(result)
-
-        def replace_body(found, body):
-            nonlocal result, current_tokens
-            _, body_start, end = found
-            result = result[:body_start] + body + result[end:]
-            current_tokens = _estimate_tokens(result)
-
-        # Priority 1: Remove Expanded Callees section
-        if current_tokens > max_tokens:
-            drop("#### Expanded Callees (Full Source):")
-
-        # Priority 2: Reduce Usage Examples to 2
-        if current_tokens > max_tokens and (
-            found := _section(result, "#### Usage Examples:")
-        ):
-            body = result[found[1] : found[2]]
-            closes = [i for i, line in enumerate(body.split("\n")) if line == "```"]
-            if len(closes) > 2:
-                kept = "\n".join(body.split("\n")[: closes[1] + 1])
-                omitted = len(closes) - 2
-                replace_body(
-                    found, f"{kept}\n\n*({omitted} more examples omitted)*\n\n"
-                )
-
-        # Priority 3: Remove Related Tests section
-        if current_tokens > max_tokens:
-            drop("#### Related Tests:")
-
-        # Priority 4: Remove Related Configuration section
-        if current_tokens > max_tokens:
-            drop("#### Related Configuration")
-
-        # Priority 5: Reduce Callers to 5
-        if current_tokens > max_tokens and (
-            found := _section(result, "#### Callers (")
-        ):
-            lines = result[found[1] : found[2]].strip().split("\n")
-            caller_lines = [line for line in lines if line.startswith("- `")]
-            if len(caller_lines) > 5:
-                more = len(caller_lines) - 5
-                kept = "\n".join(caller_lines[:5])
-                replace_body(found, f"{kept}\n  *({more} more callers omitted)*\n")
-
-        # Priority 6: Reduce Dependencies to 5
-        if current_tokens > max_tokens and (
-            found := _section(result, "#### Dependencies (Callees):")
-        ):
-            # Each top-level dependency with what is nested under it: its
-            # code and its own callees go with it or not at all; a note on
-            # the section stays.
-            entries, notes, fenced = [], [], False
-            for line in result[found[1] : found[2]].strip().split("\n"):
-                if line.startswith("*(") and not fenced:
-                    notes.append(line)
-                elif line.startswith("- ") and not fenced or not entries:
-                    entries.append([line])
-                else:
-                    entries[-1].append(line)
-                if line.lstrip().startswith("```"):
-                    fenced = not fenced
-            if len(entries) > 5:
-                dropped, fenced = 0, False
-                for line in (line for entry in entries[5:] for line in entry):
-                    if line.lstrip().startswith("```"):
-                        fenced = not fenced
-                    elif not fenced and line.lstrip().startswith("- "):
-                        dropped += 1
-                kept = "\n".join(["\n".join(entry) for entry in entries[:5]] + notes)
-                replace_body(
-                    found, f"{kept}\n*({dropped} more dependencies omitted)*\n"
-                )
-
-        # Priority 7: Truncate source code (last resort)
-        if current_tokens > max_tokens:
-            # Apply aggressive head_lines truncation
-            match = re.search(
-                r"(#### Source Code:\n```" + re.escape(source_lang) + r"\n)(.*?)(```)",
-                result,
-                re.DOTALL,
-            )
-            if match:
-                source = match.group(2)
-                lines = source.split("\n")
-                if len(lines) > 30:
-                    truncated = "\n".join(lines[:30])
-                    truncated += f"\n// ... ({len(lines) - 30} lines omitted, max_output_tokens limit) ...\n"
-                    result = (
-                        result[: match.start()]
-                        + match.group(1)
-                        + truncated
-                        + match.group(3)
-                        + result[match.end() :]
-                    )
-
-        # Add truncation note if we applied truncation
-        if current_tokens > max_tokens:
-            result += f"\n\n*[Output truncated to ~{max_tokens} tokens]*"
-
-        return result
 
     def _expand_callees_full(self, node_id: str, budget: int = 2000) -> list[dict]:
         """Expand direct callees with their full source code.
@@ -1225,7 +1098,9 @@ class GraphQuerier:
         return callers[:limit]
 
     def _expand_callees(self, node_id, depth, budget, inline_threshold):
-        """Lines listing the callees of ``node_id``, ``depth`` levels deep.
+        """``(blocks, notes)`` listing the callees of ``node_id``, ``depth``
+        levels deep: one block of lines per callee of the symbol, with what
+        is listed under it, and the notes on the whole list.
 
         Planned level by level: the symbol's own callees are all listed, and
         each level below is cut to the per-level limit, and at the node
@@ -1247,8 +1122,8 @@ class GraphQuerier:
             for parent in frontier:
                 callees = self.get_callees(parent)
                 marks = self.get_ambiguous_callees(parent)
-                if "node limit" in cuts:
-                    # Past the limit, a parent's callees are all left out
+                if "node limit" in cuts or "timeout" in cuts:
+                    # Past a cut, a parent's callees are all left out
                     rows[parent] = ([], callees, marks)
                     continue
                 # The symbol's own callees are all listed; below them, each
@@ -1257,19 +1132,24 @@ class GraphQuerier:
                 listed = []
                 rows[parent] = (listed, callees[limit:], marks)
                 for index, callee in enumerate(callees[:limit]):
-                    if (time.time() - start_time) * 1000 > self._timeout_ms:
-                        cuts.append("timeout")
-                        break
                     if callee not in self.nodes:
                         listed.append(("call", callee))
                         continue
                     if callee in placed:
                         listed.append(("seen", callee))
                         continue
-                    if level > 1 and self._max_nodes and len(placed) > self._max_nodes:
+                    # The symbol's own callees are listed whatever the limits
+                    cut = level > 1 and (
+                        "timeout"
+                        if (time.time() - start_time) * 1000 > self._timeout_ms
+                        else "node limit"
+                        if self._max_nodes and len(placed) > self._max_nodes
+                        else None
+                    )
+                    if cut:
                         # Those not reached are counted with those left out
                         rows[parent] = (listed, callees[index:], marks)
-                        cuts.append("node limit")
+                        cuts.append(cut)
                         break
                     placed[callee] = level
                     meta = self.nodes[callee]["metadata"]
@@ -1286,8 +1166,6 @@ class GraphQuerier:
                         if "token budget" not in cuts:
                             cuts.append("token budget")
                     listed.append(("summary", callee))
-                if "timeout" in cuts:
-                    break
             if "timeout" in cuts or "node limit" in cuts:
                 if level < depth:
                     # Those opened at the cut list their callees as left out
@@ -1297,12 +1175,17 @@ class GraphQuerier:
                 break
             frontier = opened
 
+        blocks, notes = [], []
         lines = []
 
         def render(parent, indent):
+            nonlocal lines
             listed, left_out, marks = rows.get(parent, ([], [], {}))
             pad = "  " * indent
             for kind, callee in listed:
+                if indent == 0:
+                    lines = []
+                    blocks.append(lines)
                 meta = self.nodes.get(callee, {}).get("metadata", {})
                 name = meta.get("name", "?")
                 if kind == "call":
@@ -1337,11 +1220,11 @@ class GraphQuerier:
             if left_out:
                 certain, possible, none = self.kinds(left_out, marks)
                 more = self.more_callers(certain, possible, "callees", none)
-                lines.append(f"{pad}*({more})*")
+                (lines if indent else notes).append(f"{pad}*({more})*")
 
         render(node_id, 0)
-        lines.extend(f"*({cut} reached)*" for cut in cuts)
-        return lines
+        notes.extend(f"*({cut} reached)*" for cut in cuts)
+        return blocks, notes
 
     @property
     def max_flow_depth(self):
