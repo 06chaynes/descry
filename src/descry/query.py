@@ -253,8 +253,6 @@ class GraphQuerier:
         self._index_is_test = None  # Test files and test functions
         self._indices_built = False
 
-        # Memoization cache for recursive expansion
-
     def _disk_path(self, file_path):
         """Where a graph-relative source path lives on disk; see source_path.
 
@@ -596,54 +594,7 @@ class GraphQuerier:
 
         # 3. Find Dependencies (Callees) with Smart Inlining - deduplicated
         # Use recursive expansion if depth > 1
-        if depth > 1:
-            callee_info = self._expand_callees(
-                node_id, depth, max_tokens, inline_threshold
-            )
-        else:
-            # Original single-level expansion
-            callees = self.get_callees(node_id)
-            possible = self.get_ambiguous_callees(node_id)
-            callee_info = []
-
-            for callee_id in callees:
-                # Check if we have the node (resolved)
-                callee_node = self.nodes.get(callee_id)
-
-                if callee_node:
-                    # Resolve file path for inlining
-                    c_file = callee_node["id"].split("::")[0].replace("FILE:", "")
-                    c_meta = callee_node["metadata"]
-                    c_tokens = c_meta.get("token_count", 999)
-                    c_lang = _get_syntax_lang(c_file, self._syntax_lang_map)
-
-                    # Header info
-                    sig = c_meta.get("signature", f"{c_meta.get('name')}(...)")
-
-                    # INLINING LOGIC: If small (< threshold tokens), show code.
-                    if c_tokens < inline_threshold and os.path.exists(
-                        self._disk_path(c_file)
-                    ):
-                        c_start = c_meta.get("lineno", 1)
-                        c_end = c_meta.get("end_lineno", c_start)
-                        c_code = self.get_source_segment(c_file, c_start, c_end)
-                        # Indent code content for proper markdown list nesting
-                        c_code_indented = "\n".join(
-                            "  " + line for line in c_code.split("\n")
-                        )
-                        callee_info.append(
-                            f"- **{c_meta.get('name')}** (Inlined, {c_tokens} toks):\n  ```{c_lang}\n{c_code_indented}\n  ```"
-                        )
-                    else:
-                        # Summary mode
-                        doc = c_meta.get("docstring", "").split("\n")[0]
-                        callee_info.append(f"- `{sig}`\n  > {doc}")
-                else:
-                    # Unresolved REF - clean up for display
-                    raw_name = callee_id.replace("REF:", "")
-                    clean_name = _clean_ref_name(raw_name)
-                    note = self.callee_note(possible.get(callee_id))
-                    callee_info.append(f"- `{clean_name}`{note}")
+        callee_info = self._expand_callees(node_id, depth, max_tokens, inline_threshold)
 
         # 4. Find Usage Examples (Callers) - grouped by file
         usage_examples = self._get_usage_examples(node_id, limit=4)
@@ -1275,18 +1226,18 @@ class GraphQuerier:
         callers.sort(key=lambda c: (bool(c["candidates"]), c["tokens"], c["name"]))
         return callers[:limit]
 
-    def _expand_callees(self, node_id, depth, budget, inline_threshold=None):
+    def _expand_callees(self, node_id, depth, budget, inline_threshold):
         """Lines listing the callees of ``node_id``, ``depth`` levels deep.
 
-        Planned level by level: a symbol is opened (its code inlined, its own
-        callees listed) at the first level that reaches it, when it is small
+        Planned level by level: the symbol's own callees are all listed, and
+        each level below is cut to the per-level limit with a note. A symbol
+        is opened (its code inlined, its own callees listed) at the first
+        level that reaches it, when it is small
         enough to inline and the token ``budget`` still covers it; a symbol
         not opened is listed by its signature, one met again as "(at level
         N)", and an unresolved call where it is made. A note says what cut
         the expansion short: the budget, the node limit or the timeout.
         """
-        if inline_threshold is None:
-            inline_threshold = CALLEE_INLINE_THRESHOLD
         start_time = time.time()
         placed = {node_id: 0}
         rows = {}  # parent -> ([(kind, callee)], callees left out, marks)
@@ -1297,9 +1248,12 @@ class GraphQuerier:
             for parent in frontier:
                 callees = self.get_callees(parent)
                 marks = self.get_ambiguous_callees(parent)
+                # The symbol's own callees are all listed; below them, each
+                # level is cut to the per-level limit.
+                limit = len(callees) if level == 1 else self._max_children_per_level
                 listed = []
-                rows[parent] = (listed, callees[self._max_children_per_level :], marks)
-                for callee in callees[: self._max_children_per_level]:
+                rows[parent] = (listed, callees[limit:], marks)
+                for callee in callees[:limit]:
                     if (time.time() - start_time) * 1000 > self._timeout_ms:
                         cuts.append("timeout")
                         break

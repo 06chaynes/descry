@@ -43,10 +43,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   that reaches it and marks it "(at level N)" where it is met again
   (`seen`, that level, in the tree); a direct callee or caller reached
   first through another one was dropped from its level, with everything
-  below it. Deep `context` opens a callee (inlines it and lists its own
-  callees) at the first level that reaches it while the token budget
-  covers it, lists every other callee by its signature or "(at level N)",
-  and says when the budget, the node limit or the timeout cut it short. A
+  below it. `context`, at every depth, lists all of the symbol's own
+  callees and cuts each level below to the per-level limit with a note; it
+  opens a callee (inlines it and lists its own callees) at the first level
+  that reaches it while the token budget covers it, lists every other
+  callee by its signature or "(at level N)", and says when the budget, the
+  node limit or the timeout cut it short. Depth 1 ignored `max_tokens`. A
   `flow` that stops early says so: "(timeout)" or "(node limit)" in text,
   `cut` in the tree, a note on the page.
 - A `flow` of `depth` N shows N levels of calls below the start; `depth=1`

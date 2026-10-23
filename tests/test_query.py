@@ -1150,6 +1150,11 @@ class TestCalleeExpansion:
         assert text.count("**y** (20 toks):") == 1
         assert "- `y` (at level 2)" in text
 
+    def test_depth_one_holds_to_the_budget(self, querier):
+        text = querier.get_context_prompt("FILE:m.py::start", max_tokens=5)
+        assert "*(token budget reached)*" in text
+        assert "- `w(...)` (20 toks)" in text
+
     def test_the_timeout_is_said(self, querier, monkeypatch):
         import itertools
 
@@ -1652,15 +1657,23 @@ def test_calls_written_alike_reach_what_any_of_them_may(tmp_path):
 
 
 def test_a_deep_context_says_what_it_leaves_out(tmp_path):
+    """The symbol's own callees are all listed; a level below is cut to the
+    per-level limit, with a note."""
     (tmp_path / "a.py").write_text("def f():\n    pass\n")
     nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
-    nodes += [_fn(f"FILE:a.py::g{i}", token_count=500) for i in range(3)]
+    nodes += [
+        _fn(f"FILE:a.py::g{i}", lineno=1, end_lineno=2, token_count=10)
+        for i in range(3)
+    ]
+    nodes += [_fn(f"FILE:a.py::h{i}", token_count=500) for i in range(3)]
     edges = [_calls("FILE:a.py::f", f"FILE:a.py::g{i}") for i in range(3)]
-    edges.append({"source": "FILE:a.py::f", "target": "REF:x.h", "relation": "CALLS"})
+    edges += [_calls("FILE:a.py::g0", f"FILE:a.py::h{i}") for i in range(3)]
+    edges.append({"source": "FILE:a.py::g0", "target": "REF:x.h", "relation": "CALLS"})
     q = _querier(
         tmp_path, nodes, edges, project_root=tmp_path, max_children_per_level=2
     )
-    text = q.get_context_prompt("FILE:a.py::f", depth=2, expand_callees=True)
+    text = q.get_context_prompt("FILE:a.py::f", depth=2)
+    assert all(f"**g{i}**" in text for i in range(3))
     assert "*(1 more callees, 1 more unresolved callees)*" in text
 
 
