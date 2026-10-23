@@ -12,6 +12,7 @@ Usage:
 
 import contextlib
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -347,13 +348,14 @@ def _resolve_cache_dir(graph_path: Path, cache_dir: str | None = None) -> Path:
 # Try to import embedding dependencies
 try:
     import numpy as np
-    from sentence_transformers import SentenceTransformer
-
-    EMBEDDINGS_AVAILABLE = True
 except ImportError:
-    EMBEDDINGS_AVAILABLE = False
     np = None
-    SentenceTransformer = None
+# Imported by _load_sentence_transformer: it brings in torch, which takes
+# seconds a command that loads no model should not spend.
+SentenceTransformer = None
+EMBEDDINGS_AVAILABLE = (
+    np is not None and importlib.util.find_spec("sentence_transformers") is not None
+)
 
 
 def embeddings_available() -> bool:
@@ -376,6 +378,9 @@ def _load_sentence_transformer(model_name: str, revision: str | None = None):
         model_name: Registry alias, HuggingFace repo id, or local path.
         revision: Overrides the registry's pinned revision.
     """
+    global SentenceTransformer
+    if SentenceTransformer is None:
+        from sentence_transformers import SentenceTransformer
     spec = resolve_model_spec(model_name)
     target = spec.repo_id if spec else model_name
     if revision is None and spec:

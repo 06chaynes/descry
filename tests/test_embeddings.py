@@ -1183,3 +1183,20 @@ def test_orphaned_embedding_temporaries_are_removed(fake_model, graph_writer):
     s._cleanup_old_embeddings(keep=set(s._cache_paths()))
 
     assert not orphan.exists()
+
+
+def test_a_service_that_loads_no_model_does_not_import_the_model_library():
+    """sentence-transformers brings in torch, seconds every command paid."""
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys; from descry import embeddings; "
+        "from descry.handlers import DescryService, DescryConfig; "
+        "DescryService(DescryConfig()); "
+        "print('sentence_transformers' in sys.modules)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip() == "False"

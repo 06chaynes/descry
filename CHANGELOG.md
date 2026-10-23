@@ -85,6 +85,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   It read the rendered text back, so code with a heading-like or a fence
   line in it was cut wrongly or not at all, opened callees kept their
   headings without their code, and counts were wrong.
+- A command that loads no embedding model no longer imports
+  sentence-transformers, and with it torch, as the service starts: where
+  they are installed every CLI command spent seconds on it.
 - `churn` ranks symbols, and co-change pairs of symbols, with the same
   number of commits by node ID, so the same history gives the same list.
   Their order among ties changed from run to run, and so, at the limit,
