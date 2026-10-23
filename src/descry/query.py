@@ -1209,6 +1209,11 @@ class GraphQuerier:
                 break
             frontier = opened
 
+        # The symbol's callees left out of its list but reached under one
+        # kept are drawn there, so they are not counted as left out.
+        listed, left_out, marks = rows[node_id]
+        rows[node_id] = (listed, [c for c in left_out if c not in placed], marks)
+
         blocks, notes = [], []
         lines = []
 

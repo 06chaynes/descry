@@ -2009,5 +2009,7 @@ def test_a_cut_callee_list_keeps_kinds_and_marks_true(tmp_path):
     )
     q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
     out = q.get_context_prompt("FILE:a.py::f", depth=2, max_output_tokens=1)
-    assert "*(1 more callees, 1 more possible callees)*" in out
+    # `a5`, cut from f's list, is drawn under `a0`, so only `x.p` is left out
+    assert "*(1 more possible callees)*" in out
+    assert "**a5**" in out
     assert "(at level" not in out
