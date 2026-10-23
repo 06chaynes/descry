@@ -1109,73 +1109,58 @@ class TestCallPathDepthAndOutcome:
         assert slow.find_call_path_result("n0", "n29")["status"] == "timeout"
 
 
-class TestExpansionMemo:
+class TestCalleeExpansion:
+    """Deep `context` opens each callee at the first level that reaches it,
+    while the token budget covers it, and lists every callee it does not
+    open."""
+
     @pytest.fixture
     def querier(self, tmp_path):
-        (tmp_path / "m.py").write_text("".join(f"def f{i}(): pass\n" for i in range(4)))
+        # start -> x (120 toks), w; x -> y; w -> z -> y
+        sizes = {"start": 10, "x": 120, "w": 20, "z": 20, "y": 20}
+        (tmp_path / "m.py").write_text(
+            "".join(f"def {n}():\n    pass\n" for n in sizes)
+        )
         nodes = [
-            _fn(f"FILE:m.py::{name}", lineno=i + 1, end_lineno=i + 1, token_count=10)
-            for i, name in enumerate(("root", "mid", "leaf", "other"))
+            _fn(
+                f"FILE:m.py::{n}", lineno=2 * i + 1, end_lineno=2 * i + 2, token_count=t
+            )
+            for i, (n, t) in enumerate(sizes.items())
         ]
-        edges = [
-            _calls("FILE:m.py::root", "FILE:m.py::mid"),
-            _calls("FILE:m.py::mid", "FILE:m.py::leaf"),
-            _calls("FILE:m.py::root", "FILE:m.py::other"),
-        ]
+        pairs = [("start", "x"), ("start", "w"), ("x", "y"), ("w", "z"), ("z", "y")]
+        edges = [_calls(f"FILE:m.py::{a}", f"FILE:m.py::{b}") for a, b in pairs]
         return _querier(tmp_path, nodes, edges, project_root=tmp_path)
 
-    def _expand(self, querier, expanded, budget=1000):
-        return querier._expand_callees_recursive(
-            "FILE:m.py::root", depth=3, budget=budget, expanded=expanded
+    def expand(self, q, budget, inline_threshold=200):
+        return "\n".join(
+            q._expand_callees("FILE:m.py::start", 3, budget, inline_threshold)
         )
 
-    def test_memoized_cost_includes_nested_callees(self, querier):
-        first_lines, first_left = self._expand(querier, {"FILE:m.py::root"})
-        again_lines, again_left = self._expand(querier, {"FILE:m.py::root"})
-        # mid, leaf and other are inlined at 10 tokens each.
-        assert first_left == again_left == 1000 - 30
-        assert again_lines == first_lines
+    def test_a_mark_points_at_an_entry(self, querier):
+        """Under a budget that cannot open `x`, `y` opens under `z`, not as a
+        mark of an entry no one drew."""
+        text = self.expand(querier, 100)
+        assert "- `x(...)` (120 toks)" in text
+        assert "**y** (20 toks):" in text
+        assert "(at level" not in text
+        assert "*(token budget reached)*" in text
 
-    def test_memo_hit_marks_the_same_nodes_expanded(self, querier):
-        fresh, cached = {"FILE:m.py::root"}, {"FILE:m.py::root"}
-        self._expand(querier, fresh)
-        self._expand(querier, cached)
-        assert cached == fresh
-        assert "FILE:m.py::leaf" in cached
+    def test_a_symbol_opens_once_at_its_level(self, querier):
+        text = self.expand(querier, 1000)
+        assert text.count("**y** (20 toks):") == 1
+        assert "- `y` (at level 2)" in text
 
-    def test_memo_is_keyed_on_the_already_expanded_nodes(self, querier):
-        self._expand(querier, {"FILE:m.py::root"})
-        lines, _ = self._expand(querier, {"FILE:m.py::root", "FILE:m.py::leaf"})
-        assert not any("**leaf**" in line for line in lines)
-        assert any("**mid**" in line for line in lines)
-
-    def test_memo_is_keyed_on_the_budget(self, querier):
-        tight, _ = self._expand(querier, {"FILE:m.py::root"}, budget=15)
-        roomy, _ = self._expand(querier, {"FILE:m.py::root"}, budget=1000)
-        inlined = [line for line in roomy if "toks):" in line]
-        assert len(inlined) == 3
-        assert roomy != tight
-
-    def test_expansion_cut_short_by_the_timeout_is_not_memoized(
-        self, querier, monkeypatch
-    ):
+    def test_the_timeout_is_said(self, querier, monkeypatch):
         import itertools
 
         import descry.query
 
-        # A clock that advances one second per reading runs out mid-expansion.
         ticks = itertools.count()
-        with monkeypatch.context() as patched:
-            patched.setattr(
-                descry.query, "time", SimpleNamespace(time=lambda: next(ticks))
-            )
-            querier._timeout_ms = 2500
-            cut_short, _ = self._expand(querier, {"FILE:m.py::root"})
-        assert any("timeout" in line for line in cut_short)
-
-        querier._timeout_ms = 4000
-        complete, _ = self._expand(querier, {"FILE:m.py::root"})
-        assert not any("timeout" in line for line in complete)
+        monkeypatch.setattr(
+            descry.query, "time", SimpleNamespace(time=lambda: next(ticks))
+        )
+        querier._timeout_ms = 1500
+        assert "*(timeout reached)*" in self.expand(querier, 1000)
 
 
 class TestLangMapValueInTruncation:

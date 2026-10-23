@@ -1698,3 +1698,14 @@ class TestUnresolvedCallsInText:
             assert "`read` (unresolved)" in text, depth
         deep = await svc.context("FILE:a.py::run", depth=2, expand_callees=True)
         assert "`parse` (unresolved)" in deep
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound", ["max_tokens", "callee_budget"])
+async def test_a_context_budget_below_one_is_refused(tmp_path, bound):
+    """One of zero listed no callees, as if the symbol called nothing."""
+    config = _plain_config(tmp_path)
+    _write_graph(config, nodes=[TestSemanticText.NODE])
+    result = await DescryService(config).context("FILE:x.py::f", depth=2, **{bound: 0})
+    assert isinstance(result, ServiceError)
+    assert f"{bound} must be at least 1, got 0." in result

@@ -399,9 +399,10 @@ async def api_context(request: Request) -> JSONResponse:
     brief = request.query_params.get("brief", "").lower() == "true"
     expand_callees = request.query_params.get("expand_callees", "").lower() == "true"
     depth = _int_param(request, "depth", 1)
-    if error := limit_error(depth, "depth"):
-        return JSONResponse({"error": error}, status_code=400)
     max_tokens = _int_param(request, "max_tokens", 2000)
+    for value, name in ((depth, "depth"), (max_tokens, "max_tokens")):
+        if error := limit_error(value, name):
+            return JSONResponse({"error": error}, status_code=400)
 
     result = await _get_service().context(
         node_id,

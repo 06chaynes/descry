@@ -43,9 +43,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   that reaches it and marks it "(at level N)" where it is met again
   (`seen`, that level, in the tree); a direct callee or caller reached
   first through another one was dropped from its level, with everything
-  below it. Deep `context` opens each callee at the first level that
-  reaches it the same way. A trace that stops early says so: "(timeout)"
-  or "(node limit)" in text, `cut` in the tree, a note on the page.
+  below it. Deep `context` opens a callee (inlines it and lists its own
+  callees) at the first level that reaches it while the token budget
+  covers it, lists every other callee by its signature or "(at level N)",
+  and says when the budget, the node limit or the timeout cut it short. A
+  `flow` that stops early says so: "(timeout)" or "(node limit)" in text,
+  `cut` in the tree, a note on the page.
 - A `flow` of `depth` N shows N levels of calls below the start; `depth=1`
   showed the start alone. `[query] max_depth` is that many levels too, for
   `flow` and for `context`'s callee expansion. A depth past it is traced to
@@ -63,8 +66,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `callees` says how many callees its `limit` leaves out, and of a name
   several definitions share, which one it answers for (`others` in the web
   API).
-- A `limit`, a `flow` or `context` `depth` or a `path` `max_depth` below 1
-  is refused by every tool; `limit=0` answered as if there were no
+- A `limit`, a `flow` or `context` `depth`, a `context` `max_tokens` or
+  `callee_budget`, or a `path` `max_depth` below 1 is refused by every
+  tool; `limit=0` answered as if there were no
   callers, matches, changes or history.
 - The web page's changes view no longer throws for a changed symbol with
   no callers.

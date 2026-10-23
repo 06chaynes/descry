@@ -1906,8 +1906,13 @@ class DescryService:
         max_output_tokens: int | None = None,
     ) -> str:
         """Get full context for a symbol."""
-        if error := limit_error(depth, "depth"):
-            return ServiceError(f"ERROR: {error}")
+        for value, name in (
+            (depth, "depth"),
+            (max_tokens, "max_tokens"),
+            (callee_budget, "callee_budget"),
+        ):
+            if error := limit_error(value, name):
+                return ServiceError(f"ERROR: {error}")
         q = await self._get_querier()
         if not q:
             return ServiceError(f"ERROR: {self._no_graph_error()}")

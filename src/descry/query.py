@@ -254,7 +254,6 @@ class GraphQuerier:
         self._indices_built = False
 
         # Memoization cache for recursive expansion
-        self._expansion_cache = {}  # {key: (results, token_cost, nodes_added)}
 
     def _disk_path(self, file_path):
         """Where a graph-relative source path lives on disk; see source_path.
@@ -598,16 +597,8 @@ class GraphQuerier:
         # 3. Find Dependencies (Callees) with Smart Inlining - deduplicated
         # Use recursive expansion if depth > 1
         if depth > 1:
-            expanded = {node_id}  # Prevent cycles
-            callee_info, _ = self._expand_callees_recursive(
-                node_id,
-                depth=depth,
-                budget=max_tokens,
-                expanded=expanded,
-                current_depth=1,
-                indent=0,
-                inline_threshold=inline_threshold,
-                levels=self._callee_levels(node_id, depth, inline_threshold),
+            callee_info = self._expand_callees(
+                node_id, depth, max_tokens, inline_threshold
             )
         else:
             # Original single-level expansion
@@ -1284,192 +1275,109 @@ class GraphQuerier:
         callers.sort(key=lambda c: (bool(c["candidates"]), c["tokens"], c["name"]))
         return callers[:limit]
 
-    def _callee_levels(self, node_id, depth, inline_threshold):
-        """``{callee: level}``: the first level of a callee expansion of
-        ``node_id`` that reaches each callee, following only the callees an
-        expansion opens, those small enough to inline."""
-        levels = {node_id: 0}
-        frontier = [node_id]
-        for level in range(1, depth + 1):
-            reached = []
-            for parent in frontier:
-                for callee in self.get_callees(parent)[: self._max_children_per_level]:
-                    if callee in self.nodes and callee not in levels:
-                        levels[callee] = level
-                        tokens = self.nodes[callee]["metadata"].get("token_count", 999)
-                        if tokens <= inline_threshold:
-                            reached.append(callee)
-            frontier = reached
-        return levels
+    def _expand_callees(self, node_id, depth, budget, inline_threshold=None):
+        """Lines listing the callees of ``node_id``, ``depth`` levels deep.
 
-    def _expand_callees_recursive(
-        self,
-        node_id: str,
-        depth: int,
-        budget: int,
-        expanded: set,
-        current_depth: int = 1,
-        indent: int = 0,
-        start_time: float | None = None,
-        inline_threshold: int | None = None,
-        levels: dict | None = None,
-    ) -> tuple[list[str], int]:
-        """Recursively expand callees up to depth limit with token budget.
-
-        Args:
-            node_id: The node to expand callees for
-            depth: Maximum recursion depth (1-3)
-            budget: Remaining token budget
-            expanded: Set of already expanded node IDs (cycle prevention)
-            current_depth: Current recursion level
-            indent: Current indentation level
-            start_time: Start time for timeout checking
-            inline_threshold: Token threshold for inlining code
-            levels: `_callee_levels` of the expansion: a callee is opened only
-                at its level and marked "(at level N)" elsewhere
-
-        Returns:
-            Tuple of (formatted lines list, remaining budget)
+        Planned level by level: a symbol is opened (its code inlined, its own
+        callees listed) at the first level that reaches it, when it is small
+        enough to inline and the token ``budget`` still covers it; a symbol
+        not opened is listed by its signature, one met again as "(at level
+        N)", and an unresolved call where it is made. A note says what cut
+        the expansion short: the budget, the node limit or the timeout.
         """
-        if start_time is None:
-            start_time = time.time()
         if inline_threshold is None:
             inline_threshold = CALLEE_INLINE_THRESHOLD
-        if levels is None:
-            levels = self._callee_levels(node_id, depth, inline_threshold)
-
-        # Check timeout
-        elapsed_ms = (time.time() - start_time) * 1000
-        if elapsed_ms > self._timeout_ms:
-            return [f"{'  ' * indent}*(timeout reached)*"], 0
-
-        # Check depth / budget / visited-node ceiling. `expanded` accumulates
-        # every callee visited across the entire expansion; capping on
-        # `_max_nodes` prevents a wide+deep graph from running the caller
-        # out of budget even though each branch respected its own limits.
-        if current_depth > depth or budget <= 0:
-            return [], budget
-        if self._max_nodes and len(expanded) >= self._max_nodes:
-            return [f"{'  ' * indent}*(node budget reached)*"], budget
-
-        # Check memoization cache. Key includes indent because rendered
-        # output lines contain indentation prefixes; caching without the
-        # indent would produce wrong-depth whitespace on re-use. It includes
-        # the budget and threshold because they decide what is inlined, and
-        # the already-expanded set because those nodes are skipped; the nodes
-        # an expansion adds are stored so a hit adds them too.
-        expanded_at_entry = frozenset(expanded)
-        budget_at_entry = budget
-        cache_key = (
-            node_id,
-            depth - current_depth + 1,
-            indent,
-            budget,
-            inline_threshold,
-            expanded_at_entry,
-            tuple(sorted(levels.items())),
-        )
-        if cache_key in self._expansion_cache:
-            cached_results, cached_cost, cached_added = self._expansion_cache[cache_key]
-            expanded |= cached_added
-            return list(cached_results), budget - cached_cost
-
-        results = []
-        callees = self.get_callees(node_id)
-        unresolved = self.get_ambiguous_callees(node_id)
-        left_out = callees[self._max_children_per_level :]
-        callees = callees[: self._max_children_per_level]
-
-        for callee_id in callees:
-            # A symbol opens at its level and is marked elsewhere; an
-            # unresolved call opens nothing and is listed where it is made.
-            level = levels.get(callee_id, current_depth)
-            if callee_id in self.nodes and (
-                callee_id in expanded or level < current_depth
-            ):
-                name = self.nodes[callee_id]["metadata"].get("name", "?")
-                results.append(f"{'  ' * indent}- `{name}` (at level {level})")
-                continue
-            expanded.add(callee_id)
-
-            # Check timeout periodically
-            if (time.time() - start_time) * 1000 > self._timeout_ms:
-                results.append(f"{'  ' * indent}*(timeout)*")
-                break
-
-            callee_node = self.nodes.get(callee_id)
-            indent_str = "  " * indent
-
-            if callee_node:
-                # Resolved node
-                c_file = callee_node["id"].split("::")[0].replace("FILE:", "")
-                c_meta = callee_node.get("metadata", {})
-                c_tokens = c_meta.get("token_count", 999)
-                c_name = c_meta.get("name", "?")
-                c_sig = c_meta.get("signature", f"{c_name}(...)")
-                c_doc = (c_meta.get("docstring", "") or "").split("\n")[0][:80]
-                c_lang = _get_syntax_lang(c_file, self._syntax_lang_map)
-
-                # Inline small functions if budget allows
-                if (
-                    c_tokens <= inline_threshold
-                    and c_tokens <= budget
-                    and os.path.exists(self._disk_path(c_file))
-                ):
-                    c_start = c_meta.get("lineno", 1)
-                    c_end = c_meta.get("end_lineno", c_start + 10)
-                    code = self.get_source_segment(c_file, c_start, c_end)
-                    # Indent code content for proper markdown list nesting
-                    code_indent = indent_str + "  "
-                    code_indented = "\n".join(
-                        code_indent + line for line in code.rstrip().split("\n")
+        start_time = time.time()
+        placed = {node_id: 0}
+        rows = {}  # parent -> ([(kind, callee)], callees left out, marks)
+        cuts = []
+        frontier = [node_id]
+        for level in range(1, depth + 1):
+            opened = []
+            for parent in frontier:
+                callees = self.get_callees(parent)
+                marks = self.get_ambiguous_callees(parent)
+                listed = []
+                rows[parent] = (listed, callees[self._max_children_per_level :], marks)
+                for callee in callees[: self._max_children_per_level]:
+                    if (time.time() - start_time) * 1000 > self._timeout_ms:
+                        cuts.append("timeout")
+                        break
+                    if callee not in self.nodes:
+                        listed.append(("call", callee))
+                        continue
+                    if callee in placed:
+                        listed.append(("seen", callee))
+                        continue
+                    if self._max_nodes and len(placed) > self._max_nodes:
+                        cuts.append("node limit")
+                        break
+                    placed[callee] = level
+                    meta = self.nodes[callee]["metadata"]
+                    tokens = meta.get("token_count", 999)
+                    on_disk = os.path.exists(
+                        self._disk_path(callee.split("::")[0].replace("FILE:", ""))
                     )
-                    results.append(f"{indent_str}- **{c_name}** ({c_tokens} toks):")
-                    results.append(f"{indent_str}  ```{c_lang}")
-                    results.append(code_indented)
-                    results.append(f"{indent_str}  ```")
-                    budget -= c_tokens
+                    if tokens <= inline_threshold and on_disk:
+                        if tokens <= budget:
+                            budget -= tokens
+                            listed.append(("open", callee))
+                            opened.append(callee)
+                            continue
+                        if "token budget" not in cuts:
+                            cuts.append("token budget")
+                    listed.append(("summary", callee))
+                if cuts and cuts[-1] != "token budget":
+                    break
+            if cuts and cuts[-1] != "token budget":
+                break
+            frontier = opened
 
-                    # Recurse if depth allows
-                    if current_depth < depth and budget > 0:
-                        nested, budget = self._expand_callees_recursive(
-                            callee_id,
-                            depth,
-                            budget,
-                            expanded,
-                            current_depth + 1,
-                            indent + 1,
-                            start_time,
-                            inline_threshold,
-                            levels,
-                        )
-                        results.extend(nested)
+        lines = []
+
+        def render(parent, indent):
+            listed, left_out, marks = rows.get(parent, ([], [], {}))
+            pad = "  " * indent
+            for kind, callee in listed:
+                meta = self.nodes.get(callee, {}).get("metadata", {})
+                name = meta.get("name", "?")
+                if kind == "call":
+                    clean = _clean_ref_name(callee.replace("REF:", ""))
+                    lines.append(
+                        f"{pad}- `{clean}`{self.callee_note(marks.get(callee))}"
+                    )
+                elif kind == "seen":
+                    lines.append(f"{pad}- `{name}` (at level {placed[callee]})")
+                elif kind == "summary":
+                    sig = meta.get("signature", f"{name}(...)")
+                    lines.append(
+                        f"{pad}- `{sig}` ({meta.get('token_count', 999)} toks)"
+                    )
+                    doc = (meta.get("docstring", "") or "").split("\n")[0][:80]
+                    if doc:
+                        lines.append(f"{pad}  > {doc}")
                 else:
-                    # Summary mode for larger functions
-                    results.append(f"{indent_str}- `{c_sig}` ({c_tokens} toks)")
-                    if c_doc:
-                        results.append(f"{indent_str}  > {c_doc}")
-            else:
-                # Unresolved REF
-                raw_name = callee_id.replace("REF:", "")
-                clean_name = _clean_ref_name(raw_name)
-                note = self.callee_note(unresolved.get(callee_id))
-                results.append(f"{indent_str}- `{clean_name}`{note}")
-        if left_out:
-            certain, possible, none = self.kinds(left_out, unresolved)
-            more = self.more_callers(certain, possible, "callees", none)
-            results.append(f"{'  ' * indent}*({more})*")
+                    file_path = callee.split("::")[0].replace("FILE:", "")
+                    start_line = meta.get("lineno", 1)
+                    code = self.get_source_segment(
+                        file_path, start_line, meta.get("end_lineno", start_line + 10)
+                    )
+                    lang = _get_syntax_lang(file_path, self._syntax_lang_map)
+                    lines.append(
+                        f"{pad}- **{name}** ({meta.get('token_count', 999)} toks):"
+                    )
+                    lines.append(f"{pad}  ```{lang}")
+                    lines.extend(f"{pad}  {line}" for line in code.rstrip().split("\n"))
+                    lines.append(f"{pad}  ```")
+                    render(callee, indent + 1)
+            if left_out:
+                certain, possible, none = self.kinds(left_out, marks)
+                more = self.more_callers(certain, possible, "callees", none)
+                lines.append(f"{pad}*({more})*")
 
-        # Cache results, with the cost of the whole subtree, unless the
-        # timeout cut the expansion short.
-        if (time.time() - start_time) * 1000 <= self._timeout_ms:
-            self._expansion_cache[cache_key] = (
-                results.copy(),
-                budget_at_entry - budget,
-                expanded - expanded_at_entry,
-            )
-
-        return results, budget
+        render(node_id, 0)
+        lines.extend(f"*({cut} reached)*" for cut in cuts)
+        return lines
 
     @property
     def max_flow_depth(self):
