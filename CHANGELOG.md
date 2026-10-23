@@ -78,8 +78,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   its text: expanded callees, then usage examples past 2, related tests
   and configuration, callers past 5 (still counting possible callers
   apart), the symbol's callees past 5 (planned again for those five, so
-  the note counts what is left out by kind and no "(at level N)" mark
-  points at a callee cut away), and the source past 30 of the symbol's
+  the note counts by kind only callees drawn nowhere in the answer and no
+  "(at level N)" mark points at a callee cut away), and the source past 30 of the symbol's
   lines, saying what each step left out; a section dropped whole keeps its
   heading with "(omitted, max_output_tokens limit)".
   It read the rendered text back, so code with a heading-like or a fence

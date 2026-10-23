@@ -1987,9 +1987,10 @@ def test_the_source_cut_counts_from_the_symbols_lines(tmp_path):
     assert "(270 lines omitted, max_output_tokens limit)" in out
 
 
-def test_a_cut_callee_list_keeps_kinds_and_marks_true(tmp_path):
-    """Possible callees are counted apart, and no mark points at a callee
-    whose entry was cut."""
+@pytest.mark.parametrize("a0_calls_p", [False, True])
+def test_a_cut_callee_list_keeps_kinds_and_marks_true(tmp_path, a0_calls_p):
+    """Possible callees are counted apart, no mark points at a callee whose
+    entry was cut, and a call drawn under a kept callee is not counted."""
     (tmp_path / "a.py").write_text("def f():\n    pass\n")
     small = [f"a{i}" for i in range(6)]
     nodes = [_fn("FILE:a.py::f", lineno=1, end_lineno=2, token_count=10)]
@@ -1999,17 +2000,19 @@ def test_a_cut_callee_list_keeps_kinds_and_marks_true(tmp_path):
     nodes += [_fn("FILE:b.py::p"), _fn("FILE:c.py::p")]
     edges = [_calls("FILE:a.py::f", f"FILE:a.py::{n}") for n in small]
     edges.append(_calls("FILE:a.py::a0", "FILE:a.py::a5"))
-    edges.append(
-        {
-            "source": "FILE:a.py::f",
-            "target": "REF:x.p",
-            "relation": "CALLS",
-            "metadata": {"candidates": ["FILE:b.py::p", "FILE:c.py::p"]},
-        }
-    )
+    for source in ["FILE:a.py::f"] + ["FILE:a.py::a0"] * a0_calls_p:
+        edges.append(
+            {
+                "source": source,
+                "target": "REF:x.p",
+                "relation": "CALLS",
+                "metadata": {"candidates": ["FILE:b.py::p", "FILE:c.py::p"]},
+            }
+        )
     q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
     out = q.get_context_prompt("FILE:a.py::f", depth=2, max_output_tokens=1)
-    # `a5`, cut from f's list, is drawn under `a0`, so only `x.p` is left out
-    assert "*(1 more possible callees)*" in out
+    # `a5`, cut from f's list, is drawn under `a0`, and so is `x.p` when
+    # `a0` makes the call
+    assert ("more possible callees" in out) is not a0_calls_p
     assert "**a5**" in out
     assert "(at level" not in out

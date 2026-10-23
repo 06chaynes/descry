@@ -1211,8 +1211,11 @@ class GraphQuerier:
 
         # The symbol's callees left out of its list but reached under one
         # kept are drawn there, so they are not counted as left out.
+        drawn = placed.keys() | {
+            c for listed, _, _ in rows.values() for kind, c in listed if kind == "call"
+        }
         listed, left_out, marks = rows[node_id]
-        rows[node_id] = (listed, [c for c in left_out if c not in placed], marks)
+        rows[node_id] = (listed, [c for c in left_out if c not in drawn], marks)
 
         blocks, notes = [], []
         lines = []
