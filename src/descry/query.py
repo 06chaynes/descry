@@ -1463,7 +1463,9 @@ class GraphQuerier:
             )
             if node["code"]:
                 output.append(f"{indent}  ```{node['lang']}")
-                output.append(node["code"].rstrip())
+                output.extend(
+                    f"{indent}  {line}" for line in node["code"].rstrip().split("\n")
+                )
                 output.append(f"{indent}  ```")
             for child in node["children"]:
                 render(child, level + 1)

@@ -953,7 +953,15 @@ class TestSourcePathsResolveAgainstProjectRoot:
         assert "return helper()" in context
         assert "return 42" in context
 
-        assert "return 42" in querier.trace_flow("caller", inline_threshold=100)
+        flow = querier.trace_flow("caller", inline_threshold=100)
+        assert "return 42" in flow
+        # Inlined code is indented as its fence is, at every level
+        fence = None
+        for line in flow.splitlines():
+            if line.lstrip().startswith("```"):
+                fence = None if fence is not None else line[: line.index("`")]
+            elif fence is not None:
+                assert line.startswith(fence), line
         tree = querier.trace_flow_structured("caller", inline_threshold=100)
         assert "return helper()" in tree["root"]["code"]
 

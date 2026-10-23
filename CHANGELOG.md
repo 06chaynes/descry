@@ -85,6 +85,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   It read the rendered text back, so code with a heading-like or a fence
   line in it was cut wrongly or not at all, opened callees kept their
   headings without their code, and counts were wrong.
+- `flow` text indents the code it inlines as deep as its fence. The code
+  was printed from the first column inside an indented fence, so it broke
+  the tree, and below the first level the fence read as an indented code
+  block.
 - A command that loads no embedding model no longer imports
   sentence-transformers, and with it torch, as the service starts: where
   they are installed every CLI command spent seconds on it.
