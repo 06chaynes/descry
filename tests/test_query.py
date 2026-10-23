@@ -1249,8 +1249,9 @@ class TestUnresolvedCallsInPathsAndFlows:
             },
         ]
         querier = _querier(tmp_path, nodes, edges)
-        # `three`'s call is left unresolved: it is no call of `Store::get`.
-        assert querier.get_callers(asked) == ["FILE:a.py::one"]
+        # `three`'s call is left unresolved: a call of the name, not certain.
+        assert querier.get_callers(asked) == ["FILE:a.py::one", "FILE:a.py::three"]
+        assert querier.get_ambiguous_callers(asked) == {"FILE:a.py::three": 0}
         found = querier.find_nodes_by_name(asked)
         assert [node["id"] for node in found] == ["FILE:a.py::Store::get"]
 
@@ -1545,10 +1546,16 @@ def test_a_graph_is_counted_as_it_loads(tmp_path):
     assert q.nodes["FILE:a.py::f"]["metadata"]["in_degree"] == 1
 
 
-def test_a_call_left_unresolved_is_no_call_of_a_definition_of_its_name(tmp_path):
-    """Unless the project defines no symbol of the name: then the calls of
-    it are what there is to find."""
-    nodes = [_fn("FILE:a.py::list_templates"), _fn("FILE:b.py::render")]
+def test_a_call_left_unresolved_is_one_of_the_name_only(tmp_path):
+    """A call the resolver found no candidates for is listed by its name,
+    marked apart from the callers resolved or narrowed to a definition; one
+    with candidates reaches only those."""
+    nodes = [
+        _fn("FILE:a.py::list_templates"),
+        _fn("FILE:c.py::Other::list_templates"),
+        _fn("FILE:b.py::render"),
+        _fn("FILE:b.py::narrowed"),
+    ]
     edges = [
         {
             "source": "FILE:b.py::render",
@@ -1556,12 +1563,15 @@ def test_a_call_left_unresolved_is_no_call_of_a_definition_of_its_name(tmp_path)
             "relation": "CALLS",
         },
         {
-            "source": "FILE:b.py::render",
-            "target": "REF:requests.get",
+            "source": "FILE:b.py::narrowed",
+            "target": "REF:held.list_templates",
             "relation": "CALLS",
+            "metadata": {"candidates": ["FILE:c.py::Other::list_templates"]},
         },
     ]
     q = _querier(tmp_path, nodes, edges)
-    assert q.get_callers("list_templates") == []
-    assert q.get_callers("list_t", fuzzy=True) == []
-    assert q.get_callers("requests.get") == ["FILE:b.py::render"]
+    callers, marks = q.ordered_callers("list_templates")
+    assert callers == ["FILE:b.py::narrowed", "FILE:b.py::render"]
+    assert marks == {"FILE:b.py::narrowed": 1, "FILE:b.py::render": 0}
+    assert q.one_of(0) == " (unresolved; same name)"
+    assert q.get_callers("FILE:a.py::list_templates") == []

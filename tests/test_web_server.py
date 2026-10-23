@@ -2000,3 +2000,45 @@ class TestStartup:
 
         assert resolve("verbose") == logging.WARNING
         assert resolve("debug") == logging.DEBUG
+
+
+def test_callers_of_a_name_count_each_kind_apart(client, web_project):
+    """Resolved, one of an unresolved call's candidates, and an unresolved
+    call of the name with no candidates."""
+    _write_web_graph(
+        web_project,
+        nodes=[_fn("parse"), _fn("sure"), _fn("maybe"), _fn("stray")],
+        edges=[
+            {
+                "source": "FILE:app.py::sure",
+                "target": "FILE:app.py::parse",
+                "relation": "CALLS_RESOLVED",
+            },
+            {
+                "source": "FILE:app.py::maybe",
+                "target": "REF:x.parse",
+                "relation": "CALLS",
+                "metadata": {"candidates": ["FILE:app.py::parse", "FILE:b.py::parse"]},
+            },
+            {
+                "source": "FILE:app.py::stray",
+                "target": "REF:y.parse",
+                "relation": "CALLS",
+            },
+        ],
+    )
+    answer = client.get("/api/callers", params={"name": "parse", "limit": 1}).json()
+    assert [answer[k] for k in ("total", "certain", "possible", "unresolved")] == [
+        3,
+        1,
+        1,
+        1,
+    ]
+    assert answer["more"] == {"certain": 0, "possible": 1, "unresolved": 1}
+    assert [c.get("candidates") for c in answer["callers"]] == [None]
+    full = client.get("/api/callers", params={"name": "parse"}).json()["callers"]
+    assert [(c["id"].split("::")[-1], c.get("candidates")) for c in full] == [
+        ("sure", None),
+        ("maybe", 2),
+        ("stray", 0),
+    ]

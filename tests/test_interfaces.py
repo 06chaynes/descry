@@ -215,8 +215,9 @@ def test_callers_say_how_many_are_possible(project, web):
     said = f"1 caller(s) of '{A}' (+1 possible):"
     assert said in _cli(project, "callers", A)
     assert said in _mcp(project, "callers", name=A)
-    answer = json.loads(web("/api/callers", name=A))
-    assert (answer["total"], answer["possible"]) == (2, 1)
+    answer = json.loads(web("/api/callers", name=A, limit=1))
+    assert (answer["total"], answer["certain"], answer["possible"]) == (2, 1, 1)
+    assert answer["more"] == {"certain": 0, "possible": 1, "unresolved": 0}
 
 
 def test_a_change_marks_its_possible_callers_on_the_page(web):
@@ -285,3 +286,11 @@ def test_context_depth_is_bounded_as_flow_is(project, web, interface):
     }[interface]()
     assert "depth must be at least 1, got 0." in refused
     assert "[depth=3] [depth 9 is past [query] max_depth]" in capped
+
+
+def test_a_possible_callee_is_named_and_followed(project):
+    flow = _mcp(project, "flow", start="FILE:use.py::guess", depth=1)
+    assert flow.count("(one of 2 candidates)") == 2
+    context = _mcp(project, "context", node_id="FILE:use.py::guess")
+    assert "`parse` (one of 2 candidates)" in context
+    assert "External" not in context

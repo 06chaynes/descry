@@ -610,6 +610,7 @@ class GraphQuerier:
         else:
             # Original single-level expansion
             callees = self.get_callees(node_id)
+            possible = self.get_ambiguous_callees(node_id)
             callee_info = []
 
             for callee_id in callees:
@@ -648,7 +649,9 @@ class GraphQuerier:
                     # Unresolved REF - clean up for display
                     raw_name = callee_id.replace("REF:", "")
                     clean_name = _clean_ref_name(raw_name)
-                    callee_info.append(f"- `{clean_name}` (External/Unresolved)")
+                    # One of the definitions it names, or none of the project's
+                    kind = self.one_of(possible.get(callee_id)).strip() or "(external)"
+                    callee_info.append(f"- `{clean_name}` {kind}")
 
         # 4. Find Usage Examples (Callers) - grouped by file
         usage_examples = self._get_usage_examples(node_id, limit=4)
@@ -1473,10 +1476,19 @@ class GraphQuerier:
 
     def _flow_next(self, node_id, direction):
         """The next level of a flow from ``node_id``: its callees, or its
-        callers with those resolved to it first; and ``{caller: number of
-        candidates}`` of the callers that only may be."""
+        callers, those resolved first; and ``{id: number of candidates}`` of
+        those that only may be."""
         if direction == "forward":
-            return self.get_callees(node_id), {}
+            # Those resolved, then each definition an unresolved call may reach
+            callees = [c for c in self.get_callees(node_id) if c in self.nodes]
+            possible = {}
+            for edge in self.outgoing[node_id]:
+                candidates = edge.get("metadata", {}).get("candidates")
+                if edge["relation"] == "CALLS" and candidates:
+                    for candidate in candidates:
+                        if candidate not in callees:
+                            possible.setdefault(candidate, len(candidates))
+            return callees + list(possible), possible
         return self.ordered_callers(node_id)
 
     def trace_flow(
@@ -2197,83 +2209,91 @@ class GraphQuerier:
             func_name: Function/method name to find callers for
             fuzzy: If True, also matches names that start with the search term
         """
-        # Step 1: Find all target node IDs that match func_name
-        target_ids = self._resolve_target_ids(func_name, fuzzy)
-        if any(target_id in self.nodes for target_id in target_ids):
-            # A call the resolver left unresolved with no candidates is no
-            # call of a definition the project has, whatever its name.
-            target_ids = {t for t in target_ids if not t.startswith("REF:")}
-
-        # Step 2: Use incoming index to find callers - O(in-degree) per target
-        callers = set()
-        for target_id in target_ids:
-            for edge in self.incoming.get(target_id, []):
-                if edge["relation"] in CALL_RELATIONS:
-                    callers.add(edge["source"])
-
-        # A call the resolver left unresolved but narrowed to candidates
-        # reaches each one.
-        for target_id in target_ids:
-            if target_id.startswith("REF:"):
-                continue
-            for edge in self.candidate_incoming.get(target_id, []):
-                if edge["relation"] in CALL_RELATIONS:
-                    callers.add(edge["source"])
-
-        return sorted(callers)
+        return sorted(self._caller_marks(func_name, fuzzy))
 
     @staticmethod
-    def possible(count):
+    def possible(count, unresolved=0):
         """The note on a count of callers or callees of those that only may
-        be: ``count`` of them; empty for none."""
-        return f" (+{count} possible)" if count else ""
+        be: ``count`` of them, and ``unresolved`` calls of the name the
+        resolver found no candidates for; empty for none."""
+        extra = [f"+{count} possible"] if count else []
+        if unresolved:
+            extra.append(f"+{unresolved} unresolved")
+        return f" ({', '.join(extra)})" if extra else ""
 
     @staticmethod
-    def more_callers(certain, possible, of="callers"):
+    def more_callers(certain, possible, of="callers", unresolved=0):
         """The note on the callers, or callees, a list leaves out: ``certain``
-        of them and ``possible`` that only may be."""
+        of them, ``possible`` that only may be, and ``unresolved`` calls of
+        the name."""
         parts = [f"{certain} more {of}"] if certain else []
         if possible:
             parts.append(f"{possible} more possible {of}")
+        if unresolved:
+            parts.append(f"{unresolved} more unresolved calls of the name")
         return ", ".join(parts)
+
+    @staticmethod
+    def kinds(ids, marks):
+        """``(certain, possible, unresolved)`` of ``ids``, by the ``marks`` of
+        `get_ambiguous_callers`."""
+        possible = sum(bool(marks.get(i)) for i in ids)
+        unresolved = sum(marks.get(i) == 0 for i in ids)
+        return len(ids) - possible - unresolved, possible, unresolved
 
     @staticmethod
     def one_of(candidates):
         """The note on a call that is one of ``candidates`` definitions an
-        unresolved edge names; empty for a call that is certain."""
+        unresolved edge names, or of the name only (0); empty for a call
+        that is certain (None)."""
+        if candidates == 0:
+            return " (unresolved; same name)"
         if candidates == 1:
             return " (unresolved; the only candidate)"
         return f" (one of {candidates} candidates)" if candidates else ""
 
     def ordered_callers(self, func_name, fuzzy=False):
-        """The callers of a symbol matching ``func_name``, those its calls are
-        resolved to first, and ``{caller: number of candidates}`` of the
-        others."""
+        """The callers of a symbol matching ``func_name``: those its calls are
+        resolved to, then those that may be, then unresolved calls of the
+        name; and the `get_ambiguous_callers` marks of all but the first."""
         ambiguous = self.get_ambiguous_callers(func_name, fuzzy)
         callers = self.get_callers(func_name, fuzzy)
-        return sorted(callers, key=ambiguous.__contains__), ambiguous
+        order = {caller: (True, mark == 0) for caller, mark in ambiguous.items()}
+        return sorted(callers, key=lambda c: order.get(c, (False, False))), ambiguous
 
     def get_ambiguous_callers(self, func_name, fuzzy=False):
-        """``{caller: number of candidates}`` of the calls that may reach a
-        symbol matching ``func_name`` only through an unresolved edge's
-        candidates — the call is one of N, not a caller for sure."""
+        """``{caller: candidates}`` of the callers of a symbol matching
+        ``func_name`` that are not certain: the number of candidates of an
+        unresolved call it is one of, or 0 for an unresolved call of its name
+        with no candidates at all."""
+        marks = self._caller_marks(func_name, fuzzy)
+        return {caller: mark for caller, mark in marks.items() if mark is not None}
+
+    def _caller_marks(self, func_name, fuzzy=False):
+        """``{caller: mark}`` of the callers of a symbol matching
+        ``func_name``: None for a call resolved to it, the number of
+        candidates for an unresolved call it is one of, 0 for an unresolved
+        call of the name the resolver found no candidates for."""
         target_ids = self._resolve_target_ids(func_name, fuzzy)
-        relations = {"CALLS", "INSTANTIATES"}
-        certain = {
-            edge["source"]
-            for target_id in target_ids
-            if not target_id.startswith("REF:")
-            for edge in self.incoming.get(target_id, [])
-            if edge["relation"] in CALL_RELATIONS
-        }
-        ambiguous = {}
-        for target_id in target_ids:
-            if target_id.startswith("REF:"):
-                continue
+        defined = [t for t in target_ids if not t.startswith("REF:")]
+        marks = {}
+        for target_id in defined:
+            for edge in self.incoming.get(target_id, []):
+                if edge["relation"] in CALL_RELATIONS:
+                    marks[edge["source"]] = None
+        for target_id in defined:
             for edge in self.candidate_incoming.get(target_id, []):
-                if edge["relation"] in relations and edge["source"] not in certain:
-                    ambiguous[edge["source"]] = len(edge["metadata"]["candidates"])
-        return ambiguous
+                if edge["relation"] in CALL_RELATIONS:
+                    marks.setdefault(
+                        edge["source"], len(edge["metadata"]["candidates"])
+                    )
+        for target_id in target_ids - set(defined):
+            for edge in self.incoming.get(target_id, []):
+                if edge["relation"] in CALL_RELATIONS and not edge.get(
+                    "metadata", {}
+                ).get("candidates"):
+                    marks.setdefault(edge["source"], 0)
+        return marks
 
     def _resolve_target_ids(self, func_name: str, fuzzy: bool = False) -> set:
         """Resolve a function name to all possible target IDs in the graph.

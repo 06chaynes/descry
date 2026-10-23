@@ -18,20 +18,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   form (`candidates`, `callers_possible`) and on the page.
 - A function no longer counts as a certain caller of a symbol it defines
   when its call to it is unresolved.
-- `callers` of a name the project defines no longer lists calls the
-  resolver left unresolved with no candidates (`loader.list_templates()`
-  on a library's loader, `d.setdefault()` on a `dict`): they are no calls
-  of that definition. A name the project does not define still finds the
-  calls written with it.
+- `callers` of a name lists the calls the resolver left unresolved with no
+  candidates apart from its callers, marked "(unresolved; same name)" and
+  counted as "+N unresolved" (`unresolved` in the web API). Some are calls
+  of the project's definition the resolver cannot follow (a Rust re-export,
+  a TypeScript static member), some are calls of something else with that
+  name (`loader.list_templates()` on a library's loader). Neither is
+  counted as a caller. An unresolved call with candidates reaches only
+  those. Callers asked for by node ID are those resolved to it or narrowed
+  to it.
 - A list cut short (`callers`, `callees`, `context`'s callers, `changes`,
   backward `flow` in text and as a tree) keeps the callers resolved to the
   symbol first, and says how many it leaves out and how many of those only
-  may be; a `flow` tree node gives them as `more` and `more_possible`.
+  may be; a `flow` tree node gives them as `more` and `more_possible`, and
+  the web API's `callers` and `callees` as `more`, shown on the page.
 - A `flow` of `depth` N shows N levels of calls below the start; `depth=1`
   showed the start alone. `[query] max_depth` is that many levels too, for
   `flow` and for `context`'s callee expansion. A depth past it is traced to
   it and says so; the web API returns the depth traced, and `/api/health`
   gives the ceiling the page's depth field is held to.
+- `context` names each possible callee as one of its candidates instead of
+  "(External/Unresolved)", and forward `flow` follows a possible callee to
+  each definition it may reach, marked.
 - `callees` says how many callees its `limit` leaves out, and of a name
   several definitions share, which one it answers for (`others` in the web
   API).

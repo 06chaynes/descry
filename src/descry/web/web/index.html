@@ -326,15 +326,16 @@
             </div>
             <div class="results" x-show="results.callers">
                 <div class="results-header">
-                    <span x-text="(results.callers?.total - results.callers?.possible) + ' caller(s) of ' + results.callers?.symbol + (results.callers?.fuzzy ? ' (fuzzy)' : '') + (results.callers?.possible ? ' (+' + results.callers.possible + ' possible)' : '')"></span>
+                    <span x-text="results.callers?.certain + ' caller(s) of ' + results.callers?.symbol + (results.callers?.fuzzy ? ' (fuzzy)' : '') + extraNote(results.callers)"></span>
                 </div>
                 <div class="results-body">
                     <template x-for="c in results.callers?.callers || []" :key="c.id">
                         <div class="symbol-list-item" @click="viewContext(c.id)">
                             <span x-text="c.name"></span>
-                            <span class="sl-location" x-text="c.location + (c.candidates ? ' · ' + oneOf(c.candidates) : '')"></span>
+                            <span class="sl-location" x-text="c.location + (c.candidates != null ? ' · ' + oneOf(c.candidates) : '')"></span>
                         </div>
                     </template>
+                    <div class="sl-location" x-show="moreNote(results.callers?.more, 'callers')" x-text="'(' + moreNote(results.callers?.more, 'callers') + ')'"></div>
                 </div>
             </div>
         </div>
@@ -367,15 +368,16 @@
             </div>
             <div class="results" x-show="results.callees">
                 <div class="results-header">
-                    <span x-text="(results.callees?.total - results.callees?.possible) + ' callee(s) of ' + (results.callees?.others ? results.callees.node_id : results.callees?.symbol) + (results.callees?.fuzzy ? ' (fuzzy)' : '') + (results.callees?.possible ? ' (+' + results.callees.possible + ' possible)' : '') + (results.callees?.others ? ' (' + results.callees.others + (results.callees.fuzzy ? ' other matches' : ' other definitions of the name') + '; use a node ID to choose)' : '')"></span>
+                    <span x-text="results.callees?.certain + ' callee(s) of ' + (results.callees?.others ? results.callees.node_id : results.callees?.symbol) + (results.callees?.fuzzy ? ' (fuzzy)' : '') + extraNote(results.callees) + (results.callees?.others ? ' (' + results.callees.others + (results.callees.fuzzy ? ' other matches' : ' other definitions of the name') + '; use a node ID to choose)' : '')"></span>
                 </div>
                 <div class="results-body">
                     <template x-for="c in results.callees?.callees || []" :key="c.id">
                         <div class="symbol-list-item" @click="viewContext(c.id)">
                             <span x-text="c.name"></span>
-                            <span class="sl-location" x-text="c.location + (c.candidates ? ' · ' + oneOf(c.candidates) : '')"></span>
+                            <span class="sl-location" x-text="c.location + (c.candidates != null ? ' · ' + oneOf(c.candidates) : '')"></span>
                         </div>
                     </template>
+                    <div class="sl-location" x-show="moreNote(results.callees?.more, 'callees')" x-text="'(' + moreNote(results.callees?.more, 'callees') + ')'"></div>
                 </div>
             </div>
         </div>
@@ -1499,12 +1501,23 @@ function app() {
         changesMore(sym) {
             const shown = sym.callers || [];
             const possible = (sym.callers_possible || 0) - shown.filter(c => c.candidates).length;
-            const certain = (sym.callers_total || 0) - shown.length - possible;
-            return [certain ? certain + ' more callers' : '', possible ? possible + ' more possible callers' : ''].filter(Boolean).join(', ');
+            return this.moreNote({certain: (sym.callers_total || 0) - shown.length - possible, possible}, 'callers');
+        },
+
+        // The note on a count of those that only may be, and of unresolved calls of the name.
+        extraNote(counts) {
+            const extra = [counts?.possible ? '+' + counts.possible + ' possible' : '', counts?.unresolved ? '+' + counts.unresolved + ' unresolved' : ''].filter(Boolean);
+            return extra.length ? ' (' + extra.join(', ') + ')' : '';
+        },
+
+        // The note on what a list leaves out: certain, possible, unresolved calls of the name.
+        moreNote(more, of) {
+            return [more?.certain ? more.certain + ' more ' + of : '', more?.possible ? more.possible + ' more possible ' + of : '', more?.unresolved ? more.unresolved + ' more unresolved calls of the name' : ''].filter(Boolean).join(', ');
         },
 
         // The note on an unresolved call that has `count` candidates.
         oneOf(count) {
+            if (count === 0) return 'unresolved; same name';
             return count === 1 ? 'unresolved; the only candidate' : `one of ${count} candidates`;
         },
 

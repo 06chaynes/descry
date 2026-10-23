@@ -1736,7 +1736,8 @@ class DescryService:
             "fuzzy": fuzzy,
             "total": len(all_callers),
             "callers": all_callers[:limit],
-            "ambiguous": {c: ambiguous[c] for c in all_callers if c in ambiguous},
+            "left_out": all_callers[limit:],
+            "ambiguous": ambiguous,
         }
 
     async def callees_data(self, name: str, limit: int = 20) -> dict:
@@ -1782,17 +1783,11 @@ class DescryService:
             "node": node,
             "total": len(callees),
             "callees": callees[:limit],
-            "ambiguous": {c: ambiguous[c] for c in callees if c in ambiguous},
+            "left_out": callees[limit:],
+            "ambiguous": ambiguous,
             # The definitions of the name besides the one answered for
             "others": len(func_matches) - 1,
         }
-
-    @staticmethod
-    def _left_out(data, shown, total):
-        """``(certain, possible)`` of the callers or callees of ``data`` past
-        the ``shown`` ones."""
-        possible = len(data["ambiguous"]) - sum(s in data["ambiguous"] for s in shown)
-        return total - len(shown) - possible, possible
 
     async def callers(self, name: str, limit: int = 20) -> str:
         """Find all callers of a symbol."""
@@ -1815,9 +1810,11 @@ class DescryService:
                 f"No callers of '{name}'. Try descry search to verify symbol exists."
             )
         else:
-            certain = total_count - len(ambiguous)
-            possible = q.possible(len(ambiguous))
-            lines = [f"{certain} caller(s) of '{name}'{fuzzy_note}{possible}:"]
+            certain, possible, unresolved = q.kinds(
+                callers + data["left_out"], ambiguous
+            )
+            extra = q.possible(possible, unresolved)
+            lines = [f"{certain} caller(s) of '{name}'{fuzzy_note}{extra}:"]
             for caller in callers:
                 node_info = q.get_node_info(caller)
                 one_of = q.one_of(ambiguous.get(caller))
@@ -1830,9 +1827,10 @@ class DescryService:
                         lines.append(f"  {caller}{one_of}")
                 else:
                     lines.append(f"  {caller}{one_of}")
+            left_out = q.kinds(data["left_out"], ambiguous)
             if len(callers) < total_count:
                 lines.append(
-                    f"  ... ({q.more_callers(*self._left_out(data, callers, total_count))}"
+                    f"  ... ({q.more_callers(*left_out[:2], unresolved=left_out[2])}"
                     f", limit {limit})"
                 )
             result = "\n".join(lines)
@@ -1869,8 +1867,8 @@ class DescryService:
         if not total:
             result = f"'{display_name}'{fuzzy_note} calls no tracked functions.{others}"
         else:
-            certain = total - len(ambiguous)
-            possible = q.possible(len(ambiguous))
+            certain, possible, _ = q.kinds(callees + data["left_out"], ambiguous)
+            possible = q.possible(possible)
             lines = [
                 f"'{display_name}'{fuzzy_note} calls {certain} function(s){possible}:"
             ]
@@ -1887,7 +1885,8 @@ class DescryService:
                 else:
                     lines.append(f"  {callee}{one_of}")
             if len(callees) < total:
-                more = q.more_callers(*self._left_out(data, callees, total), "callees")
+                certain_left, possible_left, _ = q.kinds(data["left_out"], ambiguous)
+                more = q.more_callers(certain_left, possible_left, "callees")
                 lines.append(f"  ... ({more}, limit {limit})")
             result = "\n".join(lines) + others
 

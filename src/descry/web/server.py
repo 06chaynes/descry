@@ -163,10 +163,18 @@ def _node_to_dict(node: dict) -> dict:
     }
 
 
-def _caller_to_dict(caller_id: str, q: GraphQuerier, candidates: int = 0) -> dict:
-    """Convert a caller node ID to a dict with location info."""
+def _kinds(q: GraphQuerier, ids: list, marks: dict) -> dict:
+    """How many of ``ids`` are certain, possible, and unresolved calls of the
+    name."""
+    return dict(zip(("certain", "possible", "unresolved"), q.kinds(ids, marks)))
+
+
+def _caller_to_dict(caller_id: str, q: GraphQuerier, candidates: int | None) -> dict:
+    """Convert a caller node ID to a dict with location info. `candidates`
+    is absent on a certain call, else the number its unresolved call may
+    reach, 0 for a call of the name only."""
     result = {"id": caller_id, "name": caller_id}
-    if candidates:
+    if candidates is not None:
         result["candidates"] = candidates
     file_path = ""
     if caller_id.startswith("FILE:"):
@@ -339,9 +347,10 @@ async def api_callers(request: Request) -> JSONResponse:
             "symbol": data["symbol"],
             "fuzzy": data["fuzzy"],
             "total": data["total"],
-            "possible": len(ambiguous),
+            **_kinds(q, data["callers"] + data["left_out"], ambiguous),
+            "more": _kinds(q, data["left_out"], ambiguous),
             "callers": [
-                _caller_to_dict(c, q, ambiguous.get(c, 0)) for c in data["callers"]
+                _caller_to_dict(c, q, ambiguous.get(c)) for c in data["callers"]
             ],
         }
     )
@@ -371,10 +380,11 @@ async def api_callees(request: Request) -> JSONResponse:
             "node_id": node["id"],
             "fuzzy": data["fuzzy"],
             "total": data["total"],
-            "possible": len(ambiguous),
+            **_kinds(q, data["callees"] + data["left_out"], ambiguous),
+            "more": _kinds(q, data["left_out"], ambiguous),
             "others": data["others"],
             "callees": [
-                _caller_to_dict(c, q, ambiguous.get(c, 0)) for c in data["callees"]
+                _caller_to_dict(c, q, ambiguous.get(c)) for c in data["callees"]
             ],
         }
     )
