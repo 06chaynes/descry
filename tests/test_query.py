@@ -1875,3 +1875,47 @@ def test_output_trimming_keeps_or_drops_a_dependency_whole(tmp_path):
     out = q._truncate_output_progressively(text, max_tokens=60, source_lang="python")
     assert "code 4" in out and "- `n4(...)`" in out and "**c5**" not in out
     assert "*(4 more dependencies omitted)*" in out
+
+
+def test_the_node_limit_counts_what_each_parent_leaves(tmp_path):
+    """Past the limit, a parent opened at the level above lists its
+    callees as left out, not as nothing."""
+    (tmp_path / "a.py").write_text("def f():\n    pass\n")
+    nodes = [
+        _fn(f"FILE:a.py::{n}", lineno=1, end_lineno=2, token_count=10)
+        for n in ("f", "g0", "g1", "g2")
+    ]
+    nodes += [_fn(f"FILE:a.py::{n}", token_count=500) for n in ("h0", "h1", "k0", "k1")]
+    pairs = [
+        ("f", "g0"),
+        ("f", "g1"),
+        ("f", "g2"),
+        ("g0", "h0"),
+        ("g0", "h1"),
+        ("g1", "k0"),
+        ("g1", "k1"),
+    ]
+    edges = [_calls(f"FILE:a.py::{a}", f"FILE:a.py::{b}") for a, b in pairs]
+    q = _querier(tmp_path, nodes, edges, project_root=tmp_path, max_nodes=2)
+    text = q.get_context_prompt("FILE:a.py::f", depth=2)
+    assert text.count("*(2 more callees)*") == 2
+
+
+def test_output_trimming_reads_code_as_code(tmp_path):
+    """Lines inside inlined code are neither dependencies nor headings, and
+    a note on the section stays."""
+    q = _querier(tmp_path, [_fn("FILE:x.py::f")])
+    deps = []
+    for i in range(7):
+        code = (
+            ["  - a bullet in a docstring", "  # #### not a heading"]
+            if i in (0, 6)
+            else ["  code"]
+        )
+        deps += [f"- **c{i}** (10 toks):", "  ```python", *code, "  ```"]
+    deps.append("*(token budget reached)*")
+    body = "\n".join(deps)
+    text = f"### Context\n#### Source Code:\n```python\nx\n```\n#### Dependencies (Callees):\n{body}\n"
+    out = q._truncate_output_progressively(text, max_tokens=40, source_lang="python")
+    assert "*(2 more dependencies omitted)*" in out
+    assert "**c5**" not in out and "*(token budget reached)*" in out

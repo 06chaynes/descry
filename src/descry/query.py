@@ -834,10 +834,10 @@ class GraphQuerier:
         # Priority 1: Remove Expanded Callees section
         if current_tokens > max_tokens:
             result = re.sub(
-                r"#### Expanded Callees \(Full Source\):.*?(?=####|\Z)",
+                r"#### Expanded Callees \(Full Source\):.*?(?=^#### |\Z)",
                 "",
                 result,
-                flags=re.DOTALL,
+                flags=re.DOTALL | re.MULTILINE,
             )
             result = re.sub(r"\n{3,}", "\n\n", result)
             current_tokens = _estimate_tokens(result)
@@ -846,7 +846,9 @@ class GraphQuerier:
         if current_tokens > max_tokens:
             # Find and truncate usage examples section
             match = re.search(
-                r"(#### Usage Examples:.*?)(?=####|\Z)", result, re.DOTALL
+                r"(#### Usage Examples:.*?)(?=^#### |\Z)",
+                result,
+                re.DOTALL | re.MULTILINE,
             )
             if match:
                 examples_section = match.group(1)
@@ -869,7 +871,10 @@ class GraphQuerier:
         # Priority 3: Remove Related Tests section
         if current_tokens > max_tokens:
             result = re.sub(
-                r"#### Related Tests:.*?(?=####|\Z)", "", result, flags=re.DOTALL
+                r"#### Related Tests:.*?(?=^#### |\Z)",
+                "",
+                result,
+                flags=re.DOTALL | re.MULTILINE,
             )
             result = re.sub(r"\n{3,}", "\n\n", result)
             current_tokens = _estimate_tokens(result)
@@ -877,7 +882,10 @@ class GraphQuerier:
         # Priority 4: Remove Related Configuration section
         if current_tokens > max_tokens:
             result = re.sub(
-                r"#### Related Configuration.*?(?=####|\Z)", "", result, flags=re.DOTALL
+                r"#### Related Configuration.*?(?=^#### |\Z)",
+                "",
+                result,
+                flags=re.DOTALL | re.MULTILINE,
             )
             result = re.sub(r"\n{3,}", "\n\n", result)
             current_tokens = _estimate_tokens(result)
@@ -885,7 +893,9 @@ class GraphQuerier:
         # Priority 5: Reduce Callers to 5
         if current_tokens > max_tokens:
             match = re.search(
-                r"(#### Callers \(\d+ shown\):)(.*?)(?=####|\Z)", result, re.DOTALL
+                r"(#### Callers \(\d+ shown\):)(.*?)(?=^#### |\Z)",
+                result,
+                re.DOTALL | re.MULTILINE,
             )
             if match:
                 callers_content = match.group(2)
@@ -909,23 +919,33 @@ class GraphQuerier:
         # Priority 6: Reduce Dependencies to 5
         if current_tokens > max_tokens:
             match = re.search(
-                r"(#### Dependencies \(Callees\):)(.*?)(?=####|\Z)", result, re.DOTALL
+                r"(#### Dependencies \(Callees\):)(.*?)(?=^#### |\Z)",
+                result,
+                re.DOTALL | re.MULTILINE,
             )
             if match:
                 # Each top-level dependency with what is nested under it:
-                # its code and its own callees go with it or not at all.
-                entries = []
+                # its code and its own callees go with it or not at all; a
+                # note on the section stays.
+                entries, notes, fenced = [], [], False
                 for line in match.group(2).strip().split("\n"):
-                    if line.startswith(("- ", "*(")) or not entries:
+                    if line.startswith("*(") and not fenced:
+                        notes.append(line)
+                    elif line.startswith("- ") and not fenced or not entries:
                         entries.append([line])
                     else:
                         entries[-1].append(line)
+                    if line.lstrip().startswith("```"):
+                        fenced = not fenced
                 if len(entries) > 5:
-                    dropped = sum(
-                        sum(line.lstrip().startswith("- ") for line in entry)
-                        for entry in entries[5:]
-                    )
-                    new_content = "\n".join("\n".join(entry) for entry in entries[:5])
+                    dropped, fenced = 0, False
+                    for line in (line for entry in entries[5:] for line in entry):
+                        if line.lstrip().startswith("```"):
+                            fenced = not fenced
+                        elif not fenced and line.lstrip().startswith("- "):
+                            dropped += 1
+                    kept = ["\n".join(entry) for entry in entries[:5]]
+                    new_content = "\n".join([*kept, *notes])
                     new_content += f"\n*({dropped} more dependencies omitted)*\n"
                     result = (
                         result[: match.start()]
@@ -1256,6 +1276,10 @@ class GraphQuerier:
             for parent in frontier:
                 callees = self.get_callees(parent)
                 marks = self.get_ambiguous_callees(parent)
+                if "node limit" in cuts:
+                    # Past the limit, a parent's callees are all left out
+                    rows[parent] = ([], callees, marks)
+                    continue
                 # The symbol's own callees are all listed; below them, each
                 # level is cut to the per-level limit.
                 limit = len(callees) if level == 1 else self._max_children_per_level
@@ -1291,9 +1315,9 @@ class GraphQuerier:
                         if "token budget" not in cuts:
                             cuts.append("token budget")
                     listed.append(("summary", callee))
-                if cuts and cuts[-1] != "token budget":
+                if "timeout" in cuts:
                     break
-            if cuts and cuts[-1] != "token budget":
+            if "timeout" in cuts or "node limit" in cuts:
                 break
             frontier = opened
 
