@@ -92,7 +92,8 @@ _DEFAULT_EXCLUDED_DIRS = {
     "venv",
     # Go
     "vendor",
-    # .NET (its `bin` is skipped beside a project file)
+    # .NET (its `bin`, and an Eclipse project's, is skipped beside the
+    # project file)
     "obj",
     # Dart / Flutter
     ".dart_tool",

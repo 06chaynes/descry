@@ -202,7 +202,7 @@ For customization, add a `.descry.toml` to your project root.
 
 ```toml
 [project]
-# OPTIONAL — REPLACES the 25-element default. Leave unset to keep defaults
+# OPTIONAL — REPLACES the 24-element default. Leave unset to keep defaults
 # (.git, .gradle, .next, .svelte-kit, .venv, node_modules, target, build, …).
 # excluded_dirs = ["target", "node_modules", "dist", "build", "vendor"]
 # OPTIONAL — in a git repository, files git ignores are not indexed.

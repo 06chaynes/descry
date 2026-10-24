@@ -30861,8 +30861,8 @@ def test_a_form_feed_ends_no_line(tmp_path):
 
 
 def test_a_bin_directory_is_indexed_unless_it_is_dotnet_build_output(tmp_path):
-    """Dart's `bin/` and Rust's `src/bin/` hold sources; a .NET project's
-    `bin/` holds what it builds."""
+    """Dart's `bin/` and Rust's `src/bin/` hold sources; a .NET or an
+    Eclipse project's `bin/` holds what it builds."""
     from descry.handlers import _DEFAULT_EXCLUDED_DIRS
 
     files = {
@@ -30870,6 +30870,8 @@ def test_a_bin_directory_is_indexed_unless_it_is_dotnet_build_output(tmp_path):
         "rust/src/bin/tool.rs": "fn main() {}\n",
         "net/App.csproj": "<Project />\n",
         "net/bin/Debug/Copied.cs": "class Copied {}\n",
+        "eclipse/.classpath": "<classpath />\n",
+        "eclipse/bin/generated/Copied.java": "class Copied {}\n",
     }
     for rel, source in files.items():
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -30878,7 +30880,9 @@ def test_a_bin_directory_is_indexed_unless_it_is_dotnet_build_output(tmp_path):
     builder.process_directory()
     found = {n["id"] for n in builder.nodes if n["type"] == "File"}
     assert {"FILE:dart/bin/main.dart", "FILE:rust/src/bin/tool.rs"} <= found
-    assert not any("net/bin" in f for f in found)
+    assert not any(
+        "/bin/" in f for f in found if f.startswith(("FILE:net", "FILE:eclipse"))
+    )
 
 
 def test_a_dart_call_of_a_standard_type_constructs_it(tmp_path):

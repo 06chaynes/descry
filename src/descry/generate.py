@@ -24887,16 +24887,19 @@ class CodeGraphBuilder:
         for root, dirs, files in os.walk(self.root_dir, followlinks=False):
             dirs.sort()
             files.sort()
-            # Filter by name first (excluded dirs, dotfiles, a .NET project's
-            # build output), and by what git ignores. `bin` holds sources in
-            # Dart and Rust.
-            dotnet = any(f.endswith((".csproj", ".vbproj", ".fsproj")) for f in files)
+            # Filter by name first (excluded dirs, dotfiles, the build output
+            # of a .NET or an Eclipse project), and by what git ignores.
+            # `bin` holds sources in Dart and Rust.
+            built = any(
+                f.endswith((".csproj", ".vbproj", ".fsproj")) or f == ".classpath"
+                for f in files
+            )
             dirs[:] = [
                 d
                 for d in kept(root, dirs)
                 if not d.startswith(".")
                 and d not in self.excluded_dirs
-                and not (dotnet and d == "bin")
+                and not (built and d == "bin")
             ]
             # Then filter by realpath containment — drop directories that are
             # symlinks pointing outside the project root.
