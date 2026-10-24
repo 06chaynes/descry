@@ -30858,3 +30858,47 @@ def test_a_form_feed_ends_no_line(tmp_path):
     }
     assert len(found) == 11
     assert set(found.values()) == {3}
+
+
+def test_a_bin_directory_is_indexed_unless_it_is_dotnet_build_output(tmp_path):
+    """Dart's `bin/` and Rust's `src/bin/` hold sources; a .NET project's
+    `bin/` holds what it builds."""
+    from descry.handlers import _DEFAULT_EXCLUDED_DIRS
+
+    files = {
+        "dart/bin/main.dart": "void main() {}\n",
+        "rust/src/bin/tool.rs": "fn main() {}\n",
+        "net/App.csproj": "<Project />\n",
+        "net/bin/Debug/Copied.cs": "class Copied {}\n",
+    }
+    for rel, source in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(source)
+    builder = CodeGraphBuilder(tmp_path, excluded_dirs=set(_DEFAULT_EXCLUDED_DIRS))
+    builder.process_directory()
+    found = {n["id"] for n in builder.nodes if n["type"] == "File"}
+    assert {"FILE:dart/bin/main.dart", "FILE:rust/src/bin/tool.rs"} <= found
+    assert not any("net/bin" in f for f in found)
+
+
+def test_a_dart_call_of_a_standard_type_constructs_it(tmp_path):
+    """Dart needs no `new`: `StringBuffer()` makes a StringBuffer, whose
+    `toString` is the library's, not a project method of that name."""
+    builder = _index(
+        tmp_path,
+        {
+            "pubspec.yaml": "name: x\n",
+            "lib/a.dart": """
+                class Oops {
+                  @override
+                  String toString() => 'oops';
+                }
+
+                String build() {
+                  final sb = StringBuffer();
+                  return sb.toString();
+                }
+            """,
+        },
+    )
+    assert _calls(builder, "FILE:lib/a.dart::build") == []
