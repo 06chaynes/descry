@@ -10,9 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `search` answers what semantic search finds when the keywords find
   nothing: the semantic pass ran because they found little, and its
-  results were then dropped ("No matches"). Its results now honour
-  `lang`, `crate`, `type` and `exclude_tests` as the keyword results do;
-  they were merged unfiltered.
+  results were then dropped ("No matches"). It now searches under
+  `lang`, `crate`, `type` and `exclude_tests` as the keyword side does; its
+  results were merged unfiltered.
+- `search --type` with a type the graph has none of, or one descry does
+  not know, matches nothing, as an unknown `lang` does; it was ignored and
+  every type answered. The CLI lists the types it takes.
 - `flow --target` takes a node ID as well as a name; a node ID was never
   found, and the trace said nothing of it.
 

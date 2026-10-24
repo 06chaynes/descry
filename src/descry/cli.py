@@ -331,7 +331,13 @@ def main():
     sub.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     sub.add_argument("--lang", default=None, help="Filter by language")
     sub.add_argument("--crate", default=None, help="Filter by crate")
-    sub.add_argument("--type", default=None, help="Filter by symbol type")
+    sub.add_argument(
+        "--type",
+        default=None,
+        type=str.lower,
+        choices=["function", "class", "method", "constant", "file", "all"],
+        help="Filter by symbol type",
+    )
     sub.add_argument(
         "--exclude-tests", action="store_true", help="Exclude test symbols"
     )

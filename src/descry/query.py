@@ -1691,9 +1691,7 @@ class GraphQuerier:
                 "constant": "Constant",
                 "file": "File",
             }
-            type_key = type_map.get(symbol_type.lower())
-            if type_key and type_key in self._index_by_type:
-                kept &= self._index_by_type[type_key]
+            kept &= self._index_by_type.get(type_map.get(symbol_type.lower()), set())
         return kept
 
     def search_docs(

@@ -434,6 +434,26 @@ class TestSearchScoring:
         with pytest.raises(EmbeddingCacheMismatch):
             s.search("anything", limit=3)
 
+    def test_kept_nodes_are_the_pool_others_never_enter(self, fake_model, graph_writer):
+        """A filter applies before the pool is cut, so a kept node far down
+        the ranking is still found."""
+        s = SemanticSearcher(str(graph_writer()))
+        dim = s.embeddings.shape[1]
+        s.embeddings = np.zeros((len(s.nodes), dim), dtype="float32")
+        s.embeddings[:, 0] = 1.0
+        last = len(s.nodes) - 1
+        s.embeddings[last] = 0.0
+        s.embeddings[last, 1] = 1.0
+        q = np.zeros(dim, dtype="float32")
+        q[0], q[1] = 1.0, 0.1
+        s.model = FakeSentenceTransformer(dim=dim, prompts={})
+        s.model.encode = lambda texts, **kw: q.reshape(1, -1)
+        wanted = s.nodes[last]["id"]
+
+        hits = s.search("q", limit=1, min_score=-1.0, keep={wanted})
+        assert [n["id"] for n, _ in hits] == [wanted]
+        assert s.search("q", limit=1, min_score=-1.0, keep=set()) == []
+
     def test_results_are_sorted_and_limited(self, fake_model, graph_writer):
         s = SemanticSearcher(str(graph_writer()))
         hits = s.search("alpha", limit=2, min_score=-1.0)

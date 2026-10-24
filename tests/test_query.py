@@ -1077,6 +1077,14 @@ class TestLanguageFilter:
     def test_all_and_none_do_not_filter(self, querier, lang):
         assert len(querier.search_docs(["handler"], lang=lang)) == len(self.FILES)
 
+    @pytest.mark.parametrize(
+        ("kind", "found"), [("function", len(FILES)), ("class", 0), ("struct", 0)]
+    )
+    def test_type_keeps_only_that_type(self, querier, kind, found):
+        """A type the graph has none of, or no type descry has, matches
+        nothing, as an unknown language does."""
+        assert len(querier.search_docs(["handler"], symbol_type=kind)) == found
+
 
 class TestCallPathDepthAndOutcome:
     def _chain(self, tmp_path, length, **config):

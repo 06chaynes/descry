@@ -24,7 +24,7 @@ descry search <terms...>
     [--limit N]                  # default 10
     [--lang rust|ts|py|...]
     [--crate NAME]
-    [--type Function|Class|Method|...]
+    [--type function|class|method|constant|file|all]
     [--exclude-tests]
 
 descry semantic <query>
@@ -49,7 +49,7 @@ descry callees <name> [--limit N]           # default 20
 descry flow <start>
     [--direction forward|backward]   # default forward
     [--depth N]                       # default 3, capped by [query] max_depth
-    [--target NAME]                   # stop early if reached
+    [--target SYMBOL]                 # stop early if reached (name or node ID)
     [--inline-threshold N]            # inline callee source below N tokens
 
 descry path <start> <end>

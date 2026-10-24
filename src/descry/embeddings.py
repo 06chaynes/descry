@@ -774,7 +774,9 @@ class SemanticSearcher:
         self.embeddings = embeddings / np.where(norms == 0, 1, norms)
         logger.info("Embeddings generated successfully")
 
-    def search(self, query: str, limit: int = 10, min_score: float = 0.3) -> list:
+    def search(
+        self, query: str, limit: int = 10, min_score: float = 0.3, keep=None
+    ) -> list:
         """Search for nodes semantically similar to the query.
 
         Args:
@@ -782,6 +784,7 @@ class SemanticSearcher:
             limit: Maximum number of results
             min_score: Minimum final score, i.e. cosine similarity after
                 the in-degree and type boosts are added (may exceed 1).
+            keep: The node IDs results may have, None for any.
 
         Returns:
             List of (node, score) tuples sorted by relevance
@@ -826,10 +829,19 @@ class SemanticSearcher:
             np.linalg.norm(self.embeddings, axis=1) * np.linalg.norm(query_embedding)
         )
 
+        if keep is not None:
+            # Nodes outside `keep` never enter the pool
+            kept = np.fromiter(
+                (n["id"] in keep for n in self.nodes), bool, len(self.nodes)
+            )
+            similarities = np.where(kept, similarities, -np.inf)
+            if not kept.any():
+                return []
+
         # Take a candidate pool by base score, then apply min_score to the
         # final score, so a node whose boosts (worth up to +0.17) lift it over
         # the threshold is kept.
-        pool = min(len(similarities), limit * 3)
+        pool = min(len(similarities) if keep is None else int(kept.sum()), limit * 3)
         top_indices = np.argpartition(-similarities, pool - 1)[:pool]
         top_indices = top_indices[np.argsort(-similarities[top_indices])]
 
