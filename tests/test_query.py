@@ -301,12 +301,16 @@ class TestFindCallPath:
 
         os.unlink(f.name)
 
+    @pytest.mark.parametrize(
+        "target", ["validate_token", "FILE:auth.rs::validate_token"]
+    )
     def test_structured_flow_stops_at_the_target_and_reports_the_path(
-        self, call_path_graph
+        self, call_path_graph, target
     ):
+        """The target is named by name or by node ID."""
         q = GraphQuerier(call_path_graph)
 
-        tree = q.trace_flow_structured("handle_request", target="validate_token")
+        tree = q.trace_flow_structured("handle_request", target=target)
 
         assert tree["path_to_target"] == [
             "handle_request",

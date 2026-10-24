@@ -308,7 +308,9 @@ def main():
         default=3,
         help="Levels of calls below the start (default: 3)",
     )
-    sub.add_argument("--target", default=None, help="Target symbol to reach")
+    sub.add_argument(
+        "--target", default=None, help="Symbol to reach, by name or node ID"
+    )
     sub.add_argument(
         "--inline-threshold",
         type=int,

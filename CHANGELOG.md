@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `search` answers what semantic search finds when the keywords find
+  nothing: the semantic pass ran because they found little, and its
+  results were then dropped ("No matches"). Its results now honour
+  `lang`, `crate`, `type` and `exclude_tests` as the keyword results do;
+  they were merged unfiltered.
+- `flow --target` takes a node ID as well as a name; a node ID was never
+  found, and the trace said nothing of it.
+
 ## [0.3.3] — 2026-10-23
 
 ### Fixed

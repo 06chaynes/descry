@@ -1318,7 +1318,8 @@ class GraphQuerier:
         once, at the first level that reaches it, and met again as `seen`,
         the level of that entry (the start is level 0).
         Returns ``(root, path, cut)``: the tree, the node IDs from the start
-        to the first node named ``target``, and why it stopped early
+        to the first node ``target`` names, by name or node ID, and why it
+        stopped early
         ("timeout", "node limit") or None."""
         start_time = time.time()
 
@@ -1353,7 +1354,7 @@ class GraphQuerier:
 
         root = tree_node(start_id, None)
         paths = {start_id: [start_id]}
-        if target and root["name"] == target:
+        if target in (root["name"], root["id"]):
             return root, paths[start_id], None
         level = [root]
         for _ in range(depth):
@@ -1378,7 +1379,7 @@ class GraphQuerier:
                     child = tree_node(child_id, marks.get(child_id))
                     paths[child_id] = [*paths[parent["id"]], child_id]
                     parent["children"].append(child)
-                    if target and child["name"] == target:
+                    if target in (child["name"], child["id"]):
                         return root, paths[child_id], None
                     next_level.append(child)
             level = next_level
@@ -1500,7 +1501,7 @@ class GraphQuerier:
         cut (why the trace stopped early, when it did). Each tree node has: id,
         name, type, tokens, file, line, code, lang, candidates, children,
         more, more_possible, and `seen`, the level its entry is at, where it
-        is placed there already. The trace stops at the first node named `target`.
+        is placed there already. The trace stops at the first node `target` names, by name or node ID.
         """
         if timeout_ms is None:
             timeout_ms = self._timeout_ms
@@ -1666,6 +1667,35 @@ class GraphQuerier:
             idf[term] = math.log((total_docs + 1) / (df + 1)) + 1
         return idf
 
+    def filtered_ids(
+        self, lang=None, crate=None, symbol_type=None, exclude_tests=False
+    ):
+        """The IDs of the nodes `search_docs`'s filters keep, None when none
+        is given: the language, the crate or module, the type, and no tests."""
+        if not (lang or crate or symbol_type or exclude_tests):
+            return None
+        self._ensure_filter_indices()
+        kept = set(self.nodes.keys())
+        if exclude_tests and self._index_is_test:
+            kept -= self._index_is_test
+        if crate:
+            kept &= self._index_by_crate.get(crate, set())
+        if lang and lang != "all":
+            lang = _LANG_ALIASES.get(lang.lower(), lang.lower())
+            kept &= self._index_by_lang.get(lang, set())
+        if symbol_type and symbol_type != "all":
+            type_map = {
+                "function": "Function",
+                "class": "Class",
+                "method": "Method",
+                "constant": "Constant",
+                "file": "File",
+            }
+            type_key = type_map.get(symbol_type.lower())
+            if type_key and type_key in self._index_by_type:
+                kept &= self._index_by_type[type_key]
+        return kept
+
     def search_docs(
         self, query_terms, lang=None, crate=None, symbol_type=None, exclude_tests=False
     ):
@@ -1695,38 +1725,10 @@ class GraphQuerier:
         if num_terms == 0:
             return []
 
-        # Apply filters if any specified
-        if lang or crate or symbol_type or exclude_tests:
-            self._ensure_filter_indices()
-            candidate_ids = set(self.nodes.keys())
-
-            # Filter out test files and functions if requested
-            if exclude_tests and self._index_is_test:
-                candidate_ids -= self._index_is_test
-
-            if crate:
-                # If crate filter specified but doesn't exist, return empty results
-                if crate not in self._index_by_crate:
-                    return []
-                candidate_ids &= self._index_by_crate[crate]
-            if lang and lang != "all":
-                lang = _LANG_ALIASES.get(lang.lower(), lang.lower())
-                candidate_ids &= self._index_by_lang.get(lang, set())
-            if symbol_type and symbol_type != "all":
-                type_map = {
-                    "function": "Function",
-                    "class": "Class",
-                    "method": "Method",
-                    "constant": "Constant",
-                    "file": "File",
-                }
-                type_key = type_map.get(symbol_type.lower())
-                if type_key and type_key in self._index_by_type:
-                    candidate_ids &= self._index_by_type[type_key]
-
-            candidates = [self.nodes[nid] for nid in candidate_ids]
-        else:
-            candidates = self.data["nodes"]
+        kept = self.filtered_ids(lang, crate, symbol_type, exclude_tests)
+        candidates = (
+            self.data["nodes"] if kept is None else [self.nodes[nid] for nid in kept]
+        )
 
         for node in candidates:
             score = 0.0
