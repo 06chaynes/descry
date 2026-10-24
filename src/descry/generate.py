@@ -18650,6 +18650,15 @@ class CallResolver:
             if self.standard[lang].key(callee, source_id) == callee:
                 held = self._returned_type(constructed, source_id)
                 self._result = held or self._result
+        elif verdict[1] == _EXTERNAL and not origin and lang == "dart":
+            # Dart constructs without `new`: a call of a standard type's
+            # name gives an instance of it.
+            library = self.standard[lang]
+            if (
+                callee in library.data["types"]
+                and library.key(callee, source_id) == callee
+            ):
+                self._result = self._returned_type(callee, source_id) or self._result
         elif verdict[1] == _EXTERNAL and not origin and lang == "typescript":
             known, value = self._js_global(callee, source_id)
             if known:
@@ -24878,12 +24887,19 @@ class CodeGraphBuilder:
         for root, dirs, files in os.walk(self.root_dir, followlinks=False):
             dirs.sort()
             files.sort()
-            # Filter by name first (excluded dirs, dotfiles), and by what git
-            # ignores.
+            # Filter by name first (excluded dirs, dotfiles, the build output
+            # of a .NET or an Eclipse project), and by what git ignores.
+            # `bin` holds sources in Dart and Rust.
+            built = any(
+                f.endswith((".csproj", ".vbproj", ".fsproj")) or f == ".classpath"
+                for f in files
+            )
             dirs[:] = [
                 d
                 for d in kept(root, dirs)
-                if not d.startswith(".") and d not in self.excluded_dirs
+                if not d.startswith(".")
+                and d not in self.excluded_dirs
+                and not (built and d == "bin")
             ]
             # Then filter by realpath containment — drop directories that are
             # symlinks pointing outside the project root.

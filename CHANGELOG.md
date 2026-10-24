@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-10-23
+
+### Fixed
+
+- A `bin` directory is indexed: Dart keeps its entry points there and Rust
+  its extra binaries (`src/bin/`). Only the `bin` of a .NET project or of
+  an Eclipse project, beside its project file or `.classpath`, is left out
+  as build output; every `bin` was.
+- A Dart call of a standard type's name without `new`, `StringBuffer()`,
+  makes an instance of that type, as `new StringBuffer()` does. Calls on it
+  were taken as calls on an unknown receiver and listed as possible calls
+  of every project method of their name (`toString`, `write`, `close`).
+
 ## [0.3.2] — 2026-10-23
 
 ### Fixed
