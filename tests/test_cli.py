@@ -225,3 +225,29 @@ class TestCliStopped:
         index.send_signal(signal.SIGHUP)
         assert not indexer_tree.grandchild_exited(timeout=1)
         assert index.poll() is None
+
+
+class TestSearchType:
+    """`--type` takes the types descry has, in any case, and refuses others."""
+
+    def test_a_type_is_passed_lowercased(self, monkeypatch):
+        seen = {}
+
+        class Service:
+            async def search(self, **kwargs):
+                seen.update(kwargs)
+                return "ok"
+
+        monkeypatch.setattr(cli, "_make_service", Service)
+        monkeypatch.setattr(
+            sys, "argv", ["descry", "search", "x", "--type", "Function"]
+        )
+        cli.main()
+        assert seen["symbol_type"] == "function"
+
+    def test_an_unknown_type_is_refused(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["descry", "search", "x", "--type", "struct"])
+        with pytest.raises(SystemExit) as exit_:
+            cli.main()
+        assert exit_.value.code == 2
+        assert "invalid choice: 'struct'" in capsys.readouterr().err
