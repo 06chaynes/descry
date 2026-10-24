@@ -2086,23 +2086,23 @@ class DescryService:
                 # and respects the cache lock).
                 searcher = await self._get_semantic_searcher()
                 if searcher is not None:
+                    # Under the filters the keyword side has
                     semantic_results = await asyncio.to_thread(
                         searcher.search,
                         " ".join(terms),
                         limit=limit * 2,
                         min_score=0.25,
+                        keep=q.filtered_ids(lang, crate, symbol_type, exclude_tests),
                     )
             except Exception as e:  # noqa: BLE001 — boundary over the embedding backend; search degrades to keyword-only
                 logger.warning(f"Semantic search failed, using keyword only: {e}")
 
-        if semantic_results and tfidf_results:
+        if semantic_results:
             combined = reciprocal_rank_fusion(tfidf_results, semantic_results)
             results = [node for node, _ in combined[:limit]]
             method = "hybrid"
-        elif tfidf_results:
-            results = tfidf_results[:limit]
         else:
-            results = []
+            results = tfidf_results[:limit]
 
         return {"ok": True, "error": None, "results": results, "method": method}
 

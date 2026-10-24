@@ -1709,3 +1709,41 @@ async def test_a_context_budget_below_one_is_refused(tmp_path, bound):
     result = await DescryService(config).context("FILE:x.py::f", depth=2, **{bound: 0})
     assert isinstance(result, ServiceError)
     assert f"{bound} must be at least 1, got 0." in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terms", "lang", "found"),
+    [
+        (["who", "talks", "to", "nothing"], None, ["FILE:x.py::f", "FILE:y.rs::g"]),
+        (["who", "talks", "to", "nothing"], "python", ["FILE:x.py::f"]),
+        # The keywords find `f` too; the semantic side is still filtered
+        (["f"], "python", ["FILE:x.py::f"]),
+    ],
+)
+async def test_search_keeps_semantic_matches_no_keyword_finds(
+    tmp_path, terms, lang, found
+):
+    """The semantic side runs because the keywords found little; what it
+    finds is answered, under the same filters as the keywords."""
+    config = _plain_config(tmp_path)
+    py = {"id": "FILE:x.py::f", "type": "Function", "metadata": {"name": "f"}}
+    rs = {"id": "FILE:y.rs::g", "type": "Function", "metadata": {"name": "g"}}
+    _write_graph(config, nodes=[py, rs])
+    svc = DescryService(config)
+
+    class Searcher:
+        def __init__(self, graph_path, **kwargs):
+            pass
+
+        def ensure_model(self):
+            pass
+
+        def search(self, query, limit=10, min_score=0.0, keep=None):
+            return [
+                r for r in [(py, 0.9), (rs, 0.8)] if keep is None or r[0]["id"] in keep
+            ]
+
+    svc._semantic_available, svc._SemanticSearcher = True, Searcher
+    data = await svc.search_data(terms, lang=lang)
+    assert ([n["id"] for n in data["results"]], data["method"]) == (found, "hybrid")
