@@ -16,7 +16,6 @@ class TestGoAdapterDiscovery:
 
         assert len(projects) == 1
         assert projects[0].name == tmp_path.name
-        assert projects[0].language == "go"
 
     def test_monorepo_modules(self, tmp_path):
         for name in ("svc-a", "svc-b"):
@@ -56,7 +55,7 @@ class TestGoAdapterDiscovery:
 
 class TestGoAdapterBuildCommand:
     def test_basic_command(self, tmp_path):
-        project = DiscoveredProject(name="svc", root=tmp_path, language="go")
+        project = DiscoveredProject(name="svc", root=tmp_path)
         spec = GoAdapter().build_command(
             project, tmp_path / "svc.scip", AdapterConfig()
         )
@@ -88,16 +87,10 @@ class TestScipGoResolution:
         sym = "scip-go gomod github.com/example/svc v1.0.0 pkg/http/Server#Handle()."
         assert idx._extract_name(sym) == "Handle"
 
-    def test_go_stats_bucket_exists(self):
-        idx = ScipIndex([])
-        assert "go" in idx._resolution_stats
-        assert idx._resolution_stats["go"] == {"attempted": 0, "resolved": 0}
-
 
 class TestScipGoHealthStatus:
     def test_go_listed_in_scip_status(self):
         from descry.scip import support
 
-        support.reset_scip_state()
         status = support.get_scip_status()
         assert "scip-go" in status["indexers"]

@@ -1,0 +1,77 @@
+{
+  "callers": {
+    "FILE:src/io.rs::Reader::parse": {
+      "resolved": [
+        "FILE:src/io.rs::load"
+      ],
+      "candidate": []
+    },
+    "FILE:src/models.rs::Order::parse": {
+      "resolved": [],
+      "candidate": []
+    },
+    "FILE:src/models.rs::User::rename": {
+      "resolved": [
+        "FILE:src/main.rs::main"
+      ],
+      "candidate": []
+    },
+    "FILE:src/models.rs::Save::save": {
+      "resolved": [
+        "FILE:src/models.rs::User::rename"
+      ],
+      "candidate": []
+    },
+    "FILE:src/models.rs::User::new": {
+      "resolved": [
+        "FILE:src/main.rs::main"
+      ],
+      "candidate": []
+    }
+  },
+  "callees": {
+    "FILE:src/main.rs::main": {
+      "resolved": [
+        "FILE:src/models.rs::User::new",
+        "FILE:src/models.rs::User::rename",
+        "FILE:src/io.rs::load"
+      ]
+    },
+    "FILE:src/models.rs::User::rename": {
+      "resolved": [
+        "FILE:src/models.rs::Save::save"
+      ]
+    },
+    "FILE:src/io.rs::load": {
+      "resolved": [
+        "FILE:src/io.rs::Reader::parse"
+      ]
+    }
+  },
+  "path": [
+    [
+      "FILE:src/main.rs::main",
+      "FILE:src/io.rs::Reader::parse",
+      [
+        "FILE:src/io.rs::load",
+        "FILE:src/io.rs::Reader::parse"
+      ]
+    ]
+  ],
+  "refused": [
+    "parse",
+    "validate"
+  ],
+  "impls": {
+    "validate": [
+      "FILE:src/models.rs::User::validate",
+      "FILE:src/models.rs::Order::validate"
+    ]
+  },
+  "external": {
+    "FILE:src/models.rs::User::rename": [
+      "to_string",
+      "name.to_string"
+    ]
+  }
+}

@@ -18,14 +18,19 @@ it is a local variable there, as it is to Ruby.
 from __future__ import annotations
 
 import re
+from functools import cache
 
-from descry.generate import (
+from descry import _stdlib
+from descry._parsing import (
     BaseParser,
     _ends_with,
+    _flat,
+    _js_brackets,
     _strip_parens,
     _tails,
     is_generated_source,
     source_lines,
+    token_count,
 )
 
 _CONST = r"(?:::)?[A-Z]\w*(?:::[A-Z]\w*)*"
@@ -60,10 +65,12 @@ _RE_ALIAS = re.compile(rf"(?<![\w.])alias(?:_method)?\b\s*+\(?\s*+:?({_METHOD_NA
 _RE_MIXIN = re.compile(
     rf"\s*+(include|extend|prepend)\b\s*+\(?\s*+({_CONST}(?:\s*,\s*{_CONST})*)\s*+\)?\s*$"
 )
-# `Class.new(Base)`, `Module.new`, `Struct.new(:a, :b)`, `Data.define(:a)`:
-# an expression that makes a type, whose block is the body of that type
+# The calls that make a type, whose block is the body of that type, as the
+# data's `makers` has them: `Class.new(Base)`, `Module.new`, `Struct.new(:a,
+# :b)`, `Data.define(:a)`
+_MAKERS = _stdlib.load("ruby").get("makers", {})
 _RE_TYPE_MAKER = re.compile(
-    r"(?<![\w:.])(?:::)?(?P<maker>Class|Module|Struct|Data)\.(?:new|define)\b"
+    r"(?<![\w:.])(?:::)?(?P<maker>" + "|".join(map(re.escape, sorted(_MAKERS))) + r")\b"
     r"\s*(?P<arguments>\((?:[^()]|\([^()]*\))*\)|[^;{]*?(?=\s*(?:\bdo\b|\{|$)))"
 )
 # define_method(:name)
@@ -156,17 +163,6 @@ _RE_BLOCK_CALL = re.compile(
 _RE_COMMAND = re.compile(
     r"\s*(?:[\w@]+\s*=\s*)?(?:[\w@:]+\s*\.\s*)*(?P<method>[a-z_]\w*[?!]?)(?=\s)"
 )
-# Methods that run their block in the object they are called on
-_EVALUATORS = frozenset(
-    {
-        "class_eval",
-        "class_exec",
-        "module_eval",
-        "module_exec",
-        "instance_eval",
-        "instance_exec",
-    }
-)
 # The last statement of a method written on one line, behind its parameters
 _RE_INLINE_BODY = re.compile(
     r"\s*(?:\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))?\s*(?:=(?![=~>])|[^;]*;)?"
@@ -209,8 +205,7 @@ _RE_REGEXP_END = re.compile(r"(?:[^/\\]|\\.)*/")
 _RE_REGEXP_FLAGS = re.compile(r"[a-z]*")
 _PAIRED = {"(": ")", "[": "]", "{": "}", "<": ">"}
 
-# Words the call scan passes over: keywords, and the methods of Kernel and
-# Module that load code, mix modules in, raise and print
+# The keywords, which the call scan passes over
 _RUBY_KEYWORDS = frozenset(
     {
         "if",
@@ -232,12 +227,6 @@ _RUBY_KEYWORDS = frozenset(
         "next",
         "redo",
         "retry",
-        "raise",
-        "throw",
-        "catch",
-        "lambda",
-        "proc",
-        "loop",
         "do",
         "end",
         "then",
@@ -257,17 +246,6 @@ _RUBY_KEYWORDS = frozenset(
         "__FILE__",
         "__LINE__",
         "__ENCODING__",
-        "require",
-        "require_relative",
-        "load",
-        "autoload",
-        "include",
-        "extend",
-        "prepend",
-        "puts",
-        "print",
-        "p",
-        "pp",
     }
 )
 
@@ -473,11 +451,24 @@ _RE_BRANCH_WORD = re.compile(
     r"(?<![\w.:@$])(?:class|module|def|do|begin|if|unless|while|until|case|for"
     r"|elsif|else|when|in|then|rescue|ensure|end)(?![\w?!:])|[{};]"
 )
-# What leaves a statement where a body ends with it, by the statement's kind
-_LEAVES = {
-    "loop": "return|raise|throw|exit|abort|fail",
-    "if": "return|raise|next|break|redo|retry|throw|exit|abort|fail",
-}
+# The keywords that leave a statement where a body ends with them, by the
+# statement's kind
+_LEAVES = {"loop": ["return"], "if": ["return", "next", "break", "redo", "retry"]}
+
+
+@cache
+def _never_returning():
+    """The Kernel methods the library says never return (`-> bot`):
+    `raise`, `exit`, `throw` and the like."""
+    kernel = _stdlib.load("ruby")["types"]["Kernel"]
+    return sorted(
+        {
+            m
+            for table in ("methods", "statics")
+            for m, r in kernel[table].items()
+            if r == "bot"
+        }
+    )
 
 
 def _branches(code_lines):
@@ -487,15 +478,12 @@ def _branches(code_lines):
     `while` or `until` modifies too."""
     branches, stack = [], []
 
-    whole = "\n".join(code_lines)
-    offsets = [0]
-    for line in code_lines:
-        offsets.append(offsets[-1] + len(line) + 1)
+    whole, offsets, _ = _js_brackets(code_lines)
     tails = _tails(whole, ";\n")
 
     def add(kind, ways, end):
-        words = _LEAVES["loop" if kind == "loop" else "if"]
-        leaf = re.compile(rf"\s*(?:{words})\b[^;\n]*")
+        words = _LEAVES["loop" if kind == "loop" else "if"] + _never_returning()
+        leaf = re.compile(rf"\s*(?:{'|'.join(map(re.escape, words))})(?![\w?!])[^;\n]*")
 
         def ends(way):
             (line, column), (last, end) = way[-1]
@@ -630,6 +618,21 @@ def _continued(code_lines, index, text):
     return text
 
 
+def _made_kind(maker):
+    """The kind of the type the maker ``maker`` makes: a module, a struct
+    of writable fields, or a class."""
+    made = _MAKERS[maker]
+    if made.get("module"):
+        return "module"
+    return "struct" if made.get("fields") == "accessor" else "class"
+
+
+def _maker(made):
+    """The constant a match of ``_RE_TYPE_MAKER`` calls its maker on, as
+    written: `Struct` of `Struct.new`."""
+    return made.string[made.start() : made.end("maker")].rpartition(".")[0]
+
+
 def _constructed(value):
     """Origin path of ``value`` where all of it is a `Const.new`, with any
     arguments in parentheses: an instance of Const, or for `Class.new(Base)`
@@ -639,9 +642,15 @@ def _constructed(value):
     made = built and _RE_TYPE_MAKER.match(value.lstrip())
     if made:
         base = re.fullmatch(rf"\(\s*({_CONST})\s*\)", made["arguments"])
-        subclass = base and made["maker"] == "Class"
+        subclass = base and _MAKERS[made["maker"]].get("base")
         return base[1].removeprefix("::") if subclass else "?"
     return built and f"{built['type'].removeprefix('::')}.new()"
+
+
+def _new_call(origin):
+    """``("call", Const, "Const.new")`` of an origin path that is an
+    instance of Const, `Const.new()`; None for any other."""
+    return ("call", origin[:-6], origin[:-2]) if origin.endswith(".new()") else None
 
 
 def _parameters(text):
@@ -687,9 +696,7 @@ def _arguments(text):
     splat, or an argument that is itself a call without parentheses."""
     count = keywords = 0
     for item in _items(text):
-        flat, wider = item, None
-        while flat != wider:
-            wider, flat = flat, re.sub(r"\([^()]*\)|\[[^\[\]]*\]|\{[^{}]*\}", "", flat)
+        flat = _flat(item)
         if item.startswith("*") and not item.startswith("**"):
             return None
         if re.match(r"[a-z_]\w*[?!]?[ \t]+[\w:\"@$\[]", flat) and not re.match(
@@ -739,7 +746,7 @@ class RubyParser(BaseParser):
         span = {
             "lineno": lineno,
             "end_lineno": end_lineno,
-            "token_count": (end_lineno - lineno + 1) * 10,
+            "token_count": token_count(lineno, end_lineno),
         }
         known = self._types.get(node_id)
         if node_id not in self.builder.node_registry:
@@ -759,9 +766,10 @@ class RubyParser(BaseParser):
             known.update(span, docstring=metadata["docstring"])
         return node_id
 
-    def _add_accessors(self, parent_id, kind, symbols, lineno):
+    def _add_accessors(self, parent_id, kind, symbols, lineno, **made):
         """Add the methods that an `attr_reader`, `attr_writer` or
-        `attr_accessor`, as ``kind`` says, defines for ``symbols``."""
+        `attr_accessor`, as ``kind`` says, defines for ``symbols``; ``made``
+        names the class whose maker call defines them instead."""
         for symbol in symbols:
             names = {"reader": [symbol], "writer": [f"{symbol}="]}.get(
                 kind, [symbol, f"{symbol}="]
@@ -777,23 +785,24 @@ class RubyParser(BaseParser):
                     docstring="",
                     is_accessor=True,
                     arity=[taken, taken, 0],
+                    **made,
                 )
 
     def _add_made(self, type_id, made, lineno):
         """Give ``type_id`` what the arguments of ``made``, a match of
-        ``_RE_TYPE_MAKER``, make for it: the accessors of a `Struct.new` or
-        `Data.define`, the base class of a `Class.new`."""
-        if made["maker"] == "Class":
+        ``_RE_TYPE_MAKER``, make for it: the base class of a `Class.new`, the
+        accessors of a `Struct.new` or `Data.define`."""
+        maker = _MAKERS[made["maker"]]
+        if maker.get("base"):
             for base in re.findall(_CONST, made["arguments"])[:1]:
-                self.builder.add_edge(
-                    type_id, f"REF:{base.removeprefix('::')}", "INHERITS"
-                )
-        elif made["maker"] != "Module":
+                self.builder.add_edge(type_id, f"REF:{base}", "INHERITS")
+        elif maker.get("fields"):
             self._add_accessors(
                 type_id,
-                "accessor" if made["maker"] == "Struct" else "reader",
+                maker["fields"],
                 re.findall(r":(\w+)", made["arguments"]),
                 lineno,
+                maker=_maker(made),
             )
 
     def _kind(self, node_id):
@@ -814,9 +823,7 @@ class RubyParser(BaseParser):
         start = assigned.end() if assigned else 0
         start += len(text[start:]) - len(text[start:].lstrip())
         text, raw = text[start:].rstrip(), raw[start:]
-        flat, wider = text, None
-        while flat != wider:
-            wider, flat = flat, re.sub(r"\([^()]*\)|\[[^\[\]]*\]|\{[^{}]*\}", "", flat)
+        flat = _flat(text)
         if text in ("", "nil"):
             return "nil"
         if text == "self":
@@ -835,7 +842,7 @@ class RubyParser(BaseParser):
             return ("type", "Array" if text[0] == "[" else "Hash")
         made = _constructed(text)
         if made:
-            return ("call", made[:-6], made[:-2]) if made.endswith(".new()") else None
+            return _new_call(made)
         if re.fullmatch(r"@\w+", text):
             return ("held", owner_id, text)
         chain = _RE_CHAIN.match(flat)
@@ -850,13 +857,13 @@ class RubyParser(BaseParser):
         root, *links = re.split(r"\s*\.\s*", chain.group().strip())
         held = None if root[:1].isupper() else self._declared(root, lineno, since)
         if root[:1].isupper() or root.startswith("::"):
-            origin = root.removeprefix("::")
+            # `::Name` keeps its root: it is the top level's constant.
+            origin = root
         elif root.startswith(("@", "$")) or (held and not held.endswith("()")):
             return None
         elif held:
             if not links:
-                typed = held.endswith(".new()")
-                return ("call", held[:-6], held[:-2]) if typed else ("type", held[:-2])
+                return _new_call(held) or ("type", held[:-2])
             origin = held
         elif root == "self":
             origin = "self"
@@ -986,7 +993,7 @@ class RubyParser(BaseParser):
             # (column, context around it) of each context the line opens
             entered = []
 
-            # 1. Classes, modules, methods and the blocks that are bodies
+            # Classes, modules, methods and the blocks that are bodies
             for column, word, last, level, defines in opened[index]:
                 end_lineno = last + 1
                 owner_id = owner()
@@ -1003,19 +1010,23 @@ class RubyParser(BaseParser):
                         if of:
                             singleton_classes.append((end_lineno, lineno, of[1]))
                         continue
+                    # `class A::B` opens `A::B` in the scope it is written
+                    # in, not in `A`; `class ::B` opens the top level's.
+                    written, around = header[1], owner(named=True)
                     context_id = self._add(
-                        owner(named=True),
-                        header[1].removeprefix("::"),
+                        file_id if written.startswith("::") else around,
+                        written.removeprefix("::"),
                         "Class",
                         lineno,
                         end_lineno,
                         kind=word,
                         docstring=self.get_leading_docstring(lines, index),
+                        **({"nesting": around} if "::" in written else {}),
                     )
                     self._scopes.append((end_lineno, {}, lineno, context_id))
                     scan_start = header.end(1)
                     if word == "class" and header["base"]:
-                        base = header["base"].removeprefix("::")
+                        base = header["base"]
                         self.builder.add_edge(context_id, f"REF:{base}", "INHERITS")
                         made = _RE_TYPE_MAKER.match(code, header.start("base"))
                         if made:
@@ -1050,6 +1061,19 @@ class RubyParser(BaseParser):
                     else:
                         params = params.partition(";")[0]
                     known = len(self.builder.nodes)
+                    # `Module.nesting` in the body: the class and module
+                    # statements open around it, innermost first, kept where
+                    # their names do not say it (`class A::B` is not in `A`)
+                    nesting = [
+                        c[0].partition("::")[2]
+                        for c in reversed(self._contexts)
+                        if c[0] in self._types
+                    ]
+                    path = owner_id.partition("::")[2].split("::")
+                    if nesting != [
+                        "::".join(path[:size]) for size in range(len(path), 0, -1)
+                    ]:
+                        extra = {**extra, "cref": nesting}
                     context_id = self._add(
                         owner_id,
                         name,
@@ -1094,16 +1118,17 @@ class RubyParser(BaseParser):
                         owner_id = owner(named=True)
                         if in_method or not constant:
                             owner_id = self._contexts[-1][0]
-                            name = f"<{made['maker']}:{lineno}>"
-                        kind = made["maker"].lower()
+                            name = f"<{made['maker'].partition('.')[0]}:{lineno}>"
+                        kind = _made_kind(made["maker"])
                         context_id = self._add(
                             owner_id,
                             name,
                             "Class",
                             lineno,
                             end_lineno,
-                            kind="class" if kind == "data" else kind,
+                            kind=kind,
                             docstring=self.get_leading_docstring(lines, index),
+                            maker=_maker(made),
                         )
                         self._add_made(context_id, made, lineno)
                     elif (
@@ -1133,7 +1158,7 @@ class RubyParser(BaseParser):
                         receiver = receiver.group() if receiver else dotted and "?"
                         call = call or _RE_COMMAND.match(before)
                         method = call["method"] if call else "block"
-                        evaluated = method in _EVALUATORS
+                        evaluated = method in _stdlib.section("ruby", "evaluators")
                         if not (evaluated and receiver in (None, False, "self")):
                             reopens = {}
                             if evaluated and re.fullmatch(_CONST, receiver):
@@ -1175,7 +1200,7 @@ class RubyParser(BaseParser):
             )
             since = next((s[2] for s in reversed(self._scopes) if s[2]), 1)
 
-            # 2. What a class or module body declares, outside its methods
+            # What a class or module body declares, outside its methods
             if context_id == owner_id:
                 # attr_reader / writer / accessor — an accessor per symbol
                 m_attr = _RE_ATTR.search(code)
@@ -1207,7 +1232,7 @@ class RubyParser(BaseParser):
                     made = _RE_TYPE_MAKER.match(value.lstrip())
                     built = _RE_CONSTRUCTED.fullmatch(value)
                     if made:
-                        kind = made["maker"].lower()
+                        kind = _made_kind(made["maker"])
                         type_id = f"{outer_id}::{m_const[1]}"
                         if type_id not in self.builder.node_registry:
                             self._add(
@@ -1216,8 +1241,9 @@ class RubyParser(BaseParser):
                                 "Class",
                                 lineno,
                                 lineno,
-                                kind="class" if kind == "data" else kind,
+                                kind=kind,
                                 docstring=self.get_leading_docstring(lines, index),
+                                maker=_maker(made),
                             )
                             self._add_made(type_id, made, lineno)
                     else:
@@ -1245,12 +1271,12 @@ class RubyParser(BaseParser):
                     for base in reversed(re.findall(_CONST, m_mixin[2])):
                         self.builder.add_edge(
                             owner_id,
-                            f"REF:{base.removeprefix('::')}",
+                            f"REF:{base}",
                             "INHERITS",
                             {"mixin": m_mixin[1]},
                         )
 
-            # 3. What each instance variable of the type is assigned
+            # What each instance variable of the type is assigned
             multiple = _RE_MULTIPLE.match(code)
             targets = multiple[1] if multiple else ""
             for variable in re.findall(r"(?<![\w@])@\w+", targets):
@@ -1264,7 +1290,7 @@ class RubyParser(BaseParser):
                     held_as = _constructed(value)
                 self.fields.setdefault((self_id, found[1]), set()).add(held_as or "?")
 
-            # 4. Calls, and the local variables the line binds
+            # Calls, and the local variables the line binds
             if skip_calls:
                 continue
             # Each local variable the line assigns -> the column it is at
@@ -1338,7 +1364,7 @@ class RubyParser(BaseParser):
                     elif root[:1].isupper() or root.startswith("::"):
                         # `Const.new` is a call of Const.
                         path = root.removeprefix("::")
-                        origin = f"{path}.{name}"
+                        origin = f"{root}.{name}"
                         callee = path if name == "new" else origin
                     elif root.startswith(("@", "$")) or (
                         root not in _RUBY_KEYWORDS
@@ -1365,6 +1391,12 @@ class RubyParser(BaseParser):
                 source_id = next((c for at, c in entered if start < at), context_id)
                 self.add_call(source_id, callee, lineno, since, start, paren, origin)
                 edge = len(self.builder.edges) - 1
+                if "." not in callee and next(
+                    (not scope[2] for scope in reversed(self._scopes)), False
+                ):
+                    # In a block, which may be run with another `self`
+                    meta = self.builder.edges[edge].setdefault("metadata", {})
+                    meta.setdefault("site", {})["block"] = True
                 if callee.endswith("="):
                     written = [1, False]
                 elif paren < 0:
@@ -1400,7 +1432,7 @@ class RubyParser(BaseParser):
                     body["last"] = None
                 elif word == "ensure":
                     body["ends"] = lineno
-                elif word in ("return", "raise", "fail"):
+                elif word.partition("(")[0] in ("return", *_never_returning()):
                     body["last"] = "nil"
                 elif (
                     continues
@@ -1435,16 +1467,21 @@ class RubyParser(BaseParser):
                     elif origin:
                         self._made.add((lineno, column))
 
+        def held_type(key):
+            """The one origin every value of the instance variable ``key``,
+            ``(owner ID, name)``, has; "" where its values differ."""
+            types = self.fields.get(key, ())
+            return next(iter(types)) if len(types) == 1 else ""
+
         # An instance variable has a type where every value it is assigned
         # in its class is an instance of that one, and its reader returns it.
         for edge, owner_id, variable, method in held:
-            types = self.fields.get((owner_id, variable), ())
-            if len(types) == 1 and "?" not in types:
+            made = held_type((owner_id, variable))
+            if made not in ("", "?"):
                 metadata = self.builder.edges[edge]["metadata"]
-                metadata["origin"] = f"{next(iter(types))}.{method}"
+                metadata["origin"] = f"{made}.{method}"
         for node, owner_id, variable in readers:
-            types = self.fields.get((owner_id, variable), ())
-            made = next(iter(types)) if len(types) == 1 else ""
+            made = held_type((owner_id, variable))
             if made.endswith(".new()"):
                 node["metadata"]["return_type"] = made.removesuffix(".new()")
         # A method returns what its last statement and its `return`s all
@@ -1453,10 +1490,7 @@ class RubyParser(BaseParser):
             exits = set()
             for given in (*body["exits"], body["last"]):
                 if given and given[0] == "held":
-                    types = self.fields.get(given[1:], ())
-                    made = next(iter(types)) if len(types) == 1 else ""
-                    typed = made.endswith(".new()")
-                    given = ("call", made[:-6], made[:-2]) if typed else None
+                    given = _new_call(held_type(given[1:]))
                 exits.add(given)
             exits.discard("nil")
             if len(exits) != 1 or None in exits or "return_type" in body["node"]:

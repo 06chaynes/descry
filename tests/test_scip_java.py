@@ -25,7 +25,6 @@ class TestJavaAdapterDiscovery:
         assert len(projects) == 1
         assert projects[0].name == tmp_path.name
         assert projects[0].root == tmp_path
-        assert projects[0].language == "java"
 
     def test_gradle_monorepo(self, tmp_path):
         for name in ("alpha", "beta"):
@@ -43,7 +42,6 @@ class TestJavaAdapterDiscovery:
         names = sorted(p.name for p in projects)
         assert names == ["alpha", "beta"]
         for p in projects:
-            assert p.language == "java"
             assert p.root.name == p.name
 
     def test_sbt_build(self, tmp_path):
@@ -125,7 +123,10 @@ class TestJavaAdapterDiscovery:
 
         assert [p.root for p in projects] == [tmp_path]
 
-    @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+    @pytest.mark.skipif(
+        os.name == "nt" or os.geteuid() == 0,
+        reason="root reads any file; Windows does not read mode bits",
+    )
     def test_unreadable_build_properties_yields_the_subprojects(self, tmp_path):
         """scip-java aborts on a `project/build.properties` it cannot read, so
         the root is not taken as one Gradle build."""
@@ -301,9 +302,7 @@ class TestJavaAdapterDiscovery:
 
 class TestJavaAdapterBuildCommand:
     def test_basic_command(self, tmp_path):
-        project = DiscoveredProject(
-            name="myapp", root=tmp_path / "myapp", language="java"
-        )
+        project = DiscoveredProject(name="myapp", root=tmp_path / "myapp")
         spec = JavaAdapter().build_command(
             project, tmp_path / "myapp.scip", AdapterConfig()
         )
@@ -320,7 +319,7 @@ class TestJavaAdapterBuildCommand:
         JavaCompile tasks so scip-java works out of the box on Kafka-style
         conservative builds. Verify it gets added on a Gradle project."""
         (tmp_path / "build.gradle").write_text("// gradle")
-        project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
+        project = DiscoveredProject(name="myapp", root=tmp_path)
         spec = JavaAdapter().build_command(
             project, tmp_path / "out.scip", AdapterConfig()
         )
@@ -337,7 +336,7 @@ class TestJavaAdapterBuildCommand:
     def test_no_gradle_args_on_a_maven_project(self, tmp_path):
         """A Maven project gets no Gradle arguments."""
         (tmp_path / "pom.xml").write_text("<project/>")
-        project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
+        project = DiscoveredProject(name="myapp", root=tmp_path)
         spec = JavaAdapter().build_command(
             project, tmp_path / "out.scip", AdapterConfig()
         )
@@ -346,7 +345,7 @@ class TestJavaAdapterBuildCommand:
 
     def test_no_gradle_args_on_an_sbt_project(self, tmp_path):
         (tmp_path / "build.sbt").write_text('scalaVersion := "2.13.14"')
-        project = DiscoveredProject(name="myapp", root=tmp_path, language="java")
+        project = DiscoveredProject(name="myapp", root=tmp_path)
         spec = JavaAdapter().build_command(
             project, tmp_path / "out.scip", AdapterConfig()
         )
@@ -369,7 +368,7 @@ class TestJavaAdapterBuildCommand:
                 (root / marker).write_text("// marker\n")
                 if pom:
                     (root / "pom.xml").write_text("<project/>")
-                project = DiscoveredProject(name="myapp", root=root, language="java")
+                project = DiscoveredProject(name="myapp", root=root)
                 spec = JavaAdapter().build_command(
                     project, root / "out.scip", AdapterConfig()
                 )
@@ -391,7 +390,7 @@ class TestJavaAdapterKotlinDslPreflight:
         (tmp_path / "buildSrc" / "build.gradle.kts").write_text(
             "plugins {\n    `kotlin-dsl`\n}\n"
         )
-        project = DiscoveredProject(name="kx", root=tmp_path, language="java")
+        project = DiscoveredProject(name="kx", root=tmp_path)
 
         with pytest.raises(RuntimeError, match="kotlin-dsl"):
             JavaAdapter().build_command(project, tmp_path / "out.scip", AdapterConfig())
@@ -407,7 +406,7 @@ class TestJavaAdapterKotlinDslPreflight:
         (tmp_path / "build-settings-logic" / "build.gradle.kts").write_text(
             'plugins { id("org.gradle.kotlin.kotlin-dsl") }\n'
         )
-        project = DiscoveredProject(name="ktor", root=tmp_path, language="java")
+        project = DiscoveredProject(name="ktor", root=tmp_path)
 
         with pytest.raises(RuntimeError, match="kotlin-dsl"):
             JavaAdapter().build_command(project, tmp_path / "out.scip", AdapterConfig())
@@ -419,7 +418,7 @@ class TestJavaAdapterKotlinDslPreflight:
         (tmp_path / "buildSrc" / "build.gradle").write_text(
             "apply plugin: 'kotlin-dsl'\n"
         )
-        project = DiscoveredProject(name="weird", root=tmp_path, language="java")
+        project = DiscoveredProject(name="weird", root=tmp_path)
 
         with pytest.raises(RuntimeError, match="kotlin-dsl"):
             JavaAdapter().build_command(project, tmp_path / "out.scip", AdapterConfig())
@@ -430,7 +429,7 @@ class TestJavaAdapterKotlinDslPreflight:
         (tmp_path / "buildSrc" / "build.gradle.kts").write_text(
             "plugins {\n    java\n}\n"
         )
-        project = DiscoveredProject(name="ok", root=tmp_path, language="java")
+        project = DiscoveredProject(name="ok", root=tmp_path)
         spec = JavaAdapter().build_command(
             project, tmp_path / "out.scip", AdapterConfig()
         )
@@ -445,7 +444,7 @@ class TestJavaAdapterKotlinDslPreflight:
         (tmp_path / "buildSrc" / "build.gradle.kts").write_text(
             "plugins {\n    `kotlin-dsl`\n}\n"
         )
-        project = DiscoveredProject(name="maven", root=tmp_path, language="java")
+        project = DiscoveredProject(name="maven", root=tmp_path)
         spec = JavaAdapter().build_command(
             project, tmp_path / "out.scip", AdapterConfig()
         )
@@ -455,7 +454,7 @@ class TestJavaAdapterKotlinDslPreflight:
     def test_no_buildSrc_does_not_raise(self, tmp_path):
         # Plain Maven project — no buildSrc at all
         (tmp_path / "pom.xml").write_text("<project></project>")
-        project = DiscoveredProject(name="maven", root=tmp_path, language="java")
+        project = DiscoveredProject(name="maven", root=tmp_path)
         spec = JavaAdapter().build_command(
             project, tmp_path / "out.scip", AdapterConfig()
         )
@@ -467,7 +466,7 @@ class TestJavaAdapterKotlinDslPreflight:
         (tmp_path / "settings.gradle.kts").write_text(
             'includeBuild("../somewhere-else")\n'
         )
-        project = DiscoveredProject(name="ok", root=tmp_path, language="java")
+        project = DiscoveredProject(name="ok", root=tmp_path)
         spec = JavaAdapter().build_command(
             project, tmp_path / "out.scip", AdapterConfig()
         )
@@ -533,18 +532,10 @@ class TestScipJavaResolution:
         idx = ScipIndex([])
         assert idx._extract_name("local foo") is None
 
-    def test_java_stats_bucket_exists(self):
-        """Registry-driven _resolution_stats should include a "java" bucket
-        now that JavaAdapter is registered."""
-        idx = ScipIndex([])
-        assert "java" in idx._resolution_stats
-        assert idx._resolution_stats["java"] == {"attempted": 0, "resolved": 0}
-
 
 class TestScipJavaHealthStatus:
     def test_java_listed_in_scip_status(self):
         from descry.scip import support
 
-        support.reset_scip_state()
         status = support.get_scip_status()
         assert "scip-java" in status["indexers"]

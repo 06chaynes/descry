@@ -800,6 +800,7 @@ end
 """.strip()
         _parse(builder, src)
         assert _call_edges(builder) == [
+            ("build", "lambda"),
             ("build", "items.map"),
             ("build", "item.name"),
             ("build", "app.call"),

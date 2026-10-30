@@ -26,12 +26,14 @@ class _StubAdapter:
     extensions = (".stub",)
 
     def __init__(self, script, name="stublang", mode="direct"):
+        if os.name == "nt":
+            pytest.skip("the fake indexer is a shell script")
         self.script = script
         self.name = name
         self.mode = mode
 
     def discover(self, root, _excluded_dirs):
-        return [DiscoveredProject(name="proj", root=root, language=self.name)]
+        return [DiscoveredProject(name="proj", root=root)]
 
     def build_command(self, project, out_path, _config):
         return CommandSpec(
@@ -57,7 +59,7 @@ def stub_adapter(monkeypatch):
 
 
 def _project(root, adapter):
-    return DiscoveredProject(name="proj", root=root, language=adapter.name)
+    return DiscoveredProject(name="proj", root=root)
 
 
 def _seed_old_index(path):
@@ -69,7 +71,7 @@ def _seed_old_index(path):
 
 class TestStaleIndex:
     def test_direct_mode_indexer_that_writes_nothing_fails(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         adapter = _StubAdapter("exit 1")
         _seed_old_index(mgr._index_path(adapter.name, "proj"))
 
@@ -79,22 +81,41 @@ class TestStaleIndex:
         frames = "".join(f"    at frame{i} (file.js:{i}:1)\\n" for i in range(40))
         adapter = _StubAdapter(f"printf 'Error: the cause\\n{frames}' >&2; exit 1")
 
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         assert mgr._generate_scip(adapter, _project(tmp_path, adapter)) is False
         assert "Error: the cause" in caplog.text
         assert "frame" not in caplog.text
 
+    def test_a_failure_reports_a_reason_the_indexer_wrote_to_stdout(
+        self, tmp_path, caplog
+    ):
+        adapter = _StubAdapter("printf 'Error: the cause\\n'; exit 1")
+
+        mgr = ScipCacheManager(tmp_path, set())
+        assert mgr._generate_scip(adapter, _project(tmp_path, adapter)) is False
+        assert "Error: the cause" in caplog.text
+
+    def test_a_failure_skips_a_blank_padded_stderr_for_stdout(self, tmp_path, caplog):
+        frames = "    at frame1 (file.js:1:1)\n\n    at frame2 (file.js:2:1)\n"
+        adapter = _StubAdapter(
+            f"printf '{frames}' >&2; printf 'Error: the cause\\n'; exit 1"
+        )
+
+        mgr = ScipCacheManager(tmp_path, set())
+        assert mgr._generate_scip(adapter, _project(tmp_path, adapter)) is False
+        assert "Error: the cause" in caplog.text
+
     def test_failed_run_leaves_project_needing_update(self, tmp_path, stub_adapter):
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         adapter = stub_adapter("exit 1")
         _seed_old_index(mgr._index_path(adapter.name, "proj"))
 
-        mgr._update_changed_for_adapter(adapter, parallel=False)
+        mgr._update_changed_for_adapter(adapter)
 
         assert mgr.needs_update("proj", adapter.name) is True
 
     def test_direct_mode_rewrite_of_existing_index_succeeds(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         adapter = _StubAdapter("printf 'new index, longer' > {out}")
         index = mgr._index_path(adapter.name, "proj")
         _seed_old_index(index)
@@ -103,7 +124,7 @@ class TestStaleIndex:
         assert index.read_bytes() == b"new index, longer"
 
     def test_rename_mode_ignores_index_scip_it_did_not_write(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         adapter = _StubAdapter("exit 1", mode="rename")
         _seed_old_index(tmp_path / "index.scip")
 
@@ -116,7 +137,7 @@ class TestStaleIndex:
 
         monkeypatch.setattr(os, "rename", _cross_device)
         monkeypatch.setattr(os, "replace", _cross_device)
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         adapter = _StubAdapter("printf 'payload' > index.scip", mode="rename")
 
         assert mgr._generate_scip(adapter, _project(tmp_path, adapter)) is True
@@ -132,7 +153,7 @@ class TestProjectNameCollisions:
     ):
         stub_adapter("printf 'from a' > {out}", name="lang_a")
         stub_adapter("printf 'from b' > {out}", name="lang_b")
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
 
         paths = mgr.update_all()
 
@@ -144,18 +165,18 @@ class TestProjectNameCollisions:
     def test_indexes_are_counted_by_a_flat_scip_glob(self, tmp_path, stub_adapter):
         stub_adapter("printf 'from a' > {out}", name="lang_a")
         stub_adapter("printf 'from b' > {out}", name="lang_b")
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
 
         mgr.update_all()
 
         assert len(list(mgr.cache_dir.glob("*.scip"))) == 2
 
     def test_name_with_slash_stays_directly_in_cache_dir(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         assert mgr._index_path("rust", "crates/util").parent == mgr.cache_dir
 
     def test_update_removes_only_indexes_without_an_adapter_prefix(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         mgr.cache_dir.mkdir(parents=True)
         (mgr.cache_dir / "app.scip").write_bytes(b"no prefix")
         (mgr.cache_dir / "rust--app.scip").write_bytes(b"adapter prefix")
@@ -168,7 +189,7 @@ class TestProjectNameCollisions:
 class TestRustSingleCrateAtRoot:
     def _crate_arg(self, root):
         (project,) = RustAdapter().discover(root, set())
-        config = ScipCacheManager(root)._adapter_config_for(RustAdapter())
+        config = ScipCacheManager(root, set())._adapter_config_for(RustAdapter())
         argv = RustAdapter().build_command(project, root / "out.scip", config).argv
         return Path(argv[argv.index("scip") + 1])
 
@@ -186,7 +207,7 @@ class TestRustSingleCrateAtRoot:
         member = tmp_path / "crates" / "cli"
         (member / "src").mkdir(parents=True)
         (member / "Cargo.toml").write_text('[package]\nname = "my-cli"\n')
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         paths = {
             f"rust:{tmp_path.name}": Path("root.scip"),
             "rust:crates/cli": Path("cli.scip"),
@@ -255,7 +276,7 @@ class TestRustSingleCrateAtRoot:
         (tmp_path / "Cargo.toml").write_text('[package]\nname = "mylib"\n')
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "lib.rs").write_text("pub fn f() {}\n")
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
 
         first = mgr._hash_rust_crate(tmp_path.name)
         (tmp_path / "src" / "lib.rs").write_text("pub fn g() {}\n")
@@ -266,27 +287,41 @@ class TestRustSingleCrateAtRoot:
         (tmp_path / "package.json").write_text("{}")
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "index.ts").write_text("export const x = 1;\n")
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
 
         first = mgr._hash_typescript_package(tmp_path.name)
         (tmp_path / "src" / "index.ts").write_text("export const x = 2;\n")
 
         assert mgr._hash_typescript_package(tmp_path.name) != first
 
+    def test_typescript_package_hash_tracks_sources_outside_src(self, tmp_path):
+        (tmp_path / "package.json").write_text("{}")
+        (tmp_path / "lib").mkdir()
+        (tmp_path / "lib" / "index.js").write_text("exports.x = 1;\n")
+        mgr = ScipCacheManager(tmp_path, set())
+
+        first = mgr._hash_typescript_package(tmp_path.name)
+        (tmp_path / "lib" / "index.js").write_text("exports.x = 2;\n")
+
+        assert mgr._hash_typescript_package(tmp_path.name) != first
+
 
 class TestCacheDirParameter:
     def test_default_is_inside_the_project(self, tmp_path):
-        assert ScipCacheManager(tmp_path).cache_dir == tmp_path / ".descry_cache/scip"
+        assert (
+            ScipCacheManager(tmp_path, set()).cache_dir
+            == tmp_path / ".descry_cache/scip"
+        )
 
     def test_configured_cache_dir_receives_indexes_and_checksums(
         self, tmp_path, stub_adapter
     ):
         repo = tmp_path / "repo"
         repo.mkdir()
-        mgr = ScipCacheManager(repo, cache_dir=tmp_path / "elsewhere")
+        mgr = ScipCacheManager(repo, set(), cache_dir=tmp_path / "elsewhere")
 
         mgr._update_changed_for_adapter(
-            stub_adapter("printf 'payload' > {out}"), parallel=False
+            stub_adapter("printf 'payload' > {out}"),
         )
 
         assert sorted(p.name for p in (tmp_path / "elsewhere" / "scip").iterdir()) == [
@@ -297,20 +332,22 @@ class TestCacheDirParameter:
 
     def test_relative_cache_dir_is_resolved_against_cwd(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        mgr = ScipCacheManager(tmp_path / "repo", cache_dir=Path("relative-cache"))
+        mgr = ScipCacheManager(
+            tmp_path / "repo", set(), cache_dir=Path("relative-cache")
+        )
         assert mgr.cache_dir == tmp_path / "relative-cache" / "scip"
 
 
 class TestChecksumsFile:
     def test_non_dict_file_reads_as_empty(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         mgr.cache_dir.mkdir(parents=True)
         mgr.checksums_file.write_text("[]")
 
         assert mgr._load_checksums() == {}
 
     def test_failed_save_keeps_previous_contents(self, tmp_path, monkeypatch):
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         mgr._save_checksums({"rust:app": "abc"})
 
         def _fail(_src, _dst):
@@ -326,7 +363,7 @@ class TestChecksumsFile:
     def test_concurrent_adapters_keep_each_others_entries(
         self, tmp_path, monkeypatch, stub_adapter
     ):
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         real_load = mgr._load_checksums
 
         def _slow_load():
@@ -340,7 +377,7 @@ class TestChecksumsFile:
             stub_adapter("printf 'payload' > {out}", name=f"lang{i}") for i in range(4)
         ]
         threads = [
-            threading.Thread(target=mgr._update_changed_for_adapter, args=(a, False))
+            threading.Thread(target=mgr._update_changed_for_adapter, args=(a,))
             for a in adapters
         ]
         for t in threads:
@@ -355,7 +392,7 @@ class TestTimeout:
     @pytest.mark.parametrize("bad", ["x", "5", [5]])
     def test_non_numeric_timeout_is_ignored(self, tmp_path, monkeypatch, bad):
         monkeypatch.delenv("DESCRY_SCIP_TIMEOUT", raising=False)
-        mgr = ScipCacheManager(tmp_path, scip_timeout_minutes=bad)
+        mgr = ScipCacheManager(tmp_path, set(), scip_timeout_minutes=bad)
         adapter = _StubAdapter("printf 'payload' > {out}")
 
         assert mgr._get_timeout() is None
@@ -363,15 +400,21 @@ class TestTimeout:
 
     def test_numeric_timeout_is_minutes(self, tmp_path, monkeypatch):
         monkeypatch.delenv("DESCRY_SCIP_TIMEOUT", raising=False)
-        assert ScipCacheManager(tmp_path, scip_timeout_minutes=10)._get_timeout() == 600
-        assert ScipCacheManager(tmp_path, scip_timeout_minutes=0)._get_timeout() is None
+        assert (
+            ScipCacheManager(tmp_path, set(), scip_timeout_minutes=10)._get_timeout()
+            == 600
+        )
+        assert (
+            ScipCacheManager(tmp_path, set(), scip_timeout_minutes=0)._get_timeout()
+            is None
+        )
 
     @pytest.mark.parametrize(("value", "seconds"), [("5", 300), ("none", None)])
     def test_env_var_overrides_the_configured_timeout(
         self, tmp_path, monkeypatch, value, seconds
     ):
         monkeypatch.setenv("DESCRY_SCIP_TIMEOUT", value)
-        mgr = ScipCacheManager(tmp_path, scip_timeout_minutes=10)
+        mgr = ScipCacheManager(tmp_path, set(), scip_timeout_minutes=10)
         assert mgr._get_timeout() == seconds
 
 
@@ -382,13 +425,15 @@ class TestCommand:
                 return CommandSpec(argv=[], cwd=project.root)
 
         adapter = _EmptyCommand("")
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
 
         assert mgr._generate_scip(adapter, _project(tmp_path, adapter)) is False
 
     def test_probed_binary_runs_in_place_of_the_named_one(self, tmp_path, monkeypatch):
         """An indexer installed under another name runs by the path the
         probe found, where argv[0] names the adapter's binary."""
+        if os.name == "nt":
+            pytest.skip("the fake indexer is a shell script")
         installed = tmp_path / "bin" / "scip_alt"
         installed.parent.mkdir()
         installed.write_text('#!/bin/sh\n[ "$1" = --version ] || printf ran > "$1"\n')
@@ -403,7 +448,7 @@ class TestCommand:
 
         monkeypatch.setattr(adapter_mod, "_binary_cache", {})
         adapter = _Installed("")
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
 
         assert mgr._generate_scip(adapter, _project(tmp_path, adapter)) is True
         assert mgr._index_path(adapter.name, "proj").read_text() == "ran"
@@ -420,7 +465,7 @@ def test_scip_python_runs_without_pip_or_git(tmp_path):
 
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "p"\n')
     (tmp_path / "a.py").write_text("def f():\n    return 1\n")
-    project = DiscoveredProject(name="p", root=tmp_path, language="python")
+    project = DiscoveredProject(name="p", root=tmp_path)
     out = tmp_path / "out.scip"
     spec = PythonAdapter().build_command(project, out, AdapterConfig())
     environment = Path(spec.argv[spec.argv.index("--environment") + 1])
@@ -436,3 +481,46 @@ def test_scip_python_runs_without_pip_or_git(tmp_path):
         capture_output=True,
     )
     assert out.stat().st_size > 0
+
+
+def test_indexing_hands_scip_the_configured_excluded_dirs(tmp_path, monkeypatch):
+    """SCIP discovery and hashing skip the directories `.descry.toml`
+    excludes, as the regex walk does."""
+    import sys
+
+    from descry import generate
+
+    handed = []
+
+    class _Recorder:
+        def __init__(self, project_root, excluded_dirs, **_):
+            handed.append(excluded_dirs)
+
+        def update_all(self):
+            return {}
+
+    (tmp_path / ".descry.toml").write_text('[project]\nexcluded_dirs = ["custom"]\n')
+    (tmp_path / "a.py").write_text("def f():\n    pass\n")
+    monkeypatch.setattr(generate, "scip_available", lambda: True)
+    monkeypatch.setattr(generate, "get_scip_status", dict)
+    monkeypatch.setattr(generate, "ScipCacheManager", _Recorder)
+    monkeypatch.delenv("DESCRY_NO_SCIP", raising=False)
+    monkeypatch.setenv("DESCRY_NO_EMBEDDINGS", "1")
+    monkeypatch.setenv("DESCRY_CACHE_DIR", str(tmp_path.parent / f"{tmp_path.name}-c"))
+    monkeypatch.setattr(sys, "argv", ["descry-generate", str(tmp_path)])
+    generate.main()
+    assert handed == [{"custom"}]
+
+
+def test_rust_hash_sees_an_edit_under_a_root_inside_a_target_directory(tmp_path):
+    """Only directories inside the crate are skipped, not those its path
+    passes through."""
+    root = tmp_path / "target" / "ws"
+    (root / "src").mkdir(parents=True)
+    (root / "Cargo.toml").write_text('[package]\nname = "ws"\n')
+    lib = root / "src" / "lib.rs"
+    lib.write_text("fn a() {}\n")
+    mgr = ScipCacheManager(root, {"target"})
+    before = mgr._hash_project("ws", "rust")
+    lib.write_text("fn b() {}\n")
+    assert mgr._hash_project("ws", "rust") != before

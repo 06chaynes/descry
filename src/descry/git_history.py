@@ -4,13 +4,9 @@ Git History Analysis Module
 Provides symbol-level git history analysis by combining git operations
 with descry's structural knowledge. Enables churn hotspot detection,
 symbol evolution tracking, and change impact analysis.
-
-Usage:
-    from git_history import GitHistoryAnalyzer, GitError
-    analyzer = GitHistoryAnalyzer("/path/to/repo")
-    churn = analyzer.get_churn(time_range="last 30 days", limit=20)
 """
 
+import difflib
 import logging
 import os
 import re
@@ -19,20 +15,36 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from descry.handlers import _DEFAULT_CODE_EXTENSIONS
+from descry._answers import fail
+from descry._files import open_regular
+from descry._parsing import source_lines
+from descry.handlers import (
+    _DEFAULT_CHURN_EXCLUSIONS,
+    _DEFAULT_CODE_EXTENSIONS,
+    ChurnMode,
+)
+from descry.query import file_of, source_path
 
 logger = logging.getLogger(__name__)
 
 
 class GitError(Exception):
-    """Raised for git-specific errors (not installed, not a repo, etc.)."""
+    """Raised for git-specific errors (not installed, not a repo, etc.).
+    `detail`, what git wrote, is for the text only."""
+
+    def __init__(self, message: str, detail: str = ""):
+        super().__init__(message)
+        self.message, self.detail = message, detail
+
+
+class GitFailed(GitError):
+    """Raised when git ran and exited non-zero."""
 
 
 class PartialCloneError(GitError):
     """Raised when git needs objects a partial clone has not downloaded."""
 
 
-# --- Git argument validators ---
 # Accepts: HEAD, HEAD^, HEAD^^, HEAD~N, HEAD^{tree}, @, @{-1},
 #          branch@{upstream}, master@{yesterday}, branch names, sha prefixes,
 #          and the ~N / ^ / ^{type} suffixes on any of those names.
@@ -42,7 +54,6 @@ _REF_REGEX = re.compile(
     r"(?:[~^]\d*)*(?:\^\{[a-z]+\})?(?:@\{(?:-\d+|[^}\-]+)\})?"
     r"|@\{-\d+\}"
 )
-_SYMBOL_REGEX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _validate_git_ref(ref: str) -> str:
@@ -70,13 +81,6 @@ def _validate_git_range(range_str: str) -> str:
             return range_str
     _validate_git_ref(range_str)
     return range_str
-
-
-def _validate_git_symbol(name: str) -> str:
-    """Validate a symbol name for `git log -L:<symbol>:<file>`."""
-    if not name or not _SYMBOL_REGEX.fullmatch(name):
-        raise GitError(f"Invalid git symbol: {name!r}")
-    return name
 
 
 def _validate_git_file(path: str) -> str:
@@ -109,20 +113,14 @@ def _validate_pathspec(spec: str) -> str:
     return spec
 
 
-DEFAULT_CHURN_EXCLUSIONS = [
-    ".descry_cache/",
-    ".beads/",
-    "Cargo.lock",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-]
-
 # Placed before the subcommand on every invocation. All but the last stop
 # the analysed repository's own config and hooks from making git run a
 # command; `-c` overrides the repository's config, including files it
 # includes.
 _GIT_CONFIG_PINS = (
+    # A path's history is its own; the churn walk reads renames itself.
+    "-c",
+    "log.follow=false",
     "-c",
     f"core.hooksPath={os.devnull}",
     "-c",
@@ -139,13 +137,19 @@ _GIT_CONFIG_PINS = (
 )
 # Ignore diff.external and the diff drivers and textconv filters that
 # attributes select, and print the plain a/ b/ uncoloured form the diff
-# parser reads whatever the repository's config asks for.
+# parser reads whatever the repository's config asks for. --submodule=short
+# keeps a submodule diff inline, and --ignore-submodules=dirty keeps the
+# working-tree dirty check of a single-ref diff from starting a child git
+# in the submodule that would read the submodule's own config and run its
+# filter drivers; a submodule's moved commit still diffs.
 _GIT_DIFF_OPTS = (
     "--no-ext-diff",
     "--no-textconv",
     "--no-color",
     "--src-prefix=a/",
     "--dst-prefix=b/",
+    "--submodule=short",
+    "--ignore-submodules=dirty",
 )
 # Merged over the environment. A partial clone would otherwise fetch missing
 # objects on demand through whatever transport command its remote config
@@ -166,23 +170,17 @@ CHURN_DIFF_BUDGET_SECONDS = 30
 _UNKNOWN_CHURN_MODE = "Unknown mode '{}'. Use 'symbols', 'files', or 'co-change'."
 
 
-def _parse_name_only_log(output: str) -> tuple[dict[str, list[str]], set[str]]:
-    """Parse `git log --name-only` output written with _NAME_ONLY_FORMAT.
-
-    Returns each file's commits, newest first, and the commits that have no
-    parent.
-    """
+def _parse_name_only_log(output: str) -> dict[str, list[str]]:
+    """Each file's commits, newest first, of `git log --name-only` output
+    written with _NAME_ONLY_FORMAT."""
     file_commits: dict[str, list[str]] = defaultdict(list)
-    root_commits = set()
     current_commit = None
     for line in output.split("\n"):
         if line.startswith("\x00"):
-            current_commit, _, parents = line[1:].strip().partition("\x00")
-            if not parents:
-                root_commits.add(current_commit)
+            current_commit = line[1:].strip().partition("\x00")[0]
         elif line.strip() and current_commit:
             file_commits[line.strip()].append(current_commit)
-    return file_commits, root_commits
+    return file_commits
 
 
 def _parse_log_header(line: str) -> dict | None:
@@ -198,21 +196,77 @@ def _parse_log_header(line: str) -> dict | None:
     }
 
 
-def _diffable_commits(commits: list[str], deadline: float, skipped: dict[str, int]):
-    """Yield the commits of one file that the churn limits allow diffing.
+def _line_before(hunks: list[dict], line: int, first: bool) -> int:
+    """Where line ``line`` of the new side of the diff ``hunks`` stands on
+    its old side; one the diff wrote, at the first line of what it replaced
+    for ``first``, else at the last."""
+    shift = 0
+    for hunk in hunks:
+        new, new_count = hunk["new_start"], hunk["new_count"]
+        old, old_count = hunk["old_start"], hunk["old_count"]
+        if line < new + (not new_count):
+            break
+        if line < new + new_count:
+            # With no old lines `old` is the line the new ones follow.
+            return old + (not old_count) if first else old + old_count - 1
+        shift += old_count - new_count
+    return line + shift
 
-    `commits` is newest first; `deadline` is a time.monotonic() value.
-    What the limits leave out is counted in `skipped`.
-    """
-    recent = commits[:CHURN_MAX_COMMITS_PER_FILE]
-    if len(recent) < len(commits):
-        skipped["capped_files"] += 1
-    for done, commit_hash in enumerate(recent):
-        if time.monotonic() >= deadline:
-            skipped["unread_files"] += 1
-            skipped["unread_commits"] += len(recent) - done
-            return
-        yield commit_hash
+
+def _spans_before(spans: list, hunks: list[dict]) -> list:
+    """``spans`` of lines on the new side of the diff ``hunks`` as they
+    stand on its old side; one wholly written by the diff is empty."""
+    return [
+        (_line_before(hunks, start, True), _line_before(hunks, end, False), held)
+        for start, end, held in spans
+    ]
+
+
+def _line_diff(old: list[str], new: list[str]) -> list[dict]:
+    """The hunks of a diff of the lines ``old`` to ``new``, as
+    `_parse_diff_hunks` gives a diff's without context."""
+    matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
+    return [
+        {
+            "old_start": i1 + (i2 > i1),
+            "old_count": i2 - i1,
+            "new_start": j1 + (j2 > j1),
+            "new_count": j2 - j1,
+        }
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+        if tag != "equal"
+    ]
+
+
+def _line_map(spans: list) -> dict[int, str]:
+    """Each line of ``spans`` to the innermost of them that holds it."""
+    line_map = {}
+    for start, end, node_id in sorted(spans, key=lambda s: s[0] - s[1]):
+        for ln in range(start, end + 1):
+            line_map[ln] = node_id
+    return line_map
+
+
+def _touched(hunks: list[dict], spans: list, before: list) -> dict[str, dict]:
+    """``{symbol: {added, removed, diff}}`` of the `-U0` diff ``hunks``: its
+    added lines counted by the new side's ``spans``, its removed ones by the
+    old side's ``before``, ``diff`` the lines each symbol holds."""
+    new_map, old_map = _line_map(spans), _line_map(before)
+    touched: dict[str, dict] = {}
+    for hunk in hunks:
+        for side, mark, lines, start in (
+            ("removed", "-", old_map, hunk["old_start"]),
+            ("added", "+", new_map, hunk["new_start"]),
+        ):
+            written = [text for text in hunk["lines"] if text[:1] == mark]
+            for line, text in enumerate(written, start):
+                if symbol := lines.get(line):
+                    held = touched.setdefault(
+                        symbol, {"added": 0, "removed": 0, "diff": []}
+                    )
+                    held[side] += 1
+                    held["diff"].append(text)
+    return touched
 
 
 def _churn_partial_note(skipped: dict[str, int]) -> str:
@@ -239,7 +293,37 @@ def _churn_partial_note(skipped: dict[str, int]) -> str:
     )
 
 
-CODE_EXTENSIONS = _DEFAULT_CODE_EXTENSIONS
+def _symbol_line(rank: int, sym: dict) -> str:
+    """A changed symbol's ranked line, without its counts."""
+    location = f"{sym['file']}:{sym['line']}" if sym["line"] else sym["file"]
+    return f"{rank:>3}. [{(sym['type'] or '???')[:3]}] {sym['name']} | {location} "
+
+
+def _pairs(item_commits: dict[str, set[str]]) -> list[tuple[tuple[str, str], int]]:
+    """The pairs of ``item_commits``' items changed together in at least two
+    commits, with that count, most first, then by name."""
+    commit_items: dict[str, set[str]] = defaultdict(set)
+    for item, commits in item_commits.items():
+        for c in commits:
+            commit_items[c].add(item)
+    pair_counts: dict[tuple[str, str], int] = defaultdict(int)
+    for items in commit_items.values():
+        listed = sorted(items)
+        for i in range(len(listed)):
+            for j in range(i + 1, len(listed)):
+                pair_counts[(listed[i], listed[j])] += 1
+    frequent = [(pair, count) for pair, count in pair_counts.items() if count >= 2]
+    return sorted(frequent, key=lambda x: (-x[1], x[0]))
+
+
+def _narrowed(time_range, path_filter):
+    """What a history query was narrowed by, as its message says it."""
+    named = [
+        what
+        for what, given in (("time range", time_range), ("path filter", path_filter))
+        if given
+    ]
+    return f" for the given {' and '.join(named)}" if named else ""
 
 
 class GitHistoryAnalyzer:
@@ -249,8 +333,8 @@ class GitHistoryAnalyzer:
         self,
         project_root: str,
         graph_querier=None,
-        churn_exclusions=None,
-        code_extensions=None,
+        churn_exclusions=_DEFAULT_CHURN_EXCLUSIONS,
+        code_extensions=_DEFAULT_CODE_EXTENSIONS,
         git_timeout=30,
     ):
         """Initialize the analyzer.
@@ -259,22 +343,14 @@ class GitHistoryAnalyzer:
             project_root: Path to the git repository root.
             graph_querier: Optional GraphQuerier instance for symbol resolution.
             churn_exclusions: List of path patterns to exclude from churn analysis.
-                Defaults to DEFAULT_CHURN_EXCLUSIONS.
             code_extensions: Set of file extensions considered as code.
-                Defaults to CODE_EXTENSIONS.
             git_timeout: Default timeout in seconds for git commands.
         """
         self.project_root = Path(project_root).resolve()
         self.querier = graph_querier
         self._verified = False
-        self.churn_exclusions = (
-            churn_exclusions
-            if churn_exclusions is not None
-            else DEFAULT_CHURN_EXCLUSIONS
-        )
-        self.code_extensions = (
-            code_extensions if code_extensions is not None else CODE_EXTENSIONS
-        )
+        self.churn_exclusions = churn_exclusions
+        self.code_extensions = code_extensions
         self.default_timeout = git_timeout
 
     def _run_git(
@@ -315,8 +391,11 @@ class GitHistoryAnalyzer:
             )
             if result.returncode != 0:
                 stderr = result.stderr.decode("utf-8", errors="replace").strip()
+                # An object a partial clone lacks: `cat-file` calls it a bad
+                # file, other commands one they are unable to read.
+                unread = "unable to read" in stderr or stderr.endswith(": bad file")
                 if "lazy fetching disabled" in stderr or (
-                    "unable to read" in stderr and self._is_partial_clone()
+                    unread and self._is_partial_clone()
                 ):
                     raise PartialCloneError(
                         "This repository is a partial clone and git objects this "
@@ -324,7 +403,7 @@ class GitHistoryAnalyzer:
                         "fetch them on demand: fetch the missing objects with git, "
                         "then retry."
                     )
-                raise GitError(f"git {' '.join(args[:3])}... failed: {stderr}")
+                raise GitFailed(f"git {args[0]} failed.", detail=stderr)
             return result.stdout.decode("utf-8", errors="replace")
         except FileNotFoundError:
             raise GitError("git not found. Install git to use history tools.") from None
@@ -338,11 +417,11 @@ class GitHistoryAnalyzer:
         if self._verified:
             return
         try:
-            output = self._run_git(["rev-parse", "--is-inside-work-tree"])
-            if output.strip() != "true":
-                raise GitError("Not inside a git repository.")
-        except GitError as err:
+            inside = self._run_git(["rev-parse", "--is-inside-work-tree"])
+        except GitFailed as err:
             raise GitError("Not inside a git repository.") from err
+        if inside.strip() != "true":
+            raise GitError("Not inside a git repository.")
         self._verified = True
 
     def _is_shallow(self) -> bool:
@@ -389,16 +468,131 @@ class GitHistoryAnalyzer:
         """Return the id of the empty tree, the diff base of a root commit."""
         return self._run_git(["hash-object", "-t", "tree", os.devnull]).strip()
 
+    def _file_walk(self, file_path: str):
+        """Yield ``(commit, parents, path, parent path, start)`` for each
+        commit that changed ``file_path``, children before parents: git's
+        simplified history of the path, parents rewritten to those that
+        changed it, and where a commit made the path by renaming another,
+        that one's history from its parent on; ``start`` is the revision a
+        history is read from, on its first commit, else None."""
+        pending, seen = [("HEAD", file_path)], set()
+        while pending:
+            start, path = pending.pop(0)
+            log = self._run_git(
+                [
+                    "log",
+                    "--topo-order",
+                    "--full-history",
+                    "--parents",
+                    "--format=%x00%H %P",
+                    "--name-status",
+                    "--no-renames",
+                    start,
+                    "--",
+                    f":(literal){path}",
+                ],
+                timeout=30,
+            )
+            for index, record in enumerate(log.split("\x00")[1:]):
+                head, _, body = record.partition("\n")
+                commit, *parents = head.split()
+                if (commit, path) in seen or not (body.strip() or parents):
+                    # A commit read already, or one listed without the path
+                    continue
+                seen.add((commit, path))
+                before = path
+                if body.strip().startswith("A"):
+                    # The path's history starts here; the commit's own parent
+                    # may have had it under another name.
+                    real = self._run_git(
+                        ["rev-list", "--parents", "-n", "1", commit]
+                    ).split()[1:2]
+                    renames = real and self._run_git(
+                        [
+                            "diff",
+                            "--name-status",
+                            "-M",
+                            "--diff-filter=R",
+                            f"{real[0]}..{commit}",
+                        ],
+                        timeout=30,
+                    )
+                    for line in (renames or "").splitlines():
+                        _, old, new = (line.split("\t") + ["", ""])[:3]
+                        if new == path:
+                            before, parents = old, real
+                            pending.append((real[0], old))
+                yield commit, parents, path, before, None if index else start
+
+    def _churn_file(
+        self,
+        file_path,
+        total,
+        spans,
+        counted,
+        deadline,
+        skipped,
+        changed,
+        most,
+    ):
+        """Credit each commit of ``counted`` (any where None) that changed
+        ``file_path``, ``total`` of them in its log, to the symbols of
+        ``spans`` its lines were in then, in ``changed[symbol][commit]``
+        as `_touched` gives them: added lines by the commit's spans, removed
+        ones by its parent's; a merge to those it changed against every
+        parent. No more than ``most`` commits are read (None: all)."""
+        # Revision -> {symbol: its span there}
+        at = {"HEAD": {s[2]: s for s in self._spans_before(spans, "HEAD", file_path)}}
+        read = 0
+        for commit, parents, path, before, start in self._file_walk(file_path):
+            # A history read from a revision starts with what it holds there.
+            held = list((at.pop(commit, None) or at.pop(start, None) or {}).values())
+            if not held:
+                continue
+            if time.monotonic() >= deadline:
+                skipped["unread_files"] += 1
+                skipped["unread_commits"] += max(total - read, 0)
+                return
+            wanted = counted is None or commit in counted
+            if wanted and read == most:
+                skipped["capped_files"] += 1
+                return
+            diffs = [
+                self._parse_diff_hunks(
+                    self._commit_file_diff(parent, commit, before, path)
+                )
+                for parent in parents or [self._empty_tree()]
+            ]
+            before_spans = [_spans_before(held, hunks) for hunks in diffs]
+            touched = [
+                _touched(hunks, held, old) for hunks, old in zip(diffs, before_spans)
+            ]
+            if wanted:
+                read += 1
+                for symbol in set(touched[0]).intersection(*touched[1:]):
+                    changed[symbol][commit] = touched[0][symbol]
+            # A symbol a merge leaves as one parent had it goes on in the
+            # first such parent alone, as git follows a range.
+            for index, (parent, old) in enumerate(zip(parents, before_spans)):
+                for span, (_, _, symbol) in zip(old, held):
+                    clean = [i for i, t in enumerate(touched) if symbol not in t]
+                    if not clean or clean[0] == index:
+                        at.setdefault(parent, {}).setdefault(symbol, span)
+
     def _commit_file_diff(
-        self, commit_hash: str, file_path: str, root_commits: set[str]
+        self, parent: str, commit: str, before: str, path: str
     ) -> str:
-        """Return the diff one commit made to one file."""
-        if commit_hash in root_commits:
-            parent = self._empty_tree()
-        else:
-            parent = f"{commit_hash}~1"
+        """The diff ``commit`` made to ``path``, ``before`` in ``parent``."""
         return self._run_git(
-            ["diff", f"{parent}..{commit_hash}", "--", file_path], timeout=10
+            [
+                "diff",
+                f"{parent}..{commit}",
+                "-U0",
+                "-M",
+                "--",
+                *(f":(literal){p}" for p in {before, path}),
+            ],
+            timeout=10,
         )
 
     def _ranges_covering(self, commit_hashes: list[str]) -> tuple[str, str]:
@@ -413,6 +607,14 @@ class GitHistoryAnalyzer:
         except GitError:
             return f"{self._empty_tree()}..{newest}", newest
         return f"{oldest}~1..{newest}", f"{oldest}~1..{newest}"
+
+    def _counted(self, time_flags: list[str]) -> set[str] | None:
+        """The commits ``time_flags`` select; None, every commit, for none."""
+        if not time_flags:
+            return None
+        ranged = any(".." in flag for flag in time_flags)
+        listed = ["rev-list", *time_flags, *([] if ranged else ["HEAD"])]
+        return set(self._run_git(listed).split())
 
     def _parse_time_range(self, time_range: str | None) -> list[str]:
         """Convert human-readable time range to git flags.
@@ -454,49 +656,54 @@ class GitHistoryAnalyzer:
         # user input straight through as a single argv token.
         if not re.match(r"^[A-Za-z0-9 :,.\-/+]{1,64}$", time_range):
             raise GitError(f"Invalid time_range: {time_range!r}")
+        # git reads a date it cannot make out as now: one that is not "now"
+        # and reads as it is no date at all.
+        read, now = (
+            int(self._run_git(["rev-parse", f"--since={at}"]).partition("=")[2])
+            for at in (time_range, "now")
+        )
+        if time_range.lower() != "now" and abs(read - now) <= 1:
+            raise GitError(
+                f"Invalid time_range: {time_range!r} is no date git reads; "
+                "use 'last N days', 'since <ref>' or a date"
+            )
         return [f"--since={time_range}"]
 
-    def _build_file_line_map(self, file_path: str) -> dict[int, str]:
-        """Build a mapping from line numbers to symbol node IDs for a file.
-
-        Uses the graph querier to find all functions/methods in the file
-        and maps each line to its containing symbol.
-
-        Args:
-            file_path: Relative file path (e.g., "backend/src/config.rs").
-
-        Returns:
-            Dict mapping line_number -> node_id.
-        """
+    def _symbol_spans(self, file_path: str) -> list[tuple[int, int, str]]:
+        """``(first line, last line, node ID)`` of each function, method and
+        class of the graph in a file, as the file stands today."""
         if not self.querier:
-            return {}
-
+            return []
         file_id = f"FILE:{file_path}"
-        nodes = self.querier.data.get("nodes", [])
+        return [
+            (start, node["metadata"].get("end_lineno", start), node["id"])
+            for node in self.querier.data.get("nodes", [])
+            if node["id"].startswith(file_id + "::")
+            and node["type"] in ("Function", "Method", "Class")
+            and (start := node["metadata"].get("lineno", 0)) > 0
+        ]
 
-        # Collect function/method spans in this file
-        spans = []
-        for node in nodes:
-            if node["id"].startswith(file_id + "::") and node["type"] in (
-                "Function",
-                "Method",
-                "Class",
-            ):
-                start = node["metadata"].get("lineno", 0)
-                end = node["metadata"].get("end_lineno", start)
-                if start > 0:
-                    span_size = end - start
-                    spans.append((span_size, start, end, node["id"]))
-
-        # Sort by span size descending so outer spans are written first and inner spans overwrite them
-        spans.sort(key=lambda x: -x[0])
-
-        line_map = {}
-        for _, start, end, node_id in spans:
-            for ln in range(start, end + 1):
-                line_map[ln] = node_id
-
-        return line_map
+    def _spans_before(self, spans: list, revision: str, file_path: str) -> list:
+        """``spans`` of a file today as they stood in ``revision``, carried
+        back through the line diff of the revision's copy against the file
+        on disk, which no git filter reads."""
+        old = self._run_git(["cat-file", "blob", f"{revision}:{file_path}"])
+        disk = source_path(self.project_root, file_path)
+        # Read as it is stored, a `\r` before each `\n` kept, as git does
+        try:
+            with open_regular(
+                disk or os.devnull, "r", encoding="utf-8", errors="replace", newline=""
+            ) as f:
+                new = f.read()
+        except OSError:
+            new = ""
+        # Lines counted at `\n` alone, as git and the parsers count them, and
+        # compared without the `\r` a checkout may write before one
+        old, new = (
+            [line.removesuffix("\r") for line in source_lines(text)]
+            for text in (old, new)
+        )
+        return _spans_before(spans, _line_diff(old, new))
 
     def _parse_diff_hunks(self, diff_output: str) -> list[dict]:
         """Parse unified diff output into structured hunk data.
@@ -506,7 +713,7 @@ class GitHistoryAnalyzer:
 
         Returns:
             List of dicts with keys: file, old_start, old_count,
-            new_start, new_count, header, lines.
+            new_start, new_count, lines.
         """
         hunks = []
         current_file = None
@@ -520,23 +727,13 @@ class GitHistoryAnalyzer:
                 current_hunk["lines"].append(line)
                 old_left -= not line.startswith("+")
                 new_left -= not line.startswith("-")
-            # Track file changes
             elif line.startswith("diff --git"):
                 current_file = None
-                current_hunk = None
-                # A body falls short of its header's counts when git writes
-                # empty context lines as empty lines (diff.suppressBlankEmpty).
-                old_left = new_left = 0
             elif line.startswith("+++ b/"):
                 current_file = line[6:]
-            elif line.startswith("--- /dev/null"):
-                # New file
-                pass
             elif line.startswith("@@ "):
                 # Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-                match = re.match(
-                    r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)", line
-                )
+                match = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
                 if match and current_file:
                     current_hunk = {
                         "file": current_file,
@@ -544,242 +741,109 @@ class GitHistoryAnalyzer:
                         "old_count": int(match.group(2) or 1),
                         "new_start": int(match.group(3)),
                         "new_count": int(match.group(4) or 1),
-                        "header": match.group(5).strip(),
                         "lines": [],
                     }
                     hunks.append(current_hunk)
                     old_left = current_hunk["old_count"]
                     new_left = current_hunk["new_count"]
-            elif current_hunk is not None:
-                if line.startswith(("+", "-", " ")):
-                    current_hunk["lines"].append(line)
 
         return hunks
 
-    def _get_node_display(self, node_id: str) -> tuple[str, str, str]:
-        """Get display info for a node ID.
-
-        Returns:
-            Tuple of (type_badge, display_name, location).
-        """
+    def _get_node_display(self, node_id: str) -> tuple[str, str]:
+        """The name and location of a node ID."""
         if not self.querier:
-            # Extract basic info from node ID
             parts = node_id.replace("FILE:", "").split("::")
             file_path = parts[0]
             name = parts[-1] if len(parts) > 1 else file_path
-            return "[Fun]", name, file_path
+            return name, file_path
 
-        node = self.querier.get_node_info(node_id)
+        node = self.querier.nodes.get(node_id)
         if not node:
             parts = node_id.replace("FILE:", "").split("::")
-            return "[???]", parts[-1] if len(parts) > 1 else node_id, ""
+            return parts[-1] if len(parts) > 1 else node_id, ""
 
         meta = node.get("metadata", {})
-        node_type = node.get("type", "?")[:3]
         name = meta.get("name", "unknown")
-        parent = meta.get("parent_name", "")
-        display_name = f"{parent}.{name}" if parent else name
 
         # Build location
-        file_path = (
-            node_id.split("::")[0].replace("FILE:", "")
-            if node_id.startswith("FILE:")
-            else ""
-        )
+        file_path = file_of(node_id) if node_id.startswith("FILE:") else ""
         lineno = meta.get("lineno")
         location = f"{file_path}:{lineno}" if lineno else file_path
 
-        return f"[{node_type}]", display_name, location
+        return name, location
 
-    # --- Main analysis methods ---
+    def _symbol_entry(self, node_id: str) -> dict:
+        """A changed symbol's `id`, `type` (its node's, None for a file or a
+        node the graph lacks), `name`, `file` and `line`."""
+        node = self.querier.nodes.get(node_id) if self.querier else None
+        return {
+            "id": node_id,
+            "type": node.get("type") if node else None,
+            "name": self._get_node_display(node_id)[0],
+            "file": file_of(node_id),
+            "line": (node or {}).get("metadata", {}).get("lineno"),
+        }
 
-    def get_churn(
-        self,
-        time_range: str | None = None,
-        path_filter: str | None = None,
-        limit: int = 20,
-        mode: str = "symbols",
-        exclude_generated: bool = True,
-    ) -> str:
-        """Analyze code churn to find hotspots.
-
-        Args:
-            time_range: Time range filter (e.g., "last 30 days").
-            path_filter: Path filter (e.g., "backend/", "*.rs").
-            limit: Maximum results to return.
-            mode: "symbols" (default), "files", or "co-change".
-
-        Returns:
-            Formatted analysis string.
-        """
-        self._verify_git()
-
-        if path_filter:
-            _validate_pathspec(path_filter)
-
-        # Build git log command for file-level commit counts
-        git_args = [
-            "log",
-            _NAME_ONLY_FORMAT,
-            "--name-only",
-            "--no-merges",
-        ]
-        git_args.extend(self._parse_time_range(time_range))
-        if path_filter:
-            git_args.extend(["--", path_filter])
-        elif exclude_generated:
-            # Validate each exclusion entry before ':!' prefixing
-            exclusions = []
-            for p in self.churn_exclusions:
-                _validate_pathspec(p)
-                exclusions.append(f":!{p}")
-            git_args.extend(["--", "."] + exclusions)
-
-        output = self._run_git(git_args, timeout=60)
-
-        if not output.strip():
-            return "No commits found for the given time range."
-
-        # Parse file-level commit counts
-        file_commits, root_commits = _parse_name_only_log(output)
-
-        if not file_commits:
-            return "No file changes found for the given time range."
-
-        # FILE MODE: Just return file-level results
-        if mode == "files":
-            sorted_files = sorted(
-                file_commits.items(), key=lambda x: len(x[1]), reverse=True
-            )[:limit]
-
-            lines = []
-            range_note = f" ({time_range})" if time_range else ""
-            lines.append(
-                f"### Top {len(sorted_files)} Most Changed Files{range_note}\n"
-            )
-
-            for rank, (file_path, commits) in enumerate(sorted_files, 1):
-                lines.append(f"{rank:>3}. {file_path} ({len(commits)} commits)")
-
+    @staticmethod
+    def render_churn(data: dict) -> str:
+        """The markdown of a `get_churn_structured` result."""
+        note = data.get("truncation_note")
+        partial = f"\n\n*{note}*" if note else ""
+        if "message" in data:
+            return data["message"] + partial
+        range_note = f" ({data['time_range']})" if data["time_range"] else ""
+        if "files" in data:
+            files = data["files"]
+            lines = [f"### Top {len(files)} Most Changed Files{range_note}\n"]
+            lines += [
+                f"{rank:>3}. {f['file']} ({f['commits']} commits)"
+                for rank, f in enumerate(files, 1)
+            ]
             return "\n".join(lines)
-
-        # SYMBOL MODE: Attribute changes to symbols
-        if mode in ("symbols", "co-change"):
-            # Sort files by commit count and take top 50 for symbol attribution
-            sorted_files = sorted(
-                file_commits.items(), key=lambda x: len(x[1]), reverse=True
-            )[:50]
-
-            symbol_commits: dict[str, set[str]] = defaultdict(set)
-            symbol_lines: dict[str, tuple[int, int]] = {}  # node_id -> (added, removed)
-            skipped: dict[str, int] = defaultdict(int)
-            deadline = time.monotonic() + CHURN_DIFF_BUDGET_SECONDS
-
-            for file_path, commits in sorted_files:
-                # Skip commits touching too many files (bulk refactors)
-                file_line_map = self._build_file_line_map(file_path)
-                if not file_line_map:
-                    # No graph data for this file, count at file level
-                    symbol_commits[f"FILE:{file_path}"].update(commits)
-                    continue
-
-                # Get per-commit diffs for this file
-                for commit_hash in _diffable_commits(commits, deadline, skipped):
-                    try:
-                        diff_output = self._commit_file_diff(
-                            commit_hash, file_path, root_commits
-                        )
-                    except PartialCloneError:
-                        raise
-                    except GitError:
-                        # Timed out or unreadable - skip this commit
-                        continue
-
-                    hunks = self._parse_diff_hunks(diff_output)
-                    touched_symbols = set()
-
-                    for hunk in hunks:
-                        # Map changed lines to symbols
-                        line = hunk["new_start"]
-                        for diff_line in hunk["lines"]:
-                            if diff_line.startswith("+"):
-                                symbol = file_line_map.get(line)
-                                if symbol:
-                                    touched_symbols.add(symbol)
-                                    old_add, old_rem = symbol_lines.get(symbol, (0, 0))
-                                    symbol_lines[symbol] = (old_add + 1, old_rem)
-                                line += 1
-                            elif diff_line.startswith("-"):
-                                # NOTE: Removed lines use new-side line numbers for symbol lookup,
-                                # which is approximate when insertions shift line positions.
-                                # Commit-count attribution (the primary ranking metric) is unaffected.
-                                symbol = file_line_map.get(line)
-                                if symbol:
-                                    touched_symbols.add(symbol)
-                                    old_add, old_rem = symbol_lines.get(symbol, (0, 0))
-                                    symbol_lines[symbol] = (old_add, old_rem + 1)
-                                # Removed lines don't advance new-side line counter
-                            else:
-                                line += 1
-
-                    for sym in touched_symbols:
-                        symbol_commits[sym].add(commit_hash)
-
-            partial_note = _churn_partial_note(skipped)
-            partial_suffix = f"\n\n*{partial_note}*" if partial_note else ""
-
-            if not symbol_commits:
-                return (
-                    "No symbol-level changes detected. Graph may not cover these files."
-                    + partial_suffix
+        if "symbols" in data:
+            symbols = data["symbols"]
+            path_note = f" in {data['path_filter']}" if data["path_filter"] else ""
+            lines = [
+                f"### Top {len(symbols)} Most Changed Symbols{range_note}{path_note}\n"
+            ]
+            for rank, sym in enumerate(symbols, 1):
+                stats = (
+                    f", +{sym['added']}/-{sym['removed']}"
+                    if sym["added"] or sym["removed"]
+                    else ""
                 )
-
-            # Separate graph-resolved symbols (FILE:path::Symbol) from
-            # file-level fallbacks (FILE:path with no ::).
-            graph_resolved = {}
-            file_fallbacks = {}
-            for k, v in symbol_commits.items():
-                is_file_fallback = k.startswith("FILE:") and "::" not in k
-                if is_file_fallback:
-                    ext = Path(k.replace("FILE:", "")).suffix.lower()
-                    if ext not in self.code_extensions:
-                        continue  # Drop non-code FILE entries
-                    file_fallbacks[k] = v
-                else:
-                    graph_resolved[k] = v
-            # Prefer graph-resolved symbols; fall back to file-level only if none
-            symbol_commits = graph_resolved if graph_resolved else file_fallbacks
-
-            if mode == "co-change":
-                return (
-                    self._format_co_change(symbol_commits, limit, file_commits)
-                    + partial_suffix
-                )
-
-            # Sort by commit count
-            sorted_symbols = sorted(
-                symbol_commits.items(), key=lambda x: (-len(x[1]), x[0])
-            )[:limit]
-
-            lines = []
-            range_note = f" ({time_range})" if time_range else ""
-            path_note = f" in {path_filter}" if path_filter else ""
-            lines.append(
-                f"### Top {len(sorted_symbols)} Most Changed Symbols{range_note}{path_note}\n"
-            )
-
-            for rank, (node_id, commits) in enumerate(sorted_symbols, 1):
-                type_badge, name, location = self._get_node_display(node_id)
-                added, removed = symbol_lines.get(node_id, (0, 0))
-                line_stats = f", +{added}/-{removed}" if added or removed else ""
                 lines.append(
-                    f"{rank:>3}. {type_badge} {name} | {location} "
-                    f"({len(commits)} commits{line_stats})"
+                    _symbol_line(rank, sym) + f"({sym['commits']} commits{stats})"
                 )
-
-            return "\n".join(lines) + partial_suffix
-
-        return _UNKNOWN_CHURN_MODE.format(mode)
+            return "\n".join(lines) + partial
+        pairs = data["pairs"]
+        if not pairs:
+            return (
+                "No co-change patterns found (need pairs with 2+ shared commits)."
+                if data.get("file_level")
+                else "No co-change patterns found in code files."
+            ) + partial
+        if data.get("file_level"):
+            lines = [
+                f"### Top {len(pairs)} Co-Change Pairs (file-level)\n",
+                "*Symbol-level data was too sparse; showing file-level co-changes:*\n",
+            ]
+            lines += [
+                f"{rank:>3}. {p['a_name']} <-> {p['b_name']} ({p['shared_commits']} shared commits)"
+                for rank, p in enumerate(pairs, 1)
+            ]
+        else:
+            lines = [
+                f"### Top {len(pairs)} Co-Change Pairs\n",
+                "Symbols that frequently change in the same commit:\n",
+            ]
+            for rank, p in enumerate(pairs, 1):
+                a = f" ({p['a_file']})" if p["a_file"] else ""
+                b = f" ({p['b_file']})" if p["b_file"] else ""
+                lines.append(
+                    f"{rank:>3}. {p['a_name']}{a} <-> {p['b_name']}{b} ({p['shared_commits']} shared commits)"
+                )
+        return "\n".join(lines) + partial
 
     def get_churn_structured(
         self,
@@ -792,21 +856,35 @@ class GitHistoryAnalyzer:
         """Analyze code churn, returning structured data for UI rendering.
 
         Returns dict with keys: mode, time_range, path_filter, and one of:
-        - symbols: list of {id, type, name, file, line, commits, added, removed}
+        - symbols: list of {id, type, name, file, line, commits, added, removed},
+          `type` the node's type, None for a file or a node the graph lacks
         - files: list of {file, commits}
         - pairs: list of {a_id, a_name, a_file, b_id, b_name, b_file, shared_commits}
         Symbol and co-change results carry truncation_note when the churn
-        limits left commits undiffed.
+        limits left commits undiffed. Instead of the list, `message` says
+        why there is nothing to list; an unknown mode is `{"error",
+        "reason"}`.
         """
-        if mode not in ("symbols", "files", "co-change"):
-            return {"error": _UNKNOWN_CHURN_MODE.format(mode)}
+        if mode not in {m.value for m in ChurnMode}:
+            return fail("invalid", _UNKNOWN_CHURN_MODE.format(mode))
         self._verify_git()
+        try:
+            if path_filter:
+                _validate_pathspec(path_filter)
+            time_flags = self._parse_time_range(time_range)
+        except GitError as e:
+            return fail("invalid", str(e))
 
-        if path_filter:
-            _validate_pathspec(path_filter)
-
-        git_args = ["log", _NAME_ONLY_FORMAT, "--name-only", "--no-merges"]
-        git_args.extend(self._parse_time_range(time_range))
+        # Every commit that changed a file, through each parent of a merge,
+        # whatever the pathspec
+        git_args = [
+            "log",
+            _NAME_ONLY_FORMAT,
+            "--name-only",
+            "--no-merges",
+            "--full-history",
+        ]
+        git_args.extend(time_flags)
         if path_filter:
             git_args.extend(["--", path_filter])
         elif exclude_generated:
@@ -817,20 +895,26 @@ class GitHistoryAnalyzer:
             git_args.extend(["--", "."] + exclusions)
 
         output = self._run_git(git_args, timeout=60)
-
-        if not output.strip():
-            return {"error": "No commits found for the given time range."}
-
-        file_commits, root_commits = _parse_name_only_log(output)
-
-        if not file_commits:
-            return {"error": "No file changes found for the given time range."}
-
         base = {
             "mode": mode,
             "time_range": time_range or "",
             "path_filter": path_filter or "",
         }
+
+        if not output.strip():
+            return {
+                **base,
+                "message": f"No commits found{_narrowed(time_range, path_filter)}.",
+            }
+
+        file_commits = _parse_name_only_log(output)
+
+        if not file_commits:
+            return {
+                **base,
+                "message": "No file changes found"
+                f"{_narrowed(time_range, path_filter)}.",
+            }
 
         # FILE MODE
         if mode == "files":
@@ -848,60 +932,47 @@ class GitHistoryAnalyzer:
         )[:50]
 
         symbol_commits: dict[str, set[str]] = defaultdict(set)
-        symbol_lines: dict[str, tuple[int, int]] = {}
+        changed: dict[str, dict[str, dict]] = defaultdict(dict)
         skipped: dict[str, int] = defaultdict(int)
         deadline = time.monotonic() + CHURN_DIFF_BUDGET_SECONDS
 
+        # A commit's lines are read against the symbols as they stood in it,
+        # as `git log -L` follows a range: today's carried back to HEAD, then
+        # through the file's history, each commit's spans carried to each of
+        # its parents through the diff between them, across renames.
+        counted = self._counted(time_flags)
         for file_path, commits in sorted_files:
-            file_line_map = self._build_file_line_map(file_path)
-            if not file_line_map:
+            spans = self._symbol_spans(file_path)
+            if not spans:
                 symbol_commits[f"FILE:{file_path}"].update(commits)
                 continue
-
-            for commit_hash in _diffable_commits(commits, deadline, skipped):
-                try:
-                    diff_output = self._commit_file_diff(
-                        commit_hash, file_path, root_commits
-                    )
-                except PartialCloneError:
-                    raise
-                except GitError:
-                    continue
-
-                hunks = self._parse_diff_hunks(diff_output)
-                touched_symbols = set()
-
-                for hunk in hunks:
-                    line = hunk["new_start"]
-                    for diff_line in hunk["lines"]:
-                        if diff_line.startswith("+"):
-                            symbol = file_line_map.get(line)
-                            if symbol:
-                                touched_symbols.add(symbol)
-                                old_add, old_rem = symbol_lines.get(symbol, (0, 0))
-                                symbol_lines[symbol] = (old_add + 1, old_rem)
-                            line += 1
-                        elif diff_line.startswith("-"):
-                            symbol = file_line_map.get(line)
-                            if symbol:
-                                touched_symbols.add(symbol)
-                                old_add, old_rem = symbol_lines.get(symbol, (0, 0))
-                                symbol_lines[symbol] = (old_add, old_rem + 1)
-                        else:
-                            line += 1
-
-                for sym in touched_symbols:
-                    symbol_commits[sym].add(commit_hash)
+            try:
+                self._churn_file(
+                    file_path,
+                    len(commits),
+                    spans,
+                    counted,
+                    deadline,
+                    skipped,
+                    changed,
+                    CHURN_MAX_COMMITS_PER_FILE,
+                )
+            except PartialCloneError:
+                raise
+            except GitError:
+                skipped["unread_files"] += 1
+        for symbol, commits in changed.items():
+            symbol_commits[symbol].update(commits)
 
         partial_note = _churn_partial_note(skipped)
 
-        if not symbol_commits:
-            return {
-                "error": "No symbol-level changes detected. Graph may not cover these files."
-                + (f" {partial_note}" if partial_note else "")
-            }
         if partial_note:
             base["truncation_note"] = partial_note
+        if not symbol_commits:
+            return {
+                **base,
+                "message": "No symbol-level changes detected. Graph may not cover these files.",
+            }
 
         # Filter to graph-resolved symbols
         graph_resolved = {}
@@ -916,6 +987,12 @@ class GitHistoryAnalyzer:
             else:
                 graph_resolved[k] = v
         symbol_commits = graph_resolved if graph_resolved else file_fallbacks
+        if not symbol_commits:
+            return {
+                **base,
+                "message": "No changes to code files found"
+                f"{_narrowed(time_range, path_filter)}.",
+            }
 
         # CO-CHANGE MODE
         if mode == "co-change":
@@ -928,28 +1005,13 @@ class GitHistoryAnalyzer:
 
         symbols = []
         for node_id, commits in sorted_symbols:
-            type_badge, name, location = self._get_node_display(node_id)
-            file_path = ""
-            line = None
-            if ":" in location:
-                file_path, line_str = location.rsplit(":", 1)
-                try:
-                    line = int(line_str)
-                except ValueError:
-                    file_path = location
-            else:
-                file_path = location
-            added, removed = symbol_lines.get(node_id, (0, 0))
+            by_commit = changed.get(node_id, {}).values()
             symbols.append(
                 {
-                    "id": node_id,
-                    "type": type_badge.strip("[]"),
-                    "name": name,
-                    "file": file_path,
-                    "line": line,
+                    **self._symbol_entry(node_id),
                     "commits": len(commits),
-                    "added": added,
-                    "removed": removed,
+                    "added": sum(t["added"] for t in by_commit),
+                    "removed": sum(t["removed"] for t in by_commit),
                 }
             )
 
@@ -967,38 +1029,20 @@ class GitHistoryAnalyzer:
         graph_symbols = {k: v for k, v in symbol_commits.items() if "::" in k}
 
         pairs = []
-        if graph_symbols:
-            commit_symbols: dict[str, set[str]] = defaultdict(set)
-            for sym, commits in graph_symbols.items():
-                for c in commits:
-                    commit_symbols[c].add(sym)
-
-            pair_counts: dict[tuple[str, str], int] = defaultdict(int)
-            for symbols in commit_symbols.values():
-                sym_list = sorted(symbols)
-                for i in range(len(sym_list)):
-                    for j in range(i + 1, len(sym_list)):
-                        pair_counts[(sym_list[i], sym_list[j])] += 1
-
-            frequent_pairs = [
-                (pair, count) for pair, count in pair_counts.items() if count >= 2
-            ]
-            frequent_pairs.sort(key=lambda x: (-x[1], x[0]))
-
-            for (sym_a, sym_b), count in frequent_pairs[:limit]:
-                _, name_a, loc_a = self._get_node_display(sym_a)
-                _, name_b, loc_b = self._get_node_display(sym_b)
-                pairs.append(
-                    {
-                        "a_id": sym_a,
-                        "a_name": name_a,
-                        "a_file": loc_a,
-                        "b_id": sym_b,
-                        "b_name": name_b,
-                        "b_file": loc_b,
-                        "shared_commits": count,
-                    }
-                )
+        for (sym_a, sym_b), count in _pairs(graph_symbols)[:limit]:
+            name_a, loc_a = self._get_node_display(sym_a)
+            name_b, loc_b = self._get_node_display(sym_b)
+            pairs.append(
+                {
+                    "a_id": sym_a,
+                    "a_name": name_a,
+                    "a_file": loc_a,
+                    "b_id": sym_b,
+                    "b_name": name_b,
+                    "b_file": loc_b,
+                    "shared_commits": count,
+                }
+            )
 
         if not pairs and file_commits:
             # Fall back to file-level co-change
@@ -1008,30 +1052,13 @@ class GitHistoryAnalyzer:
                 if Path(f).suffix.lower() in self.code_extensions
             }
             if code_files:
-                commit_files: dict[str, set[str]] = defaultdict(set)
-                for fp, commits in code_files.items():
-                    for c in commits:
-                        commit_files[c].add(fp)
-
-                pair_counts: dict[tuple[str, str], int] = defaultdict(int)
-                for files in commit_files.values():
-                    file_list = sorted(files)
-                    for i in range(len(file_list)):
-                        for j in range(i + 1, len(file_list)):
-                            pair_counts[(file_list[i], file_list[j])] += 1
-
-                frequent_pairs = [
-                    (pair, count) for pair, count in pair_counts.items() if count >= 2
-                ]
-                frequent_pairs.sort(key=lambda x: x[1], reverse=True)
-
-                for (file_a, file_b), count in frequent_pairs[:limit]:
+                for (file_a, file_b), count in _pairs(code_files)[:limit]:
                     pairs.append(
                         {
-                            "a_id": "",
+                            "a_id": None,
                             "a_name": file_a,
                             "a_file": file_a,
-                            "b_id": "",
+                            "b_id": None,
                             "b_name": file_b,
                             "b_file": file_b,
                             "shared_commits": count,
@@ -1042,456 +1069,169 @@ class GitHistoryAnalyzer:
         base["pairs"] = pairs
         return base
 
-    def _format_co_change(
-        self,
-        symbol_commits: dict[str, set[str]],
-        limit: int,
-        file_commits: dict[str, list[str]] | None = None,
-    ) -> str:
-        """Format co-change analysis showing symbol pairs that change together.
-
-        Args:
-            symbol_commits: Mapping of symbol -> set of commit hashes.
-            limit: Max pairs to show.
-            file_commits: Optional file-level commit data for fallback.
-
-        Returns:
-            Formatted co-change analysis.
-        """
-        # Exclude file-level fallback entries (FILE:path with no ::) for meaningful co-change
-        graph_symbols = {k: v for k, v in symbol_commits.items() if "::" in k}
-
-        frequent_pairs = []
-        if graph_symbols:
-            # Build commit -> symbols map
-            commit_symbols: dict[str, set[str]] = defaultdict(set)
-            for sym, commits in graph_symbols.items():
-                for c in commits:
-                    commit_symbols[c].add(sym)
-
-            # Count co-occurrences
-            pair_counts: dict[tuple[str, str], int] = defaultdict(int)
-            for symbols in commit_symbols.values():
-                sym_list = sorted(symbols)
-                for i in range(len(sym_list)):
-                    for j in range(i + 1, len(sym_list)):
-                        pair_counts[(sym_list[i], sym_list[j])] += 1
-
-            # Filter to pairs with >1 co-occurrence
-            frequent_pairs = [
-                (pair, count) for pair, count in pair_counts.items() if count >= 2
-            ]
-            frequent_pairs.sort(key=lambda x: (-x[1], x[0]))
-            frequent_pairs = frequent_pairs[:limit]
-
-        if frequent_pairs:
-            lines = [f"### Top {len(frequent_pairs)} Co-Change Pairs\n"]
-            lines.append("Symbols that frequently change in the same commit:\n")
-
-            for rank, ((sym_a, sym_b), count) in enumerate(frequent_pairs, 1):
-                _, name_a, loc_a = self._get_node_display(sym_a)
-                _, name_b, loc_b = self._get_node_display(sym_b)
-                loc_suffix_a = f" ({loc_a})" if loc_a else ""
-                loc_suffix_b = f" ({loc_b})" if loc_b else ""
-                lines.append(
-                    f"{rank:>3}. {name_a}{loc_suffix_a} <-> "
-                    f"{name_b}{loc_suffix_b} ({count} shared commits)"
-                )
-
-            return "\n".join(lines)
-
-        # Fall back to file-level co-change when symbol data is sparse
-        if file_commits:
-            return self._format_file_co_change(file_commits, limit)
-
-        return "No co-change patterns found (need pairs with 2+ shared commits)."
-
-    def _format_file_co_change(
-        self, file_commits: dict[str, list[str]], limit: int
-    ) -> str:
-        """Format co-change analysis at the file level (fallback).
-
-        Args:
-            file_commits: Mapping of file path -> list of commit hashes.
-            limit: Max pairs to show.
-
-        Returns:
-            Formatted file-level co-change analysis.
-        """
-        # Filter to code files only
-        code_files = {
-            f: commits
-            for f, commits in file_commits.items()
-            if Path(f).suffix.lower() in self.code_extensions
-        }
-        if not code_files:
-            return "No co-change patterns found in code files."
-
-        # Build commit -> files map
-        commit_files: dict[str, set[str]] = defaultdict(set)
-        for fp, commits in code_files.items():
-            for c in commits:
-                commit_files[c].add(fp)
-
-        # Count co-occurrences
-        pair_counts: dict[tuple[str, str], int] = defaultdict(int)
-        for files in commit_files.values():
-            file_list = sorted(files)
-            for i in range(len(file_list)):
-                for j in range(i + 1, len(file_list)):
-                    pair_counts[(file_list[i], file_list[j])] += 1
-
-        frequent_pairs = [
-            (pair, count) for pair, count in pair_counts.items() if count >= 2
-        ]
-        frequent_pairs.sort(key=lambda x: x[1], reverse=True)
-        frequent_pairs = frequent_pairs[:limit]
-
-        if not frequent_pairs:
-            return "No co-change patterns found (need pairs with 2+ shared commits)."
-
-        lines = [f"### Top {len(frequent_pairs)} Co-Change Pairs (file-level)\n"]
-        lines.append(
-            "*Symbol-level data was too sparse; showing file-level co-changes:*\n"
-        )
-
-        for rank, ((file_a, file_b), count) in enumerate(frequent_pairs, 1):
-            lines.append(f"{rank:>3}. {file_a} <-> {file_b} ({count} shared commits)")
-
-        return "\n".join(lines)
-
-    def get_evolution(
+    def get_evolution_structured(
         self,
         name: str,
         time_range: str | None = None,
         limit: int = 10,
         show_diff: bool = False,
-        crate: str | None = None,
-    ) -> str:
-        """Track the evolution of a specific symbol over time.
+    ) -> dict:
+        """The commits that changed a symbol, newest first.
 
         Args:
-            name: Symbol name (fuzzy-matched via graph querier).
+            name: The symbol's node ID.
             time_range: Time range filter.
             limit: Maximum commits to show.
             show_diff: Include actual diff hunks.
 
         Returns:
-            Formatted evolution timeline.
+            `{"error", "reason"}` when the node is not a file's or git
+            fails; else `symbol`, `node_id`, `location`,
+            `mode` ("lines" from the symbol's own lines, those no definition
+            inside it holds, followed as churn follows them; "file" from the
+            file's log for a symbol with no line span), `shallow`,
+            `show_diff`, `truncation_note` where the time budget cut the
+            walk short, and `commits`, each `{hash, date, author, subject}`
+            and, in "lines" mode, `added`, `removed` and `diff`.
         """
         self._verify_git()
-
-        # Resolve symbol
-        file_path = None
-        symbol_name = name
-        resolved_node_id = None
-        match_count = 0
-
-        if self.querier:
-            matches = self.querier.find_nodes_by_name(name)
-            # Prefer functions/methods
-            func_matches = [m for m in matches if m["type"] in ("Function", "Method")]
-            if func_matches:
-                matches = func_matches
-
-            if not matches:
-                matches = self.querier.find_nodes_by_name(name, fuzzy=True)
-                func_matches = [
-                    m for m in matches if m["type"] in ("Function", "Method")
-                ]
-                if func_matches:
-                    matches = func_matches
-
-            if matches:
-                all_matches = list(matches)
-                match_count = len(all_matches)
-
-                # Filter by crate if specified
-                if crate:
-                    crate_filtered = [
-                        m for m in matches if crate.lower() in m["id"].lower()
-                    ]
-                    if crate_filtered:
-                        matches = crate_filtered
-
-                # Rank by in_degree (callers), non-test preferred
-                if len(matches) > 1:
-
-                    def rank_match(m):
-                        in_degree = m.get("metadata", {}).get("in_degree", 0)
-                        is_test = "test" in m["id"].lower()
-                        return (-in_degree, is_test)
-
-                    matches.sort(key=rank_match)
-
-                best = matches[0]
-                resolved_node_id = best["id"]
-                symbol_name = best["metadata"].get("name", name)
-                # Extract file path from node ID
-                if best["id"].startswith("FILE:"):
-                    file_path = best["id"].split("::")[0].replace("FILE:", "")
-
-        if not file_path:
-            return (
-                f"Could not resolve symbol '{name}'. "
-                "Try descry_search to find the exact name."
-            )
-
-        # Try git log -L :name:file (git's native function tracking)
-        # This works for top-level functions but fails for methods/nested fns
-        # Note: '--' separator does NOT protect -L (it's a flag with inline value);
-        # symbol and file must be strictly validated before interpolation.
-        _validate_git_symbol(symbol_name)
-        _validate_git_file(file_path)
-        git_args = [
-            "log",
-            f"-L:{symbol_name}:{file_path}",
-            _HEADER_FORMAT,
-            "--date=short",
-            "--no-merges",
-        ]
-        git_args.extend(self._parse_time_range(time_range))
-
         try:
-            output = self._run_git(git_args, timeout=30)
+            time_flags = self._parse_time_range(time_range)
+        except GitError as e:
+            return fail("invalid", str(e))
+
+        if not name.startswith("FILE:"):
+            return fail(
+                "not_found",
+                f"Could not resolve symbol '{name}'. "
+                "Try descry_search to find the exact name.",
+            )
+        file_path = file_of(name)
+        _validate_git_file(file_path)
+        symbol_name, location = self._get_node_display(name)
+        found = {
+            "symbol": symbol_name,
+            "node_id": name,
+            "location": location or file_path,
+            "show_diff": show_diff,
+        }
+
+        # The symbol's own lines, those no definition inside it holds,
+        # followed through history as churn follows them; a symbol with no
+        # line span has its file's commits.
+        spans = self._symbol_spans(file_path)
+        own = next((s for s in spans if s[2] == name), None)
+        try:
+            if own:
+                held = [s for s in spans if own[0] <= s[0] and s[1] <= own[1]]
+                changed, skipped = defaultdict(dict), defaultdict(int)
+                deadline = time.monotonic() + CHURN_DIFF_BUDGET_SECONDS
+                counted = self._counted(time_flags)
+                self._churn_file(
+                    file_path, 0, held, counted, deadline, skipped, changed, None
+                )
+                by_commit = list(changed[name].items())[:limit]
+                log = (
+                    self._run_git(
+                        ["log", "--no-walk=unsorted", _HEADER_FORMAT, "--date=short"]
+                        + [commit for commit, _ in by_commit]
+                    )
+                    if by_commit
+                    else ""
+                )
+                headers = [
+                    h for line in log.split("\n") if (h := _parse_log_header(line))
+                ]
+                commits = [
+                    {**header, **lines, "diff": "\n".join(lines["diff"])}
+                    for header, (_, lines) in zip(headers, by_commit)
+                ]
+                if skipped:
+                    found["truncation_note"] = (
+                        f"Partial results: the {CHURN_DIFF_BUDGET_SECONDS}s time "
+                        "budget ran out before the symbol's first commit was read."
+                    )
+            else:
+                log = self._run_git(
+                    ["log", _HEADER_FORMAT, "--date=short", "--no-merges"]
+                    + time_flags
+                    + ["--", file_path],
+                    timeout=30,
+                )
+                headers = (_parse_log_header(line) for line in log.split("\n"))
+                commits = [h for h in headers if h][:limit]
         except PartialCloneError:
             raise
-        except GitError:
-            output = None
-
-        # Fallback: try line-range based -L using descry metadata
-        if not output and resolved_node_id and self.querier:
-            node_info = self.querier.get_node_info(resolved_node_id)
-            if node_info:
-                meta = node_info.get("metadata", {})
-                start_line = meta.get("lineno")
-                end_line = meta.get("end_lineno")
-                if start_line and end_line:
-                    # file_path already validated above; line numbers from
-                    # metadata are trusted ints.
-                    _validate_git_file(file_path)
-                    git_args = [
-                        "log",
-                        f"-L{int(start_line)},{int(end_line)}:{file_path}",
-                        _HEADER_FORMAT,
-                        "--date=short",
-                        "--no-merges",
-                    ]
-                    git_args.extend(self._parse_time_range(time_range))
-                    try:
-                        output = self._run_git(git_args, timeout=30)
-                    except PartialCloneError:
-                        raise
-                    except GitError:
-                        output = None
-
-        # Build disambiguation note if multiple matches
-        disambig_note = ""
-        if match_count > 1:
-            _, _, location = (
-                self._get_node_display(resolved_node_id)
-                if resolved_node_id
-                else ("", "", file_path)
-            )
-            disambig_note = (
-                f"\n*{match_count} symbols named `{name}` — "
-                f"showing: {location}. Use `crate` to disambiguate.*"
-            )
-
-        if output and output.strip():
-            result = self._format_evolution_from_log_l(
-                output, symbol_name, file_path, resolved_node_id, limit, show_diff
-            )
-            return result + disambig_note
-
-        # Fallback: simple file log filtered by symbol
-        git_args = ["log", _HEADER_FORMAT, "--date=short", "--no-merges"]
-        git_args.extend(self._parse_time_range(time_range))
-        git_args.extend(["--", file_path])
-
-        try:
-            output = self._run_git(git_args, timeout=30)
         except GitError as e:
-            return f"Error getting history: {e}"
-
-        if not output.strip():
-            return f"No commits found for '{symbol_name}' in {file_path}."
-
-        result = self._format_evolution_fallback(
-            output, symbol_name, file_path, resolved_node_id, limit, show_diff
-        )
-        return result + disambig_note
-
-    def _format_evolution_from_log_l(
-        self,
-        output: str,
-        symbol_name: str,
-        file_path: str,
-        node_id: str | None,
-        limit: int,
-        show_diff: bool,
-    ) -> str:
-        """Format evolution from git log -L output.
-
-        The output is one _HEADER_FORMAT line per commit, then its diff.
-        """
-        commits = []
-        current_commit = None
-        diff_lines = []
-        authors = set()
-
-        for line in output.split("\n"):
-            header = _parse_log_header(line)
-            if header:
-                if current_commit:
-                    current_commit["diff"] = "\n".join(diff_lines)
-                    commits.append(current_commit)
-                    diff_lines = []
-
-                current_commit = {**header, "diff": "", "added": 0, "removed": 0}
-                authors.add(header["author"])
-            elif current_commit:
-                # Lines of a CRLF file end in CR; output is split on LF only.
-                line = line.rstrip("\r")
-                diff_lines.append(line)
-                if line.startswith("+") and not line.startswith("+++"):
-                    current_commit["added"] += 1
-                elif line.startswith("-") and not line.startswith("---"):
-                    current_commit["removed"] += 1
-
-        if current_commit:
-            current_commit["diff"] = "\n".join(diff_lines)
-            commits.append(current_commit)
-
-        commits = commits[:limit]
-
+            return fail("failed", f"Error getting history: {e}", _detail=e.detail)
         if not commits:
-            return f"No evolution data found for '{symbol_name}'."
+            return {
+                "message": f"No commits found for '{symbol_name}' in {file_path}"
+                f"{_narrowed(time_range, None)}."
+            }
+        return {
+            **found,
+            "mode": "lines" if own else "file",
+            "shallow": bool(own) and self._is_shallow(),
+            "commits": commits,
+        }
 
-        # Format output
-        location = file_path
-        if node_id:
-            _, _, loc = self._get_node_display(node_id)
-            if loc:
-                location = loc
-
-        # Calculate date span
-        dates = [c["date"] for c in commits]
-        date_span = f"{dates[-1]} to {dates[0]}" if len(dates) > 1 else dates[0]
-
-        lines = [f"### Evolution of `{symbol_name}` ({location})\n"]
-        lines.append(
-            f"{len(commits)} commit(s) | {len(authors)} author(s) | {date_span}\n"
-        )
-
-        shallow = (
-            " (shallow clone - history may be incomplete)" if self._is_shallow() else ""
-        )
-        if shallow:
-            lines.append(f"*Warning: {shallow}*\n")
+    @staticmethod
+    def render_evolution(data: dict) -> str:
+        """The markdown of a `get_evolution_structured` result."""
+        if "message" in data:
+            return data["message"]
+        commits = data["commits"]
+        authors = len({c["author"] for c in commits})
+        lines = [f"### Evolution of `{data['symbol']}` ({data['location']})\n"]
+        if data["mode"] == "file":
+            note = "*Note: Using file-level history (the graph has no lines for this symbol)*"
+            if data["show_diff"]:
+                note += "\n*Diffs were requested but are not available in file-level fallback mode.*"
+            lines.append(note + "\n")
+            lines.append(f"{len(commits)} commit(s) | {authors} author(s)\n")
+        else:
+            dates = [c["date"] for c in commits]
+            span = f"{dates[-1]} to {dates[0]}" if len(dates) > 1 else dates[0]
+            lines.append(f"{len(commits)} commit(s) | {authors} author(s) | {span}\n")
+            if data["shallow"]:
+                lines.append(
+                    "*Warning:  (shallow clone - history may be incomplete)*\n"
+                )
+            if data.get("truncation_note"):
+                lines.append(f"*{data['truncation_note']}*\n")
 
         for i, commit in enumerate(commits, 1):
             lines.append(
                 f"{i}. **{commit['hash']}** ({commit['date']}) {commit['author']}"
             )
             lines.append(f"   {commit['subject']}")
-            if commit["added"] or commit["removed"]:
+            if commit.get("added") or commit.get("removed"):
                 lines.append(f"   +{commit['added']}/-{commit['removed']} lines")
-
-            if show_diff and commit["diff"].strip():
-                # Show condensed diff - indent content for markdown list nesting
-                diff_text = commit["diff"].strip()
-                diff_lines_raw = diff_text.split("\n")[:30]
-                # Indent each line by 3 spaces so marked.js keeps it inside the list item
-                indented = "\n".join("   " + dl for dl in diff_lines_raw)
-                if len(diff_text.split("\n")) > 30:
+            if data["show_diff"] and commit.get("diff", "").strip():
+                # Indented so marked.js keeps the diff inside the list item
+                diff_lines = commit["diff"].strip().split("\n")
+                indented = "\n".join("   " + dl for dl in diff_lines[:30])
+                if len(diff_lines) > 30:
                     indented += "\n   ... (truncated)"
                 lines.append(f"   ```diff\n{indented}\n   ```")
             lines.append("")
 
         return "\n".join(lines)
 
-    def _format_evolution_fallback(
-        self,
-        output: str,
-        symbol_name: str,
-        file_path: str,
-        node_id: str | None,
-        limit: int,
-        show_diff: bool,
-    ) -> str:
-        """Format evolution using simple file-level log (fallback mode)."""
-        commits = []
-        authors = set()
-
-        for line in output.strip().split("\n"):
-            header = _parse_log_header(line)
-            if header:
-                commits.append(header)
-                authors.add(header["author"])
-
-        commits = commits[:limit]
-
-        if not commits:
-            return f"No commits found for '{symbol_name}' in {file_path}."
-
-        location = file_path
-        if node_id:
-            _, _, loc = self._get_node_display(node_id)
-            if loc:
-                location = loc
-
-        lines = [f"### Evolution of `{symbol_name}` ({location})\n"]
-        note = "*Note: Using file-level history (git log -L failed for this symbol)*"
-        if show_diff:
-            note += "\n*Diffs were requested but are not available in file-level fallback mode.*"
-        lines.append(note + "\n")
-        lines.append(f"{len(commits)} commit(s) | {len(authors)} author(s)\n")
-
-        for i, commit in enumerate(commits, 1):
-            lines.append(
-                f"{i}. **{commit['hash']}** ({commit['date']}) {commit['author']}"
-            )
-            lines.append(f"   {commit['subject']}")
-            lines.append("")
-
-        return "\n".join(lines)
-
-    def _attribute_hunks_to_symbols(self, hunks) -> dict[str, dict]:
-        """Attribute added/removed diff lines to the symbols containing them.
-
-        Removed lines are attributed using new-side line numbers; old-side
-        attribution would need a line map built from the pre-change state, so
-        per-symbol +N/-M counts are approximate. Commit-level attribution is
-        exact.
-        """
+    def _attribute_hunks_to_symbols(self, hunks, spans_of) -> dict[str, dict]:
+        """Attribute the added and removed lines of the `-U0` diff ``hunks``
+        to the symbols holding them: added ones by the spans ``spans_of``
+        gives a file on the diff's new side, removed ones by those spans
+        carried back to its old side (see `_touched`)."""
         file_hunks: dict[str, list[dict]] = defaultdict(list)
         for hunk in hunks:
             file_hunks[hunk["file"]].append(hunk)
-
         modified_symbols: dict[str, dict] = {}
         for file_path, fhunks in file_hunks.items():
-            line_map = self._build_file_line_map(file_path)
-            if not line_map:
-                continue
-            for hunk in fhunks:
-                line = hunk["new_start"]
-                for diff_line in hunk["lines"]:
-                    if diff_line.startswith("+"):
-                        symbol = line_map.get(line)
-                        if symbol:
-                            modified_symbols.setdefault(
-                                symbol, {"added": 0, "removed": 0}
-                            )["added"] += 1
-                        line += 1
-                    elif diff_line.startswith("-"):
-                        symbol = line_map.get(line)
-                        if symbol:
-                            modified_symbols.setdefault(
-                                symbol, {"added": 0, "removed": 0}
-                            )["removed"] += 1
-                    else:
-                        line += 1
+            spans = spans_of(file_path)
+            touched = _touched(fhunks, spans, _spans_before(spans, fhunks))
+            modified_symbols.update(touched)
         return modified_symbols
 
     def _collect_changes(
@@ -1499,11 +1239,12 @@ class GitHistoryAnalyzer:
         commit_range: str | None,
         time_range: str | None,
         path_filter: str | None,
-    ) -> tuple[list[dict], int, dict[str, dict]] | str:
+    ) -> tuple[list[dict], int, dict[str, dict]] | dict:
         """Changed files, commit count and per-symbol line counts for a range.
 
-        A string instead when there is nothing to report: the message saying
-        why.
+        Instead `{"error", "reason"}` when the arguments are wrong or the
+        git run failed, or `{"message"}` saying why there is nothing to
+        report.
         """
         self._verify_git()
 
@@ -1514,30 +1255,62 @@ class GitHistoryAnalyzer:
             try:
                 _validate_git_range(commit_range)
             except GitError as e:
-                return f"Invalid commit range '{commit_range}': {e}"
+                return fail(
+                    "invalid",
+                    f"Invalid commit range '{commit_range}': {e}",
+                )
+        if path_filter:
+            try:
+                _validate_pathspec(path_filter)
+            except GitError as e:
+                return fail(
+                    "invalid",
+                    f"Invalid path filter '{path_filter}': {e}",
+                )
+
         effective_range = commit_range
         count_range = None
-        if not effective_range:
+        if commit_range:
+            if "..." in commit_range:
+                # The diff spans the merge-base to the second ref; the
+                # count is of those commits, not the symmetric difference.
+                count_range = commit_range.replace("...", "..")
+            elif ".." in commit_range:
+                count_range = commit_range
+                # Two refs that diverged: the commits the range counts run
+                # from the merge base, and the diff of them does too; the
+                # trees of both refs hold changes only the first made. Refs
+                # of no common history, or a tree, have no merge base: the
+                # diff is of the two trees.
+                first, _, second = commit_range.partition("..")
+                try:
+                    self._run_git(["merge-base", first, second], timeout=10)
+                except GitError:
+                    pass
+                else:
+                    effective_range = commit_range.replace("..", "...")
+            else:
+                # A single ref diffs the working tree: nothing in it is
+                # committed.
+                count_range = ""
+        elif not effective_range:
             if time_range:
                 # Get commits in time range and build a range
-                time_flags = self._parse_time_range(time_range)
+                try:
+                    time_flags = self._parse_time_range(time_range)
+                except GitError as e:
+                    return fail("invalid", str(e))
                 git_args = ["log", "--format=%H", "--no-merges"] + time_flags
                 output = self._run_git(git_args, timeout=30)
                 commit_hashes = [
                     h.strip() for h in output.strip().split("\n") if h.strip()
                 ]
                 if not commit_hashes:
-                    return "No commits found for the given time range."
+                    return {"message": "No commits found for the given time range."}
                 # oldest..newest
                 effective_range, count_range = self._ranges_covering(commit_hashes)
             else:
                 effective_range, count_range = self._ranges_covering(["HEAD"])
-
-        if path_filter:
-            try:
-                _validate_pathspec(path_filter)
-            except GitError as e:
-                return f"Invalid path filter '{path_filter}': {e}"
 
         # Get changed files with stats
         diff_stat_args = ["diff", "--numstat", effective_range]
@@ -1552,10 +1325,19 @@ class GitHistoryAnalyzer:
         except PartialCloneError:
             raise
         except GitError as e:
-            return f"Invalid commit range '{effective_range}': {e}"
+            # The range passed validation above; the work itself failed
+            # (an absent history in a shallow clone, a timeout).
+            return fail(
+                "failed",
+                f"Getting changes for '{commit_range or effective_range}' failed: {e}",
+                _detail=e.detail,
+            )
 
         if not numstat_output.strip():
-            return f"No changes found in {effective_range}."
+            return {
+                "message": f"No changes found in {commit_range or effective_range}"
+                f"{_narrowed(None if commit_range else time_range, path_filter)}."
+            }
 
         # Parse numstat output
         changed_files: list[dict] = []
@@ -1572,17 +1354,21 @@ class GitHistoryAnalyzer:
                     }
                 )
 
-        # Count commits in range
-        try:
-            commit_count_output = self._run_git(
-                ["rev-list", "--count", count_range or effective_range], timeout=10
-            )
-            commit_count = int(commit_count_output.strip())
-        except (GitError, ValueError):
+        # Count commits in range; a single ref diffs the working tree,
+        # where nothing is committed.
+        if count_range == "":
             commit_count = 0
+        else:
+            try:
+                commit_count_output = self._run_git(
+                    ["rev-list", "--count", count_range or effective_range], timeout=10
+                )
+                commit_count = int(commit_count_output.strip())
+            except (GitError, ValueError):
+                commit_count = 0
 
-        # Get full diff for symbol attribution
-        diff_args = ["diff", effective_range]
+        # The full diff, without context, for symbol attribution
+        diff_args = ["diff", "-U0", effective_range]
         if path_filter:
             diff_args.extend(["--", path_filter])
 
@@ -1593,108 +1379,81 @@ class GitHistoryAnalyzer:
 
         hunks = self._parse_diff_hunks(diff_output) if diff_output else []
 
-        # Attribute changes to symbols
-        return changed_files, commit_count, self._attribute_hunks_to_symbols(hunks)
+        # The range's new side is its last ref, a single ref's the working tree.
+        end = effective_range.rpartition("..")[2] if ".." in effective_range else None
+        end = end if end is None or end else "HEAD"
+        try:
+            symbols = self._attribute_hunks_to_symbols(
+                hunks,
+                lambda f: (
+                    self._spans_before(self._symbol_spans(f), end, f)
+                    if end
+                    else self._symbol_spans(f)
+                ),
+            )
+        except PartialCloneError:
+            raise
+        except GitError:
+            symbols = {}
+        return changed_files, commit_count, symbols
 
-    def get_changes(
-        self,
-        commit_range: str | None = None,
-        time_range: str | None = None,
-        path_filter: str | None = None,
-        show_callers: bool = True,
-        limit: int = 50,
-    ) -> str:
-        """Analyze change impact for a commit range.
+    @staticmethod
+    def render_changes(data: dict) -> str:
+        """The markdown of a `get_changes_structured` result."""
+        from descry.query import GraphQuerier
 
-        Args:
-            commit_range: Git commit range (e.g., "HEAD~5..HEAD").
-            time_range: Time range (e.g., "last 7 days"). Used if commit_range not given.
-            path_filter: Path filter (e.g., "backend/").
-            show_callers: Include callers of changed symbols.
-            limit: Maximum symbols to show.
-
-        Returns:
-            Formatted impact analysis.
-        """
-        changes = self._collect_changes(commit_range, time_range, path_filter)
-        if isinstance(changes, str):
-            return changes
-        changed_files, commit_count, modified_symbols = changes
-
-        # Format output
-        lines = []
-        range_display = commit_range or time_range or "HEAD~1..HEAD"
+        if "message" in data:
+            return data["message"]
+        commits = data["commits"]
         count_note = (
-            f" ({commit_count} commit{'s' if commit_count != 1 else ''})"
-            if commit_count
-            else ""
+            f" ({commits} commit{'s' if commits != 1 else ''})" if commits else ""
         )
-        lines.append(f"### Change Impact: {range_display}{count_note}\n")
-        lines.append(
-            f"Scope: {len(changed_files)} file(s) | "
-            f"{len(modified_symbols)} symbol(s) affected\n"
-        )
-
-        if not modified_symbols:
-            # Show file-level summary if no symbol attribution possible
+        lines = [
+            f"### Change Impact: {data['range']}{count_note}\n",
+            f"Scope: {data['files_count']} file(s) | {data['symbols_count']} symbol(s) affected\n",
+        ]
+        if "symbols" not in data:
             lines.append(
                 "*No symbol-level attribution available (graph may not cover these files).*\n"
             )
             lines.append("#### Changed Files")
-            for f in changed_files[:limit]:
-                lines.append(f"  - {f['file']} (+{f['added']}/-{f['removed']})")
+            lines += [
+                f"  - {f['file']} (+{f['added']}/-{f['removed']})"
+                for f in data["changed_files"]
+            ]
             return "\n".join(lines)
 
-        # Sort modified symbols by total change magnitude
-        sorted_modified = sorted(
-            modified_symbols.items(),
-            key=lambda x: x[1]["added"] + x[1]["removed"],
-            reverse=True,
-        )[:limit]
-
-        lines.append(f"#### Modified ({len(sorted_modified)})")
-        for rank, (node_id, stats) in enumerate(sorted_modified, 1):
-            type_badge, name, location = self._get_node_display(node_id)
+        lines.append(f"#### Modified ({len(data['symbols'])})")
+        for rank, sym in enumerate(data["symbols"], 1):
             lines.append(
-                f"{rank:>3}. {type_badge} {name} | {location} "
-                f"(+{stats['added']}/-{stats['removed']})"
+                _symbol_line(rank, sym) + f"(+{sym['added']}/-{sym['removed']})"
             )
-
-            if show_callers and self.querier:
-                callers, total, possible = self._symbol_callers(node_id)
-                if callers:
-                    names = ", ".join(
-                        c["name"] + self.querier.one_of(c["candidates"])
-                        for c in callers
-                    )
-                    hidden = possible - sum(bool(c["candidates"]) for c in callers)
-                    hidden_certain = total - len(callers) - hidden
-                    more = (
-                        f"; {self.querier.more_callers(hidden_certain, hidden)}"
-                        if total > len(callers)
-                        else ""
-                    )
-                    lines.append(f"     Callers: {names}{more}")
-
+            if callers := sym.get("callers"):
+                names = ", ".join(
+                    c["name"] + GraphQuerier.one_of(c.get("candidates"))
+                    for c in callers
+                )
+                hidden = sym["callers_possible"] - sum(
+                    bool(c.get("candidates")) for c in callers
+                )
+                hidden_certain = sym["callers_total"] - len(callers) - hidden
+                more = (
+                    f"; {GraphQuerier.more_callers(hidden_certain, hidden)}"
+                    if sym["callers_total"] > len(callers)
+                    else ""
+                )
+                lines.append(f"     Callers: {names}{more}")
         return "\n".join(lines)
 
     def _symbol_callers(self, node_id):
         """The first five callers of the symbol ``node_id``, certain ones
-        first, each ``{"id", "name", "candidates"}`` where ``candidates`` is
-        the number an unresolved call reaching it only may be one of; the
-        number of its callers; and how many of those only may be."""
+        first, as `GraphQuerier.reference` gives each; the number of its
+        callers; and how many of those only may be."""
         caller_ids, ambiguous = self.querier.ordered_callers(node_id)
-        callers = []
-        for caller_id in caller_ids[:5]:
-            c_node = self.querier.get_node_info(caller_id)
-            name = (
-                c_node["metadata"].get("name", "?")
-                if c_node
-                else caller_id.split("::")[-1]
-            )
-            callers.append(
-                {"id": caller_id, "name": name, "candidates": ambiguous.get(caller_id)}
-            )
+        callers = [
+            self.querier.reference(caller_id, ambiguous.get(caller_id))
+            for caller_id in caller_ids[:5]
+        ]
         return callers, len(caller_ids), len(ambiguous)
 
     def get_changes_structured(
@@ -1708,11 +1467,14 @@ class GitHistoryAnalyzer:
         """Analyze change impact, returning structured data for UI rendering.
 
         Returns dict with keys: range, commits, files_count, symbols_count,
-        symbols (list), changed_files (list when no symbol attribution).
+        symbols (list), changed_files (list when no symbol attribution); or
+        `{"error", "reason"}` for wrong arguments, or `message` saying why
+        there is nothing to report. A symbol's
+        `type` is its node's, None for a file or a node the graph lacks.
         """
         changes = self._collect_changes(commit_range, time_range, path_filter)
-        if isinstance(changes, str):
-            return {"error": changes}
+        if isinstance(changes, dict):
+            return changes
         changed_files, commit_count, modified_symbols = changes
 
         range_display = commit_range or time_range or "HEAD~1..HEAD"
@@ -1736,24 +1498,8 @@ class GitHistoryAnalyzer:
 
         symbols = []
         for node_id, stats in sorted_modified:
-            type_badge, name, location = self._get_node_display(node_id)
-            file_path = ""
-            line = None
-            if ":" in location:
-                file_path, line_str = location.rsplit(":", 1)
-                try:
-                    line = int(line_str)
-                except ValueError:
-                    file_path = location
-            else:
-                file_path = location
-
             entry = {
-                "id": node_id,
-                "type": type_badge.strip("[]"),
-                "name": name,
-                "file": file_path,
-                "line": line,
+                **self._symbol_entry(node_id),
                 "added": stats["added"],
                 "removed": stats["removed"],
             }

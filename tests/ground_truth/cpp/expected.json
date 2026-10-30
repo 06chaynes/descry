@@ -1,0 +1,17 @@
+{
+  "callers": {
+    "FILE:reader.hpp::Reader::parse": {"resolved": ["FILE:reader.hpp::load"], "candidate": []},
+    "FILE:models.hpp::Order::parse": {"resolved": [], "candidate": []},
+    "FILE:models.hpp::User::rename": {"resolved": ["FILE:main.cpp::main"], "candidate": []},
+    "FILE:models.hpp::Base::save": {"resolved": ["FILE:models.hpp::User::rename"], "candidate": []},
+    "FILE:models.hpp::Base::validate": {"resolved": ["FILE:models.hpp::Base::save"], "candidate": []}
+  },
+  "callees": {
+    "FILE:main.cpp::main": {"resolved": ["FILE:models.hpp::User::rename", "FILE:reader.hpp::load"]}
+  },
+  "flatten": {"FILE:models.hpp::User": ["rename", "save", "validate"]},
+  "path": [
+    ["FILE:main.cpp::main", "FILE:reader.hpp::Reader::parse", ["FILE:reader.hpp::load", "FILE:reader.hpp::Reader::parse"]]
+  ],
+  "refused": ["parse", "validate"]
+}

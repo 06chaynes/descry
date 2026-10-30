@@ -2,12 +2,11 @@
 
 scip-go is a Go-toolchain-based indexer installed via::
 
-    go install github.com/sourcegraph/scip-go/cmd/scip-go@latest
+    go install github.com/scip-code/scip-go/cmd/scip-go@latest
 
 It uses the Go ``go list`` tooling to walk the module's package graph and
-emits a single ``.scip`` index file. The ``--output`` flag is supported
-(verified via ``scip-go --help`` as of 0.1.26), so descry uses
-``output_mode="direct"``.
+emits a single ``.scip`` index file. The ``--output`` flag is supported,
+so descry uses ``output_mode="direct"``.
 
 SCIP symbol format (path-descriptor style, same as Rust and Java):
 
@@ -21,7 +20,6 @@ Examples:
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 from descry.scip.adapter import (
@@ -29,19 +27,14 @@ from descry.scip.adapter import (
     CommandSpec,
     DiscoveredProject,
     register,
+    subdir_projects,
 )
 from descry.scip.adapters.typescript import parse_backtick_descriptors
-
-logger = logging.getLogger(__name__)
 
 
 def _has_go_sources(pkg_dir: Path) -> bool:
     """True if `pkg_dir` contains any ``.go`` file outside ``vendor/``."""
-    for go_file in pkg_dir.rglob("*.go"):
-        if "vendor" in go_file.parts:
-            continue
-        return True
-    return False
+    return any("vendor" not in f.parts for f in pkg_dir.rglob("*.go"))
 
 
 class GoAdapter:
@@ -56,49 +49,22 @@ class GoAdapter:
         """Return one DiscoveredProject per Go module.
 
         A module is any directory containing ``go.mod``. Multi-module
-        monorepos (one ``go.mod`` per subdirectory) are supported.
-        **Root is always included as a project if it has a ``go.mod``**
-        — many repos (prometheus, etc.) have a large root-level module
-        plus small helper modules under subdirs; the prior "only
-        include root when no subdir modules exist" rule silently
-        skipped those root modules, killing resolution rates on the
-        largest codebases. ``go.work`` multi-module workspaces are out
-        of scope; each ``go.mod`` is indexed independently.
+        monorepos (one ``go.mod`` per subdirectory) are supported. The
+        root is a project beside them where it has a ``go.mod``.
+        ``go.work`` multi-module workspaces are out of scope; each
+        ``go.mod`` is indexed independently.
         """
-        seen: set[str] = set()
         projects: list[DiscoveredProject] = []
-
         if (root / "go.mod").exists() and _has_go_sources(root):
-            seen.add(root.name)
-            projects.append(
-                DiscoveredProject(
-                    name=root.name,
-                    root=root,
-                    language=self.name,
-                )
-            )
-
-        for marker in root.glob("*/go.mod"):
-            pkg_dir = marker.parent
-            if pkg_dir.name.startswith("."):
-                continue
-            if pkg_dir.name in excluded_dirs:
-                continue
-            if pkg_dir.name in seen:
-                continue
-            if not _has_go_sources(pkg_dir):
-                continue
-            seen.add(pkg_dir.name)
-            projects.append(
-                DiscoveredProject(
-                    name=pkg_dir.name,
-                    root=pkg_dir,
-                    language=self.name,
-                )
-            )
-
-        projects.sort(key=lambda p: p.name)
-        return projects
+            projects.append(DiscoveredProject(name=root.name, root=root))
+        projects += subdir_projects(
+            root,
+            excluded_dirs,
+            ("*/go.mod",),
+            _has_go_sources,
+            frozenset(p.name for p in projects),
+        )
+        return sorted(projects, key=lambda p: p.name)
 
     def build_command(
         self,
@@ -113,7 +79,7 @@ class GoAdapter:
         """
         argv: list[str] = [self.binary, "--output", str(out_path)]
 
-        return CommandSpec(argv=argv, cwd=project.root, output_mode="direct")
+        return CommandSpec(argv=argv, cwd=project.root)
 
     def parse_descriptors(self, raw: str) -> list[str]:
         """Parse scip-go descriptor strings into name components.

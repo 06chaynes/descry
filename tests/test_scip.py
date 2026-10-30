@@ -59,45 +59,12 @@ class TestTypescriptScipParsing:
 class TestScipCachePerformance:
     """Tests for SCIP cache performance optimizations."""
 
-    def test_get_max_workers_env_override(self):
-        """Should respect DESCRY_SCIP_WORKERS env variable."""
-        # Save original
-        original = os.environ.get("DESCRY_SCIP_WORKERS")
-
-        try:
-            os.environ["DESCRY_SCIP_WORKERS"] = "1"
-            manager = ScipCacheManager(Path("."))
-            assert manager._get_max_workers(10) == 1
-
-            os.environ["DESCRY_SCIP_WORKERS"] = "5"
-            assert manager._get_max_workers(10) == 5
-            # Should cap at num_items
-            assert manager._get_max_workers(3) == 3
-        finally:
-            if original is None:
-                os.environ.pop("DESCRY_SCIP_WORKERS", None)
-            else:
-                os.environ["DESCRY_SCIP_WORKERS"] = original
-
-    def test_get_max_workers_defaults_to_reasonable_value(self):
-        """Should default to reasonable worker count without env override."""
-        # Ensure env var is not set
-        original = os.environ.pop("DESCRY_SCIP_WORKERS", None)
-        try:
-            manager = ScipCacheManager(Path("."))
-            workers = manager._get_max_workers(10)
-            # Should return between 2 and 4 (reasonable defaults)
-            assert 2 <= workers <= 4
-        finally:
-            if original is not None:
-                os.environ["DESCRY_SCIP_WORKERS"] = original
-
     def test_get_prime_threads_env_override(self):
         """Should respect DESCRY_PRIME_THREADS env variable."""
         original = os.environ.get("DESCRY_PRIME_THREADS")
         try:
             os.environ["DESCRY_PRIME_THREADS"] = "8"
-            manager = ScipCacheManager(Path("."))
+            manager = ScipCacheManager(Path("."), set())
             assert manager._get_prime_threads() == 8
         finally:
             if original is None:
@@ -109,7 +76,7 @@ class TestScipCachePerformance:
         """Should default based on CPU count."""
         original = os.environ.pop("DESCRY_PRIME_THREADS", None)
         try:
-            manager = ScipCacheManager(Path("."))
+            manager = ScipCacheManager(Path("."), set())
             threads = manager._get_prime_threads()
             expected = max(2, multiprocessing.cpu_count() - 2)
             assert threads == expected
@@ -138,7 +105,7 @@ class TestPythonSCIPDiscovery:
         (tmp_path / "frontend").mkdir()
         (tmp_path / "frontend" / "index.js").write_text("")
 
-        manager = ScipCacheManager(tmp_path)
+        manager = ScipCacheManager(tmp_path, set())
         assert _discovered(manager, "python") == ["backend", "workers"]
 
     def test_monorepo_respects_excluded_dirs(self, tmp_path):
@@ -147,7 +114,7 @@ class TestPythonSCIPDiscovery:
         (node_modules / "pyproject.toml").write_text("[project]\nname='x'\n")
         (node_modules / "a.py").write_text("")
 
-        manager = ScipCacheManager(tmp_path)
+        manager = ScipCacheManager(tmp_path, set())
         assert _discovered(manager, "python") == []
 
     def test_single_package_layout_uses_root_name(self, tmp_path):
@@ -157,13 +124,13 @@ class TestPythonSCIPDiscovery:
         (src / "__init__.py").write_text("")
         (src / "app.py").write_text("def main(): pass\n")
 
-        manager = ScipCacheManager(tmp_path)
+        manager = ScipCacheManager(tmp_path, set())
         assert _discovered(manager, "python") == [tmp_path.name]
 
     def test_setup_py_recognized(self, tmp_path):
         (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup()\n")
         (tmp_path / "mod.py").write_text("x = 1\n")
-        manager = ScipCacheManager(tmp_path)
+        manager = ScipCacheManager(tmp_path, set())
         assert _discovered(manager, "python") == [tmp_path.name]
 
     def test_hash_python_changes_on_source_edit(self, tmp_path):
@@ -171,7 +138,7 @@ class TestPythonSCIPDiscovery:
         src = tmp_path / "a.py"
         src.write_text("x = 1\n")
 
-        manager = ScipCacheManager(tmp_path)
+        manager = ScipCacheManager(tmp_path, set())
         first = manager._hash_python_package(tmp_path.name)
         src.write_text("x = 2\n")
         second = manager._hash_python_package(tmp_path.name)
@@ -180,7 +147,7 @@ class TestPythonSCIPDiscovery:
     def test_hash_python_stable_without_edits(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text('[project]\nname="x"\n')
         (tmp_path / "a.py").write_text("x = 1\n")
-        manager = ScipCacheManager(tmp_path)
+        manager = ScipCacheManager(tmp_path, set())
         assert manager._hash_python_package(
             tmp_path.name
         ) == manager._hash_python_package(tmp_path.name)
@@ -188,7 +155,7 @@ class TestPythonSCIPDiscovery:
     def test_needs_update_python(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text('[project]\nname="x"\n')
         (tmp_path / "a.py").write_text("x = 1\n")
-        manager = ScipCacheManager(tmp_path)
+        manager = ScipCacheManager(tmp_path, set())
         # No cached .scip → needs update.
         assert manager.needs_update(tmp_path.name, "python") is True
 
@@ -240,20 +207,17 @@ class TestPythonSCIPSymbolExtraction:
 
 
 class TestPythonSCIPAvailability:
-    """support.py exposes scip-python status + per-adapter availability probes."""
+    """support.py exposes scip-python status; DESCRY_NO_SCIP disables every adapter."""
 
-    def test_scip_python_disabled_by_env(self, monkeypatch):
+    def test_no_adapter_is_available_when_disabled_by_env(self, monkeypatch):
         from descry.scip import adapter as adapter_mod
-        from descry.scip import support
 
-        support.reset_scip_state()
         monkeypatch.setenv("DESCRY_NO_SCIP", "1")
-        assert adapter_mod.indexer_available("python") is False
+        assert adapter_mod.available_adapters() == []
 
     def test_get_scip_status_reports_python_key(self, monkeypatch):
         from descry.scip import support
 
-        support.reset_scip_state()
         monkeypatch.delenv("DESCRY_NO_SCIP", raising=False)
         status = support.get_scip_status()
         assert "scip-python" in status["indexers"]
@@ -274,6 +238,9 @@ class TestGenerateScipRenameMode:
         """
         from descry.scip.adapter import CommandSpec, DiscoveredProject
 
+        if os.name == "nt":
+            pytest.skip("the fake indexer is a shell script")
+
         class _StubAdapter:
             name = "stublang"
             scheme = "scip-stub"
@@ -281,9 +248,7 @@ class TestGenerateScipRenameMode:
             extensions = (".stub",)
 
             def discover(self, root, _excluded_dirs):
-                return [
-                    DiscoveredProject(name="stubproj", root=root, language=self.name)
-                ]
+                return [DiscoveredProject(name="stubproj", root=root)]
 
             def build_command(self, project, _out_path, _config):
                 # Simulate the indexer by pre-creating index.scip in cwd
@@ -306,10 +271,10 @@ class TestGenerateScipRenameMode:
     def test_rename_mode_moves_default_output_into_cache(self, tmp_path):
         from descry.scip.adapter import DiscoveredProject
 
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         mgr.cache_dir.mkdir(parents=True, exist_ok=True)
         adapter = self._stub_adapter(mode="rename")
-        project = DiscoveredProject(name="stubproj", root=tmp_path, language="stublang")
+        project = DiscoveredProject(name="stubproj", root=tmp_path)
 
         ok = mgr._generate_scip(adapter, project)
 
@@ -324,6 +289,9 @@ class TestGenerateScipRenameMode:
         index.scip sitting in cwd. Only 'rename' mode should do the move.
         """
         from descry.scip.adapter import CommandSpec, DiscoveredProject
+
+        if os.name == "nt":
+            pytest.skip("the fake indexer is a shell script")
 
         # Pre-seed a stray file so we can verify it's left in place.
         stray = tmp_path / "index.scip"
@@ -349,11 +317,9 @@ class TestGenerateScipRenameMode:
             def parse_descriptors(self, _raw):
                 return []
 
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         mgr.cache_dir.mkdir(parents=True, exist_ok=True)
-        project = DiscoveredProject(
-            name="directproj", root=tmp_path, language="directlang"
-        )
+        project = DiscoveredProject(name="directproj", root=tmp_path)
 
         ok = mgr._generate_scip(_DirectStubAdapter(), project)
 
@@ -683,6 +649,87 @@ class TestScipIndexResolveLineSemantics:
         )
 
 
+class TestScipIndexResolveInheritsShapes:
+    """The shapes scip-python records for a Python INHERITS edge (V1-92,
+    V1-93b): resolve() takes the occurrence at the base's position,
+    whatever name it carries, and never the bare-name fallback when a
+    position is recorded."""
+
+    def test_aliased_base_resolves_through_the_recorded_occurrence(self, tmp_path):
+        # `class Blueprint(SansioBlueprint)`: the reference's alias name
+        # never appears in the index; the occurrence at the base's column
+        # carries the definition's name.
+        documents = {
+            "src/sansio_blueprints.py": [
+                (0, "scip-python python p 1 `sansio_blueprints`/Blueprint().", True)
+            ],
+            "src/blueprints.py": [
+                (
+                    17,
+                    "scip-python python p 1 `sansio_blueprints`/Blueprint().",
+                    False,
+                    21,
+                )
+            ],
+        }
+        index = ScipIndex([_write_scip(tmp_path / "app.scip", documents)])
+        resolved = index.resolve("SansioBlueprint", "app/src/blueprints.py", 18, 21)
+        assert resolved is not None
+        assert "sansio_blueprints.py" in resolved and resolved.endswith("Blueprint")
+
+    def test_unresolved_base_recorded_as_a_local_stops_the_name_fallback(
+        self, tmp_path
+    ):
+        # scip-python records an external base as `local N` at the base's
+        # column, beside the class's own definition occurrence — and a
+        # local class's definition under a `local N` symbol too, so the
+        # symbol IS in `definitions` yet has no name to build a node from.
+        documents = {
+            "src/testing.py": [
+                (26, "scip-python python p 1 `testing`/EnvironBuilder().", True, 6),
+                (26, "local 2", False, 21),
+                (0, "local 2", True, 4),
+            ]
+        }
+        index = ScipIndex([_write_scip(tmp_path / "app.scip", documents)])
+        assert index.resolve("EnvironBuilder", "app/src/testing.py", 27, 21) is None
+        # The definition occurrence at its own column still resolves.
+        resolved = index.resolve("EnvironBuilder", "app/src/testing.py", 27, 6)
+        assert resolved is not None and resolved.endswith("EnvironBuilder")
+
+    def test_same_line_definition_and_reference_take_the_reference_column(
+        self, tmp_path
+    ):
+        # `class Config(flask.Config)` on one line: the class's own
+        # definition and the base reference share the line; the base's
+        # column picks the reference.
+        documents = {
+            "src/config.py": [(0, "scip-python python p 1 `config`/Config().", True)],
+            "tests/test_config.py": [
+                (198, "scip-python python p 1 `test_config`/Config().", True, 10),
+                (198, "scip-python python p 1 `config`/Config().", False, 17),
+            ],
+        }
+        index = ScipIndex([_write_scip(tmp_path / "app.scip", documents)])
+        resolved = index.resolve("Config", "app/tests/test_config.py", 199, 17)
+        assert resolved is not None
+        assert "config.py" in resolved and resolved.endswith("Config")
+
+    def test_occurrence_with_a_definition_beats_a_same_named_bare_entry(self, tmp_path):
+        documents = {
+            "src/flask_app.py": [
+                (0, "scip-python python p 1 `flask_app`/Flask().", True)
+            ],
+            "tests/test_x.py": [(0, "scip-python python p 1 `test_x`/Flask().", True)],
+            # The source names flask_app's Flask.
+            "src/proxy.py": [(2, "scip-python python p 1 `flask_app`/Flask().", False)],
+        }
+        index = ScipIndex([_write_scip(tmp_path / "app.scip", documents)])
+        resolved = index.resolve("Flask", "app/src/proxy.py", 3)
+        assert resolved is not None
+        assert "flask_app.py" in resolved and resolved.endswith("Flask")
+
+
 def test_protobuf_runtime_mismatch_loads_nothing(tmp_path, monkeypatch):
     """A VersionError from importing the pb2 bindings is not raised to the caller."""
     import sys
@@ -742,7 +789,7 @@ def test_typescript_package_without_tsconfig_gets_one_in_the_cache(tmp_path):
     root, cache = tmp_path / "app", tmp_path / "cache"
     root.mkdir()
     cache.mkdir()
-    project = DiscoveredProject(name="app", root=root, language="typescript")
+    project = DiscoveredProject(name="app", root=root)
     out = cache / "typescript--app.scip"
     inferred = cache / "typescript--app.tsconfig.json"
     inferred.symlink_to(tmp_path / "elsewhere")
@@ -835,7 +882,7 @@ def test_non_rust_adapters_ignore_adapter_config(tmp_path, lang):
     from descry.scip.adapter import ADAPTERS, AdapterConfig, DiscoveredProject
 
     adapter = ADAPTERS[lang]
-    project = DiscoveredProject(name="app", root=tmp_path, language=lang)
+    project = DiscoveredProject(name="app", root=tmp_path)
     out = tmp_path / "app.scip"
     (tmp_path / "compile_commands.json").write_text("[]")
 
@@ -846,3 +893,33 @@ def test_non_rust_adapters_ignore_adapter_config(tmp_path, lang):
 
     assert loaded.argv == plain.argv
     assert loaded.env_extras == plain.env_extras
+
+
+@pytest.mark.parametrize("overridden", [False, True])
+def test_a_python_call_of_an_outside_method_leaves_unless_overridden(
+    tmp_path, overridden
+):
+    """A call scip-python records to a method of a package the project
+    defines nothing of leaves the project, unless a project symbol
+    overrides that method (a subclass's `resolve`)."""
+    from descry.scip import pb2
+
+    outside = "scip-python python python-stdlib 3.11 pathlib/Path#resolve()."
+    index = pb2.Index()
+    doc = index.documents.add()
+    doc.relative_path = "p/b.py"
+    for line, symbol, role in (
+        (1, "scip-python python p 0 `p.b`/use().", 1),
+        (2, outside, 0),
+    ):
+        occ = doc.occurrences.add()
+        occ.range.extend([line, 4, 7])
+        occ.symbol, occ.symbol_roles = symbol, role
+    if overridden:
+        info = doc.symbols.add()
+        info.symbol = "scip-python python p 0 `p.b`/P#resolve()."
+        relation = info.relationships.add()
+        relation.symbol, relation.is_implementation = outside, True
+    path = tmp_path / "py.scip"
+    path.write_bytes(index.SerializeToString())
+    assert ScipIndex([path]).outside_at("x.resolve", "p/b.py", 3) is not overridden

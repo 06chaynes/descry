@@ -40,24 +40,29 @@ except ModuleNotFoundError as e:
         "Install it with: pip install 'descry-codegraph[web]'"
     )
 
-from descry import __version__
+from descry._answers import fail
 
-# Configure logging
-_log_level = os.environ.get("DESCRY_LOG_LEVEL", "INFO")
+# Configure logging; uvicorn logs at the level asked of descry-web itself
+# A name that is no level is WARNING, as the CLI reads it.
+_level = logging.getLevelNamesMapping().get(
+    os.environ.get("DESCRY_LOG_LEVEL", "INFO").upper(), logging.WARNING
+)
 logging.basicConfig(
-    level=getattr(logging, _log_level.upper(), logging.WARNING),
+    level=_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+_level_name = logging.getLevelName(_level).lower()
+# uvicorn has no NOTSET; logging everything is its debug.
+_level_name = "debug" if _level_name == "notset" else _level_name
 logger = logging.getLogger("descry_web")
 
-SERVER_VERSION = __version__
-
-# --- Import shared modules ---
-
-from descry.handlers import DescryConfig, DescryService, ServiceError, limit_error
-from descry.query import GraphQuerier, _get_syntax_lang
-
-# --- Project config (lazy-loaded via DescryConfig) ---
+from descry.handlers import (
+    DescryConfig,
+    DescryService,
+    Direction,
+    public,
+)
+from descry.query import _get_syntax_lang
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -79,145 +84,112 @@ def _get_service() -> DescryService:
     return _service
 
 
-# --- Cached instances (delegate to DescryService) ---
+class _Malformed(ValueError):
+    """A query parameter the request writes that its tool cannot take."""
 
 
-async def _get_querier() -> GraphQuerier | None:
-    """Get GraphQuerier via DescryService (lock-disciplined, async)."""
-    return await _get_service()._get_querier()
-
-
-def _int_param(request: Request, name: str, default: int) -> int:
-    """Parse an integer query parameter. Non-integer values fall back to default.
-
-    Web endpoints were using `int(request.query_params.get(name, "N"))` which
-    raises ValueError on garbage input (e.g. ``?limit=foo``) and surfaced as
-    a 500. This helper returns the default instead, so malformed user input
-    degrades quietly rather than crashing the request.
-    """
+def _int_param(request: Request, name: str, default: int | None) -> int | None:
+    """The integer query parameter ``name``, ``default`` where it is not
+    given; `_Malformed` where it is no integer."""
     raw = request.query_params.get(name)
     if raw is None:
         return default
     try:
         return int(raw)
     except ValueError:
-        return default
+        raise _Malformed(f"'{name}' must be an integer, got {raw!r}") from None
+
+
+def _flag(request: Request, name: str, default: str = "false") -> bool:
+    """The boolean query parameter ``name``: "true" or "false"; anything
+    else is malformed."""
+    raw = request.query_params.get(name, default).lower()
+    if raw == "true":
+        return True
+    if raw == "false":
+        return False
+    raise _Malformed(
+        f"'{name}' must be 'true' or 'false', got {request.query_params.get(name)!r}"
+    )
+
+
+# The web status of each failure reason, as CONTRACT.md lists them
+_STATUS = {
+    "invalid": 400,
+    "ambiguous": 400,
+    "not_found": 404,
+    "busy": 409,
+    "no_graph": 503,
+    "unavailable": 503,
+    "loading": 503,
+    "failed": 500,
+}
+
+
+def _failure(answer: dict) -> JSONResponse:
+    """A failed answer as the web gives it: the answer, under its reason's
+    status."""
+    return JSONResponse(public(answer), status_code=_STATUS[answer["reason"]])
+
+
+def _invalid(error: str) -> JSONResponse:
+    """The failure of a request its tool cannot take."""
+    return _failure(fail("invalid", error))
+
+
+def _refused(reason: str, error: str, status: int | None = None) -> JSONResponse:
+    """A request the server itself refuses, in the shape of every failure,
+    under ``status`` where the reason's is not the HTTP one (413, 415, 403)."""
+    return JSONResponse(
+        public(fail(reason, error)), status_code=status or _STATUS[reason]
+    )
+
+
+def _answered(answer: dict, **page) -> JSONResponse:
+    """A tool's answer as the web gives it, with what the page shows besides
+    (`page`), or its failure."""
+    if not answer["ok"]:
+        return _failure(answer)
+    return JSONResponse({**public(answer), **page})
 
 
 def _bad_direction(request: Request) -> JSONResponse | None:
-    """A 400 if `direction` is given and is neither "forward" nor "backward"."""
-    direction = request.query_params.get("direction", "forward")
-    if direction in ("forward", "backward"):
+    """The failure for a `direction` that is neither "forward" nor "backward"."""
+    if request.query_params.get("direction", "forward") in {d.value for d in Direction}:
         return None
-    return JSONResponse(
-        {"error": "'direction' must be 'forward' or 'backward'"}, status_code=400
-    )
+    return _invalid("'direction' must be 'forward' or 'backward'")
 
 
-async def _service_error(result: str) -> JSONResponse | None:
-    """An error response if `result` is rendered text reporting `ERROR:`, else None."""
-    if not result.startswith("ERROR:"):
-        return None
-    status = 404 if await _get_querier() else 503
-    return JSONResponse(
-        {"error": result.removeprefix("ERROR:").strip()}, status_code=status
-    )
+def _page(markdown: str) -> str:
+    """A tool's text without the graph header line it opens with: the page
+    shows the graph's state itself."""
+    head, sep, body = markdown.partition("\n\n")
+    return body if sep and head.startswith("[") and head.endswith("]") else markdown
 
 
-def _graph_failure(data: dict) -> JSONResponse:
-    """The error response for a failed graph result from the service.
-
-    400 if the service rejected the arguments, else 503: there is no usable
-    graph, or semantic search has no model to answer with.
-    """
-    status = 400 if data.get("reason") == "invalid" else 503
-    return JSONResponse({"error": data["error"]}, status_code=status)
-
-
-def _git_failure(data: dict) -> JSONResponse:
-    """The error response for a failed git-history result from the service."""
-    status = {"invalid": 400, "unavailable": 503}.get(data["reason"], 500)
-    return JSONResponse({"error": data["error"]}, status_code=status)
-
-
-def _node_to_dict(node: dict) -> dict:
-    """Convert a graph node to a JSON-serializable dict for the frontend."""
-    meta = node.get("metadata", {})
-    node_id = node.get("id", "")
-    file_path = ""
-    if node_id.startswith("FILE:"):
-        file_path = node_id.split("::")[0].replace("FILE:", "")
-    lineno = meta.get("lineno")
-    return {
-        "id": node_id,
-        "type": node.get("type", "?"),
-        "name": meta.get("name", "unknown"),
-        "parent_name": meta.get("parent_name", ""),
-        "file_path": file_path,
-        "lineno": lineno,
-        "location": f"{file_path}:{lineno}" if file_path and lineno else file_path,
-        "signature": meta.get("signature", ""),
-        "docstring": meta.get("docstring", ""),
-        "token_count": meta.get("token_count", 0),
-        "in_degree": meta.get("in_degree", 0),
-    }
-
-
-def _kinds(q: GraphQuerier, ids: list, marks: dict) -> dict:
-    """How many of ``ids`` are certain, possible, and unresolved calls of the
-    name."""
-    return dict(zip(("certain", "possible", "unresolved"), q.kinds(ids, marks)))
-
-
-def _caller_to_dict(caller_id: str, q: GraphQuerier, candidates: int | None) -> dict:
-    """Convert a caller node ID to a dict with location info. `candidates`
-    is absent on a certain call, else the number its unresolved call may
-    reach, 0 for a call of the name only."""
-    result = {"id": caller_id, "name": caller_id}
-    if candidates is not None:
-        result["candidates"] = candidates
-    file_path = ""
-    if caller_id.startswith("FILE:"):
-        parts = caller_id.split("::")
-        file_path = parts[0].replace("FILE:", "")
-        if len(parts) > 1:
-            result["name"] = parts[-1]
-    node_info = q.get_node_info(caller_id)
-    if node_info:
-        meta = node_info.get("metadata", {})
-        lineno = meta.get("lineno")
-        result["file_path"] = file_path
-        result["lineno"] = lineno
-        result["location"] = f"{file_path}:{lineno}" if lineno else file_path
-        result["type"] = node_info.get("type", "?")
-        result["signature"] = meta.get("signature", "")
-    else:
-        result["file_path"] = file_path
-        result["location"] = file_path
-    return result
-
-
-# --- API Endpoint Handlers ---
+async def _cards(refs: list) -> list:
+    """`_node_ref` entries with the signature and docstring the page shows
+    on each result card."""
+    q = await _get_service()._get_querier()
+    shown = []
+    for ref in refs:
+        meta = ((q.nodes.get(ref["id"]) if q else None) or {}).get("metadata", {})
+        shown.append(
+            {
+                **ref,
+                "signature": meta.get("signature", ""),
+                "docstring": meta.get("docstring", ""),
+            }
+        )
+    return shown
 
 
 async def api_health(_request: Request) -> JSONResponse:
-    health = json.loads(await _get_service().health())
-    features = health["features"]
-    features["cross_lang"] = _get_service().cross_lang_error() is None
-    return JSONResponse(
-        {
-            "status": health["status"],
-            "version": SERVER_VERSION,
-            "project_root": str(_get_config().project_root),
-            "graph": await _get_service().status_data(),
-            "max_depth": q.max_flow_depth if (q := await _get_querier()) else None,
-            "features": features,
-        }
-    )
+    return _answered(await _get_service().health_answer())
 
 
 async def api_status(_request: Request) -> JSONResponse:
-    return JSONResponse(await _get_service().status_data())
+    return _answered(await _get_service().status_answer())
 
 
 async def api_ensure(request: Request) -> JSONResponse:
@@ -227,35 +199,23 @@ async def api_ensure(request: Request) -> JSONResponse:
     except ValueError:
         body = None
     if not isinstance(body, dict):
-        return JSONResponse(
-            {"error": "Request body must be a JSON object"}, status_code=400
-        )
+        return _invalid("Request body must be a JSON object")
     max_age = body.get("max_age_hours")
     if "max_age_hours" in body and (
         isinstance(max_age, bool) or not isinstance(max_age, (int, float))
     ):
-        return JSONResponse(
-            {"error": "'max_age_hours' must be a number"}, status_code=400
-        )
-
-    data = await _get_service().ensure_data(max_age)
-    if not data["ok"]:
-        status = {"invalid": 400, "busy": 409}.get(data["reason"], 500)
-        return JSONResponse({"error": data["error"]}, status_code=status)
-    response = {"action": data["action"]}
-    if data["result"] is not None:
-        response["result"] = data["result"]
-    response["graph"] = await _get_service().status_data()
-    return JSONResponse(response)
+        return _invalid("'max_age_hours' must be a number")
+    answer = await _get_service().ensure_answer(max_age)
+    report = answer.get("_report")
+    return _answered(answer, **({"markdown": report} if report is not None else {}))
 
 
 async def api_index(_request: Request) -> JSONResponse:
     # Always indexes cfg.project_root.
-    result = await _get_service().index()
-    if isinstance(result, ServiceError):
-        status = 409 if result.reason == "busy" else 500
-        return JSONResponse({"error": result}, status_code=status)
-    return JSONResponse({"result": result, "graph": await _get_service().status_data()})
+    answer = await _get_service().index_answer()
+    return _answered(
+        answer, **({"markdown": answer["_report"]} if answer["ok"] else {})
+    )
 
 
 async def api_index_stream(_request: Request) -> StreamingResponse:
@@ -267,7 +227,7 @@ async def api_index_stream(_request: Request) -> StreamingResponse:
         async with contextlib.aclosing(_get_service().index_stream()) as events:
             async for event in events:
                 if event["type"] == "done" and event["success"]:
-                    event["graph"] = await _get_service().status_data()
+                    event["graph"] = public(await _get_service().status_answer())
                 yield f"data: {json.dumps(event)}\n\n"
 
     return StreamingResponse(
@@ -281,460 +241,201 @@ async def api_search(request: Request) -> JSONResponse:
     terms_str = request.query_params.get("terms", "")
     terms = [t.strip() for t in terms_str.split(",") if t.strip()]
     if not terms:
-        return JSONResponse({"error": "Missing 'terms' parameter"}, status_code=400)
-
-    data = await _get_service().search_data(
+        return _invalid("Missing 'terms' parameter")
+    answer = await _get_service().search_answer(
         terms,
         limit=_int_param(request, "limit", 10),
         lang=request.query_params.get("lang"),
         crate=request.query_params.get("crate"),
         symbol_type=request.query_params.get("type"),
-        exclude_tests=request.query_params.get("exclude_tests", "").lower() == "true",
+        exclude_tests=_flag(request, "exclude_tests"),
     )
-    if not data["ok"]:
-        return _graph_failure(data)
-
-    return JSONResponse(
-        {
-            "results": [_node_to_dict(n) for n in data["results"]],
-            "method": data["method"],
-            "query": " ".join(terms),
-            "total": len(data["results"]),
-        }
-    )
+    if not answer["ok"]:
+        return _failure(answer)
+    return _answered(answer, results=await _cards(answer["results"]))
 
 
 async def api_semantic(request: Request) -> JSONResponse:
     query = request.query_params.get("query", "")
     if not query:
-        return JSONResponse({"error": "Missing 'query' parameter"}, status_code=400)
-    limit = _int_param(request, "limit", 10)
-
-    data = await _get_service().semantic_data(query, limit=limit)
-    if not data["ok"]:
-        return _graph_failure(data)
-    results = data["results"]
-
-    return JSONResponse(
-        {
-            "results": [
-                {**_node_to_dict(node), "score": round(score, 4)}
-                for node, score in results
-            ],
-            "query": query,
-            "total": len(results),
-        }
+        return _invalid("Missing 'query' parameter")
+    answer = await _get_service().semantic_answer(
+        query, limit=_int_param(request, "limit", 10)
     )
+    if not answer["ok"]:
+        return _failure(answer)
+    return _answered(answer, results=await _cards(answer["results"]))
 
 
 async def api_callers(request: Request) -> JSONResponse:
-    name = request.query_params.get("name", "")
+    name = request.query_params.get("symbol", "")
     if not name:
-        return JSONResponse({"error": "Missing 'name' parameter"}, status_code=400)
-
-    data = await _get_service().callers_data(
-        name, limit=_int_param(request, "limit", 20)
-    )
-    if not data["ok"]:
-        return _graph_failure(data)
-
-    q = await _get_querier()
-    if not q:
-        return JSONResponse({"error": "Graph not found"}, status_code=503)
-    ambiguous = data.get("ambiguous", {})
-    return JSONResponse(
-        {
-            "symbol": data["symbol"],
-            "fuzzy": data["fuzzy"],
-            "total": data["total"],
-            **_kinds(q, data["callers"] + data["left_out"], ambiguous),
-            "more": _kinds(q, data["left_out"], ambiguous),
-            "callers": [
-                _caller_to_dict(c, q, ambiguous.get(c)) for c in data["callers"]
-            ],
-        }
+        return _invalid("Missing 'symbol' parameter")
+    return _answered(
+        await _get_service().callers_answer(
+            name, limit=_int_param(request, "limit", 20)
+        )
     )
 
 
 async def api_callees(request: Request) -> JSONResponse:
-    name = request.query_params.get("name", "")
+    name = request.query_params.get("symbol", "")
     if not name:
-        return JSONResponse({"error": "Missing 'name' parameter"}, status_code=400)
-
-    data = await _get_service().callees_data(
-        name, limit=_int_param(request, "limit", 20)
-    )
-    if not data["ok"]:
-        return _graph_failure(data)
-    if not data["found"]:
-        return JSONResponse({"error": f"No function '{name}' found"}, status_code=404)
-
-    q = await _get_querier()
-    if not q:
-        return JSONResponse({"error": "Graph not found"}, status_code=503)
-    node = data["node"]
-    ambiguous = data.get("ambiguous", {})
-    return JSONResponse(
-        {
-            "symbol": node.get("metadata", {}).get("name", name),
-            "node_id": node["id"],
-            "fuzzy": data["fuzzy"],
-            "total": data["total"],
-            **_kinds(q, data["callees"] + data["left_out"], ambiguous),
-            "more": _kinds(q, data["left_out"], ambiguous),
-            "others": data["others"],
-            "callees": [
-                _caller_to_dict(c, q, ambiguous.get(c)) for c in data["callees"]
-            ],
-        }
+        return _invalid("Missing 'symbol' parameter")
+    return _answered(
+        await _get_service().callees_answer(
+            name, limit=_int_param(request, "limit", 20)
+        )
     )
 
 
 async def api_context(request: Request) -> JSONResponse:
-    node_id = request.query_params.get("node_id", "")
-    if not node_id:
-        return JSONResponse({"error": "Missing 'node_id' parameter"}, status_code=400)
-
-    full = request.query_params.get("full", "").lower() == "true"
-    brief = request.query_params.get("brief", "").lower() == "true"
-    expand_callees = request.query_params.get("expand_callees", "").lower() == "true"
-    depth = _int_param(request, "depth", 1)
-    max_tokens = _int_param(request, "max_tokens", 2000)
-    for value, name in ((depth, "depth"), (max_tokens, "max_tokens")):
-        if error := limit_error(value, name):
-            return JSONResponse({"error": error}, status_code=400)
-
-    result = await _get_service().context(
-        node_id,
-        depth=depth,
-        max_tokens=max_tokens,
-        full=full,
-        brief=brief,
-        expand_callees=expand_callees,
+    symbol = request.query_params.get("symbol", "")
+    if not symbol:
+        return _invalid("Missing 'symbol' parameter")
+    svc = _get_service()
+    answer = await svc.context_answer(
+        symbol,
+        brief=_flag(request, "brief"),
+        full=_flag(request, "full"),
+        expand_callees=_flag(request, "expand_callees"),
+        deduplicate=_flag(request, "deduplicate"),
+        depth=_int_param(request, "depth", 1),
+        max_tokens=_int_param(request, "max_tokens", 2000),
+        callee_budget=_int_param(request, "callee_budget", 2000),
+        head_lines=_int_param(request, "head_lines", None),
+        max_output_tokens=_int_param(request, "max_output_tokens", None),
     )
-
-    return await _service_error(result) or JSONResponse(
-        {"node_id": node_id, "markdown": result}
-    )
+    return _answered(answer, markdown=await svc.context_text(answer))
 
 
 async def api_structure(request: Request) -> JSONResponse:
     filename = request.query_params.get("filename", "")
     if not filename:
-        return JSONResponse({"error": "Missing 'filename' parameter"}, status_code=400)
-
-    data = await _get_service().structure_data(filename)
-    if not data["ok"]:
-        return JSONResponse({"error": data["error"]}, status_code=503)
-    if not data["found"]:
-        return JSONResponse({"error": f"File '{filename}' not found"}, status_code=404)
-
-    grouped = {}
-    for type_name in ["Constant", "Class", "Function", "Configuration"]:
-        items = [
-            {
-                "name": d["metadata"].get("name", ""),
-                "lineno": d["metadata"].get("lineno"),
-                "signature": d["metadata"].get("signature", ""),
-                "id": d.get("id", ""),
-            }
-            for d in data["definitions"]
-            if d["type"] == type_name
-        ]
-        if items:
-            grouped[type_name.lower()] = sorted(
-                items, key=lambda x: x.get("lineno") or 0
-            )
-
-    return JSONResponse(
-        {
-            "file": data["file"],
-            "imports": data["imports"],
-            "definitions": grouped,
-        }
-    )
+        return _invalid("Missing 'filename' parameter")
+    return _answered(await _get_service().structure_answer(filename))
 
 
 async def api_flatten(request: Request) -> JSONResponse:
-    class_node_id = request.query_params.get("class_node_id", "")
-    if not class_node_id:
-        return JSONResponse(
-            {"error": "Missing 'class_node_id' parameter"}, status_code=400
-        )
-
-    result = await _get_service().flatten(class_node_id)
-    return await _service_error(result) or JSONResponse(
-        {"class_node_id": class_node_id, "markdown": result}
-    )
+    symbol = request.query_params.get("symbol", "")
+    if not symbol:
+        return _invalid("Missing 'symbol' parameter")
+    svc = _get_service()
+    answer = await svc.flatten_answer(symbol)
+    return _answered(answer, markdown=await svc.flatten_text(answer))
 
 
 async def api_impls(request: Request) -> JSONResponse:
     method = request.query_params.get("method", "")
     if not method:
-        return JSONResponse({"error": "Missing 'method' parameter"}, status_code=400)
+        return _invalid("Missing 'method' parameter")
     trait_name = request.query_params.get("trait_name") or None
-
-    data = await _get_service().impls_data(method, trait_name)
-    if not data["ok"]:
-        return JSONResponse({"error": data["error"]}, status_code=503)
-
-    impls = []
-    for node in data["implementations"]:
-        meta = node.get("metadata", {})
-        node_id = node.get("id", "")
-        parts = node_id.split("::")
-        struct_name = parts[-2] if len(parts) >= 2 else "?"
-        file_path = (
-            node_id.split("::")[0].replace("FILE:", "")
-            if node_id.startswith("FILE:")
-            else ""
-        )
-        impls.append(
-            {
-                "id": node_id,
-                "struct_name": struct_name,
-                "trait_name": meta.get("trait_impl", "unknown"),
-                "file_path": file_path,
-                "lineno": meta.get("lineno"),
-                "signature": meta.get("signature", ""),
-            }
-        )
-
-    return JSONResponse(
-        {
-            "method": method,
-            "trait_filter": trait_name,
-            "total": len(impls),
-            "implementations": impls,
-        }
-    )
+    return _answered(await _get_service().impls_answer(method, trait_name))
 
 
 async def api_flow(request: Request) -> JSONResponse:
     start = request.query_params.get("start", "")
     if not start:
-        return JSONResponse({"error": "Missing 'start' parameter"}, status_code=400)
-
+        return _invalid("Missing 'start' parameter")
     if bad_direction := _bad_direction(request):
         return bad_direction
-    direction = request.query_params.get("direction", "forward")
-    depth = _int_param(request, "depth", 3)
-    target = request.query_params.get("target") or None
-    inline_threshold = _int_param(request, "inline_threshold", 100)
-    structured = request.query_params.get("format", "markdown") == "tree"
-
-    data = await _get_service().flow_data(
+    svc = _get_service()
+    answer = await svc.flow_answer(
         start,
-        direction=direction,
-        depth=depth,
-        target=target,
-        inline_threshold=inline_threshold,
-        structured=structured,
+        direction=request.query_params.get("direction", "forward"),
+        depth=_int_param(request, "depth", 3),
+        target=request.query_params.get("target") or None,
+        inline_threshold=_int_param(request, "inline_threshold", 100),
     )
-    if not data["ok"]:
-        return _graph_failure(data)
-
-    return JSONResponse(
-        {
-            "start": start,
-            "direction": direction,
-            "depth": data["depth"],
-            "tree" if structured else "markdown": data["result"],
-        }
-    )
+    if not answer["ok"]:
+        return _failure(answer)
+    # The page shows the code the tree inlines
+    if request.query_params.get("format", "markdown") == "tree":
+        return _answered(answer, tree=answer["_flow"])
+    return _answered(answer, markdown=_page(await svc.flow_text(answer)))
 
 
 async def api_path(request: Request) -> JSONResponse:
     start = request.query_params.get("start", "")
     end = request.query_params.get("end", "")
     if not start or not end:
-        return JSONResponse(
-            {"error": "Missing 'start' and/or 'end' parameter"}, status_code=400
-        )
-
-    max_depth = _int_param(request, "max_depth", 10)
+        return _invalid("Missing 'start' and/or 'end' parameter")
     if bad_direction := _bad_direction(request):
         return bad_direction
-    direction = request.query_params.get("direction", "forward")
-
-    data = await _get_service().path_data(
-        start, end, max_depth=max_depth, direction=direction
+    svc = _get_service()
+    answer = await svc.path_answer(
+        start,
+        end,
+        max_depth=_int_param(request, "max_depth", 10),
+        direction=request.query_params.get("direction", "forward"),
     )
-    if not data["ok"]:
-        return _graph_failure(data)
-
-    if data["status"] != "found":
-        return JSONResponse(
-            {
-                "start": start,
-                "end": end,
-                "status": data["status"],
-                "hops": 0,
-                "path": [],
-                "markdown": data["message"],
-            }
-        )
-
-    path = data["path"]
-    # Build structured path + markdown
-    hops = []
-    md_lines = [
-        f"### Call Path: `{start}` -> `{end}` ({len(path)} hop{'s' if len(path) != 1 else ''})\n"
-    ]
-    for i, hop in enumerate(path, 1):
-        caller_name = hop.get("caller_name", "?")
-        callee_name = hop.get("callee_name", "?")
-        file_path = hop.get("file_path", "")
-        call_line = hop.get("call_line")
-        snippet = hop.get("call_snippet", "")
-        hops.append(
-            {
-                "step": i,
-                "caller": caller_name,
-                "callee": callee_name,
-                "file_path": file_path,
-                "line": call_line,
-                "snippet": snippet,
-                "candidates": hop.get("candidates"),
-            }
-        )
-        md_lines.append(
-            f"**{i}. {caller_name}** -> **{callee_name}**"
-            f"{GraphQuerier.one_of(hop.get('candidates'))}"
-        )
-        if file_path and call_line:
-            md_lines.append(f"   {file_path}:{call_line}")
-        if snippet:
-            lang = (
-                _get_syntax_lang(file_path, _get_config().syntax_lang_map)
-                if file_path
-                else ""
-            )
-            md_lines.append(f"```{lang}")
-            md_lines.append(snippet)
-            md_lines.append("```")
-        md_lines.append("")
-
-    return JSONResponse(
-        {
-            "start": start,
-            "end": end,
-            "status": data["status"],
-            "hops": len(path),
-            "path": hops,
-            "markdown": "\n".join(md_lines),
-        }
-    )
+    return _answered(answer, markdown=_page(await svc.path_text(answer, start, end)))
 
 
 async def api_cross_lang(request: Request) -> JSONResponse:
-    mode = request.query_params.get("mode", "endpoint")
-    method = request.query_params.get("method")
-    path = request.query_params.get("path")
-    tag = request.query_params.get("tag")
-
-    data = await _get_service().cross_lang_data(mode, method=method, path=path, tag=tag)
-    if not data["ok"]:
-        if data["reason"] == "invalid":
-            return JSONResponse({"error": data["error"]}, status_code=400)
-        return JSONResponse({"not_configured": True, "message": data["error"]})
-
-    result = data["result"]
-    if mode == "list":
-        return JSONResponse({"tag": tag, "total": len(result), "endpoints": result})
-    if result is None:
-        return JSONResponse(
-            {"error": f"No handler for {method.upper()} {path}"}, status_code=404
-        )
-    return JSONResponse(result)
+    answer = await _get_service().cross_lang_answer(
+        request.query_params.get("mode", "endpoint"),
+        method=request.query_params.get("method"),
+        path=request.query_params.get("path"),
+        tag=request.query_params.get("tag"),
+    )
+    if not answer["ok"]:
+        return _failure(answer)
+    # The page shows the spec's summaries, by operation
+    result = answer["_result"]
+    found = result if isinstance(result, list) else [result] if result else []
+    summaries = {e["operationId"]: e.get("summary", "") for e in found if "path" in e}
+    return _answered(answer, summaries=summaries)
 
 
 async def api_churn(request: Request) -> JSONResponse:
-    time_range = request.query_params.get("time_range")
-    path_filter = request.query_params.get("path_filter")
-    limit = _int_param(request, "limit", 20)
-    mode = request.query_params.get("mode", "symbols")
-    exclude_generated = (
-        request.query_params.get("exclude_generated", "true").lower() == "true"
+    svc = _get_service()
+    answer = await svc.churn_answer(
+        time_range=request.query_params.get("time_range"),
+        path_filter=request.query_params.get("path_filter"),
+        limit=_int_param(request, "limit", 20),
+        mode=request.query_params.get("mode", "symbols"),
+        exclude_generated=_flag(request, "exclude_generated", "true"),
     )
-    structured = request.query_params.get("format", "markdown") == "structured"
-
-    data = await _get_service().churn_data(
-        time_range=time_range,
-        path_filter=path_filter,
-        limit=limit,
-        mode=mode,
-        exclude_generated=exclude_generated,
-        structured=structured,
-    )
-    if not data["ok"]:
-        return _git_failure(data)
-    if structured:
-        return JSONResponse({"data": data["result"]})
-    return JSONResponse({"mode": mode, "markdown": data["result"]})
+    return _answered(answer, markdown=_page(await svc.churn_text(answer)))
 
 
 async def api_evolution(request: Request) -> JSONResponse:
-    name = request.query_params.get("name", "")
+    name = request.query_params.get("symbol", "")
     if not name:
-        return JSONResponse({"error": "Missing 'name' parameter"}, status_code=400)
-
-    time_range = request.query_params.get("time_range")
-    limit = _int_param(request, "limit", 10)
-    show_diff = request.query_params.get("show_diff", "").lower() == "true"
-    crate = request.query_params.get("crate")
-
-    data = await _get_service().evolution_data(
-        name, time_range=time_range, limit=limit, show_diff=show_diff, crate=crate
+        return _invalid("Missing 'symbol' parameter")
+    svc = _get_service()
+    answer = await svc.evolution_answer(
+        name,
+        time_range=request.query_params.get("time_range"),
+        limit=_int_param(request, "limit", 10),
+        show_diff=_flag(request, "show_diff"),
+        crate=request.query_params.get("crate"),
     )
-    if not data["ok"]:
-        return _git_failure(data)
-    return JSONResponse({"name": name, "markdown": data["result"]})
+    return _answered(answer, markdown=_page(await svc.evolution_text(answer)))
 
 
 async def api_changes(request: Request) -> JSONResponse:
-    commit_range = request.query_params.get("commit_range")
-    time_range = request.query_params.get("time_range")
-    path_filter = request.query_params.get("path_filter")
-    show_callers = request.query_params.get("show_callers", "true").lower() == "true"
-    limit = _int_param(request, "limit", 50)
-    structured = request.query_params.get("format", "markdown") == "structured"
-
-    data = await _get_service().changes_data(
-        commit_range=commit_range,
-        time_range=time_range,
-        path_filter=path_filter,
-        show_callers=show_callers,
-        limit=limit,
-        structured=structured,
+    svc = _get_service()
+    answer = await svc.changes_answer(
+        commit_range=request.query_params.get("commit_range"),
+        time_range=request.query_params.get("time_range"),
+        path_filter=request.query_params.get("path_filter"),
+        show_callers=_flag(request, "show_callers", "true"),
+        limit=_int_param(request, "limit", 50),
     )
-    if not data["ok"]:
-        return _git_failure(data)
-    if structured:
-        return JSONResponse({"data": data["result"]})
-    return JSONResponse({"markdown": data["result"]})
+    return _answered(answer, markdown=_page(await svc.changes_text(answer)))
 
 
 async def api_quick(request: Request) -> JSONResponse:
-    name = request.query_params.get("name", "")
+    name = request.query_params.get("symbol", "")
     if not name:
-        return JSONResponse({"error": "Missing 'name' parameter"}, status_code=400)
-
-    full = request.query_params.get("full", "").lower() == "true"
-    brief = request.query_params.get("brief", "").lower() == "true"
-
-    data = await _get_service().quick_data(name, full=full, brief=brief)
-    if not data["ok"]:
-        return JSONResponse({"error": data["error"]}, status_code=503)
-    if not data["found"]:
-        return JSONResponse({"error": f"No symbol found for '{name}'"}, status_code=404)
-
-    return await _service_error(data["context"]) or JSONResponse(
-        {
-            "symbol": _node_to_dict(data["node"]),
-            "other_matches": data["other_matches"],
-            "markdown": data["context"],
-        }
+        return _invalid("Missing 'symbol' parameter")
+    full, brief = _flag(request, "full"), _flag(request, "brief")
+    svc = _get_service()
+    answer = await svc.quick_answer(name, full, brief)
+    return _answered(
+        answer, markdown=await svc.quick_text(answer, name, full=full, brief=brief)
     )
 
 
@@ -746,8 +447,21 @@ def _open_beneath(root: Path, parts: tuple[str, ...]) -> int:
     `O_NONBLOCK` keeps the open from waiting on a FIFO.
     """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    if os.open not in os.supports_dir_fd:  # Windows has no openat()
-        return os.open(root.joinpath(*parts), flags)
+    if os.open not in os.supports_dir_fd:
+        # Windows has no openat(): what was opened must be the file the path
+        # resolves to afterwards, and that inside `root`.
+        path = root.joinpath(*parts)
+        fd = os.open(path, flags)
+        try:
+            real = path.resolve(strict=True)
+            if not real.is_relative_to(root) or not os.path.samestat(
+                os.fstat(fd), os.stat(real)
+            ):
+                raise OSError(errno.ELOOP, "the path changed while it was opened")
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
 
     dir_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -765,8 +479,10 @@ def _open_beneath(root: Path, parts: tuple[str, ...]) -> int:
 async def api_source(request: Request) -> JSONResponse:
     file_param = request.query_params.get("file", "")
     if not file_param:
-        return JSONResponse({"error": "Missing 'file' parameter"}, status_code=400)
+        return _refused("invalid", "Missing 'file' parameter")
 
+    if "\0" in file_param:
+        return _refused("invalid", "Invalid path: embedded null byte")
     target_line = _int_param(request, "line", 0) or None
 
     # Pipeline: resolve → containment → S_ISREG → size → text-check → read
@@ -774,27 +490,24 @@ async def api_source(request: Request) -> JSONResponse:
     try:
         file_path = (cfg.project_root / file_param).resolve(strict=False)
     except (OSError, RuntimeError, ValueError) as e:
-        return JSONResponse({"error": f"Invalid path: {e}"}, status_code=400)
+        return _refused("invalid", f"Invalid path: {e}")
 
-    try:
-        if not file_path.is_relative_to(cfg.resolved_project_root):
-            return JSONResponse({"error": "Path outside project root"}, status_code=400)
-    except ValueError:
-        return JSONResponse({"error": "Path outside project root"}, status_code=400)
+    if not file_path.is_relative_to(cfg.resolved_project_root):
+        return _refused("invalid", "Path outside project root")
 
     if not file_path.exists():
-        return JSONResponse({"error": f"File not found: {file_param}"}, status_code=404)
+        return _refused("not_found", f"File not found: {file_param}")
 
     try:
         st = file_path.stat()
     except OSError as e:
-        return JSONResponse({"error": f"Cannot stat file: {e}"}, status_code=400)
+        return _refused("invalid", f"Cannot stat file: {e}")
 
     if not stat.S_ISREG(st.st_mode):
-        return JSONResponse({"error": "Not a regular file"}, status_code=400)
+        return _refused("invalid", "Not a regular file")
     limit = cfg.max_file_bytes
     if limit and st.st_size > limit:
-        return JSONResponse({"error": "File too large"}, status_code=413)
+        return _refused("invalid", "File too large", 413)
 
     # Open without following symlinks so a swap between the earlier
     # containment check and this read cannot redirect us outside the project,
@@ -803,20 +516,20 @@ async def api_source(request: Request) -> JSONResponse:
     try:
         fd = _open_beneath(root, file_path.relative_to(root).parts)
     except OSError as e:
-        return JSONResponse({"error": f"Cannot open file: {e}"}, status_code=400)
+        return _refused("invalid", f"Cannot open file: {e}")
     try:
         with os.fdopen(fd, "rb") as f:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
-                return JSONResponse({"error": "Not a regular file"}, status_code=400)
+                return _refused("invalid", "Not a regular file")
             sample = f.read(8192)
             if b"\0" in sample:
-                return JSONResponse({"error": "Not a text file"}, status_code=415)
+                return _refused("invalid", "Not a text file", 415)
             f.seek(0)
             raw = f.read(limit + 1 if limit else -1)
     except OSError as e:
-        return JSONResponse({"error": f"Cannot read file: {e}"}, status_code=500)
+        return _refused("failed", f"Cannot read file: {e}")
     if limit and len(raw) > limit:
-        return JSONResponse({"error": "File too large"}, status_code=413)
+        return _refused("invalid", "File too large", 413)
     content = raw.decode("utf-8", errors="replace")
 
     lang = _get_syntax_lang(str(file_path), cfg.syntax_lang_map)
@@ -863,9 +576,6 @@ async def api_examples(_request: Request) -> JSONResponse:
     if not data["ok"] or data["examples"] is None:
         return JSONResponse({"available": False})
     return JSONResponse({"available": True, **data["examples"]})
-
-
-# --- App entrypoint ---
 
 
 def _content_security_policy(html: str) -> str:
@@ -935,23 +645,28 @@ routes = [
 # POST /api/index. TrustedHostMiddleware rejects requests whose Host header
 # isn't loopback, defeating DNS-rebinding attacks that would otherwise bypass
 # the 127.0.0.1 bind.
-_ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 class _LoopbackHostMiddleware(TrustedHostMiddleware):
-    """TrustedHostMiddleware that also accepts the IPv6 loopback literal.
+    """TrustedHostMiddleware that also accepts the IPv6 loopback literal, and
+    refuses another host as every failure is answered.
 
     The base class takes the host to be whatever precedes the first colon, so
     `[::1]:8787` is read as `[` and no allowed-hosts entry can match it.
     """
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and re.fullmatch(
-            r"\[::1\](:\d+)?", Headers(scope=scope).get("host", "")
+        if scope["type"] != "http":
+            await super().__call__(scope, receive, send)
+            return
+        host = Headers(scope=scope).get("host", "")
+        if re.fullmatch(r"\[::1\](:\d+)?", host) or (
+            host.split(":")[0] in self.allowed_hosts
         ):
             await self.app(scope, receive, send)
         else:
-            await super().__call__(scope, receive, send)
+            await _refused("invalid", "Invalid host header")(scope, receive, send)
 
 
 class _SameOriginMiddleware:
@@ -983,9 +698,7 @@ class _SameOriginMiddleware:
             except ValueError:
                 cross_origin = True
             if cross_origin:
-                response = JSONResponse(
-                    {"error": "Cross-origin request refused"}, status_code=403
-                )
+                response = _refused("invalid", "Cross-origin request refused", 403)
                 await response(scope, receive, send)
                 return
         await self.app(scope, receive, send)
@@ -1015,14 +728,15 @@ class _ContentSecurityPolicyMiddleware:
 
 middleware = [
     Middleware(_ContentSecurityPolicyMiddleware),
-    Middleware(_LoopbackHostMiddleware, allowed_hosts=_ALLOWED_HOSTS),
+    Middleware(_LoopbackHostMiddleware, allowed_hosts=_LOOPBACK_HOSTS),
     Middleware(_SameOriginMiddleware),
 ]
 
-app = Starlette(routes=routes, middleware=middleware)
-
-
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+app = Starlette(
+    routes=routes,
+    middleware=middleware,
+    exception_handlers={_Malformed: lambda _request, exc: _invalid(str(exc))},
+)
 
 
 def _loopback_host(value: str) -> str:
@@ -1067,14 +781,14 @@ def main():
         logger.info("Pre-warming graph...")
 
         async def _prewarm():
-            await _get_querier()
-            return await _get_service().status_data()
+            await _get_service()._get_querier()
+            return public(await _get_service().status_answer())
 
         status = asyncio.run(_prewarm())
         logger.info(f"Graph ready: {status['nodes']:,}n / {status['edges']:,}e")
 
     try:
-        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        uvicorn.run(app, host=args.host, port=args.port, log_level=_level_name)
     except OSError as e:
         if e.errno == errno.EADDRINUSE:
             print(

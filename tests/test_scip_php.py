@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from descry.scip.adapter import AdapterConfig, DiscoveredProject
 from descry.scip.adapters.php import PhpAdapter
-from descry.scip.parser import ScipIndex
 
 
 class TestPhpAdapterDiscovery:
@@ -16,7 +15,6 @@ class TestPhpAdapterDiscovery:
         projects = PhpAdapter().discover(tmp_path, set())
         assert len(projects) == 1
         assert projects[0].name == tmp_path.name
-        assert projects[0].language == "php"
 
     def test_monorepo(self, tmp_path):
         for name in ("pkg-a", "pkg-b"):
@@ -39,7 +37,7 @@ class TestPhpAdapterDiscovery:
 
 class TestPhpAdapterBuildCommand:
     def test_basic_command(self, tmp_path):
-        project = DiscoveredProject(name="app", root=tmp_path, language="php")
+        project = DiscoveredProject(name="app", root=tmp_path)
         spec = PhpAdapter().build_command(
             project, tmp_path / "app.scip", AdapterConfig()
         )
@@ -52,12 +50,5 @@ class TestScipPhpHealthStatus:
     def test_php_listed_in_scip_status(self):
         from descry.scip import support
 
-        support.reset_scip_state()
         status = support.get_scip_status()
         assert "scip-php" in status["indexers"]
-
-
-class TestScipPhpResolution:
-    def test_php_stats_bucket_exists(self):
-        idx = ScipIndex([])
-        assert "php" in idx._resolution_stats

@@ -130,7 +130,7 @@ class _Writer:
         self.mode = mode
 
     def discover(self, root, _excluded_dirs):
-        return [DiscoveredProject(name="proj", root=root, language=self.name)]
+        return [DiscoveredProject(name="proj", root=root)]
 
     def build_command(self, project, out_path, _config):
         target = out_path if self.mode == "direct" else "index.scip"
@@ -147,12 +147,12 @@ class _Writer:
 def test_scip_output_link_is_removed_not_written_through(tmp_path, victim):
     root = tmp_path / "repo"
     root.mkdir()
-    mgr = ScipCacheManager(root)
+    mgr = ScipCacheManager(root, set())
     adapter = _Writer("direct")
     output = mgr._index_path(adapter.name, "proj")
     output.parent.mkdir(parents=True, exist_ok=True)
     output.symlink_to(victim)
-    project = DiscoveredProject(name="proj", root=root, language=adapter.name)
+    project = DiscoveredProject(name="proj", root=root)
 
     assert mgr._generate_scip(adapter, project) is True
 
@@ -164,9 +164,9 @@ def test_rename_mode_does_not_run_through_a_linked_index(tmp_path, victim):
     root = tmp_path / "repo"
     root.mkdir()
     (root / "index.scip").symlink_to(victim)
-    mgr = ScipCacheManager(root)
+    mgr = ScipCacheManager(root, set())
     adapter = _Writer("rename")
-    project = DiscoveredProject(name="proj", root=root, language=adapter.name)
+    project = DiscoveredProject(name="proj", root=root)
 
     assert mgr._generate_scip(adapter, project) is False
 

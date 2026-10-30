@@ -25,7 +25,6 @@ runner logs why.
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 from descry.scip.adapter import (
@@ -33,11 +32,9 @@ from descry.scip.adapter import (
     CommandSpec,
     DiscoveredProject,
     register,
+    subdir_projects,
 )
 from descry.scip.adapters.typescript import parse_backtick_descriptors
-
-logger = logging.getLogger(__name__)
-
 
 _C_EXTENSIONS = (".c", ".cc", ".cpp", ".cxx", ".cu")
 _C_HEADERS = (".h", ".hh", ".hpp", ".hxx")
@@ -76,7 +73,7 @@ class ClangAdapter:
     name = "clang"
     scheme = "cxx"
     binary = "scip-clang"
-    extensions = (".c", ".cc", ".cpp", ".cxx", ".cu", ".h", ".hh", ".hpp", ".hxx")
+    extensions = (*_C_EXTENSIONS, *_C_HEADERS)
 
     def discover(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
         """Return one DiscoveredProject per top-level C/C++ project.
@@ -97,34 +94,13 @@ class ClangAdapter:
                 return compiled or parts
         if not _has_c_sources(root):
             return []
-        return [DiscoveredProject(name=root.name, root=root, language=self.name)]
+        return [DiscoveredProject(name=root.name, root=root)]
 
     def _parts(self, root: Path, excluded_dirs: set[str]) -> list[DiscoveredProject]:
         """The subdirectories of ``root`` with a build file and C/C++
         sources of their own."""
-        seen: set[str] = set()
-        projects: list[DiscoveredProject] = []
-        for marker_name in _MARKERS:
-            for marker in root.glob(f"*/{marker_name}"):
-                pkg_dir = marker.parent
-                if pkg_dir.name.startswith("."):
-                    continue
-                if pkg_dir.name in excluded_dirs:
-                    continue
-                if pkg_dir.name in seen:
-                    continue
-                if not _has_c_sources(pkg_dir):
-                    continue
-                seen.add(pkg_dir.name)
-                projects.append(
-                    DiscoveredProject(
-                        name=pkg_dir.name,
-                        root=pkg_dir,
-                        language=self.name,
-                    )
-                )
-        projects.sort(key=lambda p: p.name)
-        return projects
+        patterns = tuple(f"*/{marker}" for marker in _MARKERS)
+        return subdir_projects(root, excluded_dirs, patterns, _has_c_sources)
 
     def build_command(
         self,
@@ -147,7 +123,7 @@ class ClangAdapter:
             f"--index-output-path={out_path}",
         ]
 
-        return CommandSpec(argv=argv, cwd=project.root, output_mode="direct")
+        return CommandSpec(argv=argv, cwd=project.root)
 
     def parse_descriptors(self, raw: str) -> list[str]:
         """scip-clang descriptors follow the same path-suffix format

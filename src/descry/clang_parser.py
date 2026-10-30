@@ -14,27 +14,31 @@ import re
 from bisect import bisect_left, bisect_right
 from itertools import accumulate
 
-from descry.generate import (
-    _C_MARK_RE,
+from descry import _stdlib
+from descry._parsing import (
     BaseParser,
+    _blank,
     _bracketed_parts,
     _casts,
-    _flip_sign,
     _generic_metadata,
+    _js_brackets,
     _raw_pointer,
     _strip_generics,
     blank_strings,
-    c_specialization,
     call_arguments,
     is_generated_source,
     source_lines,
+    token_count,
 )
+from descry.resolver import _C_MARK_RE, _flip_sign, c_specialization
 
 # #include <foo.h>  /  #include "foo.h"
 _RE_INCLUDE = re.compile(r'^\s*#\s*include\s+[<"]([^>"]+)[>"]')
 
 # #define MACRO value
 _RE_DEFINE = re.compile(r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)")
+# #undef MACRO
+_RE_UNDEF = re.compile(r"^\s*#\s*undef\s+([A-Za-z_]\w*)")
 
 
 def _include_guard(source, open_at, arm):
@@ -97,17 +101,139 @@ def _expansion(text, name):
 
 
 _RE_DIRECTIVE = re.compile(r"\s*#\s*(\w*)")
-_RE_IF_0 = re.compile(r"\s*#\s*if\s+0\s*$")
+# The tokens of a preprocessor condition: numbers, names, operators, and
+# any other character alone, which the evaluator does not read
+_RE_IF_TOKEN = re.compile(r"\d\w*|\w+|&&|\|\||[!=<>]=|\S")
+
+
+def _c_integer(token):
+    """The integer literal ``token`` as C reads it, `0x` hex, `0b` binary
+    and a leading `0` octal, its suffix dropped; None for no such literal."""
+    digits = re.sub(r"[uUlL]+$", "", token)
+    if not re.fullmatch(r"[0-9A-Za-z]+", digits):
+        # Python's `int` reads `_` separators and other scripts' digits too.
+        return None
+    base = {"0x": 16, "0b": 2}.get(digits[:2].lower())
+    try:
+        if base:
+            return int(digits[2:], base)
+        return int(digits, 8 if digits[:1] == "0" else 10)
+    except ValueError:
+        return None
+
+
+def _c_quotient(a, b):
+    """``a / b`` as C divides integers, toward zero."""
+    quotient = abs(a) // abs(b)
+    return quotient if (a < 0) == (b < 0) else -quotient
+
+
+# The binary operators of a condition below `&&`, by C's precedence,
+# lowest first; a comparison gives 1 or 0
+_IF_BINARY = (
+    {"==": lambda a, b: int(a == b), "!=": lambda a, b: int(a != b)},
+    {
+        "<": lambda a, b: int(a < b),
+        ">": lambda a, b: int(a > b),
+        "<=": lambda a, b: int(a <= b),
+        ">=": lambda a, b: int(a >= b),
+    },
+    {"+": int.__add__, "-": int.__sub__},
+    {
+        "*": int.__mul__,
+        "/": _c_quotient,
+        "%": lambda a, b: a - b * _c_quotient(a, b),
+    },
+)
+
+
+def _if_value(code):
+    """True or False where the condition of the `#if` or `#elif` line
+    ``code`` holds or fails whatever the macros, `0 && defined(X)` too;
+    None where a macro decides it."""
+    expr = re.sub(r"/\*.*?\*/", "", code.split("//")[0])
+    tokens = _RE_IF_TOKEN.findall(re.sub(r"^\s*#\s*(?:el)?if\b", "", expr))
+    at = 0
+
+    def take():
+        nonlocal at
+        at += 1
+        return tokens[at - 1] if at <= len(tokens) else ""
+
+    def logic(join, short):
+        """``join(operand)`` of the operands joined by ``short`` (`&&` or
+        `||`), each 0, 1 or None for not known; the one that decides
+        whatever the others give decides."""
+        held = [join()]
+        while tokens[at : at + 1] == [short]:
+            take()
+            held.append(join())
+        if len(held) == 1:
+            return held[0]
+        known = [bool(v) for v in held if v is not None]
+        decider = short == "||"
+        if decider in known:
+            return int(decider)
+        return int(not decider) if len(known) == len(held) else None
+
+    def either():
+        return logic(both, "||")
+
+    def both():
+        return logic(binary, "&&")
+
+    def binary(level=0):
+        if level == len(_IF_BINARY):
+            return one()
+        operators = _IF_BINARY[level]
+        held = binary(level + 1)
+        while tokens[at : at + 1] and tokens[at] in operators:
+            op, right = take(), binary(level + 1)
+            # Division by zero is an error, which decides nothing here.
+            unknown = None in (held, right) or (op in "/%" and not right)
+            held = None if unknown else operators[op](held, right)
+        return held
+
+    def one():
+        token = take()
+        if token in ("!", "-", "+", "~"):
+            held = one()
+            unary = {
+                "!": lambda v: int(not v),
+                "-": int.__neg__,
+                "+": int,
+                "~": int.__invert__,
+            }
+            return None if held is None else unary[token](held)
+        if token == "(":
+            held = either()
+            take()
+            return held
+        if token == "defined":
+            if take() == "(":
+                take()
+                take()
+            return None
+        if token[:1].isdigit():
+            return _c_integer(token)
+        return None
+
+    value = either() if tokens else None
+    return None if value is None or at != len(tokens) else bool(value)
+
+
+_RE_PRAGMA_ONCE = re.compile(r"\s*#\s*pragma\s+once\b")
 _RE_IFDEF = re.compile(r"\s*#\s*(?:el)?if(?:n?def)?\s+")
 _RE_DEFINED = re.compile(r"^!?\s*defined\s*\(?\s*([A-Za-z_]\w*)\s*\)?$")
 _RE_IF_ATOM = re.compile(r"^!?\s*([A-Za-z_]\w*)$")
 _IF_KEYWORDS = frozenset({"defined", "and", "or", "not", "true", "false"})
 
 
-def _if_signs(word, code):
+def _if_signs(word, code, joined=False):
     """The atoms a preprocessor conditional's arm holds, signed: `+X` where
-    `X` holds, `-X` where it does not. A disjunction holds nothing for
-    sure, and a comparison names no symbol."""
+    `X` holds, `-X` where it does not. With ``joined`` a disjunction is one
+    atom, its text, else it holds nothing for sure; a comparison names no
+    symbol."""
     if word == "else":
         return frozenset()
     if word == "ifdef":
@@ -116,7 +242,7 @@ def _if_signs(word, code):
         return frozenset({"-" + _RE_IFDEF.sub("", code).strip()})
     expr = _RE_IFDEF.sub("", code).split("//")[0]
     if "||" in expr:
-        return frozenset()
+        return frozenset({"+" + " ".join(expr.split())} if joined else ())
     signs = set()
     for term in expr.split("&&"):
         term = term.strip()
@@ -276,13 +402,13 @@ _TYPE = (
 _TEMPLATE_ARGUMENTS = "[^<>;(){}=]*"
 for _ in range(8):
     _TEMPLATE_ARGUMENTS = rf"(?:[^<>;(){{}}=]|<{_TEMPLATE_ARGUMENTS}>)*"
+# The library's class templates whose `->` reaches their first type
+# argument, as its data has them (`unique_ptr`, `optional`)
+_POINTERS = "|".join(map(re.escape, sorted(_stdlib.section("cpp", "pointers"))))
 # A smart pointer, and in group 1 the type it points at
-_POINTER_TYPE = (
-    r"(?:std::)?(?:unique_ptr|shared_ptr|optional|expected)\s*"
-    rf"<{_TEMPLATE_ARGUMENTS}>"
-)
+_POINTER_TYPE = rf"(?:std::)?(?:{_POINTERS})\s*<{_TEMPLATE_ARGUMENTS}>"
 _RE_POINTER = re.compile(
-    r"((?:std::)?(?:unique_ptr|shared_ptr|optional|expected))\s*<"
+    rf"((?:std::)?(?:{_POINTERS}))\s*<"
     r"\s*(?:(?:const|typename)\s+)*+([\w:]+)"
 )
 _DECLARATOR = r"(?:\s+(?:const|volatile)\b)*(?:\s*(?P<pointer>[*&]+)\s*(?:const\s+)?|\s+)(?P<name>[A-Za-z_]\w*)"
@@ -514,10 +640,6 @@ def _declarators(tail: str) -> list[str]:
     return re.sub(r"\w+\s*\(\)", "", flat).split(",")
 
 
-def _blank(match: re.Match) -> str:
-    return " " * len(match.group())
-
-
 def _declares(code: str, ends: list[int], at: int) -> re.Match | None:
     """`_RE_DECLARES`'s match of the statement of ``code`` that ``at`` is
     in, up to ``at``. ``ends`` holds where each `;`, `{` and `}` of
@@ -617,14 +739,13 @@ class ClangParser(BaseParser):
         self._source = source_lines(content)
         self._skip_calls = is_generated_source(content)
         self._macros = {}  # ID of each macro of the file -> its metadata
+        self._renamed = {}  # ID of a macro a function's name took -> its own
         self._guarded = {}  # line -> the conditionals that enclose it
         self._sites = {}  # node ID -> the lines of its definitions
         bodies = []  # (macro ID, first line, last line, parameters) of each `#define`
         self._lines = self._prepare(file_id, bodies)
-        self._text = "\n".join(self._lines)
-        self._starts = [0]  # offset in the text of each line
-        for line in self._lines:
-            self._starts.append(self._starts[-1] + len(line) + 1)
+        brackets = _js_brackets(self._lines)
+        self._text, self._starts = brackets[:2]  # the offset of each line
         self._closers = _closers(self._text)
         self._kinds = {}  # ID of each namespace and type of the file -> kind
         self._generic = frozenset()  # type parameters in scope
@@ -633,7 +754,7 @@ class ClangParser(BaseParser):
         self._member = False  # the calls being read are a member function's
         self._kr = None  # offsets of a function head with K&R parameters
         self.scan_declarations(self._lines, _DECLARATIONS)
-        self.read_blocks(self._lines)
+        self.read_blocks(self._lines, brackets)
         self._body(0, len(self._text), file_id, None)
         # A definition that sits inside an `#if` arm is built only in the
         # configurations that pick the arm: that is evidence about the
@@ -648,6 +769,7 @@ class ClangParser(BaseParser):
         # The calls in a macro's replacement text are the macro's; what its
         # parameters stand for is not known.
         for macro_id, first, last, parameters in () if self._skip_calls else bodies:
+            macro_id = self._renamed.get(macro_id, macro_id)
             nesting = []
             for parameter in parameters:
                 self.declared.setdefault(parameter, []).append(
@@ -684,9 +806,12 @@ class ClangParser(BaseParser):
         depth = 0
         last = ""  # the last character of code so far
         # [depth before, depth after the first alternative, skipped, the
-        # directive's line, the signs each arm's condition holds] of each
-        # open conditional
+        # directive's line, the signs each arm's condition holds, whether
+        # the arm read is one no build compiles, whether an arm before it
+        # holds in every build] of each open conditional
         groups = []
+        directed = []  # the line of each directive
+        once = False  # a `#pragma once` outside any conditional
         closed = []  # (open line, arms, close line) of each ended `#if`
         defined_here = set()  # macros the file defines (include guards)
         for index, raw in enumerate(self._source):
@@ -713,15 +838,20 @@ class ClangParser(BaseParser):
             if not directive:
                 continue
             word = directive[1]
+            directed.append(index)
             if word in ("if", "ifdef", "ifndef"):
                 skipped = bool(groups) and groups[-1][2]
+                value = _if_value(code) if word == "if" else None
+                dead = bool(groups) and groups[-1][5] or value is False
                 groups.append(
                     [
                         depth,
                         None,
-                        skipped or bool(_RE_IF_0.match(code)),
+                        skipped or dead,
                         index,
-                        [_if_signs(word, code)],
+                        [_if_signs(word, code, joined=True)],
+                        dead,
+                        value is True,
                     ]
                 )
             elif word in ("elif", "else") and groups:
@@ -729,19 +859,41 @@ class ClangParser(BaseParser):
                 if group[1] is None:
                     group[1] = depth
                 outer = len(groups) > 1 and groups[-2][2]
-                group[2] = outer or group[1] != group[0] or last in _OPEN_STATEMENT
-                group[4].append(_if_signs(word, code))
+                value = _if_value(code) if word == "elif" else True
+                group[5] = (
+                    len(groups) > 1 and groups[-2][5] or group[6] or value is False
+                )
+                group[6] = group[6] or value is True
+                group[2] = (
+                    outer or group[5] or group[1] != group[0] or last in _OPEN_STATEMENT
+                )
+                group[4].append(_if_signs(word, code, joined=True))
                 depth = group[0]
             elif word == "endif" and groups:
                 group = groups.pop()
                 closed.append((group[3], group[4], index))
                 if group[1] is not None:
                     depth = group[1]
+            elif groups and groups[-1][5]:
+                # A directive no build reads defines and includes nothing.
+                continue
+            elif word == "pragma" and _RE_PRAGMA_ONCE.match(code) and not groups:
+                once = True
             elif m_inc := _RE_INCLUDE.match(raw):
-                self.builder.add_edge(file_id, f"MODULE:{m_inc.group(1)}", "IMPORTS")
+                self.builder.add_edge(
+                    file_id,
+                    f"MODULE:{m_inc.group(1)}",
+                    "IMPORTS",
+                    {"lineno": index + 1},
+                )
+            elif m_undef := _RE_UNDEF.match(code):
+                held = self.builder.c_macro_lines.setdefault(file_id, {})
+                held.setdefault(m_undef[1], []).append((index + 1, False))
             elif m_def := _RE_DEFINE.match(code):
                 name = m_def.group(1)
                 defined_here.add(name)
+                held = self.builder.c_macro_lines.setdefault(file_id, {})
+                held.setdefault(name, []).append((index + 1, True))
                 macro_id = f"{file_id}::{name}"
                 last = index
                 while self._source[last].rstrip().endswith("\\"):
@@ -786,7 +938,6 @@ class ClangParser(BaseParser):
         # are no evidence about which call site may reach what it holds.
         coded = [i for i, l in enumerate(lines) if l.strip()]
         if coded:
-            ambient = frozenset()
             wrapping = [
                 arms[0]
                 for open_at, arms, close_at in closed
@@ -817,6 +968,17 @@ class ClangParser(BaseParser):
                         self._guarded[index] = rest
                     else:
                         del self._guarded[index]
+        # A file its own guard, around all its code and directives, or a
+        # `#pragma once` outside any conditional keeps from being read twice
+        outer = closed and min(closed)
+        guarded = (
+            outer
+            and _include_guard(self._source, outer[0], outer[1][0])
+            and len(outer[1]) == 1
+            and all(outer[0] <= at <= outer[2] for at in [*coded, *directed])
+        )
+        if guarded or once:
+            self.builder.c_once.add(file_id)
         return lines
 
     def _first_line(self, begin, offset):
@@ -873,6 +1035,13 @@ class ClangParser(BaseParser):
             )
             flat = " " * end + flat[end:]
         return flat, spans, parameters, defaults
+
+    def _open_generic(self, parameters):
+        """Bring the type parameters ``parameters`` into scope; gives the
+        ones in scope before, for the caller to restore."""
+        generic = self._generic
+        self._generic = generic.union(filter(None, parameters))
+        return generic
 
     def _body(self, start, end, parent_id, owner):
         """Read the declarations between offsets ``start`` and ``end``, the
@@ -947,10 +1116,7 @@ class ClangParser(BaseParser):
             return closer + 1
         found = _signature(flat)
         if found:
-            generic, self._generic = (
-                self._generic,
-                self._generic.union(filter(None, parameters)),
-            )
+            generic = self._open_generic(parameters)
             function_id, since, member = self._function(
                 found, flat, head, spans, begin, closer, parent_id, owner
             )
@@ -995,11 +1161,27 @@ class ClangParser(BaseParser):
             # `typedef struct { ... } Name;`, `typedef struct { ... } *Name;`
             name = names[0]
         if name is None:
-            # An unnamed struct or union that declares no variable is a
-            # member of the type around it, which has its fields, as the
-            # scope around an unnamed enum has its enumerators.
             if kind in ("struct", "union") and not tail.strip():
+                # An unnamed struct or union that declares no variable is a
+                # member of the type around it, which has its fields, as the
+                # scope around an unnamed enum has its enumerators.
                 self._body(at + 1, closer, parent_id, owner)
+            elif kind in ("struct", "union") and "(" not in tail:
+                # One that declares variables is a type source cannot name;
+                # its members are its own, and the variables hold it. A
+                # function type's declarator names no variable.
+                first = self._first_line(begin, at)
+                last = bisect_right(self._starts, closer)
+                written = f"struct@{first + 1}"
+                nameless = self._nameless_owner(
+                    parent_id, written, first + 1, last, kind=kind
+                )
+                self._body(at + 1, closer, nameless, written)
+                for part in _declarators(tail):
+                    if held := _RE_DECLARED_NAME.match(part):
+                        self.declared.setdefault(held[1], []).append(
+                            (last, f"{written}()", owner is None, None)
+                        )
             elif kind == "enum":
                 self._enumerators(at + 1, closer, parent_id)
             return stop + 1
@@ -1031,7 +1213,7 @@ class ClangParser(BaseParser):
                 kind=kind,
                 lineno=first + 1,
                 end_lineno=end_lineno,
-                token_count=(end_lineno - first) * 10,
+                token_count=token_count(first + 1, end_lineno),
                 docstring=self.get_leading_docstring(self._source, first),
                 **_generic_metadata(
                     {
@@ -1048,10 +1230,7 @@ class ClangParser(BaseParser):
         if kind == "enum":
             self._enumerators(at + 1, closer, type_id, name)
         else:
-            generic, self._generic = (
-                self._generic,
-                self._generic.union(filter(None, parameters)),
-            )
+            generic = self._open_generic(parameters)
             # The bases as written, with their template arguments
             listed = (
                 declared["bases"] and re.split(r"(?<!:):(?!:)", flat, maxsplit=1)[1]
@@ -1134,10 +1313,13 @@ class ClangParser(BaseParser):
         the `::` of a definition written in ``scope_id`` on line
         ``lineno``, leads to; the scope itself and ``owner`` for no names.
         A type that this file does not declare gets a node to hold what is
-        defined as its members."""
+        defined as its members. A class a definition qualifies is one of its
+        own namespace or one inside it, which the definition must enclose:
+        a class of the name outside is not it."""
         for name in path:
             named = self._named(scope_id, name)
-            if named is None:
+            outside = named and named != f"{scope_id}::{name}"
+            if named is None or outside and self._kinds[named] != "namespace":
                 named = f"{scope_id}::{name}"
                 self.builder.add_node(
                     named,
@@ -1219,8 +1401,9 @@ class ClangParser(BaseParser):
         if function_id in self._macros:
             # A macro of the same name moves to `<file>::macro_<name>`.
             del self._macros[function_id]
-            self.rename_node(function_id, f"{scope_id}::macro_{name}")
-            self._sites[f"{scope_id}::macro_{name}"] = self._sites.pop(function_id)
+            self._renamed[function_id] = f"{scope_id}::macro_{name}"
+            self.rename_node(function_id, self._renamed[function_id])
+            self._sites[self._renamed[function_id]] = self._sites.pop(function_id)
         # A `static` written under a conditional the name is not under
         # holds only where that arm compiles, so it is no linkage.
         named_at = bisect_right(self._starts, begin + found.start("name")) - 1
@@ -1256,7 +1439,7 @@ class ClangParser(BaseParser):
                 name=name,
                 lineno=first + 1,
                 end_lineno=end_lineno,
-                token_count=(end_lineno - first) * 10,
+                token_count=token_count(first + 1, end_lineno),
                 docstring=self.get_leading_docstring(self._source, first),
                 **extra,
             )
@@ -1315,10 +1498,11 @@ class ClangParser(BaseParser):
             # are declared behind it, up to its body.
             self._kr = (begin, begin + after)
             return
+        # The `(*name)` of a function pointer
+        pointer = spans and re.match(r"\s*\*\s*(\w+)", head[spans[0][0] + 1 :])
         if alias := _RE_TYPEDEF.match(flat):
-            # The alias is the last name, or the `(*name)` of a function
-            # pointer's, which names no type that has members.
-            pointer = spans and re.match(r"\s*\*\s*(\w+)", head[spans[0][0] + 1 :])
+            # The alias is the last name, or the function pointer's, which
+            # names no type that has members.
             names = re.finditer(r"[A-Za-z_]\w*", flat.partition("(")[0])
             *_, last = names
             if pointer or spans:
@@ -1374,10 +1558,7 @@ class ClangParser(BaseParser):
                 # A prototype defines nothing; `= 0` and `= default` do.
                 defines = found["body"] and "delete" not in found["body"]
                 if defines and (owner or found["path"]):
-                    generic, self._generic = (
-                        self._generic,
-                        self._generic.union(filter(None, parameters)),
-                    )
+                    generic = self._open_generic(parameters)
                     self._function(
                         found,
                         flat,
@@ -1418,7 +1599,6 @@ class ClangParser(BaseParser):
             held = field and self._opaque(_held(field["type"]))
             kept = field and _raw_pointer(held, field["pointer"])
             # `(*name)(params)` is a field that holds a function.
-            pointer = spans and re.match(r"\s*\*\s*(\w+)", head[spans[0][0] + 1 :])
             if pointer:
                 fields.setdefault(pointer[1], "")
             if field and not held.startswith("?"):
@@ -1628,16 +1808,9 @@ class ClangParser(BaseParser):
         """Origin path of a call on an element, `items[i].callee()`: of what
         the subscript operator of what `items` holds returns, or of the
         element type of a C array."""
-        code = self._code
-        if code[end - 1 : end] != "]":
-            return None
-        depth = 0
-        for at in range(end - 1, -1, -1):
-            depth += (code[at] == "]") - (code[at] == "[")
-            if not depth:
-                break
-        path = not depth and re.search(
-            r"(?<![\w.>])[A-Za-z_]\w*(?:(?:\.|->)\w+)*$", code[:at]
+        at = self._index_open(end)
+        path = at is not None and re.search(
+            r"(?<![\w.>])[A-Za-z_]\w*(?:(?:\.|->)\w+)*$", self._code[:at]
         )
         owner = source_id.split("::")[-2] if source_id.count("::") > 1 else None
         held = path and self.call_origin(f"{path[0]}.x", lineno, since, owner)
@@ -1665,26 +1838,14 @@ class ClangParser(BaseParser):
         held = held and self._opaque(held)
         if held and held.startswith("?"):
             return None
-        pointer = held and _RE_POINTER.match(held)
-        if held == "?":
-            origin = held
-        elif held is None:
+        if held is None:
             if root == "this" and len(steps) == 2 or not self._member:
                 return None
             origin = "self" if root == "this" else f"self.{root}"
-        elif pointer:
-            # `->` reaches what the pointer points at; `.` reaches the
-            # pointer's own members — its type argument intact, so a
-            # `get()`/`operator->` return is of it.
-            origin = (
-                f"{pointer[2]}()"
-                if steps[0] == "->"
-                else f"{pointer[1]}<{pointer[2]}>()"
-            )
         else:
             iterated = held[0] in "#=" or held.startswith("self.")
             origin = held if iterated else f"{_held(held[:-2])}()"
         for arrow, name in zip(steps[::2], steps[1::2]):
             name = name.split("<")[0]
-            origin += f".?.{name}" if arrow == "->" else f".{name}"
+            origin += f".->.{name}" if arrow == "->" else f".{name}"
         return origin

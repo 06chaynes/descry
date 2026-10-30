@@ -46,7 +46,7 @@ def main():
 
     # context
     p = subparsers.add_parser("context")
-    p.add_argument("--node-id", required=True)
+    p.add_argument("--symbol", required=True)
     p.add_argument("--brief", action="store_true")
     p.add_argument("--full", action="store_true")
     p.add_argument("--expand-callees", action="store_true")
@@ -70,7 +70,7 @@ def main():
 
     # flatten
     p = subparsers.add_parser("flatten")
-    p.add_argument("--node-id", required=True)
+    p.add_argument("--symbol", required=True)
 
     # cross_lang
     p = subparsers.add_parser("cross_lang")
@@ -89,7 +89,7 @@ def main():
 
     # quick
     p = subparsers.add_parser("quick")
-    p.add_argument("--name", required=True)
+    p.add_argument("--symbol", required=True)
     p.add_argument("--full", action="store_true")
     p.add_argument("--brief", action="store_true")
 
@@ -109,7 +109,7 @@ def main():
 
     # evolution
     p = subparsers.add_parser("evolution")
-    p.add_argument("--name", required=True)
+    p.add_argument("--symbol", required=True)
     p.add_argument("--time-range", default=None)
     p.add_argument("--limit", type=int, default=10)
     p.add_argument("--show-diff", action="store_true")
@@ -162,7 +162,7 @@ async def dispatch(args):
             return await service.callees(args.symbol, args.limit)
         elif cmd == "context":
             return await service.context(
-                args.node_id,
+                args.symbol,
                 brief=args.brief,
                 full=args.full,
                 expand_callees=args.expand_callees,
@@ -185,7 +185,7 @@ async def dispatch(args):
         elif cmd == "structure":
             return await service.structure(args.path)
         elif cmd == "flatten":
-            return await service.flatten(args.node_id)
+            return await service.flatten(args.symbol)
         elif cmd == "cross_lang":
             return await service.cross_lang(
                 mode=args.mode,
@@ -202,7 +202,7 @@ async def dispatch(args):
                 exclude_generated=args.exclude_generated,
             )
         elif cmd == "quick":
-            return await service.quick(args.name, full=args.full, brief=args.brief)
+            return await service.quick(args.symbol, full=args.full, brief=args.brief)
         elif cmd == "impls":
             return await service.impls(args.method, trait_name=args.trait_name)
         elif cmd == "index":
@@ -211,7 +211,7 @@ async def dispatch(args):
             return await service.semantic(args.query, limit=args.limit)
         elif cmd == "evolution":
             return await service.evolution(
-                name=args.name,
+                args.symbol,
                 time_range=args.time_range,
                 limit=args.limit,
                 show_diff=args.show_diff,

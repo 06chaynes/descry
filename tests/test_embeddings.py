@@ -5,6 +5,7 @@ Runs without downloading a model: every test injects a deterministic stub over
 a SentenceTransformer.
 """
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -231,7 +232,9 @@ class TestCacheKeyIdentity:
     ):
         g = graph_writer()
         before = SemanticSearcher(str(g))._cache_key()
-        monkeypatch.setattr(SemanticSearcher, "DEFAULT_MODEL_REVISION", "0" * 40)
+        default = E.MODEL_REGISTRY[E.DEFAULT_MODEL_ALIAS]
+        bumped = dataclasses.replace(default, revision="0" * 40)
+        monkeypatch.setitem(E.MODEL_REGISTRY, E.DEFAULT_MODEL_ALIAS, bumped)
         assert SemanticSearcher(str(g))._cache_key() != before
 
     def test_key_changes_with_recipe_version(
@@ -276,6 +279,23 @@ class TestCacheKeyIdentity:
         before = SemanticSearcher(str(g), model_name=str(mdir))._cache_key()
         (mdir / "w.bin").write_bytes(b"two-different-length")
         assert SemanticSearcher(str(g), model_name=str(mdir))._cache_key() != before
+
+    def test_a_relative_local_model_has_one_key_from_any_cwd(
+        self, fake_model, graph_writer, tmp_path, monkeypatch
+    ):
+        root = tmp_path / "root"
+        (root / "models" / "local").mkdir(parents=True)
+        (root / "models" / "local" / "w.bin").write_bytes(b"x")
+        g = graph_writer()
+        monkeypatch.chdir(root)
+        here = SemanticSearcher(
+            str(g), model_name="models/local", source_root=str(root)
+        )._cache_key()
+        monkeypatch.chdir(tmp_path)
+        there = SemanticSearcher(
+            str(g), model_name="models/local", source_root=str(root)
+        )._cache_key()
+        assert here == there
 
     def test_sidecar_records_identity(self, fake_model, graph_writer):
         g = graph_writer()
@@ -334,13 +354,6 @@ class TestCacheRoundTrip:
         leftovers = [p.name for p in g.parent.iterdir() if ".tmp" in p.name]
         assert leftovers == []
 
-    def test_force_rebuild_reencodes(self, fake_model, graph_writer):
-        g = graph_writer()
-        SemanticSearcher(str(g))
-        fake_model["encodes"].clear()
-        SemanticSearcher(str(g), force_rebuild=True)
-        assert fake_model["encodes"], "force_rebuild must re-encode"
-
 
 class TestCorruptCacheRecovery:
     def _build(self, graph_writer):
@@ -361,6 +374,35 @@ class TestCorruptCacheRecovery:
         fake_model["encodes"].clear()
         SemanticSearcher(str(g))
         assert fake_model["encodes"]
+
+    @pytest.mark.parametrize(
+        "sidecar",
+        [
+            b"[]",
+            b'{"node_count": "5"}',
+            b'{"node_count": null}',
+            b'{"node_count": [1]}',
+            b'{"node_count": true}',
+            b'{"node_count": -5}',
+            b"\xff\xfe not text",
+        ],
+    )
+    def test_a_sidecar_descry_did_not_sign_is_no_cache(
+        self, fake_model, graph_writer, sidecar
+    ):
+        """As the searcher takes it: it would build the embeddings again."""
+        g, (_, js) = self._build(graph_writer)
+        js.write_bytes(sidecar)
+        status = get_embeddings_status(str(g))
+        assert (status["cached"], status["node_count"]) == (False, 0)
+
+    def test_a_sidecar_too_deeply_nested_to_read_is_no_cache(
+        self, fake_model, graph_writer
+    ):
+        g, (_, js) = self._build(graph_writer)
+        js.write_text("[" * 100_000)
+        status = get_embeddings_status(str(g))
+        assert (status["cached"], status["node_count"]) == (False, 0)
 
     def test_node_count_mismatch_regenerates(self, fake_model, graph_writer):
         g, (_, js) = self._build(graph_writer)
@@ -1220,3 +1262,47 @@ def test_a_service_that_loads_no_model_does_not_import_the_model_library():
         [sys.executable, "-c", probe], capture_output=True, text=True, check=True
     )
     assert out.stdout.strip() == "False"
+
+
+class TestKeptVectors:
+    @pytest.fixture(autouse=True)
+    def state(self, tmp_path, monkeypatch):
+        for name in ("XDG_STATE_HOME", "LOCALAPPDATA"):
+            monkeypatch.setenv(name, str(tmp_path / "state"))
+
+    @staticmethod
+    def _rebuild(graph, fake_model):
+        fake_model["encodes"].clear()
+        searcher = SemanticSearcher(str(graph), force_rebuild=True)
+        return searcher, [t for texts, _ in fake_model["encodes"] for t in texts]
+
+    def test_a_rebuild_encodes_only_the_texts_that_changed(
+        self, fake_model, graph_writer
+    ):
+        graph = graph_writer()
+        first, _ = self._rebuild(graph, fake_model)
+        loads = fake_model["loads"]
+        assert self._rebuild(graph, fake_model)[1] == []
+        assert fake_model["loads"] == loads
+        nodes = json.loads(graph.read_text())["nodes"]
+        nodes[0]["metadata"]["docstring"] = "Subtract one number from another."
+        graph_writer(nodes)
+        again, encoded = self._rebuild(graph, fake_model)
+        assert encoded == [again.node_texts[0]]
+        assert np.array_equal(again.embeddings[1:], first.embeddings[1:])
+        assert not np.array_equal(again.embeddings[0], first.embeddings[0])
+
+    def test_a_cache_descry_did_not_sign_is_encoded_over(
+        self, fake_model, graph_writer, tmp_path
+    ):
+        graph = graph_writer()
+        self._rebuild(graph, fake_model)
+        (sidecar,) = (tmp_path / ".descry_cache").glob("embeddings_*.json")
+        held = json.loads(sidecar.read_text())
+        held["mac"] = "0" * 64
+        sidecar.write_text(json.dumps(held))
+        fake_model["encodes"].clear()
+        loaded = SemanticSearcher(str(graph))
+        assert [t for texts, _ in fake_model["encodes"] for t in texts] == (
+            loaded.node_texts
+        )

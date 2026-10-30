@@ -7,7 +7,14 @@ import time
 
 import pytest
 
-from descry import dotnet_parser, generate, go_parser, java_parser, ruby_parser
+from descry import (
+    dotnet_parser,
+    go_parser,
+    java_parser,
+    ruby_parser,
+    rust_parser,
+    ts_parser,
+)
 from descry.clang_parser import _RE_TYPE
 from descry.dart_parser import _RE_CLOSURE, _RE_LOCAL_FUNCTION, DartParser
 from descry.generate import CodeGraphBuilder
@@ -27,15 +34,15 @@ _LONG_RUN = " " * 20000
         (DartParser.binding_re.search, "const" + _RUN),
         (java_parser._RE_METHOD.match, "final" + _RUN),
         (java_parser._RE_FIELD.match, "final" + _RUN),
-        (generate._TS_IMPORT_RE.findall, "import" + _RUN + "x;\n"),
-        (generate._RUST_ARM_RE.search, _RUN + "!"),
+        (ts_parser._TS_IMPORT_RE.findall, "import" + _RUN + "x;\n"),
+        (rust_parser._RUST_ARM_RE.search, _RUN + "!"),
         (java_parser._RE_METHOD.match, "public <T>" + _RUN),
         (java_parser._RE_METHOD.match, "public @A" + _RUN),
         (java_parser._RE_ENUM_CONSTANT.match, "A" + _RUN + ")"),
-        (generate._RUST_BINDER_RES[1].findall, "for" + _RUN),
-        (generate._RUST_FOR_RE.search, "    for" + _RUN + "x"),
-        (generate._RUST_IF_LET_RE.search, "while let" + _RUN),
-        (generate._RUST_MATCH_RE.search, "match" + _RUN + "a b"),
+        (rust_parser._RUST_BINDER_RES[1].findall, "for" + _RUN),
+        (rust_parser._RUST_FOR_RE.search, "    for" + _RUN + "x"),
+        (rust_parser._RUST_IF_LET_RE.search, "while let" + _RUN),
+        (rust_parser._RUST_MATCH_RE.search, "match" + _RUN + "a b"),
         (ruby_parser._RE_INLINE_BODY.match, "x" + "\r\n" * 1500 + ")"),
         (dotnet_parser._RE_MEMBER.match, "partial unsafe" + _LONG_RUN + ")"),
         (dotnet_parser._RE_PARAMETER.search, "scoped readonly" + _LONG_RUN + "x;"),
@@ -50,9 +57,9 @@ _LONG_RUN = " " * 20000
         (dotnet_parser._RE_PRIMARY_CONSTRUCTOR.match, _LONG_RUN * 3 + "x"),
         (dotnet_parser._RE_PARAMETER.findall, "readonly" + "\t\n " * 20000 + ")"),
         (_RE_CLOSURE.findall, "\n" * 60000),
-        (generate._TS_IMPORT_RE.findall, "\n" * 60000),
-        (generate._TS_DEFAULT_EXPORT_RE.findall, "\u2028" * 60000),
-        (generate._RUST_USE_RE.findall, "\n" * 60000),
+        (ts_parser._TS_IMPORT_RE.findall, "\n" * 60000),
+        (ts_parser._TS_DEFAULT_EXPORT_RE.findall, "\u2028" * 60000),
+        (rust_parser._RUST_USE_RE.findall, "\n" * 60000),
     ],
     ids=[
         "dart-local-function",
@@ -231,13 +238,13 @@ def test_the_patterns_still_match_source():
     binding = DartParser.binding_re.search("  final Map<String, int> counts = {};")
     method = java_parser._RE_METHOD.match("  public static   int  size(")
     field = java_parser._RE_FIELD.match("  private   final int  count;")
-    arm = generate._RUST_ARM_RE.search("        Some(x) if x > 1 => x,")
+    arm = rust_parser._RUST_ARM_RE.search("        Some(x) if x > 1 => x,")
 
     assert _RE_LOCAL_FUNCTION.match("  Future<int> load(")
     assert binding["name"] == "counts"
     assert method["name"] == "size"
     assert field["name"] == "count"
-    assert generate._TS_IMPORT_RE.findall("import  { a }  from 'm';") == [
+    assert ts_parser._TS_IMPORT_RE.findall("import  { a }  from 'm';") == [
         ("{ a }", "m")
     ]
     assert arm["pattern"] == "Some(x)"

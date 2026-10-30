@@ -21,7 +21,6 @@ adapter uses ``output_mode="rename"`` to move it into the cache dir.
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 from descry.scip.adapter import (
@@ -29,10 +28,9 @@ from descry.scip.adapter import (
     CommandSpec,
     DiscoveredProject,
     register,
+    subdir_projects,
 )
 from descry.scip.adapters.typescript import parse_backtick_descriptors
-
-logger = logging.getLogger(__name__)
 
 
 def _has_ruby_sources(pkg_dir: Path) -> bool:
@@ -62,31 +60,8 @@ class RubyAdapter:
             # scip-ruby run at a root with its Gemfile indexes the tree.
             if not _has_ruby_sources(root):
                 return []
-            return [DiscoveredProject(name=root.name, root=root, language=self.name)]
-        seen: set[str] = set()
-        projects: list[DiscoveredProject] = []
-
-        for marker in root.glob("*/Gemfile"):
-            pkg_dir = marker.parent
-            if pkg_dir.name.startswith("."):
-                continue
-            if pkg_dir.name in excluded_dirs:
-                continue
-            if pkg_dir.name in seen:
-                continue
-            if not _has_ruby_sources(pkg_dir):
-                continue
-            seen.add(pkg_dir.name)
-            projects.append(
-                DiscoveredProject(
-                    name=pkg_dir.name,
-                    root=pkg_dir,
-                    language=self.name,
-                )
-            )
-
-        projects.sort(key=lambda p: p.name)
-        return projects
+            return [DiscoveredProject(name=root.name, root=root)]
+        return subdir_projects(root, excluded_dirs, ("*/Gemfile",), _has_ruby_sources)
 
     def build_command(
         self,
@@ -107,9 +82,7 @@ class RubyAdapter:
         otherwise exit non-zero before writing any index — on
         Sorbet-unannotated Ruby code (the common case), scip-ruby v1
         aborts at the first typecheck error without this flag
-        combination. Combined with the partial-output tolerance in
-        ``cache.py``, a non-zero scip-ruby exit that still produced
-        an index file is now kept as partial SCIP data.
+        combination.
         """
         argv: list[str] = [
             self.binary,
@@ -125,8 +98,7 @@ class RubyAdapter:
 
         scip-ruby emits the same backtick-wrapped file-path format used
         by scip-typescript / scip-python / scip-go, so the shared helper
-        handles it correctly. Verify with a real fixture; swap to the
-        path-style (Rust) helper if scip-ruby changes formats.
+        handles it.
         """
         return parse_backtick_descriptors(raw)
 

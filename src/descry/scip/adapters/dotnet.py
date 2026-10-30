@@ -18,7 +18,6 @@ finds one.
 
 from __future__ import annotations
 
-import logging
 import os
 from pathlib import Path
 
@@ -27,11 +26,9 @@ from descry.scip.adapter import (
     CommandSpec,
     DiscoveredProject,
     register,
+    subdir_projects,
 )
 from descry.scip.adapters.typescript import parse_backtick_descriptors
-
-logger = logging.getLogger(__name__)
-
 
 _DOTNET_MARKERS = (".sln", ".slnx", ".csproj", ".vbproj", ".fsproj")
 
@@ -84,9 +81,6 @@ def _global_json_satisfiable(project_root: Path, dotnet_root: str | None) -> str
     if not isinstance(pin, str) or not pin:
         return None
 
-    # rollForward "latestFeature" / "latestMajor" / "latestMinor" /
-    # "latestPatch" all allow graceful fallback; only disable≈"disable"
-    # or default behavior with a missing SDK is a hard block.
     roll_forward = (sdk.get("rollForward") or "").lower()
     allow_prerelease = bool(sdk.get("allowPrerelease", False))
 
@@ -110,7 +104,7 @@ def _global_json_satisfiable(project_root: Path, dotnet_root: str | None) -> str
     ):
         return None
     # Any version with allowPrerelease + latestMajor
-    if roll_forward == "latestmajor" and allow_prerelease and installed:
+    if roll_forward == "latestmajor" and allow_prerelease:
         return None
 
     return (
@@ -122,14 +116,7 @@ def _global_json_satisfiable(project_root: Path, dotnet_root: str | None) -> str
 
 
 def _find_net9_dotnet_root() -> str | None:
-    """Return the path of a DOTNET_ROOT that has a net9.0 runtime, or None.
-
-    scip-dotnet 0.2.13 targets net9.0 and won't roll forward to net10+.
-    When the system default SDK is net10 we need to point the tool at a
-    side-installed net9 runtime. Check the conventional locations in
-    priority order — Homebrew's ``dotnet@9`` keg-only formula, the
-    official ``dotnet-install.sh`` path, then a user-scoped install.
-    """
+    """The first of these locations holding a 9.x runtime, or None."""
     # ``~/.dotnet`` comes first: when users have both net9 and net10
     # side-by-side there (the dotnet-install.sh default layout), scip-
     # dotnet gets access to BOTH the net9 runtime it needs AND the
@@ -164,47 +151,13 @@ class DotnetAdapter:
         """Discover .NET projects.
 
         Order of preference:
-        1. Solution-level project at root (`root/*.sln`).
-        2. Top-level subdirectories containing a .sln/.csproj/.vbproj.
-        3. Root as a single project if it carries a .csproj/.vbproj.
+        1. The root, where it holds a solution or project file.
+        2. Top-level subdirectories holding one.
         """
-        seen: set[str] = set()
-        projects: list[DiscoveredProject] = []
-
-        # 1. Root-level solution — treat the whole repo as one project.
         if _has_marker(root) and _has_dotnet_sources(root):
-            projects.append(
-                DiscoveredProject(
-                    name=root.name,
-                    root=root,
-                    language=self.name,
-                )
-            )
-            return projects
-
-        # 2. Per-subdir projects.
-        for marker in _DOTNET_MARKERS:
-            for match in root.glob(f"*/*{marker}"):
-                pkg_dir = match.parent
-                if pkg_dir.name.startswith("."):
-                    continue
-                if pkg_dir.name in excluded_dirs:
-                    continue
-                if pkg_dir.name in seen:
-                    continue
-                if not _has_dotnet_sources(pkg_dir):
-                    continue
-                seen.add(pkg_dir.name)
-                projects.append(
-                    DiscoveredProject(
-                        name=pkg_dir.name,
-                        root=pkg_dir,
-                        language=self.name,
-                    )
-                )
-
-        projects.sort(key=lambda p: p.name)
-        return projects
+            return [DiscoveredProject(name=root.name, root=root)]
+        patterns = tuple(f"*/*{marker}" for marker in _DOTNET_MARKERS)
+        return subdir_projects(root, excluded_dirs, patterns, _has_dotnet_sources)
 
     def build_command(
         self,
@@ -214,15 +167,12 @@ class DotnetAdapter:
     ) -> CommandSpec:
         """Build the ``scip-dotnet index --output <out>`` command.
 
-        scip-dotnet 0.2.13 targets ``net9.0``. On a system with only
-        .NET 10+ installed the tool crashes at startup (exit 131)
-        because ``LatestMajor`` roll-forward doesn't cover the net9 →
-        net10 major-version gap. To make the adapter self-healing on
-        systems with net10+ as the default SDK, we look for a
-        side-installed net9 runtime in common locations (Homebrew's
-        ``dotnet@9``, the official dotnet-install.sh path, or an
-        explicit ``DOTNET_ROOT``) and point scip-dotnet at it when
-        found.
+        It sets ``DOTNET_ROLL_FORWARD=LatestMajor``, and ``DOTNET_ROOT``,
+        with its ``bin`` first on ``PATH``, to ``$DOTNET_ROOT`` or else a
+        side-installed net9 runtime where one is found: scip-dotnet
+        0.2.13 targets ``net9.0``, which ``LatestMajor`` does not roll
+        forward to net10+. Raises where ``global.json`` pins an SDK that
+        is not installed.
         """
         dotnet_root = os.environ.get("DOTNET_ROOT") or _find_net9_dotnet_root()
 
@@ -232,11 +182,7 @@ class DotnetAdapter:
         # wasting a `dotnet restore` round-trip that will fail anyway.
         reason = _global_json_satisfiable(project.root, dotnet_root)
         if reason is not None:
-            logger.warning(
-                f"SCIP: skipping scip-dotnet for {project.name}: {reason}. "
-                f"Falling back to regex-only resolution for this project."
-            )
-            raise RuntimeError(f"scip-dotnet incompatibility: {reason}")
+            raise RuntimeError(reason)
 
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
         # It indexes every `.sln` and project file it finds itself, and no
@@ -258,7 +204,6 @@ class DotnetAdapter:
             argv=argv,
             cwd=project.root,
             env_extras=env_extras,
-            output_mode="direct",
         )
 
     def parse_descriptors(self, raw: str) -> list[str]:

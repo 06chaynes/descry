@@ -10,9 +10,7 @@ Descry indexes your codebase into a knowledge graph of symbols (functions, class
 > the codebase has been through an internal security and correctness
 > review, AI-authored code can still contain subtle defects, missed edge
 > cases, or security assumptions that weren't obvious to the reviewer.
-> Treat this tool as experimental pre-1.0 software: **do not rely on it
-> for safety-critical analysis, and do not point it at code or
-> repositories you don't trust.**
+> Descry follows [semver](https://semver.org/) strictly from 1.0.0.
 >
 > **This tool is designed to run locally on your own machine.** The web
 > UI (`descry-web`) binds to `127.0.0.1` and is unauthenticated by design —
@@ -136,7 +134,7 @@ descry quick handle_request
 
 ### Claude Code
 
-Add to your Claude Code MCP settings (`.claude/settings.json` or global):
+Register with Claude Code (`.mcp.json` in the project, or `claude mcp add descry -- descry-mcp` for the user scope):
 
 ```json
 {
@@ -200,6 +198,8 @@ For customization, add a `.descry.toml` to your project root.
 
 > **Heads-up on list-typed fields.** Several settings below are **lists that REPLACE descry's defaults** when set, not merge. These include `[project] excluded_dirs`, `[code_files] extensions`, `[test_detection] path_patterns` / `file_suffixes`, and `[git] churn_exclusions`. Leave them out unless you have a specific reason — descry's defaults already cover a wide language matrix. If you do set them, copy the full default list (see `_DEFAULT_*` constants in `src/descry/handlers.py`) and modify from there. `[syntax.lang_map]` is the one list-shaped field that *merges* with defaults.
 
+A value of the wrong type — a quoted boolean, a string where a list belongs, a list entry that is not a string — is ignored with a warning and the default kept; a number must be finite, at least 0 and below 1,000,000.
+
 ```toml
 [project]
 # OPTIONAL — REPLACES the 24-element default. Leave unset to keep defaults
@@ -245,13 +245,13 @@ timeout = 30
 
 [timeouts]
 scip_minutes = 30      # per indexer; 0 = unlimited
-embedding_seconds = 60
-query_ms = 4000
+embedding_seconds = 60 # MCP and web answer `loading` past it; the CLI waits
+query_ms = 4000         # 0 = no time limit
 index_minutes = 30     # Timeout for `descry index` subprocess
 
 [query]
 max_depth = 3
-max_nodes = 100
+max_nodes = 100         # 0 = no node limit
 max_children_per_level = 10
 max_callers_shown = 15
 
@@ -284,11 +284,10 @@ api_prefixes = ["/api/v1", "/api/v2", "/api"]      # stripped when matching spec
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DESCRY_LOG_LEVEL` | `WARNING` (`INFO` for the indexer) | Log level (DEBUG, INFO, WARNING, ERROR) |
+| `DESCRY_LOG_LEVEL` | `WARNING` (`INFO` for the web UI and the indexer) | Log level (DEBUG, INFO, WARNING, ERROR) |
 | `DESCRY_CACHE_DIR` | `.descry_cache/` | Override cache directory location |
 | `DESCRY_NO_SCIP` | `false` | Disable SCIP indexing |
 | `DESCRY_NO_EMBEDDINGS` | `false` | Disable semantic search |
-| `DESCRY_SCIP_WORKERS` | auto | Max parallel SCIP indexer workers (overrides the memory-based default) |
 | `DESCRY_SCIP_TIMEOUT` | auto | Per-project SCIP indexer timeout in minutes (`0` / `none` disables) |
 | `DESCRY_PRIME_THREADS` | auto | Threads used when pre-warming `rust-analyzer` cache |
 
@@ -319,21 +318,27 @@ Share of project calls resolved without SCIP, measured on public repositories at
 
 | Language | Repository | Resolved |
 |---|---|---|
-| Rust | ripgrep `3fce3b5` | 84% (95% with rust-analyzer) |
+| Rust | ripgrep `3fce3b5` | 89% (97% with rust-analyzer) |
 | TypeScript | zod `0b216ef` | 93% |
 | Go | cobra `adbc881` | 100% |
-| Java | gson `845664b`, commons-lang `682a8ff` | 100%, 99% |
-| Python | httpx `b5addb6`, flask `d086db8` | 97%, 96% |
+| Java | gson `845664b`, commons-lang `682a8ff` | 99%, 99% |
+| Python | httpx `b5addb6`, flask `d086db8` | 96%, 96% |
 | PHP | monolog `3bed304`, guzzle `9393947` | 95%, 93% |
-| C# | serilog `bebc771`, Newtonsoft.Json `52fa3ae` (`Src/Newtonsoft.Json`) | 94%, 91% |
+| C# | serilog `bebc771`, Newtonsoft.Json `52fa3ae` (`Src/Newtonsoft.Json`) | 77%, 82% |
 | C | jq `a19efdd`, libuv `954c1d1` | 99%, 79% |
-| C++ | leveldb `7ee830d`, fmt `c4927e6` | 97%, 86% |
+| C++ | leveldb `7ee830d`, fmt `c4927e6` | 98%, 89% |
 | Dart | shelf `b2cb503`, riverpod `1efba1c` (`packages/riverpod`) | 95%, 91% |
 | Ruby | rack `a9833c8`, sinatra `cb22afd` | 70%, 39% |
 
-The remainder is unresolved, not wrong: of 450 resolved edges drawn at random from these repositories and read against the source, every one reaches the definition the call reaches. Ruby is low because the language declares no types and calls inside DSL blocks run with another `self`; libuv because most of its functions exist once for Unix and once for Windows, and the build files, not the source, choose between them.
+The remainder is unresolved, not wrong: of 450 resolved edges drawn at random from these repositories and read against the source, every one reaches the definition the call reaches. Ruby is low because the language declares no types and calls inside DSL blocks run with another `self`; C# because a call among a method's overloads that its arguments' types do not decide (serilog's `Write` and `ForContext`) keeps them as candidates; libuv because most of its functions exist once for Unix and once for Windows, and the build files, not the source, choose between them.
+
+Each release is also checked call site by call site against SCIP indexes, which name the definition each call reaches, of the repositories above and of axios, preact, excalidraw and aws-lc. At 1.0.0, of 203,100 resolved call sites the indexers judge, descry and SCIP name the same definition at all but 21, and those are the indexers' mistakes: 17 in sinatra, where scip-ruby names a method that an RSpec block in another file defines instead of the helper the call reaches, and 4 in fmt, where scip-clang takes a call of a class template's primary definition for one of its specializations.
 
 ## Installation
+
+Linux and macOS are supported, with CI on both. Windows is best-effort:
+descry runs there and is kept from regressing, but is not tested on each
+change.
 
 ### Minimal (graph + CLI only)
 
@@ -372,6 +377,36 @@ pip install "descry-codegraph[embeddinggemma-2]"
 pip install descry-codegraph[all]
 ```
 
+### Choosing a torch build
+
+Semantic search runs on torch, which the `embeddings` extra pulls from
+PyPI: on Linux that wheel is built for NVIDIA GPUs (CUDA) and is large.
+For a CPU-only machine or an AMD GPU, take torch from PyTorch's own index
+instead:
+
+```bash
+# CPU only
+uv tool install "descry-codegraph[all]" --with torch \
+    --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+
+# AMD GPU (ROCm); the index names the ROCm version
+uv tool install "descry-codegraph[all]" --with torch \
+    --index https://download.pytorch.org/whl/rocm7.2 --index-strategy unsafe-best-match
+
+# NVIDIA GPU (CUDA): PyPI's torch
+uv tool install "descry-codegraph[all]"
+```
+
+With pip, install torch first from the same index
+(`pip install torch --index-url https://download.pytorch.org/whl/cpu`),
+then `descry-codegraph[embeddings]`. Without it, `descry health` notes
+`sentence-transformers not installed`. Embeddings run on the GPU torch
+sees, else the CPU.
+
+The SCIP indexers are separate programs found on `PATH`, each optional;
+the table under [Language Support](#language-support) says how to install
+each, and `descry status` lists the ones it found.
+
 ### Development
 
 ```bash
@@ -404,22 +439,26 @@ Requires [uv](https://github.com/astral-sh/uv) and [just](https://github.com/cas
 - The UI is served by the same process that reads your repository; any authentication layer would be a shared-secret between your browser and your own terminal.
 - `TrustedHostMiddleware` rejects requests whose `Host` header isn't loopback (`127.0.0.1`, `localhost`, `::1`), defeating DNS-rebinding attacks that would otherwise bypass the 127.0.0.1 bind.
 - The `--host` flag is validated by `_loopback_host` and rejects non-loopback values with a clear error pointing at the reverse-proxy guidance.
-- Path-traversal hardening on `/api/source` is independent of any CORS posture: it enforces project-root containment, rejects non-regular files, caps size at `[code_files] max_file_mb`, refuses non-text content, and opens every path component with `O_NOFOLLOW` to defeat symlink swaps.
+- Path-traversal hardening on `/api/source` is independent of any CORS posture: it enforces project-root containment, rejects non-regular files, caps size at `[code_files] max_file_mb` (0 lifts the cap), refuses a file with a NUL byte in its first 8 KiB as not text, and opens every path component with `O_NOFOLLOW` to defeat symlink swaps.
 - The page's scripts are pinned with Subresource Integrity hashes and a Content-Security-Policy is sent with every response; rendered repository markdown cannot load remote images.
-- The reindex endpoints (`/api/index`, `/api/index/stream`) accept no path parameter; they always index the configured project root, one run at a time (a second request gets `409`).
+- The reindex endpoints (`/api/index`, `/api/index/stream`) accept no path parameter; they always index the configured project root, one run at a time: a second request to `/api/index` gets `409`, and one to `/api/index/stream` a `done` event whose `success` is false.
 
 **Do not expose `descry-web` to an untrusted network.** If you need remote access, put it behind your own authenticated reverse proxy.
 
 ## Versioning
 
-Descry is pre-1.0. Minor version bumps (`0.1.x` → `0.2.x`) may include breaking changes to the library API, graph schema, CLI, or MCP tool signatures. Patch releases (`0.1.0` → `0.1.1`) will not introduce breaking changes. Once we reach `1.0.0`, the project will follow [semver](https://semver.org/) strictly.
+From 1.0.0 descry follows [semver](https://semver.org/): a breaking change to the library API, graph schema, CLI, or MCP tool signatures comes with a major version bump; minor and patch releases do not break them.
 
-The only stable public API in pre-1.0 releases is `descry.__version__`. Submodules (`descry.handlers`, `descry.query`, etc.) are not considered stable API yet — refactor freely.
+The only stable public API is `descry.__version__`. Submodules (`descry.handlers`, `descry.query`, etc.) are not stable API — refactor freely.
 
 ## Further Reading
 
+- [CONTRACT](CONTRACT.md) — what every tool takes and answers.
+- [Tool reference](docs/TOOLS.md) — each tool's parameters, answer and an example.
+- [Certainty](docs/CERTAINTY.md) — what resolved, candidate and unresolved mean.
+- [Upgrading](docs/UPGRADING.md) — what changes from 0.3.
 - [CHANGELOG](CHANGELOG.md) — release notes.
-- [SECURITY](SECURITY.md) — security policy and disclosure.
+- [SECURITY](SECURITY.md) — security model, policy and disclosure.
 
 ## License
 

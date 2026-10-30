@@ -10,72 +10,89 @@ Usage:
 
 import argparse
 import asyncio
+import json
 import sys
 
-from descry.handlers import DescryConfig, DescryService, ServiceError
+from descry._answers import fail
+from descry._streams import write_utf8
+from descry.handlers import (
+    ChurnMode,
+    CrossLangMode,
+    DescryConfig,
+    DescryService,
+    Direction,
+    SymbolType,
+    public,
+)
 
 
 def _make_service() -> DescryService:
     config = DescryConfig.from_env()
+    # A process that ends with its answer waits for the embeddings it loads.
+    config.embedding_timeout = None
     return DescryService(config)
 
 
-def _run(coro) -> str:
-    return asyncio.run(coro)
+def _print_answer(args, answer, render):
+    """Print a tool's answer: with `--json` the answer itself, else the text
+    `render` makes of it. A failed answer exits 2, so shell chains like
+    `descry callers X && next_step` stop there."""
 
+    async def run():
+        found = await answer
+        return found, None if args.json else await render(found)
 
-def _print_result(coro):
-    """Run a service coroutine, print the result, and translate service-side
-    errors to a nonzero exit code so shell chains like `descry callers X &&
-    next_step` don't silently advance on "ERROR: Graph not found".
-
-    A failure is a `ServiceError`, whatever its text; the `ERROR:` prefix
-    marks one in text that arrives as a plain string.
-    """
-    result = _run(coro)
-    print(result)
-    if isinstance(result, ServiceError) or (
-        isinstance(result, str) and result.lstrip().upper().startswith("ERROR:")
-    ):
+    found, text = asyncio.run(run())
+    print(json.dumps(public(found), indent=2) if args.json else text)
+    if not found["ok"]:
         sys.exit(2)
 
 
-def cmd_health(_args):
+def cmd_health(args):
     svc = _make_service()
-    _print_result(svc.health())
+    _print_answer(args, svc.health_answer(), svc.health_text)
 
 
-def cmd_status(_args):
+def cmd_status(args):
     svc = _make_service()
-    _print_result(svc.status())
+    _print_answer(args, svc.status_answer(), svc.status_text)
 
 
 def cmd_ensure(args):
     svc = _make_service()
-    _print_result(svc.ensure(max_age_hours=args.max_age_hours))
+    _print_answer(args, svc.ensure_answer(args.max_age_hours), svc.ensure_text)
 
 
 def cmd_index(args):
     svc = _make_service()
     path = args.path if args.path else "."
-    _print_result(svc.index(path))
+    _print_answer(args, svc.index_answer(path), svc.index_text)
 
 
 def cmd_callers(args):
     svc = _make_service()
-    _print_result(svc.callers(name=args.name, limit=args.limit))
+    _print_answer(
+        args,
+        svc.callers_answer(args.symbol, args.limit),
+        lambda a: svc.listing_text(a, "callers", args.limit),
+    )
 
 
 def cmd_callees(args):
     svc = _make_service()
-    _print_result(svc.callees(name=args.name, limit=args.limit))
+    _print_answer(
+        args,
+        svc.callees_answer(args.symbol, args.limit),
+        lambda a: svc.listing_text(a, "callees", args.limit),
+    )
 
 
 def cmd_context(args):
     svc = _make_service()
-    _print_result(
-        svc.context(
-            node_id=args.node_id,
+    _print_answer(
+        args,
+        svc.context_answer(
+            args.symbol,
             brief=args.brief,
             full=args.full,
             expand_callees=args.expand_callees,
@@ -85,148 +102,171 @@ def cmd_context(args):
             callee_budget=args.callee_budget,
             head_lines=args.head_lines,
             max_output_tokens=args.max_output_tokens,
-        )
+        ),
+        svc.context_text,
     )
 
 
 def cmd_flow(args):
     svc = _make_service()
-    _print_result(
-        svc.flow(
-            start=args.start,
-            direction=args.direction,
-            depth=args.depth,
-            target=args.target,
-            inline_threshold=args.inline_threshold,
-        )
+    _print_answer(
+        args,
+        svc.flow_answer(
+            args.start, args.direction, args.depth, args.target, args.inline_threshold
+        ),
+        svc.flow_text,
     )
 
 
 def cmd_search(args):
     svc = _make_service()
-    _print_result(
-        svc.search(
-            terms=args.terms,
-            compact=args.compact,
-            limit=args.limit,
-            lang=args.lang,
-            crate=args.crate,
-            symbol_type=args.type,
-            exclude_tests=args.exclude_tests,
-        )
+    filters = (args.lang, args.crate, args.type)
+    _print_answer(
+        args,
+        svc.search_answer(args.terms, args.limit, *filters, args.exclude_tests),
+        lambda a: svc.search_text(
+            a, args.terms, args.compact, *filters, args.exclude_tests
+        ),
     )
 
 
 def cmd_structure(args):
     svc = _make_service()
-    _print_result(svc.structure(filename=args.filename))
+    _print_answer(
+        args,
+        svc.structure_answer(args.filename),
+        lambda a: svc.structure_text(a, args.filename),
+    )
 
 
 def cmd_flatten(args):
     svc = _make_service()
-    _print_result(svc.flatten(class_node_id=args.class_node_id))
+    _print_answer(args, svc.flatten_answer(args.symbol), svc.flatten_text)
 
 
-def cmd_embedding_models(_args):
+def cmd_embedding_models(args):
     svc = _make_service()
-    _print_result(svc.embedding_models())
+    _print_answer(args, svc.embedding_models_answer(), svc.health_text)
 
 
 def cmd_semantic(args):
     svc = _make_service()
-    _print_result(svc.semantic(query=args.query, limit=args.limit))
+    _print_answer(
+        args,
+        svc.semantic_answer(args.query, args.limit),
+        lambda a: svc.semantic_text(a, args.query),
+    )
 
 
 def cmd_quick(args):
     svc = _make_service()
-    _print_result(svc.quick(name=args.name, full=args.full, brief=args.brief))
+    _print_answer(
+        args,
+        svc.quick_answer(args.symbol, args.full, args.brief),
+        lambda a: svc.quick_text(a, args.symbol, args.full, args.brief),
+    )
 
 
 def cmd_impls(args):
     svc = _make_service()
-    _print_result(svc.impls(method=args.method, trait_name=args.trait_name))
+    _print_answer(args, svc.impls_answer(args.method, args.trait_name), svc.impls_text)
 
 
 def cmd_path(args):
     svc = _make_service()
-    _print_result(
-        svc.path(
-            start=args.start,
-            end=args.end,
-            max_depth=args.max_depth,
-            direction=args.direction,
-        )
+    _print_answer(
+        args,
+        svc.path_answer(args.start, args.end, args.max_depth, args.direction),
+        lambda a: svc.path_text(a, args.start, args.end),
     )
 
 
 def cmd_cross_lang(args):
     svc = _make_service()
-    _print_result(
-        svc.cross_lang(
-            mode=args.mode,
-            method=args.method,
-            path=args.path,
-            tag=args.tag,
-        )
+    _print_answer(
+        args,
+        svc.cross_lang_answer(args.mode, args.method, args.path, args.tag),
+        lambda a: svc.cross_lang_text(a, args.method, args.path, args.tag),
     )
 
 
 def cmd_churn(args):
     svc = _make_service()
-    _print_result(
-        svc.churn(
-            time_range=args.time_range,
-            path_filter=args.path_filter,
-            limit=args.limit,
-            mode=args.mode,
-            exclude_generated=args.exclude_generated,
-        )
+    _print_answer(
+        args,
+        svc.churn_answer(
+            args.time_range,
+            args.path_filter,
+            args.limit,
+            args.mode,
+            args.exclude_generated,
+        ),
+        svc.churn_text,
     )
 
 
 def cmd_evolution(args):
     svc = _make_service()
-    _print_result(
-        svc.evolution(
-            name=args.name,
-            time_range=args.time_range,
-            limit=args.limit,
-            show_diff=args.show_diff,
-            crate=args.crate,
-        )
+    _print_answer(
+        args,
+        svc.evolution_answer(
+            args.symbol, args.time_range, args.limit, args.show_diff, args.crate
+        ),
+        svc.evolution_text,
     )
 
 
 def cmd_changes(args):
     svc = _make_service()
-    _print_result(
-        svc.changes(
-            commit_range=args.commit_range,
-            time_range=args.time_range,
-            path_filter=args.path_filter,
-            show_callers=args.show_callers,
-            limit=args.limit,
-        )
+    _print_answer(
+        args,
+        svc.changes_answer(
+            args.commit_range,
+            args.time_range,
+            args.path_filter,
+            args.show_callers,
+            args.limit,
+        ),
+        svc.changes_text,
     )
 
 
-def main():
-    parser = argparse.ArgumentParser(
+class _Parser(argparse.ArgumentParser):
+    """A parser that, asked for `--json`, answers an argument it cannot read
+    as every failure is answered, `invalid`, rather than with its usage."""
+
+    def error(self, message):
+        if "--json" in sys.argv[1:]:
+            print(json.dumps(public(fail("invalid", message)), indent=2))
+            sys.exit(2)
+        super().error(message)
+
+
+def build_parser():
+    """The `descry` command line's parser, every command a subparser."""
+    parser = _Parser(
         prog="descry",
         description="Codebase knowledge graph tools",
     )
     subparsers = parser.add_subparsers(dest="command")
+    answers = argparse.ArgumentParser(add_help=False)
+    answers.add_argument(
+        "--json", action="store_true", help="Print the structured answer as JSON"
+    )
 
-    # health
-    sub = subparsers.add_parser("health", help="Quick diagnostic check")
+    sub = subparsers.add_parser(
+        "health", parents=[answers], help="Quick diagnostic check"
+    )
     sub.set_defaults(func=cmd_health)
 
-    # status
-    sub = subparsers.add_parser("status", help="Check graph existence and freshness")
+    sub = subparsers.add_parser(
+        "status", parents=[answers], help="Check graph existence and freshness"
+    )
     sub.set_defaults(func=cmd_status)
 
-    # ensure
-    sub = subparsers.add_parser("ensure", help="Ensure graph exists and is fresh")
+    sub = subparsers.add_parser(
+        "ensure", parents=[answers], help="Ensure graph exists and is fresh"
+    )
     sub.add_argument(
         "--max-age-hours",
         type=float,
@@ -235,30 +275,32 @@ def main():
     )
     sub.set_defaults(func=cmd_ensure)
 
-    # index
-    sub = subparsers.add_parser("index", help="Regenerate the codebase graph")
+    sub = subparsers.add_parser(
+        "index", parents=[answers], help="Regenerate the codebase graph"
+    )
     sub.add_argument(
         "path", nargs="?", default=None, help="Path to index (default: project root)"
     )
     sub.set_defaults(func=cmd_index)
 
-    # callers
-    sub = subparsers.add_parser("callers", help="Find all callers of a symbol")
-    sub.add_argument("name", help="Symbol name to look up")
+    sub = subparsers.add_parser(
+        "callers", parents=[answers], help="Find all callers of a symbol"
+    )
+    sub.add_argument("symbol", help="A node ID, or a name")
     sub.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     sub.set_defaults(func=cmd_callers)
 
-    # callees
-    sub = subparsers.add_parser("callees", help="Find what a symbol calls")
-    sub.add_argument("name", help="Symbol name to look up")
+    sub = subparsers.add_parser(
+        "callees", parents=[answers], help="Find what a symbol calls"
+    )
+    sub.add_argument("symbol", help="A node ID, or a name")
     sub.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     sub.set_defaults(func=cmd_callees)
 
-    # context
     sub = subparsers.add_parser(
-        "context", help="Get full context for a symbol by node ID"
+        "context", parents=[answers], help="Get full context for a symbol"
     )
-    sub.add_argument("node_id", help="Graph node ID (e.g. FILE:src/lib.rs::main)")
+    sub.add_argument("symbol", help="A node ID, or a name (e.g. FILE:src/lib.rs::main)")
     sub.add_argument("--brief", action="store_true", help="Brief output")
     sub.add_argument("--full", action="store_true", help="Full source output")
     sub.add_argument(
@@ -293,13 +335,14 @@ def main():
     )
     sub.set_defaults(func=cmd_context)
 
-    # flow
-    sub = subparsers.add_parser("flow", help="Trace call flow from a starting symbol")
+    sub = subparsers.add_parser(
+        "flow", parents=[answers], help="Trace call flow from a starting symbol"
+    )
     sub.add_argument("start", help="Starting symbol name")
     sub.add_argument(
         "--direction",
         default="forward",
-        choices=["forward", "backward"],
+        choices=[d.value for d in Direction],
         help="Trace direction (default: forward)",
     )
     sub.add_argument(
@@ -319,14 +362,15 @@ def main():
     )
     sub.set_defaults(func=cmd_flow)
 
-    # search
-    sub = subparsers.add_parser("search", help="Search symbol names and docstrings")
+    sub = subparsers.add_parser(
+        "search", parents=[answers], help="Search symbol names and docstrings"
+    )
     sub.add_argument("terms", nargs="+", help="Search terms")
     sub.add_argument(
-        "--compact", action="store_true", default=True, help="Compact output (default)"
-    )
-    sub.add_argument(
-        "--no-compact", dest="compact", action="store_false", help="Detailed output"
+        "--compact",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Compact output; --no-compact for detailed",
     )
     sub.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     sub.add_argument("--lang", default=None, help="Filter by language")
@@ -334,8 +378,7 @@ def main():
     sub.add_argument(
         "--type",
         default=None,
-        type=str.lower,
-        choices=["function", "class", "method", "constant", "file", "all"],
+        choices=[t.value for t in SymbolType],
         help="Filter by symbol type",
     )
     sub.add_argument(
@@ -343,53 +386,53 @@ def main():
     )
     sub.set_defaults(func=cmd_search)
 
-    # structure
-    sub = subparsers.add_parser("structure", help="Show file structure")
+    sub = subparsers.add_parser(
+        "structure", parents=[answers], help="Show file structure"
+    )
     sub.add_argument("filename", help="Filename to inspect")
     sub.set_defaults(func=cmd_structure)
 
-    # flatten
     sub = subparsers.add_parser(
-        "flatten", help="Show effective API of a class including inherited methods"
+        "flatten",
+        parents=[answers],
+        help="Show effective API of a class including inherited methods",
     )
-    sub.add_argument("class_node_id", help="Class node ID")
+    sub.add_argument("symbol", help="A class's node ID, or its name")
     sub.set_defaults(func=cmd_flatten)
 
-    # semantic
     sub = subparsers.add_parser(
-        "semantic", help="Pure semantic search using embeddings"
+        "semantic", parents=[answers], help="Pure semantic search using embeddings"
     )
     sub.add_argument("query", help="Natural language query")
     sub.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     sub.set_defaults(func=cmd_semantic)
 
-    # embedding-models
     sub = subparsers.add_parser(
         "embedding-models",
+        parents=[answers],
         help="List embedding models descry ships pinned configurations for",
     )
     sub.set_defaults(func=cmd_embedding_models)
 
-    # quick
     sub = subparsers.add_parser(
-        "quick", help="Find symbol and show full context in one step"
+        "quick", parents=[answers], help="Find symbol and show full context in one step"
     )
-    sub.add_argument("name", help="Symbol name")
+    sub.add_argument("symbol", help="A node ID, or a name")
     sub.add_argument("--full", action="store_true", help="Full source output")
     sub.add_argument("--brief", action="store_true", help="Brief output")
     sub.set_defaults(func=cmd_quick)
 
-    # impls
     sub = subparsers.add_parser(
-        "impls", help="Find all implementations of a Rust trait method"
+        "impls",
+        parents=[answers],
+        help="Find all implementations of a Rust trait method",
     )
     sub.add_argument("method", help="Method name")
     sub.add_argument("--trait-name", default=None, help="Filter by trait name")
     sub.set_defaults(func=cmd_impls)
 
-    # path
     sub = subparsers.add_parser(
-        "path", help="Find shortest call path between two symbols"
+        "path", parents=[answers], help="Find shortest call path between two symbols"
     )
     sub.add_argument("start", help="Starting symbol")
     sub.add_argument("end", help="Ending symbol")
@@ -399,19 +442,20 @@ def main():
     sub.add_argument(
         "--direction",
         default="forward",
-        choices=["forward", "backward"],
+        choices=[d.value for d in Direction],
         help="Search direction (default: forward)",
     )
     sub.set_defaults(func=cmd_path)
 
-    # cross-lang
     sub = subparsers.add_parser(
-        "cross-lang", help="Trace API calls from frontend to backend via OpenAPI"
+        "cross-lang",
+        parents=[answers],
+        help="Trace API calls from frontend to backend via OpenAPI",
     )
     sub.add_argument(
         "--mode",
         default="endpoint",
-        choices=["endpoint", "list", "stats"],
+        choices=[m.value for m in CrossLangMode],
         help="Trace mode (default: endpoint)",
     )
     sub.add_argument("--method", default=None, help="HTTP method (e.g. GET, POST)")
@@ -419,15 +463,16 @@ def main():
     sub.add_argument("--tag", default=None, help="Filter by tag")
     sub.set_defaults(func=cmd_cross_lang)
 
-    # churn
-    sub = subparsers.add_parser("churn", help="Find code churn hotspots")
+    sub = subparsers.add_parser(
+        "churn", parents=[answers], help="Find code churn hotspots"
+    )
     sub.add_argument("--time-range", default=None, help='Time range (e.g. "30 days")')
     sub.add_argument("--path-filter", default=None, help='Path filter (e.g. "src/")')
     sub.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     sub.add_argument(
         "--mode",
         default="symbols",
-        choices=["symbols", "files", "co-change"],
+        choices=[m.value for m in ChurnMode],
         help="Churn mode (default: symbols)",
     )
     sub.add_argument(
@@ -439,20 +484,18 @@ def main():
     )
     sub.set_defaults(func=cmd_churn)
 
-    # evolution
     sub = subparsers.add_parser(
-        "evolution", help="Track how a symbol has changed over time"
+        "evolution", parents=[answers], help="Track how a symbol has changed over time"
     )
-    sub.add_argument("name", help="Symbol name")
+    sub.add_argument("symbol", help="A node ID, or a name")
     sub.add_argument("--time-range", default=None, help='Time range (e.g. "90 days")')
     sub.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     sub.add_argument("--show-diff", action="store_true", help="Show diffs")
     sub.add_argument("--crate", default=None, help="Filter by crate")
     sub.set_defaults(func=cmd_evolution)
 
-    # changes
     sub = subparsers.add_parser(
-        "changes", help="Analyze change impact for a commit range"
+        "changes", parents=[answers], help="Analyze change impact for a commit range"
     )
     sub.add_argument(
         "--commit-range", default=None, help="Commit range (e.g. HEAD~3..HEAD)"
@@ -461,19 +504,19 @@ def main():
     sub.add_argument("--path-filter", default=None, help='Path filter (e.g. "src/")')
     sub.add_argument(
         "--show-callers",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Show callers of changed symbols (default)",
-    )
-    sub.add_argument(
-        "--no-show-callers",
-        dest="show_callers",
-        action="store_false",
-        help="Hide callers",
+        help="Show callers of changed symbols",
     )
     sub.add_argument("--limit", type=int, default=50, help="Max results (default: 50)")
     sub.set_defaults(func=cmd_changes)
 
+    return parser
+
+
+def main():
+    write_utf8()
+    parser = build_parser()
     args = parser.parse_args()
 
     if not args.command:

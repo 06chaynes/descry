@@ -66,16 +66,17 @@ class TestMcpEnums:
         assert Direction.backward.value == "backward"
 
     def test_language_values(self):
-        from descry.mcp_server import Language
+        from descry.mcp_server import LanguageName
 
-        assert Language.rust.value == "rust"
-        assert Language.all.value == "all"
+        assert LanguageName.rust.value == "rust"
+        assert LanguageName.all.value == "all"
+        assert LanguageName.ts.value == "ts"
 
     def test_language_enum_names_the_language_of_every_indexed_extension(self):
         from descry.handlers import _DEFAULT_CODE_EXTENSIONS, _DEFAULT_SYNTAX_LANG_MAP
-        from descry.mcp_server import Language
+        from descry.mcp_server import LanguageName
 
-        offered = {m.value for m in Language}
+        offered = {m.value for m in LanguageName}
         not_filtered = {".css", ".scss", ".html", ".cu"}
         for ext in _DEFAULT_CODE_EXTENSIONS - not_filtered:
             assert _DEFAULT_SYNTAX_LANG_MAP[ext] in offered, ext
@@ -156,9 +157,14 @@ class _StubService:
 
     def __getattr__(self, name):
         async def method(*_args, **_kwargs):
-            return "payload"
+            return {"ok": True, "found": 1} if name.endswith("_answer") else "payload"
 
         return method
+
+
+def _text(result):
+    """The text a tool answered with, whether alone or with its structure."""
+    return result if isinstance(result, str) else result.content[0].text
 
 
 class TestToolsFenceRepositoryContent:
@@ -178,7 +184,7 @@ class TestToolsFenceRepositoryContent:
                 for param, spec in inspect.signature(fn).parameters.items()
                 if spec.default is inspect.Parameter.empty
             }
-            assert FENCE.match(await fn(**required)), f"{name} is unfenced"
+            assert FENCE.match(_text(await fn(**required))), f"{name} is unfenced"
 
 
 def _project_with_stale_graph(tmp_path, monkeypatch):
@@ -194,6 +200,66 @@ def _project_with_stale_graph(tmp_path, monkeypatch):
 
 class TestLifespan:
     @pytest.mark.asyncio
+    async def test_a_no_embeddings_index_stays_out_of_the_pre_warm(
+        self, tmp_path, monkeypatch
+    ):
+        import descry.mcp_server as mod
+
+        _project_with_stale_graph(tmp_path, monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mod, "_service", None)
+
+        async with mod.server_lifespan(mod.mcp):
+            assert mod._service._semantic_cache["instance"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_stale_embeddings_cache_does_not_trigger_the_pre_warm(
+        self, tmp_path, monkeypatch
+    ):
+        import descry.mcp_server as mod
+
+        _project_with_stale_graph(tmp_path, monkeypatch)
+        emb = tmp_path / ".descry_cache" / "embeddings"
+        emb.mkdir(exist_ok=True)
+        (emb / "embeddings_old.npz").write_bytes(b"")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mod, "_service", None)
+
+        async with mod.server_lifespan(mod.mcp):
+            assert mod._service._semantic_cache["instance"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_ready_embeddings_cache_is_pre_warmed(self, tmp_path, monkeypatch):
+        import asyncio
+
+        import descry.mcp_server as mod
+        from descry import handlers
+
+        _project_with_stale_graph(tmp_path, monkeypatch)
+        monkeypatch.delenv("DESCRY_NO_EMBEDDINGS", raising=False)
+        ran = []
+
+        async def warmed(_self):
+            ran.append(True)
+
+        monkeypatch.setattr(
+            handlers,
+            "_try_import_embeddings",
+            lambda on: (
+                True,
+                object(),
+                lambda *_a, **kw: {"cached": True, "node_count": 1, "model": "m"},
+            ),
+        )
+        monkeypatch.setattr(mod.DescryService, "_load_embeddings_background", warmed)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mod, "_service", None)
+
+        async with mod.server_lifespan(mod.mcp):
+            await asyncio.sleep(0)
+        assert ran == [True]
+
+    @pytest.mark.asyncio
     async def test_server_starts_and_tools_answer_with_an_unloadable_graph(
         self, tmp_path, monkeypatch
     ):
@@ -204,13 +270,33 @@ class TestLifespan:
         monkeypatch.setattr(mod, "_service", None)
 
         async with mod.server_lifespan(mod.mcp):
-            health = json.loads(await mod.descry_health())
+            health = json.loads(_text(await mod.descry_health()))
             assert health["status"] == "invalid_graph"
-            assert "descry index" in await mod.descry_callers("anything")
-            assert "max_age_hours must be a finite" in await mod.descry_ensure(
-                float("nan")
+            assert "descry index" in _text(await mod.descry_callers("anything"))
+            assert "max_age_hours must be a finite" in _text(
+                await mod.descry_ensure(float("nan"))
             )
-            assert "limit must be at least 1" in await mod.descry_callers("x", -1)
+            assert "limit must be at least 1" in _text(
+                await mod.descry_callers("x", -1)
+            )
+
+    @pytest.mark.asyncio
+    async def test_arguments_the_sdk_cannot_read_answer_the_contract_shape(
+        self, tmp_path, monkeypatch
+    ):
+        import descry.mcp_server as mod
+
+        _project_with_stale_graph(tmp_path, monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(mod, "_service", None)
+
+        async with mod.server_lifespan(mod.mcp):
+            result = await mod.mcp.call_tool("descry_callees", {"symbol": 42})
+            assert result.is_error
+            assert result.structured_content == {
+                "error": "Invalid arguments for descry_callees: symbol.",
+                "reason": "invalid",
+            }
 
     @pytest.mark.asyncio
     async def test_server_starts_when_the_graph_is_removed_during_startup(
@@ -231,7 +317,7 @@ class TestLifespan:
         )
 
         async with mod.server_lifespan(mod.mcp):
-            assert json.loads(await mod.descry_health())["status"] == "no_graph"
+            assert json.loads(_text(await mod.descry_health()))["status"] == "no_graph"
 
 
 def _call(msg_id, tool, **arguments):

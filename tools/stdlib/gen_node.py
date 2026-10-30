@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from common import KEYS, main
+from common import main
 
 MODULE = re.compile(r"""^declare module ["']([^"']+)["']""", re.MULTILINE)
 
@@ -43,7 +43,7 @@ def build(archive):
     )
     version = json.loads(files[manifest])["version"]
     source = f"@types/node {version} (npm), the modules its declarations name"
-    return (source, *[None] * (KEYS.index("modules") - 1), modules)
+    return {"source": source, "modules": modules}
 
 
 if __name__ == "__main__":

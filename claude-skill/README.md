@@ -64,7 +64,7 @@ everywhere.
 
 The skill works with either the CLI or the MCP server, but the MCP path
 is faster (no subprocess per call) and its outputs are fenced for
-prompt-injection safety. Add to `.claude/settings.json`:
+prompt-injection safety. Register with Claude Code via `.mcp.json` (project) or `claude mcp add` (user):
 
 ```json
 {

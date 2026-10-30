@@ -1,0 +1,90 @@
+{
+  "callers": {
+    "FILE:app/io.py::Reader::parse": {
+      "resolved": [
+        "FILE:app/io.py::load"
+      ],
+      "candidate": [
+        "FILE:app/io.py::guess"
+      ]
+    },
+    "FILE:app/models.py::Order::parse": {
+      "resolved": [],
+      "candidate": [
+        "FILE:app/io.py::guess"
+      ]
+    },
+    "FILE:app/models.py::Base::save": {
+      "resolved": [
+        "FILE:app/models.py::User::rename"
+      ],
+      "candidate": []
+    },
+    "FILE:app/models.py::Base::validate": {
+      "resolved": [
+        "FILE:app/models.py::Base::save"
+      ],
+      "candidate": []
+    },
+    "FILE:app/models.py::User::rename": {
+      "resolved": [
+        "FILE:app/main.py::main"
+      ],
+      "candidate": []
+    }
+  },
+  "callees": {
+    "FILE:app/main.py::main": {
+      "resolved": [
+        "FILE:app/models.py::User",
+        "FILE:app/models.py::User::rename",
+        "FILE:app/io.py::load",
+        "FILE:app/io.py::Reader"
+      ]
+    },
+    "FILE:app/io.py::guess": {
+      "resolved": [],
+      "candidate": [
+        "thing.parse"
+      ]
+    },
+    "FILE:app/io.py::Reader::parse": {
+      "resolved": []
+    },
+    "FILE:app/main.py::misuse": {
+      "resolved": [
+        "FILE:app/models.py::User"
+      ],
+      "unresolved": [
+        "user.parse"
+      ]
+    }
+  },
+  "flatten": {
+    "FILE:app/models.py::User": [
+      "rename",
+      "save",
+      "validate"
+    ]
+  },
+  "path": [
+    [
+      "FILE:app/main.py::main",
+      "FILE:app/io.py::Reader::parse",
+      [
+        "FILE:app/io.py::load",
+        "FILE:app/io.py::Reader::parse"
+      ]
+    ]
+  ],
+  "refused": [
+    "parse",
+    "validate"
+  ],
+  "external": {
+    "FILE:app/io.py::Reader::parse": [
+      "json.loads",
+      "loads"
+    ]
+  }
+}

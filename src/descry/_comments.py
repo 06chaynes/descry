@@ -7,11 +7,9 @@ escapes.
 from __future__ import annotations
 
 
-def strip_line_comment(
-    line: str, markers: tuple[str, ...] = ("//",), *, backticks: bool = False
-) -> str:
+def strip_line_comment(line: str, *, backticks: bool = False) -> str:
     """Return `line` without its trailing comment, which starts at the first
-    of `markers` outside a string.
+    ``//`` outside a string.
 
     Tracks simple string state so ``"http://"`` is preserved; a backquote
     opens a string only with `backticks`. Block comments (``/* ... */``) are
@@ -32,21 +30,19 @@ def strip_line_comment(
         elif ch in quotes:
             in_string = True
             quote_char = ch
-        elif line.startswith(markers, i):
+        elif line.startswith("//", i):
             return line[:i]
         i += 1
     return line
 
 
-def strip_block_comments(
-    line: str, in_block: bool, *, hash_comments: bool = False
-) -> tuple[str, bool]:
+def strip_block_comments(line: str, in_block: bool) -> tuple[str, bool]:
     """Return `line` with ``/* ... */`` spans removed, and whether a block
     comment is still open at the end of it.
 
     `in_block` is that flag as returned for the previous line. Tracks simple
     string state so ``"/*"`` is preserved, and leaves a trailing ``//...``
-    comment (or ``#...`` with `hash_comments`) untouched.
+    comment untouched.
     """
     out = []
     quote_char = ""
@@ -74,9 +70,7 @@ def strip_block_comments(
             in_block = True
             i += 2
             continue
-        elif (ch == "/" and line[i + 1 : i + 2] == "/") or (
-            hash_comments and ch == "#"
-        ):
+        elif ch == "/" and line[i + 1 : i + 2] == "/":
             out.append(line[i:])
             break
         out.append(ch)

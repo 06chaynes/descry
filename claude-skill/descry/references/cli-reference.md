@@ -30,7 +30,7 @@ descry search <terms...>
 descry semantic <query>
     [--limit N]                  # default 10
 
-descry quick <name>
+descry quick <symbol>
     [--full]                     # no truncation
     [--brief]                    # minimal; signature + location + counts
 ```
@@ -43,8 +43,8 @@ descry quick <name>
 ## Call graph
 
 ```bash
-descry callers <name> [--limit N]           # default 20
-descry callees <name> [--limit N]           # default 20
+descry callers <symbol> [--limit N]           # default 20
+descry callees <symbol> [--limit N]           # default 20
 
 descry flow <start>
     [--direction forward|backward]   # default forward
@@ -57,13 +57,14 @@ descry path <start> <end>
     [--direction forward|backward]    # default forward
 ```
 
-- `flow` = full tree; `path` = shortest chain. Both are bounded by
-  `[query] max_nodes` and `[timeouts] query_ms` from `.descry.toml`.
+- `flow` = full tree; `path` = shortest chain. `flow` is bounded by
+  `[query] max_nodes`; `path` searches within `[query] max_depth` and
+  `[timeouts] query_ms` from `.descry.toml`.
 
 ## Context and structure
 
 ```bash
-descry context <node_id>
+descry context <symbol>
     [--brief | --full]
     [--expand-callees]               # inline small callees
     [--deduplicate]                  # avoid re-emitting same symbol
@@ -74,7 +75,7 @@ descry context <node_id>
     [--max-output-tokens N]           # overall cap
 
 descry structure <filename>
-descry flatten <class_node_id>       # class API incl. inherited methods
+descry flatten <symbol>       # class API incl. inherited methods
 descry impls <method> [--trait-name X]
 ```
 
@@ -96,7 +97,7 @@ descry churn
     [--mode symbols|files|co-change] # default symbols
     [--include-generated]            # default excludes lockfiles etc.
 
-descry evolution <name>
+descry evolution <symbol>
     [--time-range ...]
     [--limit N]                      # default 10
     [--show-diff]

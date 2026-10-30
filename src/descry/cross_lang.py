@@ -8,12 +8,6 @@ Architecture:
 - Frontend (TypeScript) uses apiClient.get/post/put/delete(endpoint)
 - Backend (Rust) has handlers with operationId matching function names
 - OpenAPI spec provides the bridge: path -> operationId -> handler function
-
-Usage:
-    config = DescryConfig(openapi_path="public/api/openapi.json", ...)
-    tracer = CrossLangTracer(config)
-    handler = tracer.endpoint_to_handler("GET", "/api/v1/actions")
-    # Returns: "list_actions"
 """
 
 import json
@@ -22,8 +16,10 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+from descry._files import open_regular
 from descry._graph import GraphSchemaError, load_graph_with_schema
-from descry.query import source_path
+from descry.handlers import _DEFAULT_API_PREFIXES
+from descry.query import HTTP_METHODS, source_path
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +82,7 @@ class CrossLangTracer:
             backend_handler_patterns: Path substrings identifying backend handler files
                 (e.g., ["backend/src/routes"]). If empty, handler filtering is skipped.
             api_prefixes: API version prefixes to strip when matching endpoints
-                (defaults to ["/api/v1", "/api/v2", "/api"]).
+                (default: `_DEFAULT_API_PREFIXES`).
             is_test: Tells whether a node ID is test code.
             project_root: Where the graph's files are, to read what heads a
                 function that shares its name with another.
@@ -98,9 +94,7 @@ class CrossLangTracer:
         self.openapi_path = Path(openapi_path)
         self.graph_path = Path(graph_path) if graph_path else None
         self.backend_handler_patterns = backend_handler_patterns or []
-        self._API_PREFIXES = (
-            tuple(api_prefixes) if api_prefixes else ("/api/v1", "/api/v2", "/api")
-        )
+        self._API_PREFIXES = tuple(api_prefixes or _DEFAULT_API_PREFIXES)
 
         # Parsed mappings
         self.path_to_operation: dict[
@@ -108,7 +102,7 @@ class CrossLangTracer:
         ] = {}  # (method, path) -> operation info
         self.operation_to_handler: dict[str, str] = {}  # operationId -> handler node_id
         self.endpoint_patterns: list[
-            tuple[str, str, re.Pattern, dict]
+            tuple[str, re.Pattern, dict]
         ] = []  # For path param matching
 
         self._parse_openapi()
@@ -117,13 +111,12 @@ class CrossLangTracer:
 
     def _parse_openapi(self):
         """Parse OpenAPI spec to extract endpoint -> operationId mappings."""
-        if not self.openapi_path.is_file():
+        try:
+            with open_regular(self.openapi_path, "r", encoding="utf-8") as f:
+                spec = json.load(f)
+        except FileNotFoundError:
             logger.warning(f"OpenAPI spec not found: {self.openapi_path}")
             return
-
-        try:
-            with open(self.openapi_path, encoding="utf-8") as f:
-                spec = json.load(f)
         except (ValueError, OSError) as e:
             logger.error(f"Failed to parse OpenAPI spec: {e}")
             return
@@ -136,7 +129,8 @@ class CrossLangTracer:
             if not isinstance(methods, dict):
                 continue
             for method, details in methods.items():
-                if method not in ("get", "post", "put", "delete", "patch"):
+                # An operation's field is the method's name in lower case.
+                if not method.islower() or method.upper() not in HTTP_METHODS:
                     continue
                 if not isinstance(details, dict):
                     continue
@@ -163,9 +157,7 @@ class CrossLangTracer:
                 escaped = re.escape(path)
                 pattern_str = re.sub(r"\\\{[^}]+\\\}", r"[^/]+", escaped)
                 pattern = re.compile(f"^{pattern_str}$")
-                self.endpoint_patterns.append(
-                    (method_upper, path, pattern, operation_info)
-                )
+                self.endpoint_patterns.append((method_upper, pattern, operation_info))
 
         logger.info(
             f"Loaded {len(self.path_to_operation)} API endpoints from OpenAPI spec"
@@ -177,9 +169,6 @@ class CrossLangTracer:
         handler is the one whose attributes or decorators write the
         operation's path, else the one outside test code; while more than
         one is left, none is linked."""
-        if not self.graph_path or not self.graph_path.exists():
-            return
-
         try:
             graph = load_graph_with_schema(self.graph_path)
         except (OSError, ValueError, GraphSchemaError) as e:
@@ -272,53 +261,22 @@ class CrossLangTracer:
                     return stripped
         return None
 
-    def endpoint_to_handler(self, method: str, path: str) -> str | None:
-        """Find the backend handler for an API endpoint.
-
-        Args:
-            method: HTTP method (GET, POST, PUT, DELETE, PATCH)
-            path: API path (e.g., "/api/v1/actions" or "/api/v1/actions/123")
-
-        Returns:
-            operationId (handler function name) or None if not found
-        """
-        method_upper = method.upper()
-
-        # Try exact match first
-        key = (method_upper, path)
-        if key in self.path_to_operation:
-            return self.path_to_operation[key]["operationId"]
-
-        # Try pattern matching for paths with IDs
-        for pattern_method, _, pattern, info in self.endpoint_patterns:
-            if pattern_method == method_upper and pattern.match(path):
-                return info["operationId"]
-
-        # Fallback: strip API version prefix and retry.
-        # Handles runtime paths (e.g., /api/v1/health) vs spec paths (e.g., /health).
-        stripped = self._strip_api_prefix(path)
-        if stripped is not None:
-            return self.endpoint_to_handler(method, stripped)
-
-        return None
-
     def get_handler_info(self, method: str, path: str) -> dict | None:
         """Get full information about an endpoint's handler.
 
+        ``method`` is an HTTP method of ``HTTP_METHODS``, in upper case.
         Returns dict with operationId, path, method, summary, tags, node_id.
         """
-        method_upper = method.upper()
-
         # Try exact match first
-        key = (method_upper, path)
+        key = (method, path)
         if key in self.path_to_operation:
             info = self.path_to_operation[key].copy()
             info["node_id"] = self.operation_to_handler.get(info["operationId"])
             return info
 
         # Try pattern matching
-        for pattern_method, _, pattern, info in self.endpoint_patterns:
-            if pattern_method == method_upper and pattern.match(path):
+        for pattern_method, pattern, info in self.endpoint_patterns:
+            if pattern_method == method and pattern.match(path):
                 result = info.copy()
                 result["node_id"] = self.operation_to_handler.get(info["operationId"])
                 return result
@@ -356,21 +314,3 @@ class CrossLangTracer:
             "openapi_path": str(self.openapi_path),
             "graph_path": str(self.graph_path) if self.graph_path else None,
         }
-
-
-if __name__ == "__main__":
-    # Generic stats-only smoke test. Prints OpenAPI + graph linkage stats.
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage: python -m descry.cross_lang <openapi_path> [graph_path]")
-        sys.exit(1)
-
-    openapi_path = sys.argv[1]
-    graph_path = sys.argv[2] if len(sys.argv) > 2 else None
-
-    tracer = CrossLangTracer(openapi_path, graph_path)
-    stats = tracer.get_stats()
-    print("CrossLangTracer stats:")
-    for key, value in stats.items():
-        print(f"  {key}: {value}")

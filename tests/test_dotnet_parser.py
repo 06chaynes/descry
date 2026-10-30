@@ -432,10 +432,10 @@ public class Log
         assert _nodes(builder) == {
             "Log": ("Class", 1, 12),
             "Log::Write": ("Method", 3, 5),
-            "Log::overload2_Write": ("Method", 7, 7),
-            "Log::overload3_Write": ("Method", 9, 11),
+            "Log::Write#2": ("Method", 7, 7),
+            "Log::Write#3": ("Method", 9, 11),
         }
-        assert _calls(builder) == [("Log::overload2_Write", "Write")]
+        assert _calls(builder) == [("Log::Write#2", "Write")]
 
     def test_members_without_a_modifier(self, builder):
         """An interface member and a private member have no modifier; a
@@ -491,7 +491,7 @@ public class Money
             "Money": ("Class", 1, 12),
             "Money::<clinit>": ("Method", 3, 3),
             "Money::<init>": ("Method", 4, 6),
-            "Money::overload2_<init>": ("Method", 7, 7),
+            "Money::<init>#2": ("Method", 7, 7),
             "Money::~Money": ("Method", 8, 8),
             "Money::operator +": ("Method", 9, 9),
             "Money::operator int": ("Method", 10, 10),
@@ -639,7 +639,7 @@ namespace App.Model
             "Outer::Handler": ("Class", 7, 7),
             "Outer::More": ("Method", 11, 11),
             "Pair": ("Class", 13, 13),
-            "overload2_Pair": ("Class", 14, 14),
+            "Pair#2": ("Class", 14, 14),
         }
         outer = next(n for n in builder.nodes if n["id"].endswith("::Outer"))
         assert outer["metadata"]["namespace"] == "App.Model"
@@ -649,7 +649,7 @@ namespace App.Model
             for e in builder.edges
             if e["relation"] == "INHERITS"
         ]
-        assert inherits == [("overload2_Pair", "REF:Pair")]
+        assert inherits == [("Pair#2", "REF:Pair")]
 
     def test_fields_declared_together(self, builder):
         src = """
@@ -822,7 +822,7 @@ public static class Lookup
         assert metadata["LoadAsync"]["return_type"] == "Task<Entry>"
         # Overloads that return different types tell no type.
         assert metadata["Load"]["return_type"] == ""
-        assert metadata["overload2_Load"]["return_type"] == ""
+        assert metadata["Load#2"]["return_type"] == ""
         assert metadata["Load"]["static"] is False
         assert metadata["Shout"]["static"] is True
         assert metadata["TryFind"]["parameters"] == [

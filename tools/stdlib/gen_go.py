@@ -4,8 +4,9 @@ usage: gen_go.py GO_DIR OUTPUT
 
 GO_DIR holds, at their paths in the Go repository at one release,
 `api/go1.txt`, `api/go1.1.txt` and so on, the exported API each release
-added with a declaration a line, and `src/builtin/builtin.go`, the
-predeclared identifiers.
+added with a declaration a line, `src/builtin/builtin.go`, the
+predeclared identifiers, and `src/internal/syslist/syslist.go`, the GOOS
+and GOARCH values build constraints know.
 """
 
 import re
@@ -14,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from common import main, new_type, record, split
+from common import closing, main, new_type, record, split
 
 # `pkg net/http (linux-386), method (*Client) Get(string) (*Response, error) #123`
 LINE = re.compile(r"pkg (\S+)(?: \([\w-]+\))?, (func|method|type) (.*?)(?: #\d+)?")
@@ -33,19 +34,14 @@ PREDECLARED_METHODS = re.compile(
     r"^type (\w+) interface \{\n\t((?:.*\n)+?)\}", re.MULTILINE
 )
 PREDECLARED_FUNCTION = re.compile(r"^func (.+)$", re.MULTILINE)
+# `var KnownOS = map[string]bool{ ... }` and its entries
+KNOWN = re.compile(
+    r"^var Known(OS|Arch) = map\[string\]bool\{\n(.*?)^\}", re.MULTILINE | re.DOTALL
+)
+ENTRY = re.compile(r'"([^"]+)":\s*true')
 # The types Go writes without a name: a slice or an array, a map, a channel
 # and the several results of a function.
 UNNAMED = ("[]", "map", "chan", "()")
-
-
-def after(text, at):
-    """The index after the bracket that closes the one at `at`."""
-    depth = 0
-    while True:
-        depth += (text[at] in BRACKETS[0]) - (text[at] in BRACKETS[1])
-        at += 1
-        if depth == 0:
-            return at
 
 
 def signature(text):
@@ -53,8 +49,8 @@ def signature(text):
     name = IDENTIFIER.match(text)[0]
     at = len(name)
     if text[at] == "[":
-        at = after(text, at)
-    return name, text[after(text, at) :].strip() or None
+        at = closing(text, at, *BRACKETS)
+    return name, text[closing(text, at, *BRACKETS) :].strip() or None
 
 
 def package_name(path):
@@ -118,7 +114,7 @@ def build(directory):
                     (functions, f"{package}.{name}", package, release, returns)
                 )
             elif kind == "method":
-                end = after(text, 0)
+                end = closing(text, 0, *BRACKETS)
                 receiver = text[1 : end - 1].lstrip("*").partition("[")[0]
                 table = types.setdefault(f"{package}.{receiver}", new_type())["methods"]
                 name, returns = signature(text[end + 1 :])
@@ -129,7 +125,7 @@ def build(directory):
                 added.setdefault((package, name), release)
                 rest = text[len(name) :]
                 if rest.startswith("["):
-                    end = after(rest, 0)
+                    end = closing(rest, 0, *BRACKETS)
                     this["params"] = [
                         part.split()[0]
                         for part in split(rest[1 : end - 1], ",", *BRACKETS)
@@ -169,12 +165,23 @@ def build(directory):
         if base in types and base not in this["bases"]:
             this["bases"].append(base)
 
+    syslist = directory / "src" / "internal" / "syslist" / "syslist.go"
+    platforms = {
+        axis.lower(): ENTRY.findall(entries)
+        for axis, entries in KNOWN.findall(syslist.read_text(encoding="utf-8"))
+    }
     newest = files[-1].stem.removeprefix("go")
     source = (
-        f"Go {newest}, api/{files[0].name} to api/{files[-1].name} and"
-        " src/builtin/builtin.go"
+        f"Go {newest}, api/{files[0].name} to api/{files[-1].name},"
+        " src/builtin/builtin.go and src/internal/syslist/syslist.go"
     )
-    return source, types, functions, scope
+    return {
+        "source": source,
+        "types": types,
+        "functions": functions,
+        "scope": scope,
+        "platforms": platforms,
+    }
 
 
 if __name__ == "__main__":

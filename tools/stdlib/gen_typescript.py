@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from common import main, new_type, record
+from common import closing, lineage, main, new_type, record
 from common import split as cut
 
 TOKEN = re.compile(
@@ -53,16 +53,6 @@ def split(toks, separators):
             depth += (tok[0] in OPEN) - (tok[0] in CLOSE)
             parts[-1].append(tok)
     return [part for part in parts if part]
-
-
-def closing(words, at):
-    """The index after the bracket that closes the one at `at`."""
-    depth = 0
-    while True:
-        depth += (words[at] in OPEN) - (words[at] in CLOSE)
-        at += 1
-        if depth == 0:
-            return at
 
 
 def arguments(text):
@@ -111,7 +101,7 @@ def callable_type(toks):
     tokens of each of its parameters and those of what it returns."""
     words = [tok[0] for tok in toks] + [""]
     if words[0] == "(":
-        end = closing(words, 0)
+        end = closing(words, 0, OPEN, CLOSE)
         if words[end] == "=>":
             return split(toks[1 : end - 1], ","), toks[end + 1 :]
         if not words[end]:
@@ -136,6 +126,11 @@ class Library:
         self.signatures = []
         self.variables = []
         self.callbacks = {}
+        # (type, method) of each signature that puts what it is passed on
+        # the object it is passed first, and hands that object back
+        self.writes = set()
+        # global value -> the type it is declared with
+        self.value_types = {}
 
     def declare(self, name, params=()):
         self.declared.add(name)
@@ -158,7 +153,7 @@ class Library:
         while words[size : size + 1] == ["."]:
             size += 2
         if size < len(words) and (
-            words[size] != "<" or closing(words, size) < len(words)
+            words[size] != "<" or closing(words, size, OPEN, CLOSE) < len(words)
         ):
             return None
         return self.resolve(namespace, "".join(words[:size]))
@@ -176,14 +171,6 @@ class Library:
                 word = self.resolve(namespace, word)
             out.append(bounds[word] if word in bounds and not qualified else word)
         return None if out == ["void"] else "".join(out)
-
-    def lineage(self, name):
-        """`name` and every type it extends."""
-        seen = [name]
-        for each in seen:
-            bases = [base.partition("<")[0] for base in self.types[each]["bases"]]
-            seen += [base for base in bases if base not in seen]
-        return seen
 
     def finish(self):
         for kind, namespace, toks in self.heritage:
@@ -205,6 +192,25 @@ class Library:
             }
             returned = self.spell(namespace, returns, bounds)
             table[name] = join(table[name], returned) if name in table else returned
+            first = annotation(params[0]) if params else []
+            gives = split(returns, "&")[0] if returns else []
+            # A further parameter, required, of what is put on the object:
+            # no primitive, which no member is made of
+            put = [
+                held
+                for param in params[1:]
+                if (held := annotation(param))
+                and "?" not in [tok[0] for tok in param[: len(param) - len(held)]]
+                and held[0][0] not in PRIMITIVES
+            ]
+            if (
+                put
+                and len(first) == 1
+                and first[0][0] in [part[0][0] for part in generics]
+                and [tok[0] for tok in gives] == [first[0][0]]
+            ):
+                # `assign<T, U>(target: T, source: U): T & U`
+                self.writes.add((owners.get(id(table)), name))
             passed = self.callbacks.setdefault(owners.get(id(table)), {})
             for position, param in enumerate(params):
                 taken = callable_type(annotation(param))
@@ -246,11 +252,13 @@ class Library:
                 if len(operands) != 1 or operands[0] not in self.types:
                     continue
                 target = operands[0]
+                if not namespace:
+                    self.value_types[name] = target
             if toks and name in self.types:
                 # The variable is the value of the type that shares its
                 # name: what can be called on it are the type's statics.
                 members = {}
-                for each in self.lineage(target):
+                for each in lineage(target, self.types, "<", {}):
                     members = self.types[each]["methods"] | members
                 for method, returns in members.items():
                     record(self.types[name]["statics"], method, returns)
@@ -388,7 +396,7 @@ class Reader:
                 continue
             name = ""
             if words[at] == "[":
-                end = closing(words, at)
+                end = closing(words, at, OPEN, CLOSE)
                 name, at = "".join(words[at:end]), end
             elif words[at] not in ("(", "<"):
                 name, at = words[at], at + 1
@@ -402,11 +410,11 @@ class Reader:
         at = int(words[0] == "?")
         generics = []
         if words[at] == "<":
-            end = closing(words, at)
+            end = closing(words, at, OPEN, CLOSE)
             generics, at = toks[at + 1 : end - 1], end
         if words[at] != "(":
             return
-        end = closing(words, at)
+        end = closing(words, at, OPEN, CLOSE)
         if words[end] != ":":
             raise ValueError(f"{self.name}: {name} has no return type")
         params = split(toks[at + 1 : end - 1], ",")
@@ -441,14 +449,21 @@ def build(archive):
     source = (
         f"typescript {version} (npm), {libraries} with the libraries they reference"
     )
-    return (
-        source,
-        library.types,
-        library.functions,
-        library.scope,
-        None,
-        library.callbacks,
-    )
+    return {
+        "source": source,
+        "types": library.types,
+        "functions": library.functions,
+        "scope": library.scope,
+        "callbacks": library.callbacks,
+        # The functions of a global value that put members on the object
+        # passed first: `Object.assign`, `Object.defineProperty`
+        "writers": sorted(
+            f"{name}.{method}"
+            for name, declared in library.value_types.items()
+            for owner, method in library.writes
+            if owner == declared
+        ),
+    }
 
 
 if __name__ == "__main__":

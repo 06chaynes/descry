@@ -122,8 +122,6 @@ void run() {
         assert "REF:doStuff" in targets
 
     def test_method_call(self, builder):
-        # Use a name that's not in STDLIB_FILTER ('start' matches Python's
-        # re.Match.start() and is intentionally filtered cross-language).
         src = """
 void run(Server* srv) {
     srv->launchWorker();
@@ -555,6 +553,7 @@ static struct { int a; } table[] = {{1}, {2}};
             "value": (1, 7),
             "list_s": (8, 10),
             "Mode": (12, 12),
+            "struct@13": (13, 13),
         }
         assert builder.fields["FILE:src/foo.c::value"] == {
             "kind": "int",

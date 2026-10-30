@@ -9,6 +9,18 @@ import time
 
 import pytest
 
+# The tests run without the variables that configure descry, so the shell
+# they run from does not change what they test; a test sets its own.
+for _name in (
+    "DESCRY_CACHE_DIR",
+    "DESCRY_LOG_LEVEL",
+    "DESCRY_NO_EMBEDDINGS",
+    "DESCRY_NO_SCIP",
+    "DESCRY_PRIME_THREADS",
+    "DESCRY_SCIP_TIMEOUT",
+):
+    os.environ.pop(_name, None)
+
 
 @pytest.fixture
 def sample_graph(tmp_path):

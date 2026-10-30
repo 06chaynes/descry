@@ -122,11 +122,11 @@ export default function (pi: ExtensionAPI) {
 			"relationships - distinguishes actual calls from definitions and comments. " +
 			"Use for impact analysis before refactoring.",
 		parameters: Type.Object({
-			name: Type.String({ description: "Symbol name to find callers of" }),
+			symbol: Type.String({ description: "A node ID, or a symbol name" }),
 			limit: Type.Optional(Type.Number({ description: "Max results", default: 20 })),
 		}),
 		async execute(_toolCallId, params, signal) {
-			const args = ["--symbol", params.name];
+			const args = ["--symbol", params.symbol];
 			if (params.limit !== undefined) args.push("--limit", String(params.limit));
 			const result = await runDescry("callers", args, signal);
 			return { content: [{ type: "text", text: result }] };
@@ -140,11 +140,11 @@ export default function (pi: ExtensionAPI) {
 			"Find what functions/methods a given symbol calls. Use for dependency analysis " +
 			"and understanding what a function relies on.",
 		parameters: Type.Object({
-			name: Type.String({ description: "Symbol name to find callees of" }),
+			symbol: Type.String({ description: "A node ID, or a symbol name" }),
 			limit: Type.Optional(Type.Number({ description: "Max results", default: 20 })),
 		}),
 		async execute(_toolCallId, params, signal) {
-			const args = ["--symbol", params.name];
+			const args = ["--symbol", params.symbol];
 			if (params.limit !== undefined) args.push("--limit", String(params.limit));
 			const result = await runDescry("callees", args, signal);
 			return { content: [{ type: "text", text: result }] };
@@ -159,7 +159,7 @@ export default function (pi: ExtensionAPI) {
 			"Use brief=true (~50 tokens) to quickly verify a symbol. " +
 			"Options: full=true (no truncation), expand_callees=true (inline dependencies).",
 		parameters: Type.Object({
-			node_id: Type.String({ description: "Node ID from search results" }),
+			symbol: Type.String({ description: "A node ID, or a symbol name" }),
 			brief: Type.Optional(Type.Boolean({ description: "Brief output (~50 tokens)", default: false })),
 			full: Type.Optional(Type.Boolean({ description: "Full output (no truncation)", default: false })),
 			expand_callees: Type.Optional(Type.Boolean({ description: "Inline callee source code", default: false })),
@@ -168,7 +168,7 @@ export default function (pi: ExtensionAPI) {
 			max_tokens: Type.Optional(Type.Number({ description: "Max output tokens", default: 2000 })),
 		}),
 		async execute(_toolCallId, params, signal) {
-			const args = ["--node-id", params.node_id];
+			const args = ["--symbol", params.symbol];
 			if (params.brief) args.push("--brief");
 			if (params.full) args.push("--full");
 			if (params.expand_callees) args.push("--expand-callees");
@@ -252,12 +252,12 @@ export default function (pi: ExtensionAPI) {
 			"Combines search + context lookup - saves a round trip. " +
 			"Set brief=true for minimal output, full=true for complete source.",
 		parameters: Type.Object({
-			name: Type.String({ description: "Symbol name to find" }),
+			symbol: Type.String({ description: "A node ID, or a symbol name" }),
 			full: Type.Optional(Type.Boolean({ description: "Show complete source", default: false })),
 			brief: Type.Optional(Type.Boolean({ description: "Minimal output", default: false })),
 		}),
 		async execute(_toolCallId, params, signal) {
-			const args = ["--name", params.name];
+			const args = ["--symbol", params.symbol];
 			if (params.full) args.push("--full");
 			if (params.brief) args.push("--brief");
 			const result = await runDescry("quick", args, signal);
@@ -335,14 +335,14 @@ export default function (pi: ExtensionAPI) {
 			"Shows commit timeline with authors and change sizes. " +
 			"Set show_diff=true to include actual diff hunks.",
 		parameters: Type.Object({
-			name: Type.String({ description: "Symbol name to track" }),
+			symbol: Type.String({ description: "A node ID, or a symbol name" }),
 			time_range: Type.Optional(Type.String({ description: "Git time range" })),
 			limit: Type.Optional(Type.Number({ description: "Max commits", default: 10 })),
 			show_diff: Type.Optional(Type.Boolean({ description: "Include diff hunks", default: false })),
 			crate: Type.Optional(Type.String({ description: "Filter by crate/package name" })),
 		}),
 		async execute(_toolCallId, params, signal) {
-			const args = ["--name", params.name];
+			const args = ["--symbol", params.symbol];
 			if (params.time_range) args.push("--time-range", params.time_range);
 			if (params.limit !== undefined) args.push("--limit", String(params.limit));
 			if (params.show_diff) args.push("--show-diff");
@@ -428,10 +428,10 @@ export default function (pi: ExtensionAPI) {
 			"Show the effective API of a class including inherited methods. " +
 			"Use for understanding class hierarchies in OOP codebases.",
 		parameters: Type.Object({
-			class_node_id: Type.String({ description: "Class node ID from search results" }),
+			symbol: Type.String({ description: "A class's node ID, or its name" }),
 		}),
 		async execute(_toolCallId, params, signal) {
-			const result = await runDescry("flatten", ["--node-id", params.class_node_id], signal);
+			const result = await runDescry("flatten", ["--symbol", params.symbol], signal);
 			return { content: [{ type: "text", text: result }] };
 		},
 	});

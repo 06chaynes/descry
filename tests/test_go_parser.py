@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from descry.generate import CodeGraphBuilder
-from descry.go_parser import GoParser
+from descry.go_parser import GoParser, go_constraints
 
 
 @pytest.fixture
@@ -25,16 +25,6 @@ def _node_ids(builder):
 
 
 class TestPackageAndImports:
-    def test_package_metadata(self, builder):
-        src = """
-package myapp
-
-func main() {}
-""".strip()
-        _parse(builder, src)
-        file_node = next(n for n in builder.nodes if n["id"] == "FILE:pkg/app.go")
-        assert file_node.get("metadata", {}).get("go_package") == "myapp"
-
     def test_single_import(self, builder):
         src = """
 package myapp
@@ -384,25 +374,6 @@ func (s *Svc) Go() {
         assert "REF:for" not in targets
         assert "REF:tick" in targets
 
-    def test_builtin_filtered(self, builder):
-        src = """
-package app
-
-type Svc struct{}
-
-func (s *Svc) Go() {
-    m := make(map[string]int)
-    _ = append(nil, 1)
-    _ = len(m)
-}
-""".strip()
-        _parse(builder, src)
-        targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
-        # `make`, `append`, `len` are Go builtins — should not become CALLS edges.
-        assert "REF:make" not in targets
-        assert "REF:append" not in targets
-        assert "REF:len" not in targets
-
 
 class TestUnexportedAndReceivers:
     def test_unexported_type_and_const(self, builder):
@@ -510,3 +481,18 @@ func run() {
         _parse(builder, src)
         targets = {e["target"] for e in builder.edges if e["relation"] == "CALLS"}
         assert targets == {"REF:stepOne", "REF:stepTwo"}
+
+
+def test_a_file_name_constrains_its_build_as_go_build_reads_it():
+    """Up to its first `.`, past its first `_` and a `_test` suffix, a name
+    ends in `_GOOS_GOARCH` or one of them, as Go's `internal/syslist` knows
+    them; a known word elsewhere in it says nothing."""
+    cases = {
+        "h_mips64le.go": {"mips64le"},
+        "x_linux_amd64_test.go": {"linux", "amd64"},
+        "a_linux.pb.go": {"linux"},
+        "x_arm_helper.go": set(),
+        "linux.go": set(),
+    }
+    for name, required in cases.items():
+        assert go_constraints(name, []) == (frozenset(required), frozenset()), name

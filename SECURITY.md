@@ -18,9 +18,48 @@ Include in your report:
 - Initial triage and severity assessment within **14 days**.
 - Coordinated disclosure target: **90 days** from acknowledgement, or sooner if a fix can be shipped quickly. If an issue requires longer, we will discuss a revised timeline with you.
 
+## Security Model
+
+descry reads repositories it does not trust: the code it indexes, a
+`.descry.toml` or cache a repository ships, and the text of its files
+are data, never instructions.
+
+- **descry's own indexing runs nothing from the repository.** The indexer
+  is a child Python started with `-P`, so a `descry/` package in the
+  repository cannot shadow descry's own. Git runs with the repository's
+  hooks, filters, external diffs and other configured commands turned off.
+- **SCIP indexers are the languages' own tools, and some run the
+  project's code:** rust-analyzer runs build scripts and procedural
+  macros, scip-java runs the Gradle or Maven build, scip-dotnet runs
+  MSBuild, scip-clang runs the compiler the repository's
+  `compile_commands.json` names. Index a repository you do not trust with SCIP off
+  (`DESCRY_NO_SCIP=1`, or `[features] enable_scip = false`).
+- **Files are read only inside the project root.** A path in a graph, or
+  a symlink in the tree, that leads outside it is refused. With SCIP on,
+  the indexers, and descry's checks of what they will index, read the
+  tree as the languages' own tools do.
+- **The cache stays inside the project** unless `DESCRY_CACHE_DIR` names
+  another place; a shipped `.descry_cache` that resolves elsewhere is
+  refused. A file's kept parse, and a node's kept embedding vector, are
+  reused only from what descry signed with a key in the user's state
+  directory, so a shipped cache is parsed and encoded over.
+- **Settings that reach a subprocess are checked.** Toolchains, indexer
+  arguments and model names from `.descry.toml` are refused if they carry
+  shell syntax, short flags or paths outside the project.
+- **No model code runs.** Embedding models load with
+  `trust_remote_code=False`, at pinned revisions for the models descry
+  knows.
+- **The web UI is for this machine only.** It listens on 127.0.0.1 and
+  rejects other `Host` headers and cross-origin writes.
+- **The MCP server fences repository text.** Source, docstrings and other
+  text from the repository reach the agent inside a tagged envelope, and
+  structured answers carry none of it but the OpenAPI tags, paths and
+  operation IDs a `cross-lang` answer lists, the import lines a
+  `structure` answer names, and the file paths its IDs are.
+
 ## Supported Versions
 
-Descry is pre-1.0. Only the latest minor release on PyPI receives security fixes. Users on older versions are encouraged to upgrade.
+Only the latest release on PyPI receives security fixes. Users on older versions are encouraged to upgrade.
 
 ## Credits
 

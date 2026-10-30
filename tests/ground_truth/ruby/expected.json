@@ -1,0 +1,85 @@
+{
+  "callers": {
+    "FILE:lib/io.rb::Reader::parse": {
+      "resolved": [
+        "FILE:lib/io.rb::read_all"
+      ],
+      "candidate": [
+        "FILE:lib/io.rb::guess"
+      ]
+    },
+    "FILE:lib/models.rb::Order::parse": {
+      "resolved": [],
+      "candidate": [
+        "FILE:lib/io.rb::guess"
+      ]
+    },
+    "FILE:lib/models.rb::Base::save": {
+      "resolved": [
+        "FILE:lib/models.rb::User::rename"
+      ],
+      "candidate": []
+    },
+    "FILE:lib/models.rb::Base::validate": {
+      "resolved": [
+        "FILE:lib/models.rb::Base::save"
+      ],
+      "candidate": []
+    },
+    "FILE:lib/models.rb::User::rename": {
+      "resolved": [
+        "FILE:lib/main.rb::main"
+      ],
+      "candidate": []
+    }
+  },
+  "callees": {
+    "FILE:lib/main.rb::main": {
+      "resolved": [
+        "FILE:lib/models.rb::User",
+        "FILE:lib/models.rb::User::rename",
+        "FILE:lib/io.rb::read_all"
+      ]
+    },
+    "FILE:lib/io.rb::guess": {
+      "resolved": [],
+      "candidate": [
+        "thing.parse"
+      ]
+    },
+    "FILE:lib/main.rb::misuse": {
+      "resolved": [
+        "FILE:lib/models.rb::User"
+      ],
+      "unresolved": [
+        "user.parse"
+      ]
+    }
+  },
+  "flatten": {
+    "FILE:lib/models.rb::User": [
+      "rename",
+      "save",
+      "validate"
+    ]
+  },
+  "path": [
+    [
+      "FILE:lib/main.rb::main",
+      "FILE:lib/io.rb::Reader::parse",
+      [
+        "FILE:lib/io.rb::read_all",
+        "FILE:lib/io.rb::Reader::parse"
+      ]
+    ]
+  ],
+  "refused": [
+    "parse",
+    "validate"
+  ],
+  "external": {
+    "FILE:lib/io.rb::Reader::parse": [
+      "JSON.parse"
+    ]
+  }
+}

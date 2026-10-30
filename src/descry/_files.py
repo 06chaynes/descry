@@ -29,6 +29,25 @@ def create_sibling(path: Path) -> tuple[int, Path]:
     return os.open(tmp, flags, 0o666), tmp
 
 
+def open_regular(path: Path, mode: str = "rb", **kwargs):
+    """`path` opened for reading if it is a regular file: never through a
+    symlink at its name, nor a FIFO or a device, which a repository can ship
+    where descry keeps files and a read of which would never end. OSError
+    for anything else."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    # Without O_NOFOLLOW (Windows), the name must be a regular file before
+    # the open and the very file opened after it.
+    named = None if hasattr(os, "O_NOFOLLOW") else os.lstat(path)
+    f = os.fdopen(os.open(path, flags), mode, **kwargs)
+    opened = os.fstat(f.fileno())
+    if not stat.S_ISREG(opened.st_mode) or (
+        named and not (stat.S_ISREG(named.st_mode) and os.path.samestat(named, opened))
+    ):
+        f.close()
+        raise OSError(f"{path} is not a regular file")
+    return f
+
+
 def remove_orphans(directory: Path, names: str) -> None:
     """Remove the temporaries `create_sibling` made in `directory` for targets
     whose names match the glob `names`, that nothing has written to for

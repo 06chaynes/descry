@@ -24,10 +24,16 @@ jobs:
       - run: ruff format --check src/ tests/ tools/
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12", "3.13"]
+        # The unit suite and the interface tests on macOS too; Windows is
+        # best-effort, kept from regressing on a local VM.
+        include:
+          - os: macos-latest
+            python-version: "3.13"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0

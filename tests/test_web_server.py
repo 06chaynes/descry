@@ -24,7 +24,6 @@ import base64
 import hashlib
 import inspect
 import json
-import logging
 import os
 import re
 import shutil
@@ -82,6 +81,23 @@ def client(web_project):
 
 
 # --- TrustedHostMiddleware / DNS-rebinding protection ---
+
+
+@pytest.mark.parametrize(
+    ("given", "level"),
+    [("NOTSET", "debug"), ("basic_format", "warning"), ("verbose", "warning")],
+)
+def test_the_log_level_uvicorn_starts_at(given, level):
+    """uvicorn has no NOTSET level: the server logs everything at debug. A
+    name that is no level is WARNING, as the CLI reads it."""
+    found = subprocess.run(
+        [sys.executable, "-c", "import descry.web.server as s; print(s._level_name)"],
+        env={**os.environ, "DESCRY_LOG_LEVEL": given},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert found.stdout.strip() == level
 
 
 class TestTrustedHost:
@@ -496,23 +512,25 @@ class TestServiceDelegation:
     @pytest.mark.parametrize(
         ("endpoint", "method"),
         [
-            ("api_health", "status_data"),
-            ("api_status", "status_data"),
-            ("api_ensure", "ensure_data"),
+            ("api_health", "health_answer"),
+            ("api_status", "status_answer"),
+            ("api_ensure", "ensure_answer"),
             ("api_examples", "examples_data"),
-            ("api_search", "search_data"),
-            ("api_semantic", "semantic_data"),
-            ("api_callers", "callers_data"),
-            ("api_callees", "callees_data"),
-            ("api_structure", "structure_data"),
-            ("api_impls", "impls_data"),
-            ("api_quick", "quick_data"),
-            ("api_flow", "flow_data"),
-            ("api_path", "path_data"),
-            ("api_cross_lang", "cross_lang_data"),
-            ("api_churn", "churn_data"),
-            ("api_evolution", "evolution_data"),
-            ("api_changes", "changes_data"),
+            ("api_search", "search_answer"),
+            ("api_semantic", "semantic_answer"),
+            ("api_callers", "callers_answer"),
+            ("api_callees", "callees_answer"),
+            ("api_structure", "structure_answer"),
+            ("api_flatten", "flatten_answer"),
+            ("api_context", "context_answer"),
+            ("api_impls", "impls_answer"),
+            ("api_quick", "quick_answer"),
+            ("api_flow", "flow_answer"),
+            ("api_path", "path_answer"),
+            ("api_cross_lang", "cross_lang_answer"),
+            ("api_churn", "churn_answer"),
+            ("api_evolution", "evolution_answer"),
+            ("api_changes", "changes_answer"),
         ],
     )
     def test_endpoint_delegates_to_service(self, endpoint, method):
@@ -552,7 +570,7 @@ class TestServiceDelegation:
 
     def test_index_delegates_and_does_not_spawn_its_own_subprocess(self):
         src = inspect.getsource(web_server.api_index)
-        assert "index()" in src
+        assert "index_answer()" in src
         assert "subprocess" not in src, "web must not run the indexer itself"
 
     def test_web_holds_no_index_lock_of_its_own(self):
@@ -633,20 +651,17 @@ class TestServiceBackedEndpoints:
         assert stale_graph == []
 
     def test_ensure_answers_with_what_the_service_did(self, client, stale_graph):
-        ready = client.post("/api/ensure", content=b'{"max_age_hours": 3}')
-        assert ready.json() == {
-            "action": "ready",
-            "graph": client.get("/api/status").json(),
-        }
+        ready = client.post("/api/ensure", content=b'{"max_age_hours": 3}').json()
+        assert set(ready) == {"action", "summary", "graph"}
+        assert ready["action"] == "ready"
+        assert ready["graph"] == client.get("/api/status").json()
         assert stale_graph == []
 
         refreshed = client.post("/api/ensure", content=b'{"max_age_hours": 1}')
         assert refreshed.status_code == 200
-        assert refreshed.json() == {
-            "action": "refreshed",
-            "result": "Index complete.",
-            "graph": client.get("/api/status").json(),
-        }
+        assert refreshed.json()["action"] == "refreshed"
+        assert refreshed.json()["markdown"] == "Index complete."
+        assert refreshed.json()["graph"] == client.get("/api/status").json()
         assert stale_graph == ["."]
 
     @pytest.mark.parametrize("path", ["/api/index", "/api/ensure"])
@@ -654,16 +669,17 @@ class TestServiceBackedEndpoints:
         (web_project / ".descry_cache" / "codebase_graph.json").unlink()
 
         async def failing_index(path="."):
-            return ServiceError("Index failed:\nboom")
+            return ServiceError("Index failed.", detail="indexer output")
 
         monkeypatch.setattr(web_server._get_service(), "index", failing_index)
         r = client.post(path)
         assert r.status_code == 500
-        assert r.json() == {"error": "Index failed:\nboom"}
+        assert r.json() == {"error": "Index failed.", "reason": "failed"}
 
     def test_status_is_the_services_view_of_the_graph(self, client, web_project):
         graph = web_project / ".descry_cache" / "codebase_graph.json"
         status = client.get("/api/status").json()
+        assert {k: status.pop(k) for k in ("scip", "embeddings")}
         assert status == {
             "exists": True,
             "age_str": "0.0h ago",
@@ -674,7 +690,8 @@ class TestServiceBackedEndpoints:
             "stale": False,
             "error": None,
         }
-        assert client.get("/api/health").json()["graph"] == status
+        health = client.get("/api/health").json()["graph"]
+        assert {k: v for k, v in health.items() if k in status} == status
 
         graph.write_text("{")
         later = time.time() + 5
@@ -684,12 +701,17 @@ class TestServiceBackedEndpoints:
         assert unreadable["error"]
 
         graph.unlink()
-        assert client.get("/api/status").json() == {
+        missing = client.get("/api/status").json()
+        assert {k: missing.pop(k) for k in ("scip", "embeddings")}
+        assert missing == {
             "exists": False,
             "age_str": "N/A",
             "age_hours": None,
             "nodes": 0,
             "edges": 0,
+            "languages": [],
+            "stale": False,
+            "error": None,
         }
 
     def test_status_lists_the_languages_the_search_filter_finds(
@@ -716,6 +738,13 @@ class TestServiceBackedEndpoints:
         assert 'x-for="lang in health?.graph?.languages' in page
         assert '<option value="rust">' not in page
 
+    def test_page_sends_show_callers_both_ways_and_links_no_unresolved_callee(self):
+        """Unticked, "Show callers" asks for none (the server's default is
+        all); a callee row of an unresolved call opens no context."""
+        page = (Path(web_server.__file__).parent / "web" / "index.html").read_text()
+        assert "p.set('show_callers', f.show_callers ? 'true' : 'false')" in page
+        assert "c.id.startsWith('REF:') || viewContext(c.id)" in page
+
     def test_status_when_the_graph_vanishes_mid_request(
         self, client, web_project, monkeypatch
     ):
@@ -736,17 +765,28 @@ class TestServiceBackedEndpoints:
         [
             "/api/search?terms=hello&limit=-1",
             "/api/semantic?query=hello&limit=-1",
-            "/api/callers?name=hello&limit=-1",
-            "/api/callees?name=hello&limit=-1",
+            "/api/callers?symbol=hello&limit=-1",
+            "/api/callees?symbol=hello&limit=-1",
             "/api/churn?limit=-1",
-            "/api/evolution?name=hello&limit=-1",
+            "/api/evolution?symbol=hello&limit=-1",
             "/api/changes?limit=-1",
         ],
     )
     def test_negative_limit_is_400(self, client, url):
         r = client.get(url)
         assert r.status_code == 400
-        assert r.json() == {"error": "limit must be at least 1, got -1."}
+        assert r.json() == {
+            "error": "limit must be at least 1, got -1.",
+            "reason": "invalid",
+        }
+
+    @pytest.mark.parametrize(
+        "url", ["/api/callers?symbol=hello&limit=ten", "/api/flow?start=hello&depth=x"]
+    )
+    def test_a_parameter_not_of_its_type_is_invalid(self, client, url):
+        r = client.get(url)
+        assert r.status_code == 400
+        assert r.json()["reason"] == "invalid"
 
     def test_semantic_while_the_model_loads_says_what_the_service_says(self, client):
         class Slow:
@@ -760,9 +800,15 @@ class TestServiceBackedEndpoints:
         r = client.get("/api/semantic?query=greeting")
 
         assert r.status_code == 503
-        assert r.json() == {"error": "Embeddings are loading. Try again shortly."}
+        assert r.json() == {
+            "error": "Embeddings are loading. Try again shortly.",
+            "reason": "loading",
+        }
 
-    def test_semantic_reports_why_the_model_did_not_load(self, client):
+    def test_semantic_reports_that_the_model_did_not_load(self, client):
+        """Its kind, not its message, which may name what the project
+        configured: that goes to the log."""
+
         class GatedModel:
             def __init__(self, *args, **kwargs):
                 raise RuntimeError("model is gated; run hf auth login")
@@ -773,7 +819,8 @@ class TestServiceBackedEndpoints:
 
         r = client.get("/api/semantic?query=greeting")
         assert r.status_code == 503
-        assert "model is gated" in r.json()["error"]
+        assert "RuntimeError" in r.json()["error"]
+        assert "model is gated" not in r.json()["error"]
         assert "Graph not found" not in r.json()["error"]
 
     def test_health_features_honor_the_enable_flags(self, web_project, monkeypatch):
@@ -816,25 +863,27 @@ class TestServiceBackedEndpoints:
         assert calls == ["."]
 
     def test_context_for_an_unknown_node_is_an_error_status(self, client):
-        r = client.get("/api/context?node_id=FILE:missing.py::nothing_here_xyz")
+        r = client.get("/api/context?symbol=FILE:missing.py::nothing_here_xyz")
         assert r.status_code == 404
         assert "not found" in r.json()["error"].lower()
 
     def test_context_for_a_known_node_renders(self, client):
-        r = client.get("/api/context?node_id=FILE:app.py::hello")
+        r = client.get("/api/context?symbol=hello")
         assert r.status_code == 200
         assert "hello" in r.json()["markdown"]
+        assert r.json()["symbol"]["id"] == "FILE:app.py::hello"
 
-    def test_flatten_of_a_non_class_is_an_error_status(self, client):
-        r = client.get("/api/flatten?class_node_id=FILE:app.py::hello")
-        assert r.status_code == 404
+    def test_flatten_of_a_non_class_is_invalid(self, client):
+        r = client.get("/api/flatten?symbol=FILE:app.py::hello")
+        assert r.status_code == 400
+        assert r.json()["reason"] == "invalid"
         assert "not a Class" in r.json()["error"]
 
     def test_quick_for_a_symbol_whose_source_is_gone_is_an_error_status(
         self, client, web_project
     ):
         (web_project / "app.py").unlink()
-        r = client.get("/api/quick?name=hello")
+        r = client.get("/api/quick?symbol=hello")
         assert r.status_code == 404
         assert "not found on disk" in r.json()["error"]
 
@@ -843,35 +892,12 @@ class TestServiceBackedEndpoints:
     ):
         (web_project / ".descry_cache" / "codebase_graph.json").unlink()
         for url in (
-            "/api/context?node_id=FILE:app.py::hello",
-            "/api/flatten?class_node_id=FILE:app.py::hello",
+            "/api/context?symbol=FILE:app.py::hello",
+            "/api/flatten?symbol=FILE:app.py::hello",
         ):
             r = client.get(url)
             assert r.status_code == 503, url
             assert "Graph not found" in r.json()["error"]
-
-    def test_callers_and_callees_when_the_graph_vanishes_mid_request(
-        self, client, web_project, monkeypatch
-    ):
-        graph_path = web_project / ".descry_cache" / "codebase_graph.json"
-        graph = json.loads(graph_path.read_text())
-        caller = json.loads(json.dumps(graph["nodes"][0]).replace("hello", "main"))
-        graph["nodes"].append(caller)
-        graph["edges"].append(
-            {
-                "source": caller["id"],
-                "target": "FILE:app.py::hello",
-                "relation": "CALLS",
-            }
-        )
-        graph_path.write_text(json.dumps(graph))
-
-        async def no_graph():
-            return None
-
-        monkeypatch.setattr(web_server, "_get_querier", no_graph)
-        assert client.get("/api/callers?name=hello").status_code == 503
-        assert client.get("/api/callees?name=main").status_code == 503
 
     def test_index_keeps_the_searcher_the_service_loaded(self, client, monkeypatch):
         svc = web_server._get_service()
@@ -920,7 +946,7 @@ class TestGraphEndpoints:
         [
             "/api/structure?filename=app.py",
             "/api/impls?method=area",
-            "/api/quick?name=hello",
+            "/api/quick?symbol=hello",
             "/api/flow?start=hello",
             "/api/flow?start=hello&format=tree",
             "/api/path?start=hello&end=hello",
@@ -932,7 +958,10 @@ class TestGraphEndpoints:
         (web_project / ".descry_cache" / "codebase_graph.json").unlink()
         r = client.get(url)
         assert r.status_code == 503
-        assert r.json() == {"error": "Graph not found. Run descry ensure first."}
+        assert r.json() == {
+            "error": "Graph not found. Run descry ensure first.",
+            "reason": "no_graph",
+        }
 
     def test_structure_groups_the_files_definitions_by_type(self, client, web_project):
         _write_web_graph(
@@ -963,30 +992,14 @@ class TestGraphEndpoints:
 
         assert r.status_code == 200
         assert r.json() == {
+            "found": True,
             "file": "FILE:app.py",
             "imports": ["os.path", "sys"],
             "definitions": {
-                "constant": [
-                    {
-                        "name": "LIMIT",
-                        "lineno": 4,
-                        "signature": "",
-                        "id": "FILE:app.py::LIMIT",
-                    }
-                ],
+                "constant": [{"id": "FILE:app.py::LIMIT", "name": "LIMIT", "line": 4}],
                 "function": [
-                    {
-                        "name": "hello",
-                        "lineno": 1,
-                        "signature": "def hello()",
-                        "id": "FILE:app.py::hello",
-                    },
-                    {
-                        "name": "later",
-                        "lineno": 9,
-                        "signature": "def later()",
-                        "id": "FILE:app.py::later",
-                    },
+                    {"id": "FILE:app.py::hello", "name": "hello", "line": 1},
+                    {"id": "FILE:app.py::later", "name": "later", "line": 9},
                 ],
             },
         }
@@ -1015,10 +1028,15 @@ class TestGraphEndpoints:
         assert r.status_code == 200
         assert r.json()["definitions"]["function"][0]["name"] == ""
 
-    def test_structure_of_an_unknown_file_is_404(self, client):
+    def test_structure_of_an_unknown_file_is_found_false(self, client):
         r = client.get("/api/structure?filename=nope.py")
-        assert r.status_code == 404
-        assert r.json() == {"error": "File 'nope.py' not found"}
+        assert r.status_code == 200
+        assert r.json() == {
+            "found": False,
+            "file": None,
+            "imports": [],
+            "definitions": {},
+        }
 
     def test_impls_lists_each_implementation_with_its_type_and_trait(
         self, client, web_project
@@ -1050,29 +1068,26 @@ class TestGraphEndpoints:
         assert filtered.status_code == 200
         assert filtered.json() == {
             "method": "area",
-            "trait_filter": "Shape",
+            "trait": "Shape",
             "total": 1,
             "implementations": [
                 {
                     "id": "FILE:shapes.rs::Circle::area",
-                    "struct_name": "Circle",
-                    "trait_name": "Shape",
-                    "file_path": "shapes.rs",
-                    "lineno": 3,
-                    "signature": "fn area(&self) -> f64",
+                    "type": "Circle",
+                    "trait": "Shape",
+                    "file": "shapes.rs",
+                    "line": 3,
                 }
             ],
         }
         unfiltered = client.get("/api/impls?method=area").json()
-        assert unfiltered["trait_filter"] is None
-        assert [i["struct_name"] for i in unfiltered["implementations"]] == [
+        assert unfiltered["trait"] is None
+        assert [i["type"] for i in unfiltered["implementations"]] == [
             "Circle",
             "Blob",
         ]
 
-    def test_quick_returns_the_best_ranked_match_and_counts_the_rest(
-        self, client, web_project
-    ):
+    def test_quick_refuses_a_name_two_definitions_share(self, client, web_project):
         _write_web_graph(
             web_project,
             nodes=[
@@ -1085,23 +1100,35 @@ class TestGraphEndpoints:
             ],
         )
 
-        r = client.get("/api/quick?name=hello&brief=true")
+        r = client.get("/api/quick?symbol=hello&brief=true")
 
+        assert r.status_code == 400
+        assert r.json()["choices"] == ["FILE:app.py::hello", "FILE:models.py::hello"]
+        r = client.get("/api/quick?symbol=FILE:app.py::hello&brief=true")
         assert r.status_code == 200
-        body = r.json()
-        assert body["symbol"]["id"] == "FILE:app.py::hello"
-        assert body["other_matches"] == 1
-        assert body["markdown"].startswith("### Brief: `FILE:app.py::hello`")
+        assert r.json()["markdown"].startswith("### Brief: `FILE:app.py::hello`")
 
     def test_quick_for_an_unknown_symbol_is_404(self, client):
-        r = client.get("/api/quick?name=nothing_here_xyz")
+        r = client.get("/api/quick?symbol=nothing_here_xyz")
         assert r.status_code == 404
-        assert r.json() == {"error": "No symbol found for 'nothing_here_xyz'"}
+        assert r.json() == {
+            "error": "Symbol 'nothing_here_xyz' not found. Try descry search.",
+            "reason": "not_found",
+        }
+
+    def test_a_flag_the_web_cannot_read_is_invalid(self, client):
+        r = client.get("/api/context?symbol=x&brief=maybe")
+        assert r.status_code == 400
+        r = client.get("/api/changes?show_callers=1")
+        assert r.status_code == 400
 
     def test_callees_of_an_unknown_function_is_404(self, client):
-        r = client.get("/api/callees?name=nothing_here_xyz")
+        r = client.get("/api/callees?symbol=nothing_here_xyz")
         assert r.status_code == 404
-        assert r.json() == {"error": "No function 'nothing_here_xyz' found"}
+        assert r.json() == {
+            "error": "Symbol 'nothing_here_xyz' not found. Try descry search.",
+            "reason": "not_found",
+        }
 
     def test_examples_name_symbols_of_the_indexed_graph(self, client, web_project):
         def method(owner):
@@ -1175,7 +1202,7 @@ class TestGraphEndpoints:
         assert r.status_code == 200
         body = r.json()
         assert (body["start"], body["direction"], body["depth"]) == (
-            "hello",
+            "FILE:app.py::hello",
             "forward",
             2,
         )
@@ -1207,32 +1234,20 @@ class TestPathEndpoint:
 
         assert r.status_code == 200
         body = r.json()
-        assert (body["start"], body["end"], body["status"], body["hops"]) == (
-            "n0",
-            "n2",
+        assert (body["start"], body["end"], body["status"]) == (
+            "FILE:app.py::n0",
+            "FILE:app.py::n2",
             "found",
-            2,
         )
-        assert body["path"] == [
-            {
-                "step": 1,
-                "caller": "n0",
-                "callee": "n1",
-                "file_path": "app.py",
-                "line": 1,
-                "snippet": "def hello():\n    return 'hi'",
-                "candidates": None,
-            },
-            {
-                "step": 2,
-                "caller": "n1",
-                "callee": "n2",
-                "file_path": "app.py",
-                "line": 1,
-                "snippet": "def hello():\n    return 'hi'",
-                "candidates": None,
-            },
+        assert [
+            (h["caller"]["id"], h["callee"]["id"], h["callee"]["kind"], h["line"])
+            for h in body["hops"]
+        ] == [
+            ("FILE:app.py::n0", "FILE:app.py::n1", "resolved", 1),
+            ("FILE:app.py::n1", "FILE:app.py::n2", "resolved", 1),
         ]
+        assert "return 'hi'" in body["markdown"]
+        assert "return 'hi'" not in json.dumps(body["hops"])
         assert body["markdown"].startswith("### Call Path: `n0` -> `n2` (2 hops)\n")
 
     def test_hop_through_an_unresolved_call_names_its_candidates(
@@ -1256,7 +1271,12 @@ class TestPathEndpoint:
 
         body = client.get("/api/path?start=start&end=FILE:other.py::helper").json()
 
-        assert (body["status"], body["path"][0]["candidates"]) == ("found", 2)
+        callee = body["hops"][0]["callee"]
+        assert (body["status"], callee["kind"], callee["candidates"]) == (
+            "found",
+            "candidate",
+            2,
+        )
         assert "**1. start** -> **helper** (one of 2 candidates)" in body["markdown"]
 
     def test_unreachable_target_is_not_found(self, client, chain):
@@ -1264,26 +1284,18 @@ class TestPathEndpoint:
 
         assert r.status_code == 200
         body = r.json()
-        assert (body["status"], body["hops"], body["path"]) == ("not_found", 0, [])
+        assert (body["status"], body["hops"]) == ("not_found", [])
         assert body["markdown"].startswith("No path found from 'n0' to 'island'")
 
-    @pytest.mark.parametrize(
-        ("limit", "value", "status", "setting"),
-        [
-            ("max_nodes", 5, "node_budget", "[query] max_nodes"),
-            ("query_timeout_ms", -1, "timeout", "[timeouts] query_ms"),
-        ],
-    )
-    def test_search_cut_short_is_not_reported_as_no_path(
-        self, client, chain, limit, value, status, setting
-    ):
-        setattr(web_server._get_config(), limit, value)
+    def test_search_cut_short_is_not_reported_as_no_path(self, client, chain):
+        web_server._get_config().query_timeout_ms = -1
+        status, setting = "timeout", "[timeouts] query_ms"
 
         r = client.get("/api/path?start=n0&end=n29&max_depth=40")
 
         assert r.status_code == 200
         body = r.json()
-        assert (body["status"], body["hops"], body["path"]) == (status, 0, [])
+        assert (body["status"], body["hops"]) == (status, [])
         assert setting in body["markdown"]
         assert "may still exist" in body["markdown"]
         assert "No path found" not in body["markdown"]
@@ -1319,36 +1331,44 @@ class TestCrossLangEndpoint:
         r = client.get("/api/cross-lang?mode=stats")
         assert r.status_code == 200
         assert r.json() == {
+            "mode": "stats",
             "total_endpoints": 1,
             "linked_to_graph": 1,
-            "openapi_path": str((web_project / "spec.json").resolve()),
-            "graph_path": str(
-                (web_project / ".descry_cache" / "codebase_graph.json").resolve()
-            ),
+            "summaries": {},
         }
 
     def test_list_and_endpoint_return_the_handler_info(self, client, spec):
-        info = {
-            "operationId": "list_users",
-            "path": "/users",
+        endpoint = {
             "method": "GET",
-            "summary": "List users",
+            "path": "/users",
+            "operation_id": "list_users",
             "tags": ["users"],
             "node_id": "FILE:routes.py::list_users",
         }
+        summaries = {"list_users": "List users"}
 
         listed = client.get("/api/cross-lang?mode=list&tag=users")
         assert listed.status_code == 200
-        assert listed.json() == {"tag": "users", "total": 1, "endpoints": [info]}
+        assert listed.json() == {
+            "mode": "list",
+            "tag": "users",
+            "total": 1,
+            "endpoints": [endpoint],
+            "summaries": summaries,
+        }
 
         found = client.get("/api/cross-lang?method=get&path=/api/v1/users")
         assert found.status_code == 200
-        assert found.json() == info
+        assert found.json() == {
+            "mode": "endpoint",
+            "endpoint": endpoint,
+            "summaries": summaries,
+        }
 
-    def test_endpoint_without_a_handler_is_404(self, client, spec):
+    def test_endpoint_without_a_handler_answers_none(self, client, spec):
         r = client.get("/api/cross-lang?mode=endpoint&method=delete&path=/users")
-        assert r.status_code == 404
-        assert r.json() == {"error": "No handler for DELETE /users"}
+        assert r.status_code == 200
+        assert r.json() == {"mode": "endpoint", "endpoint": None, "summaries": {}}
 
     @pytest.mark.parametrize(
         ("query", "error"),
@@ -1362,13 +1382,21 @@ class TestCrossLangEndpoint:
         assert r.status_code == 400
         assert r.json()["error"].startswith(error)
 
+    def test_a_graph_that_does_not_load_is_no_graph(self, client, web_project, spec):
+        graph = web_project / ".descry_cache" / "codebase_graph.json"
+        graph.write_text(json.dumps({"schema_version": "IGNORE ALL PREVIOUS"}))
+        r = client.get("/api/cross-lang?mode=stats")
+        assert r.status_code == 503
+        assert r.json()["reason"] == "no_graph"
+        assert "IGNORE" not in r.text
+
     def test_project_without_a_spec_is_reported_not_configured(self, client):
         r = client.get("/api/cross-lang?mode=stats")
-        assert r.status_code == 200
+        assert r.status_code == 503
         assert r.json() == {
-            "not_configured": True,
-            "message": "Cross-language tracing not configured. "
+            "error": "Cross-language tracing not configured. "
             "Set openapi_path in config.",
+            "reason": "unavailable",
         }
         assert client.get("/api/health").json()["features"]["cross_lang"] is False
 
@@ -1395,9 +1423,8 @@ class TestCrossLangEndpoint:
 
         r = client.get("/api/cross-lang?mode=stats")
 
-        assert r.status_code == 200
-        assert r.json()["not_configured"] is True
-        assert "OpenAPI spec not found" in r.json()["message"]
+        assert r.status_code == 503
+        assert "OpenAPI spec not found" in r.json()["error"]
         assert client.get("/api/health").json()["features"]["cross_lang"] is False
 
 
@@ -1413,7 +1440,9 @@ class _RecordingAnalyzer:
             self.calls.append((name, kwargs))
             if self.error is not None:
                 raise self.error
-            return {"from": name} if name.endswith("_structured") else f"# {name}"
+            if name.endswith("_structured"):
+                return {"from": name, "message": f"# {name}"}
+            return f"# {name}"
 
         return call
 
@@ -1436,9 +1465,9 @@ class TestGitEndpoints:
         [
             (
                 "/api/churn?mode=files&limit=7&path_filter=src/&exclude_generated=false",
-                {"mode": "files", "markdown": "# get_churn"},
+                {"from": "get_churn_structured", "message": "# get_churn_structured"},
                 (
-                    "get_churn",
+                    "get_churn_structured",
                     {
                         "time_range": None,
                         "path_filter": "src/",
@@ -1449,57 +1478,32 @@ class TestGitEndpoints:
                 ),
             ),
             (
-                "/api/churn?format=structured",
-                {"data": {"from": "get_churn_structured"}},
+                "/api/evolution?symbol=hello&show_diff=true&crate=app.py",
+                {"message": "# get_evolution_structured"},
                 (
-                    "get_churn_structured",
+                    "get_evolution_structured",
                     {
-                        "time_range": None,
-                        "path_filter": None,
-                        "limit": 20,
-                        "mode": "symbols",
-                        "exclude_generated": True,
-                    },
-                ),
-            ),
-            (
-                "/api/evolution?name=hello&show_diff=true&crate=core",
-                {"name": "hello", "markdown": "# get_evolution"},
-                (
-                    "get_evolution",
-                    {
-                        "name": "hello",
+                        # The name the graph has once is passed as its node ID
+                        "name": "FILE:app.py::hello",
                         "time_range": None,
                         "limit": 10,
                         "show_diff": True,
-                        "crate": "core",
                     },
                 ),
             ),
             (
                 "/api/changes?commit_range=HEAD~2..HEAD&show_callers=false",
-                {"markdown": "# get_changes"},
+                {
+                    "from": "get_changes_structured",
+                    "message": "# get_changes_structured",
+                },
                 (
-                    "get_changes",
+                    "get_changes_structured",
                     {
                         "commit_range": "HEAD~2..HEAD",
                         "time_range": None,
                         "path_filter": None,
                         "show_callers": False,
-                        "limit": 50,
-                    },
-                ),
-            ),
-            (
-                "/api/changes?format=structured&time_range=last+7+days",
-                {"data": {"from": "get_changes_structured"}},
-                (
-                    "get_changes_structured",
-                    {
-                        "commit_range": None,
-                        "time_range": "last 7 days",
-                        "path_filter": None,
-                        "show_callers": True,
                         "limit": 50,
                     },
                 ),
@@ -1511,11 +1515,11 @@ class TestGitEndpoints:
     ):
         r = client.get(url)
         assert r.status_code == 200
-        assert r.json() == body
+        assert {k: r.json()[k] for k in body} == body
         assert analyzer.calls == [call]
 
     @pytest.mark.parametrize(
-        "url", ["/api/churn", "/api/evolution?name=hello", "/api/changes"]
+        "url", ["/api/churn", "/api/evolution?symbol=hello", "/api/changes"]
     )
     def test_git_failure_is_500_with_gits_message(self, client, analyzer, url):
         from descry.git_history import GitError
@@ -1523,13 +1527,13 @@ class TestGitEndpoints:
         analyzer.error = GitError("Not inside a git repository.")
         r = client.get(url)
         assert r.status_code == 500
-        assert r.json() == {"error": "Not inside a git repository."}
+        assert r.json() == {"error": "Not inside a git repository.", "reason": "failed"}
 
     @pytest.mark.parametrize(
         ("url", "tool"),
         [
             ("/api/churn?format=structured", "churn"),
-            ("/api/evolution?name=hello", "evolution"),
+            ("/api/evolution?symbol=hello", "evolution"),
             ("/api/changes", "changes"),
         ],
     )
@@ -1539,10 +1543,13 @@ class TestGitEndpoints:
         analyzer.error = RuntimeError("boom")
         r = client.get(url)
         assert r.status_code == 500
-        assert r.json() == {"error": f"Error analyzing {tool}: boom"}
+        assert r.json() == {
+            "error": f"Error analyzing {tool}: boom",
+            "reason": "failed",
+        }
 
     @pytest.mark.parametrize(
-        "url", ["/api/churn", "/api/evolution?name=hello", "/api/changes"]
+        "url", ["/api/churn", "/api/evolution?symbol=hello", "/api/changes"]
     )
     def test_missing_git_history_module_is_503(self, client, analyzer, url):
         web_server._get_service()._git_available = False
@@ -1691,7 +1698,7 @@ class TestIndexRuns:
 
         assert events[-2] == {
             "type": "output",
-            "line": "Embeddings: Failed (out of memory)",
+            "line": "Embeddings: Failed (RuntimeError)",
         }
         assert events[-1]["success"] is True
 
@@ -1795,11 +1802,31 @@ INDEX_HTML = Path(web_server.WEB_DIR) / "index.html"
 
 
 def _flow_renderer_source() -> str:
-    """The flow-tree rendering methods of the page's Alpine component."""
+    """The flow-tree rendering methods of the page's Alpine component, and
+    the type badge methods they use."""
     html = INDEX_HTML.read_text(encoding="utf-8")
+    badge = html.index("        typeClass(type) {")
     start = html.index("        renderFlowTree(node, depth) {")
     end = html.index("        // Event delegation handler for flow tree clicks")
-    return html[start:end]
+    return html[badge : html.index("        pushBreadcrumb(")] + html[start:end]
+
+
+def _render_flow(node: dict) -> str:
+    """The markup the page's flow renderer makes of ``node``, run by node."""
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        pytest.skip("node is not installed")
+    script = (
+        f"const component = {{\n{_flow_renderer_source()}\n}};\n"
+        f"process.stdout.write(component.renderFlowTree({json.dumps(node)}, 0));"
+    )
+    return subprocess.run(
+        [node_bin, "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    ).stdout
 
 
 def _remote_asset_tags() -> list[str]:
@@ -1816,14 +1843,10 @@ class TestFlowTreeEscaping:
         body = _flow_renderer_source()
         for raw in ("${node.name}", "${node.type}", "${node.lang"):
             assert raw not in body
-        assert "const type = this._esc(node.type);" in body
-        assert "const typeClass = type.toLowerCase();" in body
+        assert "this._esc(this.typeLabel(node.type))" in body
         assert "const fileLoc = this._esc(" in body
 
     def test_hostile_node_renders_as_text(self):
-        node_bin = shutil.which("node")
-        if node_bin is None:
-            pytest.skip("node is not installed")
         payload = "<img src=x onerror=alert(1)>"
         hostile = {
             "id": 'FILE:a".py::f',
@@ -1836,22 +1859,19 @@ class TestFlowTreeEscaping:
             "code": f"x = '{payload}'",
             "children": [],
         }
-        script = (
-            f"const component = {{\n{_flow_renderer_source()}\n}};\n"
-            f"process.stdout.write(component.renderFlowTree({json.dumps(hostile)}, 0));"
-        )
-        out = subprocess.run(
-            [node_bin, "-e", script],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=True,
-        ).stdout
+        out = _render_flow(hostile)
 
         assert "&lt;img src=x onerror=alert(1)&gt;" in out
         # Quoted attribute values may hold "<"; what matters is the markup.
         markup = re.sub(r'="[^"]*"', '=""', out)
         assert set(re.findall(r"<(\w+)", markup)) == {"div", "span", "pre", "code"}
+
+    def test_a_node_s_type_badge_is_one_the_style_sheet_colours(self):
+        node = {"id": "FILE:a.py::f", "name": "f", "type": "Function", "file": "a.py"}
+        out = _render_flow({**node, "line": 1, "tokens": 1, "children": []})
+        assert '<span class="rc-type fun">FUN</span>' in out
+        css = (INDEX_HTML.parent / "style.css").read_text(encoding="utf-8")
+        assert ".rc-type.fun {" in css
 
 
 class TestPage:
@@ -1899,8 +1919,8 @@ class TestPage:
     def test_churn_truncation_note_is_rendered_as_text(self):
         html = INDEX_HTML.read_text(encoding="utf-8")
         (tag,) = re.findall(r"<[^>]*truncation_note[^>]*>", html)
-        assert 'x-show="results.churn?.data?.truncation_note"' in tag
-        assert 'x-text="results.churn?.data?.truncation_note"' in tag
+        assert 'x-show="results.churn?.truncation_note"' in tag
+        assert 'x-text="results.churn?.truncation_note"' in tag
         assert "x-html" not in tag
 
 
@@ -1982,25 +2002,6 @@ class TestStartup:
         assert len(result.stderr.strip().splitlines()) == 1
         assert "pip install 'descry-codegraph[web]'" in result.stderr
 
-    def test_unrecognised_log_level_falls_back_to_warning_like_the_service(self):
-        tree = ast.parse(Path(web_server.__file__).read_text(encoding="utf-8"))
-        (level,) = (
-            keyword.value
-            for node in tree.body
-            if isinstance(node, ast.Expr)
-            and isinstance(node.value, ast.Call)
-            and ast.unparse(node.value.func) == "logging.basicConfig"
-            for keyword in node.value.keywords
-            if keyword.arg == "level"
-        )
-        code = compile(ast.Expression(level), "<level>", "eval")
-
-        def resolve(name):
-            return eval(code, {"logging": logging, "_log_level": name})
-
-        assert resolve("verbose") == logging.WARNING
-        assert resolve("debug") == logging.DEBUG
-
 
 def test_callers_of_a_name_count_each_kind_apart(client, web_project):
     """Resolved, one of an unresolved call's candidates, and an unresolved
@@ -2027,7 +2028,7 @@ def test_callers_of_a_name_count_each_kind_apart(client, web_project):
             },
         ],
     )
-    answer = client.get("/api/callers", params={"name": "parse", "limit": 1}).json()
+    answer = client.get("/api/callers", params={"symbol": "parse", "limit": 1}).json()
     assert [answer[k] for k in ("total", "certain", "possible", "unresolved")] == [
         3,
         1,
@@ -2035,10 +2036,10 @@ def test_callers_of_a_name_count_each_kind_apart(client, web_project):
         1,
     ]
     assert answer["more"] == {"certain": 0, "possible": 1, "unresolved": 1}
-    assert [c.get("candidates") for c in answer["callers"]] == [None]
-    full = client.get("/api/callers", params={"name": "parse"}).json()["callers"]
-    assert [(c["id"].split("::")[-1], c.get("candidates")) for c in full] == [
-        ("sure", None),
-        ("maybe", 2),
-        ("stray", 0),
+    assert [c["kind"] for c in answer["callers"]] == ["resolved"]
+    full = client.get("/api/callers", params={"symbol": "parse"}).json()["callers"]
+    assert [(c["name"], c["kind"], c.get("candidates")) for c in full] == [
+        ("sure", "resolved", None),
+        ("maybe", "candidate", 2),
+        ("stray", "unresolved", None),
     ]

@@ -22,7 +22,6 @@ cache atomically.
 
 from __future__ import annotations
 
-import logging
 import os
 from pathlib import Path
 
@@ -31,10 +30,9 @@ from descry.scip.adapter import (
     CommandSpec,
     DiscoveredProject,
     register,
+    subdir_projects,
 )
 from descry.scip.adapters.typescript import parse_backtick_descriptors
-
-logger = logging.getLogger(__name__)
 
 
 def _has_dart_sources(pkg_dir: Path) -> bool:
@@ -69,60 +67,12 @@ class DartAdapter:
            melos ``packages/``, shelf's ``pkgs/``, ``apps/``…).
         """
         if (root / "pubspec.yaml").exists() and _has_dart_sources(root):
-            return [
-                DiscoveredProject(
-                    name=root.name,
-                    root=root,
-                    language=self.name,
-                )
-            ]
-
-        seen: set[str] = set()
-        projects: list[DiscoveredProject] = []
-
-        for marker in root.glob("*/pubspec.yaml"):
-            pkg_dir = marker.parent
-            if pkg_dir.name.startswith("."):
-                continue
-            if pkg_dir.name in excluded_dirs:
-                continue
-            if pkg_dir.name in seen:
-                continue
-            if not _has_dart_sources(pkg_dir):
-                continue
-            seen.add(pkg_dir.name)
-            projects.append(
-                DiscoveredProject(
-                    name=pkg_dir.name,
-                    root=pkg_dir,
-                    language=self.name,
-                )
-            )
-
-        # A package one level below a collection directory (step 2).
-        if not projects:
-            for marker in root.glob("*/*/pubspec.yaml"):
-                pkg_dir = marker.parent
-                collection = pkg_dir.parent
-                if pkg_dir.name.startswith(".") or collection.name.startswith("."):
-                    continue
-                if pkg_dir.name in excluded_dirs or collection.name in excluded_dirs:
-                    continue
-                if pkg_dir.name in seen:
-                    continue
-                if not _has_dart_sources(pkg_dir):
-                    continue
-                seen.add(pkg_dir.name)
-                projects.append(
-                    DiscoveredProject(
-                        name=pkg_dir.name,
-                        root=pkg_dir,
-                        language=self.name,
-                    )
-                )
-
-        projects.sort(key=lambda p: p.name)
-        return projects
+            return [DiscoveredProject(name=root.name, root=root)]
+        return subdir_projects(
+            root, excluded_dirs, ("*/pubspec.yaml",), _has_dart_sources
+        ) or subdir_projects(
+            root, excluded_dirs, ("*/*/pubspec.yaml",), _has_dart_sources
+        )
 
     def build_command(
         self,
@@ -150,7 +100,6 @@ class DartAdapter:
         """scip-dart descriptor format isn't publicly documented — the
         shared backtick helper handles both backtick-wrapped and
         path-style forms, which covers the two common SCIP conventions.
-        Verify on a real index during smoke tests and swap if needed.
         """
         return parse_backtick_descriptors(raw)
 

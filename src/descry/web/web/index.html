@@ -206,10 +206,10 @@
                         <div class="result-card" @click="viewContext(r.id)">
                             <div class="rc-header">
                                 <span class="rc-type" :class="typeClass(r.type)" x-text="typeLabel(r.type)" :title="r.type"></span>
-                                <span class="rc-name" x-text="r.parent_name ? r.parent_name + '::' + r.name : r.name"></span>
-                                <span class="rc-meta" x-text="r.token_count + 't, ' + r.in_degree + 'c'"></span>
+                                <span class="rc-name" x-text="r.name"></span>
+                                <span class="rc-meta" x-text="r.tokens + 't, ' + r.callers + 'c'"></span>
                             </div>
-                            <div class="rc-location" x-text="r.location"></div>
+                            <div class="rc-location" x-text="(r.file || '') + (r.file && r.line ? ':' + r.line : '')"></div>
                             <div class="rc-signature" x-show="r.signature" x-text="r.signature"></div>
                             <div class="rc-docstring" x-show="r.docstring" x-text="r.docstring?.split('\\n')[0]?.substring(0, 120)"></div>
                         </div>
@@ -256,7 +256,7 @@
                                 <span class="rc-name" x-text="r.name"></span>
                                 <span class="rc-meta" x-text="'score: ' + r.score"></span>
                             </div>
-                            <div class="rc-location" x-text="r.location"></div>
+                            <div class="rc-location" x-text="(r.file || '') + (r.file && r.line ? ':' + r.line : '')"></div>
                             <div class="rc-signature" x-show="r.signature" x-text="r.signature"></div>
                         </div>
                     </template>
@@ -270,7 +270,7 @@
         <div>
             <div class="tool-form">
                 <h3>Quick Lookup</h3>
-                <p class="tool-desc">The fastest way to get full details on a symbol. Combines search and context in one step: finds the best match and immediately returns its source code, callers, callees, and related tests. Use when you already know a symbol name and want everything about it at once. Ideal when you need a complete picture in a single call instead of search-then-context round trips.</p>
+                <p class="tool-desc">Full details on a symbol in one step: finds the best match for a name and returns its source code, callers, callees, and related tests. Use when you already know a symbol name and want everything about it at once, instead of a search followed by a context lookup.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Symbol Name</label>
@@ -292,7 +292,7 @@
             </div>
             <div class="results" x-show="results.quick">
                 <div class="results-header">
-                    <span x-text="results.quick?.symbol?.name + (results.quick?.other_matches > 0 ? ' (+' + results.quick.other_matches + ' others)' : '')"></span>
+                    <span x-text="results.quick?.symbol?.name"></span>
                 </div>
                 <div class="results-body markdown-body" x-html="safeHtml(results.quick?.markdown)" x-effect="if(results.quick?.markdown) $nextTick(() => renderMermaid($el))"></div>
             </div>
@@ -304,7 +304,7 @@
         <div>
             <div class="tool-form">
                 <h3>Find Callers</h3>
-                <p class="tool-desc">Lists every function or method that calls the given symbol. More reliable than grep because it uses the call graph to distinguish actual call sites from definitions, comments, and string matches. Essential for impact analysis before refactoring: understand who depends on a function before changing its signature or behavior.</p>
+                <p class="tool-desc">Lists every function or method that calls the given symbol. It reads the call graph, so definitions, comments, and strings that mention the name are not counted as calls. Use it before refactoring to see who depends on a function before changing its signature or behavior.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Symbol Name</label>
@@ -326,13 +326,13 @@
             </div>
             <div class="results" x-show="results.callers">
                 <div class="results-header">
-                    <span x-text="results.callers?.certain + ' caller(s) of ' + results.callers?.symbol + (results.callers?.fuzzy ? ' (fuzzy)' : '') + extraNote(results.callers)"></span>
+                    <span x-text="results.callers?.certain + ' caller(s) of ' + results.callers?.symbol + extraNote(results.callers)"></span>
                 </div>
                 <div class="results-body">
                     <template x-for="c in results.callers?.callers || []" :key="c.id">
                         <div class="symbol-list-item" @click="viewContext(c.id)">
                             <span x-text="c.name"></span>
-                            <span class="sl-location" x-text="c.location + (c.candidates != null ? ' · ' + oneOf(c.candidates) : '')"></span>
+                            <span class="sl-location" x-text="(c.file || '') + (c.line ? ':' + c.line : '') + (c.kind != 'resolved' ? ' · ' + oneOf(c.candidates || 0) : '')"></span>
                         </div>
                     </template>
                     <div class="sl-location" x-show="moreNote(results.callers?.more, 'callers')" x-text="'(' + moreNote(results.callers?.more, 'callers') + ')'"></div>
@@ -368,13 +368,13 @@
             </div>
             <div class="results" x-show="results.callees">
                 <div class="results-header">
-                    <span x-text="results.callees?.certain + ' callee(s) of ' + (results.callees?.others ? results.callees.node_id : results.callees?.symbol) + (results.callees?.fuzzy ? ' (fuzzy)' : '') + extraNote(results.callees) + (results.callees?.others ? ' (' + results.callees.others + (results.callees.fuzzy ? ' other matches' : ' other definitions of the name') + '; use a node ID to choose)' : '')"></span>
+                    <span x-text="results.callees?.certain + ' callee(s) of ' + results.callees?.symbol + extraNote(results.callees)"></span>
                 </div>
                 <div class="results-body">
                     <template x-for="c in results.callees?.callees || []" :key="c.id">
-                        <div class="symbol-list-item" @click="viewContext(c.id)">
+                        <div class="symbol-list-item" @click="c.id.startsWith('REF:') || viewContext(c.id)">
                             <span x-text="c.name"></span>
-                            <span class="sl-location" x-text="c.location + (c.candidates != null ? ' · ' + oneOf(c.candidates, false) : '')"></span>
+                            <span class="sl-location" x-text="(c.file || '') + (c.line ? ':' + c.line : '') + (c.kind != 'resolved' ? ' · ' + oneOf(c.candidates || 0, false) : '')"></span>
                         </div>
                     </template>
                     <div class="sl-location" x-show="moreNote(results.callees?.more, 'callees')" x-text="'(' + moreNote(results.callees?.more, 'callees') + ')'"></div>
@@ -408,7 +408,7 @@
             </div>
             <div class="results" x-show="results.context">
                 <div class="results-header">
-                    <span x-text="results.context?.node_id"></span>
+                    <span x-text="results.context?.symbol?.id"></span>
                 </div>
                 <div class="results-body markdown-body" x-html="safeHtml(results.context?.markdown)" x-effect="if(results.context?.markdown) $nextTick(() => renderMermaid($el))"></div>
             </div>
@@ -436,7 +436,10 @@
                     <button class="btn btn-primary" @click="runStructure()" :disabled="loading">Go</button>
                 </div>
             </div>
-            <div class="results" x-show="results.structure">
+            <div class="results" x-show="results.structure?.found === false">
+                <div class="flow-error">No file of that name in the graph</div>
+            </div>
+            <div class="results" x-show="results.structure?.found">
                 <div class="results-header">
                     <span x-text="results.structure?.file"></span>
                 </div>
@@ -453,7 +456,7 @@
                             <template x-for="item in items" :key="item.id || item.name">
                                 <div class="symbol-list-item" @click="item.id && viewContext(item.id)">
                                     <span x-text="item.name"></span>
-                                    <span class="sl-location" x-show="item.lineno" x-text="'L' + item.lineno"></span>
+                                    <span class="sl-location" x-show="item.line" x-text="'L' + item.line"></span>
                                 </div>
                             </template>
                         </div>
@@ -468,7 +471,7 @@
         <div>
             <div class="tool-form">
                 <h3>Flatten Class API</h3>
-                <p class="tool-desc">Shows the effective public API of a class including methods inherited from traits, interfaces, and parent types. Requires the full node ID (e.g. FILE:src/app.py::MyClass). Use this to understand the complete interface of a type without manually tracing implementations. Useful for enumerating all available methods when working with a class or struct.</p>
+                <p class="tool-desc">Shows the effective public API of a class including methods inherited from traits, interfaces, and parent types. Takes the class by node ID (e.g. FILE:src/app.py::MyClass) or by a name only one class has. Use this to understand the complete interface of a type without manually tracing implementations. Useful for enumerating all available methods when working with a class or struct.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Class Node ID</label>
@@ -493,7 +496,7 @@
         <div>
             <div class="tool-form">
                 <h3>Trait Implementations</h3>
-                <p class="tool-desc">Find every Rust type that implements a given trait method across the codebase. Essential for polymorphic code where grep matches dozens of false positives. Optionally filter by trait name.</p>
+                <p class="tool-desc">Find every Rust type that implements a given trait method across the codebase. Unlike a grep for the method name, it lists implementations only. Optionally filter by trait name.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Method Name</label>
@@ -522,11 +525,10 @@
                         <div class="result-card" @click="viewContext(impl.id)">
                             <div class="rc-header">
                                 <span class="rc-type met">impl</span>
-                                <span class="rc-name" x-text="impl.struct_name + '::' + results.impls?.method"></span>
+                                <span class="rc-name" x-text="impl.type + '::' + results.impls?.method"></span>
                             </div>
-                            <div class="rc-location" x-text="impl.file_path + (impl.lineno ? ':' + impl.lineno : '')"></div>
-                            <div class="rc-signature" x-show="impl.signature" x-text="impl.signature"></div>
-                            <div class="rc-meta" x-text="'trait: ' + impl.trait_name"></div>
+                            <div class="rc-location" x-text="impl.file + (impl.line ? ':' + impl.line : '')"></div>
+                            <div class="rc-meta" x-text="'trait: ' + impl.trait"></div>
                         </div>
                     </template>
                 </div>
@@ -574,20 +576,8 @@
                     <span x-text="'Flow from ' + results.flow?.start + ' (' + results.flow?.direction + ', depth ' + results.flow?.depth + ')'"></span>
                     <button class="btn btn-sm" @click="flowToggleAll()" x-text="flowExpandAll ? 'Collapse all' : 'Expand all'" style="font-size:11px; padding: 2px 8px;"></button>
                 </div>
-                <!-- Disambiguation note -->
-                <div class="flow-note" x-show="results.flow?.tree?.note" x-text="results.flow?.tree?.note"></div>
                 <div class="flow-note" x-show="results.flow?.tree?.cut" x-text="'Stopped early (' + results.flow?.tree?.cut + '): the tree below is not complete'"></div>
                 <div class="flow-note" x-show="results.flow?.tree?.path_to_target" x-text="'Path to target: ' + (results.flow?.tree?.path_to_target || []).join(' → ')"></div>
-                <!-- Alternatives -->
-                <div class="flow-alternatives" x-show="results.flow?.tree?.alternatives?.length">
-                    <span class="flow-alt-label">Alternatives:</span>
-                    <template x-for="alt in (results.flow?.tree?.alternatives || [])" :key="alt.id">
-                        <a class="flow-alt-link" @click.prevent="forms.flow.start = alt.id; runFlow()" x-text="alt.name + ' (' + alt.file + ')'"></a>
-                    </template>
-                </div>
-                <!-- Error -->
-                <div class="flow-error" x-show="results.flow?.tree?.error" x-text="results.flow?.tree?.error"></div>
-                <!-- Tree -->
                 <div class="flow-tree" x-show="results.flow?.tree?.root"
                      x-html="renderFlowTree(results.flow?.tree?.root, 0)"
                      @click="handleFlowClick($event)"
@@ -626,7 +616,7 @@
             </div>
             <div class="results" x-show="results.path">
                 <div class="results-header">
-                    <span x-text="results.path?.hops + ' hop(s) from ' + results.path?.start + ' to ' + results.path?.end"></span>
+                    <span x-text="results.path?.hops.length + ' hop(s) from ' + results.path?.start + ' to ' + results.path?.end"></span>
                 </div>
                 <div class="results-body markdown-body" x-html="safeHtml(results.path?.markdown)" x-effect="if(results.path?.markdown) $nextTick(() => renderMermaid($el))"></div>
             </div>
@@ -639,7 +629,7 @@
             <!-- Not configured notice (shown immediately, no query needed) -->
             <div class="tool-form" x-show="health && !health.features?.cross_lang">
                 <h3>Cross-Language Trace</h3>
-                <p class="tool-desc">Bridge the frontend-backend gap by mapping frontend API calls to their backend handler functions via the OpenAPI spec.</p>
+                <p class="tool-desc">Maps frontend API calls to their backend handler functions via the OpenAPI spec.</p>
                 <div class="tool-notice">
                     <strong>Cross-language tracing is not configured.</strong>
                     <p>This tool requires an OpenAPI spec to map frontend API calls to backend handlers. Place your spec at <code>public/api/openapi.json</code> relative to the project root, then reindex.</p>
@@ -648,7 +638,7 @@
             <!-- Normal form (shown when cross_lang is available) -->
             <div class="tool-form" x-show="!health || health.features?.cross_lang">
                 <h3>Cross-Language Trace</h3>
-                <p class="tool-desc">Bridge the frontend-backend gap by mapping frontend API calls to their backend handler functions via the OpenAPI spec. Use "Endpoint" mode to find which handler serves a specific route. Use "List" mode to see all endpoints for a resource. Use "Stats" mode for an overview of API coverage. Useful for tracing user actions from the UI all the way to the backend layer.</p>
+                <p class="tool-desc">Maps frontend API calls to their backend handler functions via the OpenAPI spec. Use "Endpoint" mode to find which handler serves a specific route. Use "List" mode to see all endpoints for a resource. Use "Stats" mode for an overview of API coverage. Useful for tracing user actions from the UI all the way to the backend layer.</p>
                 <div class="form-row">
                     <div class="form-group">
                         <label>Mode</label>
@@ -685,55 +675,46 @@
                     <a @click.prevent="forms.crossLang.mode = 'list'; forms.crossLang.tag = ''; runCrossLang()">list all endpoints</a>
                 </div>
             </div>
-            <!-- Error -->
-            <div class="results" x-show="results.crossLang?.error">
-                <div class="flow-error" x-text="results.crossLang?.error"></div>
-            </div>
             <!-- Endpoint mode result -->
-            <div class="results" x-show="results.crossLang?.operationId">
+            <div class="results" x-show="results.crossLang?.mode === 'endpoint' && results.crossLang?.endpoint === null">
+                <div class="flow-error">No handler for that endpoint</div>
+            </div>
+            <div class="results" x-show="results.crossLang?.endpoint">
                 <div class="results-header">
-                    <span x-text="results.crossLang?.method + ' ' + results.crossLang?.path"></span>
+                    <span x-text="results.crossLang?.endpoint?.method + ' ' + results.crossLang?.endpoint?.path"></span>
                 </div>
                 <div class="cl-endpoint-detail">
                     <div class="cl-row">
                         <span class="cl-label">Summary</span>
-                        <span class="cl-value" x-text="results.crossLang?.summary || 'No summary'"></span>
+                        <span class="cl-value" x-text="results.crossLang?.summaries?.[results.crossLang?.endpoint?.operation_id] || 'No summary'"></span>
                     </div>
                     <div class="cl-row">
                         <span class="cl-label">Operation</span>
-                        <span class="cl-value cl-mono" x-text="results.crossLang?.operationId"></span>
+                        <span class="cl-value cl-mono" x-text="results.crossLang?.endpoint?.operation_id"></span>
                     </div>
-                    <div class="cl-row" x-show="results.crossLang?.tags?.length">
+                    <div class="cl-row" x-show="results.crossLang?.endpoint?.tags?.length">
                         <span class="cl-label">Tags</span>
                         <span class="cl-value">
-                            <template x-for="t in (results.crossLang?.tags || [])" :key="t">
+                            <template x-for="t in (results.crossLang?.endpoint?.tags || [])" :key="t">
                                 <span class="cl-tag" @click="forms.crossLang.mode = 'list'; forms.crossLang.tag = t; runCrossLang()" x-text="t"></span>
                             </template>
                         </span>
                     </div>
                     <div class="cl-row">
                         <span class="cl-label">Handler</span>
-                        <span class="cl-value" x-show="results.crossLang?.node_id">
-                            <span class="cl-handler-name" @click="forms.context.node_id = results.crossLang.node_id; setTool('context'); runContext()" x-text="results.crossLang?.node_id?.split('::').pop()"></span>
-                            <span class="cl-handler-file" @click="
-                                const nid = results.crossLang.node_id;
-                                const file = nid.split('::')[0].replace('FILE:', '');
-                                forms.source.file = file; forms.source.line = null; setTool('source'); runSource();
-                            " x-text="results.crossLang?.node_id?.split('::')[0].replace('FILE:', '').replace(/^FILE:/, '')"></span>
+                        <span class="cl-value" x-show="results.crossLang?.endpoint?.node_id">
+                            <span class="cl-handler-name" @click="openContext(results.crossLang.endpoint.node_id)" x-text="results.crossLang?.endpoint?.node_id?.split('::').pop()"></span>
+                            <span class="cl-handler-file" @click="openSource(fileOf(results.crossLang.endpoint.node_id))" x-text="results.crossLang?.endpoint?.node_id && fileOf(results.crossLang.endpoint.node_id)"></span>
                         </span>
-                        <span class="cl-value cl-no-handler" x-show="!results.crossLang?.node_id">Not linked to graph</span>
+                        <span class="cl-value cl-no-handler" x-show="!results.crossLang?.endpoint?.node_id">Not linked to graph</span>
                     </div>
-                    <div class="cl-actions" x-show="results.crossLang?.node_id">
-                        <button class="btn btn-sm" @click="forms.context.node_id = results.crossLang.node_id; setTool('context'); runContext()">View Context</button>
+                    <div class="cl-actions" x-show="results.crossLang?.endpoint?.node_id">
+                        <button class="btn btn-sm" @click="openContext(results.crossLang.endpoint.node_id)">View Context</button>
                         <button class="btn btn-sm" @click="
-                            const name = results.crossLang.node_id.split('::').pop();
+                            const name = results.crossLang.endpoint.node_id.split('::').pop();
                             forms.flow.start = name; forms.flow.direction = 'forward'; setTool('flow'); runFlow();
                         ">Trace Forward</button>
-                        <button class="btn btn-sm" @click="
-                            const nid = results.crossLang.node_id;
-                            const file = nid.split('::')[0].replace('FILE:', '');
-                            forms.source.file = file; forms.source.line = null; setTool('source'); runSource();
-                        ">View Source</button>
+                        <button class="btn btn-sm" @click="openSource(fileOf(results.crossLang.endpoint.node_id))">View Source</button>
                     </div>
                 </div>
             </div>
@@ -743,11 +724,11 @@
                     <span x-text="(results.crossLang?.tag ? 'Tag: ' + results.crossLang.tag + ' — ' : '') + results.crossLang?.total + ' endpoints'"></span>
                 </div>
                 <div class="cl-endpoint-list">
-                    <template x-for="ep in (results.crossLang?.endpoints || [])" :key="ep.operationId">
+                    <template x-for="ep in (results.crossLang?.endpoints || [])" :key="ep.operation_id">
                         <div class="cl-endpoint-item" @click="forms.crossLang.mode = 'endpoint'; forms.crossLang.method = ep.method; forms.crossLang.path = ep.path; runCrossLang()">
                             <span class="cl-method-badge" :class="'method-' + ep.method.toLowerCase()" x-text="ep.method"></span>
                             <span class="cl-ep-path" x-text="ep.path"></span>
-                            <span class="cl-ep-summary" x-text="ep.summary || ''"></span>
+                            <span class="cl-ep-summary" x-text="results.crossLang.summaries?.[ep.operation_id] || ''"></span>
                             <span class="cl-ep-handler" x-show="ep.node_id" x-text="ep.node_id?.split('::').pop()"></span>
                         </div>
                     </template>
@@ -794,12 +775,9 @@
                     <div class="form-group">
                         <label>Time Range</label>
                         <select x-model="forms.churn.time_range">
-                            <option value="">All time</option>
-                            <option value="last 7 days">Last 7 days</option>
-                            <option value="last 14 days">Last 14 days</option>
-                            <option value="last 30 days">Last 30 days</option>
-                            <option value="last 3 months">Last 3 months</option>
-                            <option value="last 6 months">Last 6 months</option>
+                            <template x-for="[value, label] in timeRanges" :key="value">
+                                <option :value="value" x-text="label"></option>
+                            </template>
                         </select>
                         <div class="input-hints">
                             Try:
@@ -819,54 +797,53 @@
                     <button class="btn btn-primary" @click="runChurn()" :disabled="loading">Go</button>
                 </div>
             </div>
-            <div class="results" x-show="results.churn?.data">
-                <!-- Error -->
-                <div class="flow-error" x-show="results.churn?.data?.error" x-text="results.churn?.data?.error"></div>
+            <div class="results" x-show="results.churn">
+                <div class="flow-error" x-show="results.churn?.message" x-text="results.churn?.message"></div>
                 <!-- Partial-result note -->
-                <div class="flow-note" x-show="results.churn?.data?.truncation_note" x-text="results.churn?.data?.truncation_note"></div>
+                <div class="flow-note" x-show="results.churn?.truncation_note" x-text="results.churn?.truncation_note"></div>
                 <!-- Symbols mode -->
-                <template x-if="results.churn?.data?.symbols">
+                <template x-if="results.churn?.symbols">
                     <div>
                         <div class="changes-header">
-                            <span x-text="'Top ' + results.churn.data.symbols.length + ' Most Changed Symbols'"></span>
+                            <span x-text="'Top ' + results.churn.symbols.length + ' Most Changed Symbols'"></span>
                             <span class="changes-meta">
-                                <span x-show="results.churn.data.time_range" x-text="results.churn.data.time_range"></span>
-                                <template x-if="results.churn.data.path_filter">
-                                    <span><span class="changes-sep">&middot;</span><span x-text="results.churn.data.path_filter"></span></span>
+                                <span x-show="results.churn.time_range" x-text="results.churn.time_range"></span>
+                                <template x-if="results.churn.path_filter">
+                                    <span><span class="changes-sep">&middot;</span><span x-text="results.churn.path_filter"></span></span>
                                 </template>
                             </span>
                         </div>
                         <div class="churn-list">
-                            <template x-for="(sym, idx) in results.churn.data.symbols" :key="sym.id">
+                            <template x-for="(sym, idx) in results.churn.symbols" :key="sym.id">
                                 <div class="churn-item">
                                     <span class="churn-rank" x-text="idx + 1"></span>
-                                    <span class="rc-type" :class="sym.type.toLowerCase()" x-text="sym.type"></span>
-                                    <span class="changes-sym-name" @click="forms.context.node_id = sym.id; setTool('context'); runContext()" x-text="sym.name"></span>
+                                    <span class="rc-type" :class="typeClass(sym.type)" x-text="typeLabel(sym.type)" :title="sym.type"></span>
+                                    <span class="changes-sym-name" @click="openContext(sym.id)" x-text="sym.name"></span>
                                     <span class="churn-commits" x-text="sym.commits + ' commits'"></span>
                                     <span class="changes-diff-stat" x-show="sym.added || sym.removed">
                                         <span class="changes-added" x-text="'+' + sym.added"></span>
                                         <span class="changes-removed" x-text="'-' + sym.removed"></span>
                                     </span>
-                                    <span class="changes-sym-file" x-show="sym.file" @click="forms.source.file = sym.file; forms.source.line = sym.line; setTool('source'); runSource()" x-text="sym.file.replace(/^FILE:/, '') + (sym.line ? ':' + sym.line : '')"></span>
+                                    <span class="changes-sym-file" x-show="sym.file" @click="openSource(sym.file, sym.line)" x-text="sym.file + (sym.line ? ':' + sym.line : '')"></span>
                                 </div>
                             </template>
                         </div>
                     </div>
                 </template>
                 <!-- Files mode -->
-                <template x-if="results.churn?.data?.files">
+                <template x-if="results.churn?.files">
                     <div>
                         <div class="changes-header">
-                            <span x-text="'Top ' + results.churn.data.files.length + ' Most Changed Files'"></span>
+                            <span x-text="'Top ' + results.churn.files.length + ' Most Changed Files'"></span>
                             <span class="changes-meta">
-                                <span x-show="results.churn.data.time_range" x-text="results.churn.data.time_range"></span>
+                                <span x-show="results.churn.time_range" x-text="results.churn.time_range"></span>
                             </span>
                         </div>
                         <div class="churn-list">
-                            <template x-for="(f, idx) in results.churn.data.files" :key="f.file">
+                            <template x-for="(f, idx) in results.churn.files" :key="f.file">
                                 <div class="churn-item">
                                     <span class="churn-rank" x-text="idx + 1"></span>
-                                    <span class="churn-file-name" @click="forms.source.file = f.file; forms.source.line = null; setTool('source'); runSource()" x-text="f.file"></span>
+                                    <span class="churn-file-name" @click="openSource(f.file)" x-text="f.file"></span>
                                     <span class="churn-commits" x-text="f.commits + ' commits'"></span>
                                 </div>
                             </template>
@@ -874,21 +851,21 @@
                     </div>
                 </template>
                 <!-- Co-change mode -->
-                <template x-if="results.churn?.data?.pairs">
+                <template x-if="results.churn?.pairs">
                     <div>
                         <div class="changes-header">
-                            <span x-text="'Top ' + results.churn.data.pairs.length + ' Co-Change Pairs'"></span>
+                            <span x-text="'Top ' + results.churn.pairs.length + ' Co-Change Pairs'"></span>
                             <span class="changes-meta">
-                                <span x-show="results.churn.data.file_level" style="font-style:italic">file-level (symbol data sparse)</span>
+                                <span x-show="results.churn.file_level" style="font-style:italic">file-level (symbol data sparse)</span>
                             </span>
                         </div>
                         <div class="churn-list">
-                            <template x-for="(pair, idx) in results.churn.data.pairs" :key="idx">
+                            <template x-for="(pair, idx) in results.churn.pairs" :key="idx">
                                 <div class="churn-pair">
                                     <span class="churn-rank" x-text="idx + 1"></span>
-                                    <span class="churn-pair-sym" @click="if(pair.a_id) { forms.context.node_id = pair.a_id; setTool('context'); runContext(); }" :class="pair.a_id ? 'clickable' : ''" x-text="pair.a_name"></span>
+                                    <span class="churn-pair-sym" @click="pair.a_id && openContext(pair.a_id)" :class="pair.a_id ? 'clickable' : ''" x-text="pair.a_name"></span>
                                     <span class="churn-pair-arrow">&harr;</span>
-                                    <span class="churn-pair-sym" @click="if(pair.b_id) { forms.context.node_id = pair.b_id; setTool('context'); runContext(); }" :class="pair.b_id ? 'clickable' : ''" x-text="pair.b_name"></span>
+                                    <span class="churn-pair-sym" @click="pair.b_id && openContext(pair.b_id)" :class="pair.b_id ? 'clickable' : ''" x-text="pair.b_name"></span>
                                     <span class="churn-commits" x-text="pair.shared_commits + ' shared'"></span>
                                 </div>
                             </template>
@@ -904,7 +881,7 @@
         <div>
             <div class="tool-form">
                 <h3>Symbol Evolution</h3>
-                <p class="tool-desc">Track the commit history of a specific function or method over time. Shows a timeline of commits that touched the symbol, including authors, dates, and change sizes. Enable "Show diffs" to see the actual code changes at each point. Uses git's native function tracking to follow the symbol across renames and line drift. Use this to understand why a function looks the way it does, or to find when a bug was introduced.</p>
+                <p class="tool-desc">Track the commit history of a specific function or method over time. Shows a timeline of commits that touched the symbol, including authors, dates, and change sizes. Enable "Show diffs" to see the actual code changes at each point. Counts the symbol's own lines, not those of definitions inside it, followed across renames and line drift as churn follows them. Use this to understand why a function looks the way it does, or to find when a bug was introduced.</p>
                 <div class="form-row">
                     <div class="form-group flex-1">
                         <label>Symbol Name</label>
@@ -920,12 +897,9 @@
                     <div class="form-group">
                         <label>Time Range</label>
                         <select x-model="forms.evolution.time_range">
-                            <option value="">All time</option>
-                            <option value="last 7 days">Last 7 days</option>
-                            <option value="last 14 days">Last 14 days</option>
-                            <option value="last 30 days">Last 30 days</option>
-                            <option value="last 3 months">Last 3 months</option>
-                            <option value="last 6 months">Last 6 months</option>
+                            <template x-for="[value, label] in timeRanges" :key="value">
+                                <option :value="value" x-text="label"></option>
+                            </template>
                         </select>
                     </div>
                     <div class="form-group">
@@ -966,12 +940,9 @@
                     <div class="form-group">
                         <label>Time Range</label>
                         <select x-model="forms.changes.time_range">
-                            <option value="">All time</option>
-                            <option value="last 7 days">Last 7 days</option>
-                            <option value="last 14 days">Last 14 days</option>
-                            <option value="last 30 days">Last 30 days</option>
-                            <option value="last 3 months">Last 3 months</option>
-                            <option value="last 6 months">Last 6 months</option>
+                            <template x-for="[value, label] in timeRanges" :key="value">
+                                <option :value="value" x-text="label"></option>
+                            </template>
                         </select>
                     </div>
                     <div class="form-group">
@@ -985,29 +956,28 @@
                     <button class="btn btn-primary" @click="runChanges()" :disabled="loading">Go</button>
                 </div>
             </div>
-            <div class="results" x-show="results.changes?.data">
-                <!-- Error -->
-                <div class="flow-error" x-show="results.changes?.data?.error" x-text="results.changes?.data?.error"></div>
+            <div class="results" x-show="results.changes">
+                <div class="flow-error" x-show="results.changes?.message" x-text="results.changes?.message"></div>
                 <!-- Summary header -->
-                <template x-if="results.changes?.data && !results.changes?.data?.error">
+                <template x-if="results.changes && !results.changes?.message">
                     <div>
                         <div class="changes-header">
-                            <span class="changes-range" x-text="results.changes.data.range"></span>
+                            <span class="changes-range" x-text="results.changes.range"></span>
                             <span class="changes-meta">
-                                <span x-text="results.changes.data.commits + ' commit' + (results.changes.data.commits !== 1 ? 's' : '')"></span>
+                                <span x-text="results.changes.commits + ' commit' + (results.changes.commits !== 1 ? 's' : '')"></span>
                                 <span class="changes-sep">&middot;</span>
-                                <span x-text="results.changes.data.files_count + ' files'"></span>
+                                <span x-text="results.changes.files_count + ' files'"></span>
                                 <span class="changes-sep">&middot;</span>
-                                <span x-text="results.changes.data.symbols_count + ' symbols'"></span>
+                                <span x-text="results.changes.symbols_count + ' symbols'"></span>
                             </span>
                         </div>
                         <!-- File-only fallback (no symbol attribution) -->
-                        <template x-if="results.changes.data.changed_files && !results.changes.data.symbols">
+                        <template x-if="results.changes.changed_files && !results.changes.symbols">
                             <div class="changes-files">
                                 <div class="changes-section-title">Changed Files</div>
-                                <template x-for="f in results.changes.data.changed_files" :key="f.file">
+                                <template x-for="f in results.changes.changed_files" :key="f.file">
                                     <div class="changes-file-row">
-                                        <span class="changes-file-path" @click="forms.source.file = f.file; forms.source.line = null; setTool('source'); runSource()" x-text="f.file"></span>
+                                        <span class="changes-file-path" @click="openSource(f.file)" x-text="f.file"></span>
                                         <span class="changes-diff-stat">
                                             <span class="changes-added" x-text="'+' + f.added"></span>
                                             <span class="changes-removed" x-text="'-' + f.removed"></span>
@@ -1017,24 +987,24 @@
                             </div>
                         </template>
                         <!-- Symbol list -->
-                        <template x-if="results.changes.data.symbols">
+                        <template x-if="results.changes.symbols">
                             <div class="changes-symbols">
-                                <div class="changes-section-title" x-text="'Modified (' + results.changes.data.symbols.length + ')'"></div>
-                                <template x-for="(sym, idx) in results.changes.data.symbols" :key="sym.id">
+                                <div class="changes-section-title" x-text="'Modified (' + results.changes.symbols.length + ')'"></div>
+                                <template x-for="(sym, idx) in results.changes.symbols" :key="sym.id">
                                     <div class="changes-symbol">
                                         <div class="changes-symbol-row">
-                                            <span class="rc-type" :class="sym.type.toLowerCase()" x-text="sym.type"></span>
-                                            <span class="changes-sym-name" @click="forms.context.node_id = sym.id; setTool('context'); runContext()" x-text="sym.name"></span>
+                                            <span class="rc-type" :class="typeClass(sym.type)" x-text="typeLabel(sym.type)" :title="sym.type"></span>
+                                            <span class="changes-sym-name" @click="openContext(sym.id)" x-text="sym.name"></span>
                                             <span class="changes-diff-stat">
                                                 <span class="changes-added" x-text="'+' + sym.added"></span>
                                                 <span class="changes-removed" x-text="'-' + sym.removed"></span>
                                             </span>
-                                            <span class="changes-sym-file" x-show="sym.file" @click="forms.source.file = sym.file; forms.source.line = sym.line; setTool('source'); runSource()" x-text="sym.file.replace(/^FILE:/, '') + (sym.line ? ':' + sym.line : '')"></span>
+                                            <span class="changes-sym-file" x-show="sym.file" @click="openSource(sym.file, sym.line)" x-text="sym.file + (sym.line ? ':' + sym.line : '')"></span>
                                         </div>
                                         <div class="changes-callers" x-show="sym.callers?.length">
                                             <span class="changes-callers-label">Callers:</span>
                                             <template x-for="c in (sym.callers || [])" :key="c.id">
-                                                <span class="changes-caller" @click="forms.context.node_id = c.id; setTool('context'); runContext()" x-text="c.name + (c.candidates ? ' (' + oneOf(c.candidates) + ')' : '')"></span>
+                                                <span class="changes-caller" @click="openContext(c.id)" x-text="c.name + (c.candidates ? ' (' + oneOf(c.candidates) + ')' : '')"></span>
                                             </template>
                                             <span class="changes-callers-more" x-show="sym.callers_total > (sym.callers || []).length" x-text="changesMore(sym)"></span>
                                         </div>
@@ -1219,8 +1189,15 @@ function app() {
         breadcrumbs: [{label: 'Home', tool: 'home'}],
         results: {},
 
-        // Dynamic examples from graph (populated on init)
         examples: null,
+        timeRanges: [
+            ['', 'All time'],
+            ['last 7 days', 'Last 7 days'],
+            ['last 14 days', 'Last 14 days'],
+            ['last 30 days', 'Last 30 days'],
+            ['last 3 months', 'Last 3 months'],
+            ['last 6 months', 'Last 6 months'],
+        ],
 
         // Encyclopedia state
         helpSearch: '',
@@ -1308,10 +1285,13 @@ function app() {
             this.showHelp = true;
         },
 
-        openHelpTOC() {
-            this.helpSearch = '';
-            this.helpArticle = null;
-            this.showHelp = true;
+        // The help contents: by category, or the articles a search matches.
+        helpGroups() {
+            if (this.helpSearch.trim()) return [{name: '', articles: this.filteredHelpArticles()}];
+            return ['Tools', 'Concepts', 'Workflows'].map(name => ({
+                name,
+                articles: this.helpArticles.filter(a => a.category === name.toLowerCase()),
+            }));
         },
 
         filteredHelpArticles() {
@@ -1360,15 +1340,7 @@ function app() {
         },
 
         typeLabel(type) {
-            const labels = {
-                'function': 'FUN', 'method': 'MET', 'class': 'CLA',
-                'constant': 'CON', 'file': 'FIL', 'configuration': 'CFG'
-            };
-            return labels[type?.toLowerCase()] || type?.substring(0,3)?.toUpperCase() || '';
-        },
-
-        hasResults() {
-            return Object.keys(this.results).some(k => this.results[k]);
+            return (this.typeClass(type) || type?.substring(0, 3) || '').toUpperCase();
         },
 
         pushBreadcrumb(label, tool, params) {
@@ -1393,41 +1365,28 @@ function app() {
             this.runContext();
         },
 
-        viewSource(file, line) {
+        openContext(nodeId) {
+            this.forms.context.node_id = nodeId;
+            this.setTool('context');
+            this.runContext();
+        },
+
+        openSource(file, line = null) {
             this.forms.source.file = file;
-            this.forms.source.line = line || null;
-            this.activeTool = 'source';
-            const shortFile = file.split('/').pop();
-            this.pushBreadcrumb(shortFile + (line ? ':' + line : ''), 'source', {file, line});
+            this.forms.source.line = line;
+            this.setTool('source');
             this.runSource();
         },
 
-        viewCallers(name) {
-            this.forms.callers.name = name;
-            this.activeTool = 'callers';
-            this.pushBreadcrumb('callers(' + name + ')', 'callers', {name});
-            this.runCallers();
-        },
-
-        viewCallees(name) {
-            this.forms.callees.name = name;
-            this.activeTool = 'callees';
-            this.pushBreadcrumb('callees(' + name + ')', 'callees', {name});
-            this.runCallees();
+        // The file of a node ID.
+        fileOf(nodeId) {
+            return nodeId.split('::')[0].replace(/^FILE:/, '');
         },
 
         // DOMPurify config: tags and attributes allowed for rendered markdown + SVG (mermaid diagrams)
         _purifyConfig: {
-            ADD_TAGS: ['code', 'pre', 'span', 'svg', 'g', 'path', 'rect', 'text', 'tspan',
-                       'line', 'circle', 'polygon', 'polyline', 'marker', 'defs', 'style',
-                       'foreignObject', 'div', 'br', 'p', 'ul', 'ol', 'li', 'table', 'tr',
-                       'td', 'th', 'thead', 'tbody', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-                       'a', 'strong', 'em', 'blockquote', 'hr', 'img', 'dl', 'dt', 'dd'],
-            ADD_ATTR: ['class', 'id', 'viewBox', 'xmlns', 'd', 'fill', 'stroke',
-                       'stroke-width', 'transform', 'x', 'y', 'width', 'height',
-                       'style', 'href', 'src', 'alt', 'text-anchor', 'dominant-baseline',
-                       'font-size', 'font-family', 'marker-end', 'points', 'rx', 'ry',
-                       'cx', 'cy', 'r', 'x1', 'y1', 'x2', 'y2'],
+            ADD_TAGS: ['foreignObject'],
+            ADD_ATTR: ['dominant-baseline'],
         },
 
         // Safe HTML rendering: markdown -> HTML with DOMPurify sanitization + syntax highlighting.
@@ -1439,7 +1398,6 @@ function app() {
                 const rawHtml = marked.parse(md);
                 // First sanitize pass: clean the raw markdown-generated HTML
                 const div = document.createElement('div');
-                div.textContent = '';
                 div.appendChild(
                     DOMPurify.sanitize(rawHtml, { ...this._purifyConfig, RETURN_DOM_FRAGMENT: true })
                 );
@@ -1459,8 +1417,7 @@ function app() {
                 return DOMPurify.sanitize(div.innerHTML, this._purifyConfig);
             } catch (e) {
                 // Fallback: escape and show as preformatted text
-                const escaped = md.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                return '<pre>' + escaped + '</pre>';
+                return '<pre>' + this._esc(md) + '</pre>';
             }
         },
 
@@ -1475,7 +1432,6 @@ function app() {
                     const id = 'mermaid-' + Math.random().toString(36).substring(2, 9);
                     const { svg } = await mermaid.render(id, block.textContent);
                     // Mermaid.render returns SVG - sanitize before inserting
-                    const clean = DOMPurify.sanitize(svg, this._purifyConfig);
                     block.textContent = '';
                     block.appendChild(
                         DOMPurify.sanitize(svg, { ...this._purifyConfig, RETURN_DOM_FRAGMENT: true })
@@ -1532,46 +1488,31 @@ function app() {
         // Builds markup for x-html from strings that come from the indexed
         // repository, so each one is escaped where it is interpolated.
         _renderNode(node, depth) {
-            const type = this._esc(node.type);
-            const typeClass = type.toLowerCase();
             const hasChildren = node.children && node.children.length > 0;
             const hasCode = !!node.code;
             const expandable = hasChildren || hasCode;
 
-            // Shorten file path for display
-            const shortFile = node.file
-                ? node.file.replace(/^FILE:/, '')
-                : '';
-            const fileLoc = this._esc(shortFile + (node.line ? ':' + node.line : ''));
+            const fileLoc = this._esc((node.file || '') + (node.line ? ':' + node.line : ''));
 
-            // Escape code for safe embedding
-            const escapedCode = node.code
-                ? node.code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-                : '';
-
-            // Escape data attributes
-            const safeId = node.id.replace(/"/g, '&quot;');
-            const safeFile = (node.file || '').replace(/"/g, '&quot;');
+            const safeId = this._esc(node.id);
+            const safeFile = this._esc(node.file || '');
 
             let html = `<div class="flow-node ${depth === 0 ? 'flow-root' : ''}" data-depth="${depth}">`;
 
             // Node row - clickable to toggle
             html += `<div class="flow-node-row">`;
 
-            // Expand/collapse toggle
             if (expandable) {
                 html += `<span class="flow-toggle" data-action="toggle">&#x25BE;</span>`;
             } else {
                 html += `<span class="flow-toggle flow-toggle-leaf">&#x2022;</span>`;
             }
 
-            // Type badge
-            html += `<span class="rc-type ${typeClass}">${type}</span>`;
+            html += `<span class="rc-type ${this.typeClass(node.type)}">${this._esc(this.typeLabel(node.type))}</span>`;
 
             // Function name - navigates to Context
             html += `<span class="flow-fn-name" data-action="context" data-node-id="${safeId}">${this._esc(node.name)}</span>`;
 
-            // Token count
             html += `<span class="flow-tokens">${node.tokens.toLocaleString()} toks</span>`;
             if (node.candidates) html += `<span class="flow-tokens">${this.oneOf(node.candidates)}</span>`;
             if (node.seen != null) html += `<span class="flow-tokens">at level ${node.seen}</span>`;
@@ -1587,11 +1528,10 @@ function app() {
             // Inline code block (for small functions)
             if (hasCode) {
                 html += `<div class="flow-code">`;
-                html += `<pre><code class="language-${this._esc(node.lang || 'rust')}">${escapedCode}</code></pre>`;
+                html += `<pre><code class="language-${this._esc(node.lang)}">${this._esc(node.code)}</code></pre>`;
                 html += `</div>`;
             }
 
-            // Children container
             if (hasChildren) {
                 html += `<div class="flow-children">`;
                 node.children.forEach((child) => {
@@ -1621,15 +1561,10 @@ function app() {
                 target.closest('.flow-node').classList.toggle('collapsed');
             } else if (action === 'context') {
                 e.stopPropagation();
-                this.forms.context.node_id = target.dataset.nodeId;
-                this.setTool('context');
-                this.runContext();
+                this.openContext(target.dataset.nodeId);
             } else if (action === 'source') {
                 e.stopPropagation();
-                this.forms.source.file = target.dataset.file;
-                this.forms.source.line = target.dataset.line ? parseInt(target.dataset.line) : null;
-                this.setTool('source');
-                this.runSource();
+                this.openSource(target.dataset.file, target.dataset.line ? parseInt(target.dataset.line) : null);
             }
         },
 
@@ -1704,25 +1639,25 @@ function app() {
         async runQuick() {
             const f = this.forms.quick;
             if (!f.name.trim()) return;
-            this.results.quick = await this.api('/api/quick?name=' + encodeURIComponent(f.name) + '&full=' + f.full);
+            this.results.quick = await this.api('/api/quick?symbol=' + encodeURIComponent(f.name) + '&full=' + f.full);
         },
 
         async runCallers() {
             const f = this.forms.callers;
             if (!f.name.trim()) return;
-            this.results.callers = await this.api('/api/callers?name=' + encodeURIComponent(f.name) + '&limit=' + f.limit);
+            this.results.callers = await this.api('/api/callers?symbol=' + encodeURIComponent(f.name) + '&limit=' + f.limit);
         },
 
         async runCallees() {
             const f = this.forms.callees;
             if (!f.name.trim()) return;
-            this.results.callees = await this.api('/api/callees?name=' + encodeURIComponent(f.name) + '&limit=' + f.limit);
+            this.results.callees = await this.api('/api/callees?symbol=' + encodeURIComponent(f.name) + '&limit=' + f.limit);
         },
 
         async runContext() {
             const f = this.forms.context;
             if (!f.node_id.trim()) return;
-            const p = new URLSearchParams({node_id: f.node_id});
+            const p = new URLSearchParams({symbol: f.node_id});
             if (f.full) p.set('full', 'true');
             if (f.expand_callees) p.set('expand_callees', 'true');
             this.results.context = await this.api('/api/context?' + p);
@@ -1737,7 +1672,7 @@ function app() {
         async runFlatten() {
             const f = this.forms.flatten;
             if (!f.class_node_id.trim()) return;
-            this.results.flatten = await this.api('/api/flatten?class_node_id=' + encodeURIComponent(f.class_node_id));
+            this.results.flatten = await this.api('/api/flatten?symbol=' + encodeURIComponent(f.class_node_id));
         },
 
         async runImpls() {
@@ -1772,7 +1707,7 @@ function app() {
 
         async runChurn() {
             const f = this.forms.churn;
-            const p = new URLSearchParams({mode: f.mode, limit: f.limit, format: 'structured'});
+            const p = new URLSearchParams({mode: f.mode, limit: f.limit});
             if (f.time_range) p.set('time_range', f.time_range);
             if (f.path_filter) p.set('path_filter', f.path_filter);
             this.results.churn = await this.api('/api/churn?' + p);
@@ -1781,7 +1716,7 @@ function app() {
         async runEvolution() {
             const f = this.forms.evolution;
             if (!f.name.trim()) return;
-            const p = new URLSearchParams({name: f.name, limit: f.limit});
+            const p = new URLSearchParams({symbol: f.name, limit: f.limit});
             if (f.time_range) p.set('time_range', f.time_range);
             if (f.show_diff) p.set('show_diff', 'true');
             this.results.evolution = await this.api('/api/evolution?' + p);
@@ -1789,11 +1724,11 @@ function app() {
 
         async runChanges() {
             const f = this.forms.changes;
-            const p = new URLSearchParams({limit: 50, format: 'structured'});
+            const p = new URLSearchParams({limit: 50});
             if (f.commit_range) p.set('commit_range', f.commit_range);
             if (f.time_range) p.set('time_range', f.time_range);
             if (f.path_filter) p.set('path_filter', f.path_filter);
-            if (f.show_callers) p.set('show_callers', 'true');
+            p.set('show_callers', f.show_callers ? 'true' : 'false');
             this.results.changes = await this.api('/api/changes?' + p);
         },
 
@@ -1838,30 +1773,28 @@ function app() {
 
                     for (const line of lines) {
                         if (!line.startsWith('data: ')) continue;
-                        try {
-                            const evt = JSON.parse(line.slice(6));
-                            if (evt.type === 'output') {
-                                this.reindexLines.push({text: evt.line, type: 'output'});
-                            } else if (evt.type === 'start') {
-                                this.reindexLines.push({text: evt.message, type: 'info'});
-                            } else if (evt.type === 'error') {
-                                this.reindexLines.push({text: evt.message, type: 'error'});
-                            } else if (evt.type === 'done') {
-                                this.reindexStatus = evt.success ? 'success' : 'error';
-                                if (evt.graph) this.reindexGraph = evt.graph;
-                                if (evt.success) {
-                                    this.reindexLines.push({text: 'Reindex completed successfully.', type: 'success'});
-                                    await this.fetchHealth();
-                                } else {
-                                    this.reindexLines.push({text: evt.message || 'Reindex failed.', type: 'error'});
-                                }
+                        const evt = JSON.parse(line.slice(6));
+                        if (evt.type === 'output') {
+                            this.reindexLines.push({text: evt.line, type: 'output'});
+                        } else if (evt.type === 'start') {
+                            this.reindexLines.push({text: evt.message, type: 'info'});
+                        } else if (evt.type === 'error') {
+                            this.reindexLines.push({text: evt.message, type: 'error'});
+                        } else if (evt.type === 'done') {
+                            this.reindexStatus = evt.success ? 'success' : 'error';
+                            if (evt.graph) this.reindexGraph = evt.graph;
+                            if (evt.success) {
+                                this.reindexLines.push({text: 'Reindex completed successfully.', type: 'success'});
+                                await this.fetchHealth();
+                            } else {
+                                this.reindexLines.push({text: evt.message || 'Reindex failed.', type: 'error'});
                             }
-                            // Auto-scroll log
-                            this.$nextTick(() => {
-                                const log = this.$refs.reindexLog;
-                                if (log) log.scrollTop = log.scrollHeight;
-                            });
-                        } catch (e) { /* skip malformed SSE */ }
+                        }
+                        // Auto-scroll log
+                        this.$nextTick(() => {
+                            const log = this.$refs.reindexLog;
+                            if (log) log.scrollTop = log.scrollHeight;
+                        });
                     }
                 }
             } catch (e) {
@@ -1900,25 +1833,10 @@ function app() {
 
             <!-- TOC View -->
             <div x-show="!helpArticle">
-                <!-- Grouped by category when not searching -->
-                <template x-if="!helpSearch.trim()">
-                    <div>
-                        <div class="ency-category">Tools</div>
-                        <template x-for="a in helpArticles.filter(a => a.category === 'tools')" :key="a.slug">
-                            <div class="ency-toc-item" @click="helpArticle = a.slug">
-                                <span class="ency-toc-title" x-text="a.title"></span>
-                                <span class="ency-toc-desc" x-text="a.desc"></span>
-                            </div>
-                        </template>
-                        <div class="ency-category">Concepts</div>
-                        <template x-for="a in helpArticles.filter(a => a.category === 'concepts')" :key="a.slug">
-                            <div class="ency-toc-item" @click="helpArticle = a.slug">
-                                <span class="ency-toc-title" x-text="a.title"></span>
-                                <span class="ency-toc-desc" x-text="a.desc"></span>
-                            </div>
-                        </template>
-                        <div class="ency-category">Workflows</div>
-                        <template x-for="a in helpArticles.filter(a => a.category === 'workflows')" :key="a.slug">
+                <template x-for="group in helpGroups()" :key="group.name">
+                    <div class="ency-group">
+                        <div class="ency-category" x-show="group.name" x-text="group.name"></div>
+                        <template x-for="a in group.articles" :key="a.slug">
                             <div class="ency-toc-item" @click="helpArticle = a.slug">
                                 <span class="ency-toc-title" x-text="a.title"></span>
                                 <span class="ency-toc-desc" x-text="a.desc"></span>
@@ -1926,21 +1844,9 @@ function app() {
                         </template>
                     </div>
                 </template>
-
-                <!-- Flat filtered list when searching -->
-                <template x-if="helpSearch.trim()">
-                    <div>
-                        <template x-for="a in filteredHelpArticles()" :key="a.slug">
-                            <div class="ency-toc-item" @click="helpArticle = a.slug">
-                                <span class="ency-toc-title" x-text="a.title"></span>
-                                <span class="ency-toc-desc" x-text="a.desc"></span>
-                            </div>
-                        </template>
-                        <div class="ency-no-results" x-show="filteredHelpArticles().length === 0">
-                            No articles match your search.
-                        </div>
-                    </div>
-                </template>
+                <div class="ency-no-results" x-show="helpSearch.trim() && filteredHelpArticles().length === 0">
+                    No articles match your search.
+                </div>
             </div>
 
             <!-- ===== TOOL ARTICLES ===== -->
@@ -1999,7 +1905,7 @@ function app() {
                 <h3>Parameters</h3>
                 <table>
                     <tr><th>Field</th><th>Description</th></tr>
-                    <tr><td>name</td><td>Symbol name to look up (e.g. function or class name)</td></tr>
+                    <tr><td>symbol</td><td>A node ID, or a name (e.g. function or class name)</td></tr>
                     <tr><td>full</td><td>Show complete source without truncation</td></tr>
                 </table>
                 <h3>Example</h3>
@@ -2008,7 +1914,7 @@ function app() {
                 </div>
                 <h3>Tips</h3>
                 <ul class="ency-tips">
-                    <li>Combines Search + Context into one step &mdash; fastest way to get a complete picture</li>
+                    <li>Combines Search and Context into one step</li>
                     <li>If the wrong match is found, use Search to pick the right one, then Context</li>
                 </ul>
             </div>
@@ -2020,7 +1926,7 @@ function app() {
                 <h3>Parameters</h3>
                 <table>
                     <tr><th>Field</th><th>Description</th></tr>
-                    <tr><td>name</td><td>Symbol name to find callers of</td></tr>
+                    <tr><td>symbol</td><td>A node ID, or a name, to find callers of</td></tr>
                     <tr><td>limit</td><td>Max callers to return (default: 20)</td></tr>
                 </table>
                 <h3>Example</h3>
@@ -2029,8 +1935,8 @@ function app() {
                 </div>
                 <h3>Tips</h3>
                 <ul class="ency-tips">
-                    <li>More reliable than grep &mdash; uses the call graph to distinguish real calls from comments and strings</li>
-                    <li>Essential before refactoring: know who depends on a function before changing its signature</li>
+                    <li>Reads the call graph, so comments and strings that mention the name are not counted as calls</li>
+                    <li>Use before refactoring to see who depends on a function before changing its signature</li>
                     <li>Click any caller to view its full Context</li>
                 </ul>
             </div>
@@ -2042,7 +1948,7 @@ function app() {
                 <h3>Parameters</h3>
                 <table>
                     <tr><th>Field</th><th>Description</th></tr>
-                    <tr><td>name</td><td>Symbol name to find callees of</td></tr>
+                    <tr><td>symbol</td><td>A node ID, or a name, to find callees of</td></tr>
                     <tr><td>limit</td><td>Max callees to return (default: 20)</td></tr>
                 </table>
                 <h3>Example</h3>
@@ -2063,7 +1969,7 @@ function app() {
                 <h3>Parameters</h3>
                 <table>
                     <tr><th>Field</th><th>Description</th></tr>
-                    <tr><td>node_id</td><td>Full node ID (e.g. <code>FILE:src/app.py::MyClass::init</code>)</td></tr>
+                    <tr><td>symbol</td><td>A node ID (e.g. <code>FILE:src/app.py::MyClass::init</code>), or a name</td></tr>
                     <tr><td>full</td><td>Show complete source without truncation</td></tr>
                     <tr><td>expand callees</td><td>Inline source of small callees directly in the output</td></tr>
                 </table>
@@ -2094,7 +2000,7 @@ function app() {
                 </div>
                 <h3>Tips</h3>
                 <ul class="ency-tips">
-                    <li>Great for orientation when entering an unfamiliar file</li>
+                    <li>Gives an overview of an unfamiliar file</li>
                     <li>Click any symbol to jump to its full Context</li>
                     <li>Partial filenames work &mdash; <code>server</code> matches <code>web/server.py</code></li>
                 </ul>
@@ -2107,7 +2013,7 @@ function app() {
                 <h3>Parameters</h3>
                 <table>
                     <tr><th>Field</th><th>Description</th></tr>
-                    <tr><td>class_node_id</td><td>Full node ID of the class/struct (e.g. <code>FILE:src/app.py::MyClass</code>)</td></tr>
+                    <tr><td>symbol</td><td>The class or struct, by node ID (e.g. <code>FILE:src/app.py::MyClass</code>) or name</td></tr>
                 </table>
                 <h3>Example</h3>
                 <div class="ency-example">
@@ -2115,7 +2021,7 @@ function app() {
                 </div>
                 <h3>Tips</h3>
                 <ul class="ency-tips">
-                    <li>Requires the full node ID &mdash; use Search or Structure to find it first</li>
+                    <li>Takes a node ID, or a name only one class has &mdash; use Search or Structure to find it</li>
                     <li>Shows methods from all levels of the inheritance hierarchy</li>
                 </ul>
             </div>
@@ -2136,7 +2042,7 @@ function app() {
                 </div>
                 <h3>Tips</h3>
                 <ul class="ency-tips">
-                    <li>Far more precise than grep for polymorphic code &mdash; filters out false positives</li>
+                    <li>Lists implementations only, where a grep for the method name also finds calls and mentions</li>
                     <li>Add a trait name to narrow results when a method name is common</li>
                 </ul>
             </div>
@@ -2209,7 +2115,7 @@ function app() {
                 <ul class="ency-tips">
                     <li>Requires an OpenAPI spec to be configured (see project config)</li>
                     <li>Use "stats" mode first to see available endpoints and coverage</li>
-                    <li>Bridges the gap when tracing user actions from UI to backend</li>
+                    <li>Traces a user action from the UI to its backend handler</li>
                 </ul>
             </div>
 
@@ -2244,7 +2150,7 @@ function app() {
                 <h3>Parameters</h3>
                 <table>
                     <tr><th>Field</th><th>Description</th></tr>
-                    <tr><td>name</td><td>Symbol or file name to track</td></tr>
+                    <tr><td>symbol</td><td>A node ID, or a name, to track</td></tr>
                     <tr><td>time_range</td><td>Optional: limit to a time window</td></tr>
                     <tr><td>limit</td><td>Max commits to show (default: 10)</td></tr>
                     <tr><td>show_diff</td><td>Include actual code diffs at each commit</td></tr>
@@ -2255,9 +2161,9 @@ function app() {
                 </div>
                 <h3>Tips</h3>
                 <ul class="ency-tips">
-                    <li>Uses git's native function tracking to follow symbols across line drift and renames</li>
+                    <li>Follows a symbol's own lines across line drift and renames, as churn does</li>
                     <li>Enable "Show diffs" to see what changed at each commit</li>
-                    <li>Great for understanding why a function looks the way it does</li>
+                    <li>Shows how a function came to look the way it does</li>
                 </ul>
             </div>
 
@@ -2279,7 +2185,7 @@ function app() {
                 </div>
                 <h3>Tips</h3>
                 <ul class="ency-tips">
-                    <li>The "show callers" option is what makes this powerful &mdash; it reveals ripple risk</li>
+                    <li>The "show callers" option lists the callers of each changed symbol, which the change may affect</li>
                     <li>Use for code review: see at a glance what a PR touches and what depends on it</li>
                     <li>Defaults to the last commit if no range is specified</li>
                 </ul>
@@ -2387,11 +2293,11 @@ function app() {
                 <h2>SCIP Indexing</h2>
                 <p class="ency-oneliner">Compiler-level precision for cross-references and type resolution.</p>
                 <h3>What is SCIP?</h3>
-                <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">SCIP (Source Code Intelligence Protocol) is a standard for representing code intelligence data. Descry uses SCIP indices produced by language-specific indexers (rust-analyzer for Rust, scip-typescript for TypeScript) to resolve cross-references with compiler-level accuracy.</p>
+                <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">SCIP (Source Code Intelligence Protocol) is a standard for representing code intelligence data. Descry uses SCIP indices produced by each language's SCIP indexer to resolve cross-references with compiler-level accuracy.</p>
                 <h3>Why It Matters</h3>
                 <p style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">Without SCIP, descry relies on AST-based name matching which can produce false positives (e.g., two functions with the same name in different modules). With SCIP, every reference is resolved to its exact definition &mdash; no ambiguity.</p>
                 <h3>Supported Languages</h3>
-                <p style="font-size:13px;color:var(--text-secondary)">Rust (via rust-analyzer), TypeScript/JavaScript (via scip-typescript). Check Health to see if SCIP is available for your project. SCIP is optional &mdash; all tools work without it, just with less precision.</p>
+                <p style="font-size:13px;color:var(--text-secondary)">Each language whose SCIP indexer descry runs. Check Health to see which indexers are available for your project. SCIP is optional &mdash; all tools work without it, just with less precision.</p>
             </div>
 
             <!-- Semantic Embeddings -->

@@ -263,7 +263,14 @@ def build(jdk):
         for name in kept
         if module.exported(name) and (signature := module.callable(name))
     }
-    return source, types, {}, scope, None, callbacks, None, functional
+    return {
+        "source": source,
+        "types": types,
+        "functions": {},
+        "scope": scope,
+        "callbacks": callbacks,
+        "functional": functional,
+    }
 
 
 if __name__ == "__main__":

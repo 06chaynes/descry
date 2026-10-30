@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from descry.handlers import DescryConfig
+from descry.handlers import _TOML_NUMBERS, DescryConfig
 from descry.scip.cache import ADAPTERS, ScipCacheManager
 
 # --- Default field values ---
@@ -200,16 +200,62 @@ timeout = 45
         assert config.max_nodes == 100
         assert config.embedding_model is None
 
+    @pytest.mark.parametrize("value", ["-5", "inf", "nan"])
+    @pytest.mark.parametrize(("section", "key"), list(_TOML_NUMBERS))
+    def test_a_number_out_of_range_is_refused(self, tmp_path, section, key, value):
+        """`inf` overflowed every byte limit; a negative timeout timed out
+        every run at once."""
+        (tmp_path / ".descry.toml").write_text(f"[{section}]\n{key} = {value}\n")
+        config = DescryConfig()
+        kept = getattr(config, _TOML_NUMBERS[section, key])
+        config._apply_toml(DescryConfig._load_toml(tmp_path))
+        assert getattr(config, _TOML_NUMBERS[section, key]) == kept
+
     @pytest.mark.parametrize(
-        ("key", "kept"), [("max_file_mb", 10), ("max_parse_seconds", 120)]
+        "toml",
+        [
+            "project = 5\n",
+            '[features]\nenable_scip = "false"\n',
+            '[project]\nexcluded_dirs = "target"\n',
+            '[project]\nrespect_gitignore = "false"\n',
+            "[query]\nmax_depth = 2.5\n",
+            "[git]\ntimeout = 0\n",
+            "[git]\ntimeout = 1e308\n",
+            "[code_files]\nmax_file_mb = 1e308\n",
+            "[scip.rust]\ntoolchain = 5\n",
+            "[embeddings]\nmodel = 5\n",
+            "[test_detection]\npath_patterns = [1]\n",
+            "[git]\nchurn_exclusions = [1]\n",
+            '[scip]\nextra_args = "abc"\n',
+            "[scip]\nskip_crates = [1]\n",
+            "[cross_lang]\nbackend_handler_patterns = [1]\n",
+            '[cross_lang]\napi_prefixes = "/api"\n',
+            "[cross_lang]\nopenapi_path = 5\n",
+            "[syntax]\nlang_map = 3\n",
+            "[scip]\nrust = 1\n",
+        ],
     )
-    def test_negative_limit_is_refused(self, tmp_path, caplog, key, kept):
-        (tmp_path / ".descry.toml").write_text(f"[code_files]\n{key} = -5\n")
+    def test_a_value_of_the_wrong_type_keeps_the_default(self, tmp_path, caplog, toml):
+        """A quoted boolean, a fractional depth, a string where a list is,
+        a scalar where a table is, an entry that is not a string, a number
+        too large to use, a model or toolchain that is not a string: the
+        setting keeps its default and warns, where it once crashed or
+        silently took effect."""
+        (tmp_path / ".descry.toml").write_text(toml)
+        config = DescryConfig(project_root=tmp_path)
+        defaults = vars(config).copy()
         with caplog.at_level(logging.WARNING):
-            config = DescryConfig()
             config._apply_toml(DescryConfig._load_toml(tmp_path))
-        assert getattr(config, key) == kept
-        assert any("is negative" in r.message for r in caplog.records)
+        assert vars(config) == defaults
+        assert caplog.records
+
+    def test_a_number_too_large_is_refused_naming_the_bound(self, tmp_path, caplog):
+        (tmp_path / ".descry.toml").write_text("[timeouts]\nquery_ms = 2000000\n")
+        config = DescryConfig(project_root=tmp_path)
+        with caplog.at_level(logging.WARNING):
+            config._apply_toml(DescryConfig._load_toml(tmp_path))
+        assert config.query_timeout_ms == 4000
+        assert any("below 1000000" in r.message for r in caplog.records)
 
     def test_parse_time_and_gitignore_settings(self, tmp_path):
         (tmp_path / ".descry.toml").write_text(
@@ -328,7 +374,7 @@ extra_args = []
         spec = tmp_path / "public" / "openapi.json"
         spec.write_text('{"openapi":"3.0.0"}')
         (tmp_path / ".descry.toml").write_text(
-            f'[cross_lang]\nopenapi_path = "{spec}"\n'
+            f'[cross_lang]\nopenapi_path = "{spec.as_posix()}"\n'
         )
         config = DescryConfig(project_root=tmp_path)
         config._apply_toml(DescryConfig._load_toml(tmp_path))
@@ -394,23 +440,23 @@ class TestScipCacheManagerConfig:
     """ScipCacheManager receives and uses config values."""
 
     def test_default_extra_args(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         assert mgr._scip_extra_args == ["--exclude-vendored-libraries"]
 
     def test_custom_extra_args(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path, scip_extra_args=["--custom-flag"])
+        mgr = ScipCacheManager(tmp_path, set(), scip_extra_args=["--custom-flag"])
         assert mgr._scip_extra_args == ["--custom-flag"]
 
     def test_empty_extra_args(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path, scip_extra_args=[])
+        mgr = ScipCacheManager(tmp_path, set(), scip_extra_args=[])
         assert mgr._scip_extra_args == []
 
     def test_default_skip_crates(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         assert mgr._scip_skip_crates == set()
 
     def test_custom_skip_crates(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path, scip_skip_crates=["alpha", "beta"])
+        mgr = ScipCacheManager(tmp_path, set(), scip_skip_crates=["alpha", "beta"])
         assert mgr._scip_skip_crates == {"alpha", "beta"}
 
     def test_skip_crates_filters_rust_crates(self, tmp_path):
@@ -428,7 +474,7 @@ class TestScipCacheManagerConfig:
             '[workspace]\nmembers = ["alpha", "beta", "gamma"]'
         )
 
-        mgr = ScipCacheManager(tmp_path, scip_skip_crates=["beta"])
+        mgr = ScipCacheManager(tmp_path, set(), scip_skip_crates=["beta"])
         found = ADAPTERS["rust"].discover(tmp_path, mgr.excluded_dirs)
         assert "beta" in [crate.name for crate in found]
 
@@ -444,18 +490,18 @@ class TestScipCacheManagerConfig:
         assert indexed == ["alpha", "gamma"]
 
     def test_default_toolchain(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path)
+        mgr = ScipCacheManager(tmp_path, set())
         assert mgr._scip_toolchain is None
 
     def test_custom_toolchain(self, tmp_path):
-        mgr = ScipCacheManager(tmp_path, scip_toolchain="1.92.0")
+        mgr = ScipCacheManager(tmp_path, set(), scip_toolchain="1.92.0")
         assert mgr._scip_toolchain == "1.92.0"
 
     def test_toolchain_builds_rustup_command(self, tmp_path):
         """When toolchain is set, command starts with rustup run."""
         (tmp_path / "Cargo.toml").write_text('[package]\nname = "solo"')
         (tmp_path / "src").mkdir()
-        mgr = ScipCacheManager(tmp_path, scip_toolchain="1.92.0")
+        mgr = ScipCacheManager(tmp_path, set(), scip_toolchain="1.92.0")
 
         with patch("descry.scip.cache.subprocess.run") as run:
             run.return_value = subprocess.CompletedProcess([], 1, "", "")

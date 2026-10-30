@@ -68,6 +68,28 @@ def _cli(project, command, *args):
     ).stdout
 
 
+def _mcp_result(project, tool, **arguments):
+    """The CallToolResult of one MCP tool call, over stdio."""
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    async def call():
+        server = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "descry.mcp_server"],
+            cwd=project,
+            env=ENV,
+        )
+        async with (
+            stdio_client(server) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            return await session.call_tool(f"descry_{tool}", arguments)
+
+    return asyncio.run(call())
+
+
 def _mcp(project, tool, **arguments):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
@@ -107,13 +129,13 @@ def web(project, monkeypatch):
 QUESTIONS = {
     "context": (
         ("context", A),
-        ("context", {"node_id": A}),
-        ("/api/context", {"node_id": A}),
+        ("context", {"symbol": A}),
+        ("/api/context", {"symbol": A}),
     ),
     "brief": (
         ("context", A, "--brief"),
-        ("context", {"node_id": A, "brief": True}),
-        ("/api/context", {"node_id": A, "brief": "true"}),
+        ("context", {"symbol": A, "brief": True}),
+        ("/api/context", {"symbol": A, "brief": "true"}),
     ),
     "upstream": (
         ("flow", A, "--direction", "backward", "--depth", "1"),
@@ -127,13 +149,13 @@ QUESTIONS = {
     ),
     "signature": (
         ("quick", A),
-        ("quick", {"name": A}),
-        ("/api/quick", {"name": A}),
+        ("quick", {"symbol": A}),
+        ("/api/quick", {"symbol": A}),
     ),
     "flatten": (
         ("flatten", "Derived"),
-        ("flatten", {"class_node_id": "Derived"}),
-        ("/api/flatten", {"class_node_id": "Derived"}),
+        ("flatten", {"symbol": "Derived"}),
+        ("/api/flatten", {"symbol": "Derived"}),
     ),
 }
 
@@ -190,32 +212,34 @@ def test_impls_says_where_it_applies(project, interface):
 
 
 @pytest.mark.parametrize("interface", ["cli", "mcp"])
-def test_callees_say_what_they_leave_out_and_which_they_answer(project, interface):
+def test_callees_say_what_they_leave_out_and_refuse_a_shared_name(project, interface):
     ask = {
         "cli": lambda *a: _cli(project, "callees", a[0], "--limit", str(a[1])),
-        "mcp": lambda *a: _mcp(project, "callees", name=a[0], limit=a[1]),
+        "mcp": lambda *a: _mcp(project, "callees", symbol=a[0], limit=a[1]),
     }[interface]
     assert "(1 more callees, limit 1)" in ask("only_a", 1)
-    assert "1 other definition(s) of 'parse'" in ask("parse", 5)
+    refused = ask("parse", 5)
+    assert "'parse' names 2 definitions; give one by node ID:" in refused
+    assert "FILE:a.py::A::parse" in refused and "FILE:b.py::B::parse" in refused
 
 
 def test_the_web_gives_the_callees_it_leaves_out(web):
-    answer = json.loads(web("/api/callees", name="only_a", limit=1))
+    answer = json.loads(web("/api/callees", symbol="only_a", limit=1))
     assert (answer["total"], len(answer["callees"])) == (2, 1)
 
 
 def test_the_count_is_of_the_callers_resolved_to_it(project, web):
     """`guess` may call it but is not counted."""
     assert "(20 toks, 1 caller)" in _cli(project, "quick", A)
-    assert "(20 toks, 1 caller)" in _mcp(project, "quick", name=A)
-    assert json.loads(web("/api/quick", name=A))["symbol"]["in_degree"] == 1
+    assert "(20 toks, 1 caller)" in _mcp(project, "quick", symbol=A)
+    assert json.loads(web("/api/quick", symbol=A))["symbol"]["callers"] == 1
 
 
 def test_callers_say_how_many_are_possible(project, web):
     said = f"1 caller(s) of '{A}' (+1 possible):"
     assert said in _cli(project, "callers", A)
-    assert said in _mcp(project, "callers", name=A)
-    answer = json.loads(web("/api/callers", name=A, limit=1))
+    assert said in _mcp(project, "callers", symbol=A)
+    answer = json.loads(web("/api/callers", symbol=A, limit=1))
     assert (answer["total"], answer["certain"], answer["possible"]) == (2, 1, 1)
     assert answer["more"] == {"certain": 0, "possible": 1, "unresolved": 0}
 
@@ -223,12 +247,11 @@ def test_callers_say_how_many_are_possible(project, web):
 def test_a_change_marks_its_possible_callers_on_the_page(web):
     """The page renders the structured form: each caller carries its
     candidates, and the change how many of its callers only may be."""
-    data = json.loads(
-        web("/api/changes", commit_range="HEAD~1..HEAD", format="structured")
-    )
-    symbols = {s["id"]: s for s in data["data"]["symbols"]}
-    callers = {c["name"]: c["candidates"] for c in symbols[A]["callers"]}
+    data = json.loads(web("/api/changes", commit_range="HEAD~1..HEAD"))
+    symbols = {s["id"]: s for s in data["symbols"]}
+    callers = {c["name"]: c.get("candidates") for c in symbols[A]["callers"]}
     assert callers == {"only_a": None, "guess": 2}
+    assert all(c["file"] and c["line"] for c in symbols[A]["callers"])
     assert symbols[A]["callers_possible"] == 1
 
 
@@ -261,10 +284,10 @@ def test_a_depth_past_the_ceiling_says_so(project, web):
 
 def test_what_is_left_out_and_what_only_may_be_is_said(project):
     assert "(1 more possible callers, limit 1)" in _mcp(
-        project, "callers", name=A, limit=1
+        project, "callers", symbol=A, limit=1
     )
     assert "**Callees:** 0 (+1 possible)" in _mcp(
-        project, "context", node_id="FILE:use.py::guess", brief=True
+        project, "context", symbol="FILE:use.py::guess", brief=True
     )
 
 
@@ -276,12 +299,12 @@ def test_context_depth_is_bounded_as_flow_is(project, web, interface):
             _cli(project, "context", A, "--depth", "9"),
         ),
         "mcp": lambda: (
-            _mcp(project, "context", node_id=A, depth=0),
-            _mcp(project, "context", node_id=A, depth=9),
+            _mcp(project, "context", symbol=A, depth=0),
+            _mcp(project, "context", symbol=A, depth=9),
         ),
         "web": lambda: (
-            web("/api/context", node_id=A, depth=0),
-            web("/api/context", node_id=A, depth=9),
+            web("/api/context", symbol=A, depth=0),
+            web("/api/context", symbol=A, depth=9),
         ),
     }[interface]()
     assert "depth must be at least 1, got 0." in refused
@@ -291,6 +314,268 @@ def test_context_depth_is_bounded_as_flow_is(project, web, interface):
 def test_a_possible_callee_is_named_and_followed(project):
     flow = _mcp(project, "flow", start="FILE:use.py::guess", depth=1)
     assert flow.count("(one of 2 candidates)") == 2
-    context = _mcp(project, "context", node_id="FILE:use.py::guess")
+    context = _mcp(project, "context", symbol="FILE:use.py::guess")
     assert "`parse` (one of 2 candidates)" in context
     assert "external" not in context.lower()
+
+
+@pytest.mark.parametrize(
+    ("cli_args", "mcp_call", "web_call"),
+    [
+        (
+            ("callers", "parse"),
+            ("callers", {"symbol": "parse"}),
+            ("/api/callers", {"symbol": "parse"}),
+        ),
+        (
+            ("callees", "parse"),
+            ("callees", {"symbol": "parse"}),
+            ("/api/callees", {"symbol": "parse"}),
+        ),
+        (
+            ("context", "parse"),
+            ("context", {"symbol": "parse"}),
+            ("/api/context", {"symbol": "parse"}),
+        ),
+        (
+            ("quick", "parse"),
+            ("quick", {"symbol": "parse"}),
+            ("/api/quick", {"symbol": "parse"}),
+        ),
+        (
+            ("flow", "parse"),
+            ("flow", {"start": "parse"}),
+            ("/api/flow", {"start": "parse"}),
+        ),
+        (
+            ("path", "only_a", "parse"),
+            ("path", {"start": "only_a", "end": "parse"}),
+            ("/api/path", {"start": "only_a", "end": "parse"}),
+        ),
+    ],
+)
+def test_a_name_two_definitions_share_is_refused_with_both(
+    project, web, cli_args, mcp_call, web_call
+):
+    for answer in (
+        _cli(project, *cli_args),
+        _mcp(project, mcp_call[0], **mcp_call[1]),
+        web(*web_call[:1], **web_call[1]),
+    ):
+        assert "'parse' names 2 definitions; give one by node ID:" in answer
+        assert "FILE:a.py::A::parse" in answer and "FILE:b.py::B::parse" in answer
+
+
+def test_mcp_gives_callers_as_structure_without_prose(project):
+    """The structured answer has IDs, places, kinds and counts; nothing a
+    repository wrote reaches the client outside the fence."""
+    result = _mcp_result(project, "callers", symbol=A)
+    answer = result.structured_content
+    assert (answer["certain"], answer["possible"], answer["unresolved"]) == (1, 1, 0)
+    assert [(c["name"], c["kind"]) for c in answer["callers"]] == [
+        ("only_a", "resolved"),
+        ("guess", "candidate"),
+    ]
+    assert set(answer["callers"][0]) <= {
+        "id",
+        "name",
+        "file",
+        "line",
+        "kind",
+        "candidates",
+    }
+    assert result.content[0].text.startswith("<descry:repo_content")
+
+
+def test_mcp_gives_a_path_as_structure_without_prose(project):
+    """Each hop is the caller, the callee and the call's place; the code at
+    the call is only in the fenced text."""
+    result = _mcp_result(project, "path", start="only_a", end=A)
+    answer = result.structured_content
+    assert answer["status"] == "found"
+    assert [set(hop) for hop in answer["hops"]] == [
+        {"caller", "callee", "file", "line"}
+    ]
+    assert answer["hops"][0]["callee"]["id"] == A
+    assert "```" in result.content[0].text
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "key"),
+    [
+        ("search", {"terms": ["parse"]}, "results"),
+        ("quick", {"symbol": A}, "symbol"),
+    ],
+)
+def test_mcp_gives_definitions_as_structure_without_prose(
+    project, tool, arguments, key
+):
+    found = _mcp_result(project, tool, **arguments).structured_content[key]
+    for ref in found if isinstance(found, list) else [found]:
+        assert set(ref) == {
+            "id",
+            "type",
+            "name",
+            "file",
+            "line",
+            "tokens",
+            "callers",
+        }
+
+
+@pytest.mark.parametrize(
+    ("cli_args", "tool", "arguments"),
+    [
+        (("callers", A), "callers", {"symbol": A}),
+        (("path", "only_a", A), "path", {"start": "only_a", "end": A}),
+        (("search", "parse"), "search", {"terms": ["parse"]}),
+        (("context", A, "--depth", "2"), "context", {"symbol": A, "depth": 2}),
+    ],
+)
+def test_the_cli_json_is_the_mcp_structured_answer(project, cli_args, tool, arguments):
+    cli = json.loads(_cli(project, *cli_args, "--json"))
+    assert cli == _mcp_result(project, tool, **arguments).structured_content
+
+
+def test_mcp_gives_a_context_as_structure_without_source(project):
+    result = _mcp_result(project, "context", symbol=A)
+    answer = result.structured_content
+    assert answer["symbol"]["id"] == A
+    assert [(c["name"], c["kind"]) for c in answer["callers"]] == [
+        ("only_a", "resolved"),
+        ("guess", "candidate"),
+    ]
+    assert [e["file"] for e in answer["examples"]] == ["use.py", "use.py"]
+    assert "strip" not in json.dumps(answer)
+    assert "strip" in result.content[0].text
+
+
+def test_mcp_gives_a_flow_tree_with_kinds_and_no_code(project):
+    result = _mcp_result(project, "flow", start=A, direction="backward", depth=1)
+    root = result.structured_content["root"]
+    assert {(c["name"], c["kind"]) for c in root["children"]} == {
+        ("only_a", "resolved"),
+        ("guess", "candidate"),
+    }
+    assert "code" not in json.dumps(result.structured_content)
+
+
+# What each tool's structured answer holds (CONTRACT.md); `None` marks a
+# failure here: semantic search and cross-language tracing are off.
+CONTRACT = {
+    "callers": (
+        {"symbol": A},
+        "symbol total certain possible unresolved more callers",
+    ),
+    "callees": (
+        {"symbol": "only_a"},
+        "symbol total certain possible unresolved more callees",
+    ),
+    "context": (
+        {"symbol": A},
+        "symbol brief depth callers callees callers_more callees_more examples members tests configs omitted truncated",
+    ),
+    "flow": ({"start": "only_a"}, "start direction asked depth target root"),
+    "path": (
+        {"start": "only_a", "end": A},
+        "status start end direction max_depth hops",
+    ),
+    "quick": ({"symbol": "only_a"}, "symbol"),
+    "search": ({"terms": ["parse"]}, "method query total results"),
+    "semantic": ({"query": "parse"}, None),
+    "structure": ({"filename": "a.py"}, "found file imports definitions"),
+    "flatten": ({"symbol": "Derived"}, "class name note chain methods"),
+    "impls": ({"method": "parse"}, "method trait total implementations"),
+    "cross_lang": ({"mode": "stats"}, None),
+    "churn": ({}, "mode time_range path_filter symbols"),
+    "changes": (
+        {"commit_range": "HEAD~1..HEAD"},
+        "range commits files_count symbols_count symbols",
+    ),
+    "evolution": ({"symbol": "only_a"}, "node_id mode authors commits"),
+    "status": (
+        {},
+        "exists age_str age_hours nodes edges languages stale error scip embeddings",
+    ),
+    "health": (
+        {},
+        "status version project_root cache_dir warm max_depth features graph",
+    ),
+    "ensure": ({}, "action summary graph"),
+}
+
+
+# The answers of the tools the MCP test environment cannot answer (no model,
+# no spec), where another environment can
+ANSWERED_ELSEWHERE = {
+    "semantic": "query total results",
+    "cross_lang": "mode total_endpoints linked_to_graph",
+}
+
+# What the web adds for its page: a tool's text, the code a flow tree inlines,
+# and the spec's summaries of the endpoints cross_lang names
+WEB_ADDITIONS = {"markdown", "tree", "summaries"}
+
+
+@pytest.fixture
+def web_answer(project, monkeypatch):
+    from starlette.testclient import TestClient
+
+    from descry.web import server
+
+    for name in ("_config", "_service"):
+        monkeypatch.setattr(server, name, None)
+    monkeypatch.chdir(project)
+
+    def answer(tool, arguments):
+        path = f"/api/{tool.replace('_', '-')}"
+        if tool in ("ensure", "index"):
+            return client.post(path, json=arguments).json()
+        params = {
+            k: ",".join(v)
+            if isinstance(v, list)
+            else str(v).lower()
+            if isinstance(v, bool)
+            else v
+            for k, v in arguments.items()
+        }
+        return client.get(path, params=params).json()
+
+    with TestClient(server.app, base_url="http://127.0.0.1") as client:
+        yield answer
+
+
+@pytest.mark.parametrize("tool", sorted(CONTRACT))
+def test_each_web_answer_holds_what_the_contract_lists(web_answer, tool):
+    """The web answers each tool as the contract does, with only what its
+    page shows besides."""
+    arguments, fields = CONTRACT[tool]
+    body = web_answer(tool, arguments)
+    if fields is None and "error" in body:
+        assert set(body) == {"error", "reason"}
+    else:
+        expected = fields or ANSWERED_ELSEWHERE[tool]
+        assert set(body) - WEB_ADDITIONS == set(expected.split())
+
+
+@pytest.mark.parametrize("tool", sorted(CONTRACT))
+def test_each_mcp_answer_holds_what_the_contract_lists(project, tool):
+    arguments, fields = CONTRACT[tool]
+    result = _mcp_result(project, tool, **arguments)
+    if fields is None:
+        assert result.is_error
+        assert set(result.structured_content) == {"error", "reason"}
+    else:
+        assert not result.is_error
+        assert set(result.structured_content) == set(fields.split())
+
+
+def test_a_refusal_has_the_contracts_shape(project):
+    result = _mcp_result(project, "callers", symbol="parse")
+    assert result.is_error
+    answer = result.structured_content
+    assert (answer["reason"], set(answer)) == (
+        "ambiguous",
+        {"error", "reason", "choices"},
+    )
+    assert set(answer["choices"]) == {A, "FILE:b.py::B::parse"}

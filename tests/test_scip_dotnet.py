@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from descry.scip.adapter import AdapterConfig, DiscoveredProject
 from descry.scip.adapters.dotnet import DotnetAdapter
-from descry.scip.parser import ScipIndex
 
 
 class TestDotnetAdapterDiscovery:
@@ -16,7 +15,6 @@ class TestDotnetAdapterDiscovery:
         projects = DotnetAdapter().discover(tmp_path, set())
         assert len(projects) == 1
         assert projects[0].name == tmp_path.name
-        assert projects[0].language == "dotnet"
 
     def test_csproj_at_root(self, tmp_path):
         (tmp_path / "App.csproj").write_text("<Project/>")
@@ -45,7 +43,7 @@ class TestDotnetAdapterDiscovery:
 
 class TestDotnetAdapterBuildCommand:
     def test_basic_command(self, tmp_path):
-        project = DiscoveredProject(name="app", root=tmp_path, language="dotnet")
+        project = DiscoveredProject(name="app", root=tmp_path)
         spec = DotnetAdapter().build_command(
             project, tmp_path / "app.scip", AdapterConfig()
         )
@@ -61,7 +59,7 @@ class TestDotnetAdapterBuildCommand:
     def test_names_the_solution(self, tmp_path):
         """scip-dotnet does not find a `.slnx` itself."""
         (tmp_path / "App.slnx").write_text("<Solution/>")
-        project = DiscoveredProject(name="app", root=tmp_path, language="dotnet")
+        project = DiscoveredProject(name="app", root=tmp_path)
         spec = DotnetAdapter().build_command(
             project, tmp_path / "app.scip", AdapterConfig()
         )
@@ -70,7 +68,7 @@ class TestDotnetAdapterBuildCommand:
     def test_indexes_every_solution(self, tmp_path):
         """Every `.slnx` is named, and where a `.sln` or project file is
         there scip-dotnet is left to find each of them."""
-        project = DiscoveredProject(name="app", root=tmp_path, language="dotnet")
+        project = DiscoveredProject(name="app", root=tmp_path)
         out = tmp_path / "app.scip"
         for name in ("B.slnx", "A.slnx"):
             (tmp_path / name).write_text("<Solution/>")
@@ -86,12 +84,5 @@ class TestScipDotnetHealthStatus:
     def test_dotnet_listed_in_scip_status(self):
         from descry.scip import support
 
-        support.reset_scip_state()
         status = support.get_scip_status()
         assert "scip-dotnet" in status["indexers"]
-
-
-class TestScipDotnetResolution:
-    def test_dotnet_stats_bucket_exists(self):
-        idx = ScipIndex([])
-        assert "dotnet" in idx._resolution_stats

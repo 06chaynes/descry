@@ -27,8 +27,11 @@ paths used below, and the JDK at `$JAVA_HOME`.
   `builtins.object`).
 - A class that a module hands on under its own name (`asyncio.Queue`,
   `os.FileInfo`) is a type whose one base is the class it is.
-- `variants`, `callbacks`, `extensions`, `functional` and `modules` are
-  written only by a generator that has them.
+- `variants`, `callbacks`, `extensions`, `functional`, `modules`,
+  `ref_structs`, `qualifiers`, `evaluators`, `attributes`,
+  `context_managers`, `awaited`, `pointers`, `writers`, `makers`,
+  `implicit`, `implicit_usings` and `platforms` are written only by a
+  generator that has them.
 
 ## TypeScript and JavaScript
 
@@ -60,7 +63,10 @@ argument they differ in (`Array.from` returns `unknown[]`). `callbacks` has,
 for a method that takes a function, the argument it is, the types of its
 parameters, `unknown` where the signatures differ, and the type parameter of
 the signature that the function returns, where it returns one (`U` for
-`Array.map`); a `this` parameter is left out.
+`Array.map`); a `this` parameter is left out. `writers` are the functions of a
+global value whose signature takes a type parameter first, a further required
+parameter that is no primitive, and returns that first parameter's type
+(`Object.assign<T, U>(target: T, source: U): T & U`).
 
 ## Node's built-in modules
 
@@ -81,16 +87,20 @@ sha256 `e4e47dac860469aa5aa79043a6b83396299d9cd6ee23b30fcb2074625ac8dbdf`.
 ## Python
 
 Source: the `stdlib` stubs of typeshed at commit
-`c4b5c1cfaba3da11df6915b12a45c6b3468195ae`.
+`c4b5c1cfaba3da11df6915b12a45c6b3468195ae`, and the `Lib/typing.py` of
+CPython v3.15.2, the release of the newest Python those stubs are for, which
+says what class each `typing` alias the stubs leave opaque stands for.
 
-    mkdir -p "$DESCRY_STDLIB_SOURCES/typeshed"
-    curl -fLo "$DESCRY_STDLIB_SOURCES/typeshed/typeshed-c4b5c1cfaba3da11df6915b12a45c6b3468195ae.tar.gz" \
+    mkdir -p "$DESCRY_STDLIB_SOURCES/python"
+    curl -fLo "$DESCRY_STDLIB_SOURCES/python/typeshed-c4b5c1cfaba3da11df6915b12a45c6b3468195ae.tar.gz" \
         https://github.com/python/typeshed/archive/c4b5c1cfaba3da11df6915b12a45c6b3468195ae.tar.gz
-    python -I tools/stdlib/gen_python.py \
-        "$DESCRY_STDLIB_SOURCES/typeshed/typeshed-c4b5c1cfaba3da11df6915b12a45c6b3468195ae.tar.gz" \
+    curl -fLo "$DESCRY_STDLIB_SOURCES/python/cpython-v3.15.2-typing.py" \
+        https://raw.githubusercontent.com/python/cpython/v3.15.2/Lib/typing.py
+    python -I tools/stdlib/gen_python.py "$DESCRY_STDLIB_SOURCES/python" \
         src/descry/stdlib/python.json
 
-sha256 `e0925dd090c5258856dcb42b5f9e2eb033bc9e9080a5e9d198ff06e9e3cdff17`.
+sha256 `e0925dd090c5258856dcb42b5f9e2eb033bc9e9080a5e9d198ff06e9e3cdff17` (typeshed),
+`c94d236aeec98160988fb70a04a724b09920bf16d4da4e241dbb4b8c092a63f9` (typing.py).
 
 The stubs are read with `ast` as the newest Python sees them
 (`sys.version_info` tests hold, modules `VERSIONS` gives an end are left out)
@@ -125,23 +135,35 @@ gives.
 positional-only, under its name; `returns` is `R` as written. Those of a
 function are under its module (`re`, `sub`).
 
+`awaited` gives each type whose `__await__`, its own or a base's, returns a
+generator the position of the type parameter that generator returns, the
+parameter `typing.Generator`'s `close` names. The names `typing.py` makes with
+`_alias(Class, ...)` or `_TupleType(Class, ...)`, which the stubs leave
+opaque, are the types of that class. `qualifiers` are the six type
+qualifiers of the typing specification (`ClassVar`, PEP 526; `Final`, PEP
+591; `Annotated`, PEP 593; `Required`, `NotRequired`, PEP 655; `ReadOnly`,
+PEP 705), which no stub marks: the one list the generator holds.
+
 ## Go
 
-Source: `api/go1.txt`, `api/go1.1.txt` to `api/go1.26.txt` and
-`src/builtin/builtin.go` of the Go repository at tag `go1.26.0`.
+Source: `api/go1.txt`, `api/go1.1.txt` to `api/go1.26.txt`,
+`src/builtin/builtin.go` and `src/internal/syslist/syslist.go` of the Go
+repository at tag `go1.26.0`.
 
     mkdir -p "$DESCRY_STDLIB_SOURCES/go/go1.26.0/api" \
-        "$DESCRY_STDLIB_SOURCES/go/go1.26.0/src/builtin"
-    for file in src/builtin/builtin.go api/go1.txt $(seq -f 'api/go1.%g.txt' 1 26); do
+        "$DESCRY_STDLIB_SOURCES/go/go1.26.0/src/builtin" \
+        "$DESCRY_STDLIB_SOURCES/go/go1.26.0/src/internal/syslist"
+    for file in src/builtin/builtin.go src/internal/syslist/syslist.go \
+        api/go1.txt $(seq -f 'api/go1.%g.txt' 1 26); do
         curl -fLo "$DESCRY_STDLIB_SOURCES/go/go1.26.0/$file" \
             "https://raw.githubusercontent.com/golang/go/go1.26.0/$file"
     done
     python -I tools/stdlib/gen_go.py "$DESCRY_STDLIB_SOURCES/go/go1.26.0" \
         src/descry/stdlib/go.json
 
-`LC_ALL=C sh -c 'sha256sum api/go1*.txt src/builtin/builtin.go | sha256sum'` in
-`go1.26.0` gives
-`d83016686a77e86fca1ef48ee4bcee35a44be1ea8123670867ec270a62cc6674`.
+`LC_ALL=C sh -c 'sha256sum api/go1*.txt src/builtin/builtin.go
+src/internal/syslist/syslist.go | sha256sum'` in `go1.26.0` gives
+`64c4c2e79bdecfee9e68763bcc5fd3e71ec787d36c3acf161b8efea2ae12d171`.
 
 A type is named by its package's import path (`net/http.Request`), also inside
 return types, which are otherwise as the listing writes them: `uint8` for
@@ -152,7 +174,8 @@ have, are those `builtin.go` declares: its types and functions are `scope`. A
 built-in function whose result `builtin.go` writes with one of its stand-in
 types (`Type`, `IntegerType`) or a type parameter has no return type. The types
 Go writes without a name are `[]`, a slice or an array, `map`, `chan` and
-`()`, the several results of a function: each without members.
+`()`, the several results of a function: each without members. `platforms`
+is `syslist.go`'s `KnownOS` and `KnownArch`.
 
 ## Java
 
@@ -287,8 +310,9 @@ The stubs give no parameter types for the callables that functions such as
 ## C# (.NET)
 
 Source: the .NET shared runtime — the directory that holds
-`System.Private.CoreLib.dll` and the `System.*.dll` beside it. PowerShell
-7.6.7 ships .NET 10.0.13; the generator takes that directory:
+`System.Private.CoreLib.dll` and the `System.*.dll` beside it, and the .NET
+SDK that bundles that runtime, beside it or the `dotnet` on the path. PowerShell
+7.6.9 ships .NET 10.0.14; the generator takes its directory:
 
     python -I tools/stdlib/gen_dotnet.py \
         "$(dirname "$(command -v pwsh)")" src/descry/stdlib/dotnet.json
@@ -309,7 +333,12 @@ them: a call reaches one only where a `using` brings its namespace in.
 takes, which a lambda converted to it declares.
 `callbacks` has, for a method that takes a delegate, the signature its
 `Invoke` gives the argument, with the parameter that stands for its result
-where one does (`TResult` for `Select`'s selector).
+where one does (`TResult` for `Select`'s selector). `implicit` gives each
+type the types a user-defined `op_Implicit` of the library converts to it.
+`implicit_usings` gives each SDK the `<Using>` items its own `.props` and
+`.targets` declare under `<ImplicitUsings>`, with their conditions, in the
+order MSBuild reads them; Microsoft.NET.Sdk's hold those of the SDKs it
+imports.
 
 
 ## Ruby
@@ -332,7 +361,11 @@ repository's code is not run. A `module`/`class`/`struct` is a type; an
 `extend` and `prepend` name `bases`. `self.` methods are `statics`. A
 method's return type is the declared one; overloads that disagree leave
 None. A `def` whose block parameter is written `(&block: T -> S)` records
-`callbacks` for argument 0.
+`callbacks` for argument 0. `evaluators` are the methods whose block is
+typed `[self: self]`. `makers` are `Class.new` and `Module.new`, read from
+the `initialize` of `Class` and `Module`, and the singleton methods whose
+block runs as the type they return and that take symbols (`Struct.new`,
+`Data.define`): a member each symbol, writable where the type has `[]=`.
 
 ## Dart
 
@@ -380,4 +413,7 @@ the classes, class templates, functions and aliases `std` puts in them,
 with the conventions `src/descry/_stdlib.py` gives for C++. A partial or
 explicit specialization is its template's, not a type of its own. The
 generated file names the toolchain it was read from; the test regenerates
-it where this machine's is the same.
+it where this machine's is the same. `pointers` are the class templates
+whose `->` the compiler, asked through `static_assert`s of a probe, finds
+to reach their first type argument; one it cannot instantiate with the
+probe's argument is left out.

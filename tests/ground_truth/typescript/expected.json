@@ -1,0 +1,87 @@
+{
+  "callers": {
+    "FILE:src/io.ts::Reader::parse": {
+      "resolved": [
+        "FILE:src/io.ts::load"
+      ],
+      "candidate": [
+        "FILE:src/io.ts::guess"
+      ]
+    },
+    "FILE:src/models.ts::Order::parse": {
+      "resolved": [],
+      "candidate": [
+        "FILE:src/io.ts::guess"
+      ]
+    },
+    "FILE:src/models.ts::Base::save": {
+      "resolved": [
+        "FILE:src/models.ts::User::rename"
+      ],
+      "candidate": []
+    },
+    "FILE:src/models.ts::Base::validate": {
+      "resolved": [
+        "FILE:src/models.ts::Base::save"
+      ],
+      "candidate": []
+    },
+    "FILE:src/models.ts::User::rename": {
+      "resolved": [
+        "FILE:src/main.ts::main"
+      ],
+      "candidate": []
+    }
+  },
+  "callees": {
+    "FILE:src/main.ts::main": {
+      "resolved": [
+        "FILE:src/models.ts::User",
+        "FILE:src/models.ts::User::rename",
+        "FILE:src/io.ts::load",
+        "FILE:src/io.ts::Reader"
+      ]
+    },
+    "FILE:src/io.ts::guess": {
+      "resolved": [],
+      "candidate": [
+        "thing.parse"
+      ]
+    },
+    "FILE:src/main.ts::misuse": {
+      "resolved": [
+        "FILE:src/models.ts::User"
+      ],
+      "unresolved": [
+        "user.parse"
+      ]
+    }
+  },
+  "flatten": {
+    "FILE:src/models.ts::User": [
+      "rename",
+      "save",
+      "validate"
+    ]
+  },
+  "path": [
+    [
+      "FILE:src/main.ts::main",
+      "FILE:src/io.ts::Reader::parse",
+      [
+        "FILE:src/io.ts::load",
+        "FILE:src/io.ts::Reader::parse"
+      ]
+    ]
+  ],
+  "refused": [
+    "parse",
+    "validate"
+  ],
+  "external": {
+    "FILE:src/io.ts::Reader::parse": [
+      "JSON.parse",
+      "parse"
+    ]
+  }
+}

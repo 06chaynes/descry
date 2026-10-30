@@ -2,7 +2,8 @@
 
 usage: gen_dart.py SDK OUTPUT
 
-SDK is a checkout of `dart-lang/sdk` at a tag; the `sdk/lib` libraries
+SDK is a checkout of `dart-lang/sdk` at a tag, or its `sdk/lib`
+directory; the `sdk/lib` libraries
 (`core`, `async`, `collection`, `convert`, `io`, `math`, `typed_data` and
 the rest) hold the `dart:` declarations every program calls. The sources
 are read by a reader for the declaration syntax they use; nothing of the
@@ -15,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from common import new_type, record, split
+from common import closing, main, new_type, record, split
 
 # A comment or a string literal, whichever starts first
 _LEXEME = re.compile(
@@ -65,7 +66,7 @@ def _lines(text):
         held, parens = "", 0
 
 
-def _written(type_, params):
+def _written(type_):
     """The type ``type_`` as the data writes it: ``List<E>`` with the
     generics Dart writes, ``dynamic``/``void``/``Function``-typed returns
     as None."""
@@ -79,21 +80,14 @@ def _written(type_, params):
     if not match:
         return None
     name = match[0]
-    if name == "bool" or name == "int" or name == "double" or name == "num":
-        return name
     rest = type_[len(name) :].strip()
-    if rest.startswith("<"):
-        depth = 0
-        for i, c in enumerate(rest):
-            depth += (c == "<") - (c == ">")
-            if depth == 0:
-                inner = rest[1:i]
-                return f"{name}<{', '.join(split(inner, ',', '<', '>'))}>"
-        return name
+    end = closing(rest, 0, "<", ">") if rest.startswith("<") else None
+    if end:
+        return f"{name}<{', '.join(split(rest[1 : end - 1], ',', '<', '>'))}>"
     return name
 
 
-def _bases(heritage, params):
+def _bases(heritage):
     """The type names ``extends/with/implements/on`` clauses write."""
     found = []
     for clause in ("extends", "with", "implements", "on"):
@@ -105,7 +99,7 @@ def _bases(heritage, params):
             for base in split(match[1], ",", "<", ">"):
                 if base.strip().lstrip("<>").startswith("_"):
                     continue
-                held = _written(base.strip(), params)
+                held = _written(base.strip())
                 if held:
                     found.append(held)
     return found
@@ -147,7 +141,7 @@ def _callback(sig, params):
             if a.strip()
         ]
         ret = re.match(r"([A-Za-z_][\w$.<>,?]*)\s+Function", takes)
-        ret = _written(ret[1], params) if ret else None
+        ret = _written(ret[1]) if ret else None
         return {"params": held, "returns": ret if ret in params else None}
     # `void action(E element)`: the function type's signature, nested.
     found = _NESTED_FUNC.search(sig)
@@ -160,14 +154,15 @@ def _callback(sig, params):
         name = re.match(r"[A-Za-z_][\w$.<>,?]*", arg)
         if name:
             held.append(name[0])
-    ret = _written(ret_type, params)
+    ret = _written(ret_type)
     return {"params": held, "returns": ret if ret in params else None}
 
 
 def build(origin):
-    origin = Path(origin) / "sdk" / "lib"
+    checkout = Path(origin)
+    origin = checkout / "sdk" / "lib"
     if not origin.is_dir():
-        origin = Path(origin)
+        origin = checkout
     types, callbacks, functions = {}, {}, {}
     skip_dirs = {"_internal", "internal", "native", "js", "wasm", "web"}
     files = [
@@ -210,7 +205,7 @@ def build(origin):
                 ]
                 current = name
                 entry = types.setdefault(name, new_type(params))
-                for base in _bases(heritage or "", params):
+                for base in _bases(heritage or ""):
                     if base not in entry["bases"]:
                         entry["bases"].append(base)
                 continue
@@ -229,7 +224,7 @@ def build(origin):
                         and not stripped.endswith(";")
                     )
                 ):
-                    functions[member[4]] = _written(member[2] or "", ())
+                    functions[member[4]] = _written(member[2] or "")
                 continue
             if current == "_skipped" or at_depth != 1:
                 continue
@@ -267,7 +262,7 @@ def build(origin):
             if accessor == "get" or (
                 accessor is None and sig is None and name != "operator"
             ):
-                record(table, name, _written(ret_type or "", params))
+                record(table, name, _written(ret_type or ""))
                 continue
             if accessor == "set":
                 continue
@@ -280,7 +275,7 @@ def build(origin):
                     current,
                 )
                 continue
-            ret = _written(ret_type or "", own)
+            ret = _written(ret_type or "")
             record(table, name, ret)
             held = _callback(sig or "", own)
             if held:
@@ -293,17 +288,14 @@ def build(origin):
             and re.match(r"[A-Za-z_][\w$]*", base)[0] in types
         ]
     scope = {}
-    return (
-        "the Dart 3.7.0 SDK `sdk/lib` libraries",
-        types,
-        functions,
-        scope,
-        None,
-        callbacks,
-    )
+    return {
+        "source": "the Dart 3.7.0 SDK `sdk/lib` libraries",
+        "types": types,
+        "functions": functions,
+        "scope": scope,
+        "callbacks": callbacks,
+    }
 
 
 if __name__ == "__main__":
-    from common import main
-
     main(build)

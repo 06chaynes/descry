@@ -1,0 +1,14 @@
+{
+  "callers": {
+    "FILE:io.c::parse": {"resolved": ["FILE:io.c::load"], "candidate": []},
+    "FILE:order.c::parse": {"resolved": ["FILE:order.c::order_count"], "candidate": []},
+    "FILE:io.c::load": {"resolved": ["FILE:main.c::main"], "candidate": []}
+  },
+  "callees": {
+    "FILE:main.c::main": {"resolved": ["FILE:io.c::load", "FILE:order.c::order_count"]}
+  },
+  "path": [
+    ["FILE:main.c::main", "FILE:io.c::parse", ["FILE:io.c::load", "FILE:io.c::parse"]]
+  ],
+  "refused": ["parse"]
+}

@@ -284,7 +284,12 @@ def build(archive):
         f"JetBrains phpstorm-stubs {commit}: the extensions bundled with PHP,"
         " as the newest PHP has them"
     )
-    return source, reader.types, reader.functions, {}
+    return {
+        "source": source,
+        "types": reader.types,
+        "functions": reader.functions,
+        "scope": {},
+    }
 
 
 if __name__ == "__main__":

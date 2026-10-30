@@ -3,7 +3,8 @@ name: descry
 description: >
   Use descry (a polyglot codebase knowledge graph) for call-graph navigation,
   cross-file code exploration, and change-impact analysis on Rust / TypeScript
-  / Python / JavaScript / Svelte / Go / Java projects. Reach for this skill
+  / JavaScript / Python / Go / Java / Kotlin / Scala / Ruby / PHP / C# / C /
+  C++ / Dart / Svelte / Protobuf projects. Reach for this skill
   whenever the user asks who calls a function, what a function calls, how one
   symbol eventually reaches another, what changed in a commit range and who it
   affects, where a trait or interface is implemented, or wants to find a
@@ -91,10 +92,12 @@ refreshes SCIP indices and embeddings, which can take minutes on large
 Rust workspaces). If the user hasn't asked for indexing and no graph exists,
 prompt them before running `descry index`.
 
-Graph freshness is tracked by file mtime. After the user edits code, a single
-`descry ensure` (or `descry index` for an authoritative rebuild) brings
-everything current; cached queriers, semantic searchers, and dedup caches all
-invalidate by mtime.
+Graph freshness is tracked by file mtime, and `descry ensure` rebuilds only
+a graph older than `[project] max_stale_hours` (24 by default). After the
+user edits code that changes structure (new symbols, renames), run
+`descry index` before querying again: `ensure` may report the graph ready
+while it still shows the old layout. Cached queriers, semantic searchers,
+and dedup caches all invalidate by mtime.
 
 ## Commands — grouped by intent
 
@@ -104,7 +107,7 @@ invalidate by mtime.
 |------|---------|
 | Find a symbol by name | `descry search <terms>` |
 | Find by meaning, not exact name | `descry semantic <natural language query>` |
-| Get everything about a symbol in one shot | `descry quick <name>` |
+| Get everything about a symbol in one shot | `descry quick <symbol>` |
 
 `descry quick` combines search + context into one call — the fastest way to
 go from "I know the name" to "I see the source, callers, callees, and tests".
@@ -113,10 +116,10 @@ go from "I know the name" to "I see the source, callers, callees, and tests".
 
 | Goal | Command |
 |------|---------|
-| Who calls this function? | `descry callers <name>` |
-| What does this call? | `descry callees <name>` |
-| Trace forward from a function | `descry flow <name>` |
-| Trace backward from a function | `descry flow <name> --direction backward` |
+| Who calls this function? | `descry callers <symbol>` |
+| What does this call? | `descry callees <symbol>` |
+| Trace forward from a function | `descry flow <start>` |
+| Trace backward from a function | `descry flow <start> --direction backward` |
 | Find the shortest call path between two symbols | `descry path <start> <end>` |
 
 `flow` shows the full tree (good for exploring); `path` is focused (good when
@@ -126,10 +129,10 @@ you already know both endpoints and want the connection).
 
 | Goal | Command |
 |------|---------|
-| Full context for one symbol (source, callers, callees, tests) | `descry context <node_id>` |
+| Full context for one symbol (source, callers, callees, tests) | `descry context <symbol>` |
 | Structure of a file (imports, classes, functions) | `descry structure <filename>` |
-| Effective API of a class, inherited included | `descry flatten <class_node_id>` |
-| All implementations of a trait/interface method | `descry impls <method> [--trait-name X]` |
+| Effective API of a class, inherited included | `descry flatten <symbol>` |
+| All implementations of a Rust trait's method | `descry impls <method> [--trait-name X]` |
 
 Node IDs look like `FILE:src/auth.rs::validate_token`. `descry search` prints
 them; `descry quick` accepts a bare name. Pass `--full` to `context` /
@@ -140,10 +143,12 @@ them; `descry quick` accepts a bare name. Pass `--full` to `context` /
 | Goal | Command |
 |------|---------|
 | Hotspots (most-changed symbols) | `descry churn [--time-range "30 days"]` |
-| How one symbol has changed over time | `descry evolution <name>` |
+| How one symbol has changed over time | `descry evolution <symbol>` |
 | Impact of a commit range | `descry changes --commit-range HEAD~5..HEAD` |
 
-These require git history; they're no-ops in repos without a `.git`.
+These require git history; outside a git repository they fail with
+`{"error": "Not inside a git repository.", "reason": "failed"}` (exit 2
+on the CLI).
 
 ### Cross-language (frontend → backend)
 
@@ -226,7 +231,7 @@ descry semantic "http server setup"
 descry semantic "database connection"
 ```
 
-Follow each semantic hit with `descry quick <name>` for full context.
+Follow each semantic hit with `descry quick <symbol>` for full context.
 
 ## MCP variant
 

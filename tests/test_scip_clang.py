@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from descry.scip.adapter import AdapterConfig, DiscoveredProject
@@ -17,7 +19,6 @@ class TestClangAdapterDiscovery:
 
         projects = ClangAdapter().discover(tmp_path, set())
         assert len(projects) == 1
-        assert projects[0].language == "clang"
 
     def test_makefile_at_root(self, tmp_path):
         (tmp_path / "Makefile").write_text("all:")
@@ -67,7 +68,7 @@ class TestClangAdapterDiscovery:
 class TestClangAdapterBuildCommand:
     def test_compdb_auto_detected_at_root(self, tmp_path):
         (tmp_path / "compile_commands.json").write_text("[]")
-        project = DiscoveredProject(name="app", root=tmp_path, language="clang")
+        project = DiscoveredProject(name="app", root=tmp_path)
         spec = ClangAdapter().build_command(
             project, tmp_path / "app.scip", AdapterConfig()
         )
@@ -80,23 +81,26 @@ class TestClangAdapterBuildCommand:
     def test_compdb_in_build_dir(self, tmp_path):
         (tmp_path / "build").mkdir()
         (tmp_path / "build" / "compile_commands.json").write_text("[]")
-        project = DiscoveredProject(name="app", root=tmp_path, language="clang")
+        project = DiscoveredProject(name="app", root=tmp_path)
         spec = ClangAdapter().build_command(
             project, tmp_path / "app.scip", AdapterConfig()
         )
         compdb_arg = next(a for a in spec.argv if a.startswith("--compdb-path="))
-        assert "build/compile_commands.json" in compdb_arg
+        assert (
+            Path(compdb_arg.partition("=")[2])
+            == tmp_path / "build" / "compile_commands.json"
+        )
 
     def test_index_output_path_flag(self, tmp_path):
         (tmp_path / "compile_commands.json").write_text("[]")
-        project = DiscoveredProject(name="app", root=tmp_path, language="clang")
+        project = DiscoveredProject(name="app", root=tmp_path)
         spec = ClangAdapter().build_command(
             project, tmp_path / "app.scip", AdapterConfig()
         )
         assert any(arg.startswith("--index-output-path=") for arg in spec.argv)
 
     def test_no_command_without_a_compile_database(self, tmp_path):
-        project = DiscoveredProject(name="app", root=tmp_path, language="clang")
+        project = DiscoveredProject(name="app", root=tmp_path)
         with pytest.raises(FileNotFoundError):
             ClangAdapter().build_command(
                 project, tmp_path / "app.scip", AdapterConfig()
@@ -107,16 +111,11 @@ class TestScipClangHealthStatus:
     def test_clang_listed_in_scip_status(self):
         from descry.scip import support
 
-        support.reset_scip_state()
         status = support.get_scip_status()
         assert "scip-clang" in status["indexers"]
 
 
 class TestScipClangResolution:
-    def test_clang_stats_bucket_exists(self):
-        idx = ScipIndex([])
-        assert "clang" in idx._resolution_stats
-
     def test_scheme_routes_cxx_symbols(self):
         """scip-clang emits scheme `cxx`, not `scip-clang`. Verify the
         adapter claims that scheme so ScipIndex dispatches through it."""

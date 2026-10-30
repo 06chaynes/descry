@@ -1,10 +1,10 @@
 """Go regex-based baseline parser.
 
-Covers the common case of Go symbol extraction: packages, imports, type
+Covers the common case of Go symbol extraction: imports, type
 definitions (structs, interfaces, type aliases), free functions, methods,
 ``const`` and ``var`` blocks, and call sites. Mirrors the RustParser /
 JavaParser pattern: walk lines, track brace depth for context, emit
-File → Package/Type → Function/Method → CALLS edges.
+File → Type → Function/Method → CALLS edges.
 
 The parser is intentionally regex-based (no tree-sitter dependency). It
 handles well-formatted single-line declarations and balanced braces.
@@ -18,20 +18,17 @@ from __future__ import annotations
 import re
 
 from descry._comments import strip_block_comments, strip_line_comment
-from descry.generate import (
+from descry._parsing import (
     BaseParser,
     _bracketed_parts,
     _closing,
     _generic_metadata,
-    _go_type_parts,
     blank_strings,
-    go_constraints,
     is_generated_source,
     source_lines,
+    token_count,
 )
-
-# Package declaration: `package foo`
-_RE_PACKAGE = re.compile(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_]*)")
+from descry.resolver import _GOARCH, _GOOS, _go_type_parts
 
 # Single import: `import "foo/bar"` or `import alias "foo/bar"` or `import _ "foo/bar"`
 _RE_IMPORT_SINGLE = re.compile(
@@ -244,8 +241,7 @@ _RE_RECEIVER = re.compile(
     r"(?:\[[\w.*, ]+\])?\s*\{[^{}]*\}(?(paren)\s*\)))\.\s*$"
 )
 
-# Go keywords and built-in functions that would spuriously match the call
-# regex where they stand alone: a method may be named as a built-in is.
+# Go keywords, which would match the call regex where they stand alone
 _GO_CONTROL_KEYWORDS = frozenset(
     {
         "if",
@@ -259,18 +255,6 @@ _GO_CONTROL_KEYWORDS = frozenset(
         "chan",
         "map",
         "range",
-        "make",
-        "new",
-        "len",
-        "cap",
-        "append",
-        "copy",
-        "delete",
-        "panic",
-        "recover",
-        "print",
-        "println",
-        "close",
     }
 )
 
@@ -429,6 +413,22 @@ class GoParser(BaseParser):
             origin = "?"
         return origin and ".".join(filter(None, (origin, rest)))
 
+    def _add_constants(self, names, parent_id, lineno):
+        """Add a Constant node defined by ``parent_id`` on line ``lineno``
+        for each of ``names`` that has none."""
+        for name in names:
+            const_id = f"{parent_id}::{name}"
+            if const_id not in self.builder.node_registry:
+                self.builder.add_node(
+                    const_id,
+                    "Constant",
+                    name=name,
+                    lineno=lineno,
+                    docstring="",
+                    value_type=self._declared_on(name, lineno),
+                )
+                self.builder.add_edge(parent_id, const_id, "DEFINES")
+
     def _declared_on(self, name, lineno):
         """The type a declaration on line ``lineno`` gives ``name``, as it
         is written there; None where none does."""
@@ -498,6 +498,25 @@ class GoParser(BaseParser):
         blanked, from column ``start`` on. ``since`` is the first line of
         the enclosing function."""
         self.begin_line(code, lineno, source_id, raw, since)
+        # In a clause of a type switch its variable has the one type the
+        # clause names, else the type of the value switched on. Read before
+        # the line's calls, so a statement on the clause's line already
+        # sees its type.
+        indent = len(code) - len(code.lstrip())
+        while self._switches and indent < self._switches[-1][0]:
+            self._switches.pop()
+        if self._switches and indent == self._switches[-1][0]:
+            _, name, held = self._switches[-1]
+            if code.lstrip().startswith("}"):
+                self._switches.pop()
+            elif code.lstrip().startswith(("case", "default")):
+                at = None
+                if clause := _RE_CASE.match(code):
+                    held = f"{clause['type'].replace('.', '::')}()"
+                    at = clause.end()
+                elif (colon := code.find(":")) >= 0:
+                    at = colon + 1
+                self.declared.setdefault(name, []).append((lineno, held, False, at))
         if literal := _RE_LITERAL.match(code, start):
             # A call of the variable returns what the literal declares.
             returns = _signature_tail([code], 0, code, literal.end())[0]
@@ -548,22 +567,11 @@ class GoParser(BaseParser):
                     self.declared.setdefault(ranged[part], []).append(
                         (lineno, origin, False, ranged.start(part))
                     )
-        # In a clause of a type switch its variable has the one type the
-        # clause names, else the type of the value switched on.
-        indent = len(code) - len(code.lstrip())
-        while self._switches and indent < self._switches[-1][0]:
-            self._switches.pop()
+        # The switch's header, after the line's calls whose `_closes`
+        # entries `_held` reads.
         if switch := _RE_TYPE_SWITCH.match(code, start):
             held = self._held(switch["value"], lineno, since)
             self._switches.append((indent, switch["name"], held or "?"))
-        elif self._switches and indent == self._switches[-1][0]:
-            _, name, held = self._switches[-1]
-            if code.lstrip().startswith("}"):
-                self._switches.pop()
-            elif code.lstrip().startswith(("case", "default")):
-                if clause := _RE_CASE.match(code):
-                    held = f"{clause['type'].replace('.', '::')}()"
-                self.declared.setdefault(name, []).append((lineno, held, False, None))
 
     def _add_import(self, file_id, alias, path):
         self.builder.add_edge(file_id, f"MODULE:{path}", "IMPORTS")
@@ -596,15 +604,6 @@ class GoParser(BaseParser):
         # types/functions can resolve.
         skip_calls = is_generated_source(content)
 
-        # Package declaration
-        package = None
-        for line in lines[:30]:
-            m = _RE_PACKAGE.match(line)
-            if m:
-                package = m.group(1)
-                break
-        if package:
-            self.set_file_metadata(file_id, "go_package", package)
         requires, excludes = go_constraints(rel_path, lines[:30])
         if requires or excludes or rel_path.endswith("_test.go"):
             self.set_file_metadata(
@@ -692,19 +691,7 @@ class GoParser(BaseParser):
                 m_entry = _RE_BLOCK_ENTRY.match(line)
                 if m_entry and not line.strip().startswith("//"):
                     grouped = grouped or [m_entry.group(1)]
-                for name in grouped:
-                    parent_id = context_id
-                    const_id = f"{parent_id}::{name}"
-                    if const_id not in self.builder.node_registry:
-                        self.builder.add_node(
-                            const_id,
-                            "Constant",
-                            name=name,
-                            lineno=lineno,
-                            docstring="",
-                            value_type=self._declared_on(name, lineno),
-                        )
-                        self.builder.add_edge(parent_id, const_id, "DEFINES")
+                self._add_constants(grouped, context_id, lineno)
                 i += 1
                 continue
 
@@ -729,7 +716,7 @@ class GoParser(BaseParser):
                     kind=kind if kind in ("struct", "interface") else "type",
                     lineno=lineno,
                     end_lineno=end_lineno,
-                    token_count=(end_lineno - lineno + 1) * 10,
+                    token_count=token_count(lineno, end_lineno),
                     docstring=docstring,
                     **_generic_metadata(bounds),
                 )
@@ -809,7 +796,7 @@ class GoParser(BaseParser):
                     name=method_name,
                     lineno=lineno,
                     end_lineno=end_lineno,
-                    token_count=(end_lineno - lineno + 1) * 10,
+                    token_count=token_count(lineno, end_lineno),
                     docstring=docstring,
                     receiver=receiver_type,
                     return_type=return_type,
@@ -863,7 +850,7 @@ class GoParser(BaseParser):
                     name=name,
                     lineno=lineno,
                     end_lineno=end_lineno,
-                    token_count=(end_lineno - lineno + 1) * 10,
+                    token_count=token_count(lineno, end_lineno),
                     docstring=docstring,
                     return_type=return_type,
                 )
@@ -883,19 +870,8 @@ class GoParser(BaseParser):
                 m_const = _RE_VAR_SINGLE.match(line)
             if m_const:
                 grouped = grouped or [m_const.group(1)]
-            for name in grouped if context_id == file_id or m_const else ():
-                parent_id = context_id
-                const_id = f"{parent_id}::{name}"
-                if const_id not in self.builder.node_registry:
-                    self.builder.add_node(
-                        const_id,
-                        "Constant",
-                        name=name,
-                        lineno=lineno,
-                        docstring="",
-                        value_type=self._declared_on(name, lineno),
-                    )
-                    self.builder.add_edge(parent_id, const_id, "DEFINES")
+            if context_id == file_id or m_const:
+                self._add_constants(grouped, context_id, lineno)
 
             # Calls, none for an autogenerated file.
             if not skip_calls and context_id != file_id:
@@ -918,3 +894,37 @@ class GoParser(BaseParser):
                 )
                 self.builder.add_edge(file_id, receiver_id, "DEFINES")
         self.restore_source_lines()
+
+
+_RE_GO_BUILD = re.compile(r"^//go:build\s+(\S.*)")
+
+
+def go_constraints(name, head):
+    """Build constraints of the Go file ``name`` (its filename) whose first
+    lines are ``head``: ``(requires, excludes)`` of GOOS/GOARCH atoms.
+    ``_GOOS``/``_GOARCH`` suffixes of its name require; a `//go:build` line's
+    conjunction requires each term and excludes each negated term (an
+    alternation says nothing a build must hold)."""
+    requires, excludes = set(), set()
+    # As go/build reads a name: up to its first `.`, past its first `_` and
+    # a `_test` suffix, `_GOOS_GOARCH` or one of them ends it.
+    parts = name.rpartition("/")[2].partition(".")[0].split("_")[1:]
+    parts = parts[:-1] if parts[-1:] == ["test"] else parts
+    if parts[-2:-1] and parts[-2] in _GOOS and parts[-1] in _GOARCH:
+        requires.update(parts[-2:])
+    elif parts[-1:] and (parts[-1] in _GOOS or parts[-1] in _GOARCH):
+        requires.add(parts[-1])
+    for line in head:
+        directive = _RE_GO_BUILD.match(line)
+        if not directive:
+            continue
+        terms = directive[1].split("&&")
+        if any("||" in term for term in terms):
+            continue
+        for term in terms:
+            term = term.strip().strip("()")
+            if term.startswith("!"):
+                excludes.add(term[1:].strip())
+            else:
+                requires.add(term)
+    return frozenset(requires), frozenset(excludes)

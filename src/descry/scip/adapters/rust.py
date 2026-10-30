@@ -11,6 +11,7 @@ from descry.scip.adapter import (
     AdapterConfig,
     CommandSpec,
     DiscoveredProject,
+    descriptor_names,
     project_dir,
     register,
 )
@@ -23,7 +24,6 @@ logger = logging.getLogger(__name__)
 _RUST_TRAIT_IMPL = re.compile(r"impl#\[(?:`[^`]*`|[^\]`])*\]\[`?([^\]`<]+)")
 # A symbol's package and its descriptors
 _RUST_SYMBOL = re.compile(r"\S+ \S+ (\S+) \S+ (.+)", re.DOTALL)
-_RUST_DESCRIPTOR_PATTERN = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)(\([^)]*\)|[#./\[\]])?")
 
 
 def crate_dir(workspace_root: Path, name: str) -> Path:
@@ -137,13 +137,7 @@ class RustAdapter:
                 continue
             seen_paths.add(member_dir)
             rel = member_dir.relative_to(root)
-            projects.append(
-                DiscoveredProject(
-                    name=str(rel),
-                    root=root,
-                    language=self.name,
-                )
-            )
+            projects.append(DiscoveredProject(name=rel.as_posix(), root=root))
 
         if not projects:
             for cargo_toml in root.glob("*/Cargo.toml"):
@@ -154,16 +148,7 @@ class RustAdapter:
                     continue
                 if not (crate_dir / "src").exists():
                     continue
-                if crate_dir in seen_paths:
-                    continue
-                seen_paths.add(crate_dir)
-                projects.append(
-                    DiscoveredProject(
-                        name=crate_dir.name,
-                        root=root,
-                        language=self.name,
-                    )
-                )
+                projects.append(DiscoveredProject(name=crate_dir.name, root=root))
 
         root_package = "package" in _load_manifest(root_cargo)
         if (root_package or not projects) and (root / "src").exists():
@@ -171,11 +156,7 @@ class RustAdapter:
             # holds that name; `crate_dir` resolves either to the root.
             taken = any(p.name == root.name for p in projects)
             projects.append(
-                DiscoveredProject(
-                    name="." if taken else root.name,
-                    root=root,
-                    language=self.name,
-                )
+                DiscoveredProject(name="." if taken else root.name, root=root)
             )
 
         projects.sort(key=lambda p: p.name)
@@ -211,25 +192,19 @@ class RustAdapter:
 
     def _packages(self, root: Path | None) -> set[str]:
         """Cargo package names of the crates ``discover()`` finds in ``root``."""
-        names = set()
-        for project in self.discover(root, set()) if root else ():
-            manifest = crate_dir(root, project.name) / "Cargo.toml"
-            if not manifest.is_file():
-                continue
-            try:
-                with open(manifest, "rb") as f:
-                    names.add(tomllib.load(f)["package"]["name"])
-            except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError):
-                pass
-        return names
+        projects = self.discover(root, set()) if root else ()
+        manifests = (crate_dir(root, p.name) / "Cargo.toml" for p in projects)
+        names = {_load_manifest(m).get("package", {}).get("name") for m in manifests}
+        return names - {None}
 
-    def leaving(self, defined, root):
+    def leaving(self, defined, root, implemented):
         """A test of whether a call of a symbol no index defines cannot
         reach the project: it names a function, a method of a concrete type
         (`impl#[String]len().`), or a method of a trait (`Display#fmt().`)
         that no `impl` among ``defined``, the symbols the indexes define, is
         for. A symbol of a crate of ``root`` that has no index does not
-        leave; the `impl`s of such a crate are not seen."""
+        leave; the `impl`s of such a crate are not seen. ``implemented`` is
+        not read: rust-analyzer's own symbols name each `impl`."""
         found = map(_RUST_SYMBOL.fullmatch, defined)
         known = [match.groups() for match in found if match]
         found = (_RUST_TRAIT_IMPL.search(descriptors) for _, descriptors in known)
@@ -264,20 +239,7 @@ class RustAdapter:
             ``database/migrations/run_migrations().`` -> ``["run_migrations"]``
             ``impl#[AppState]new().`` -> ``["AppState", "new"]``
         """
-        names: list[str] = []
-        for match in _RUST_DESCRIPTOR_PATTERN.finditer(raw):
-            name = match.group(1)
-            suffix = match.group(2) or ""
-            if not name:
-                continue
-            if suffix == "/":
-                continue
-            if name == "impl":
-                continue
-            if name == "tests" and suffix == "/":
-                continue
-            names.append(name)
-        return names
+        return descriptor_names(raw, frozenset({"impl"}))
 
 
 register(RustAdapter())

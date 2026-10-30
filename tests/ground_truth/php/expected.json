@@ -1,0 +1,86 @@
+{
+  "callers": {
+    "FILE:src/Io.php::Reader::parse": {
+      "resolved": [
+        "FILE:src/Io.php::load"
+      ],
+      "candidate": [
+        "FILE:src/Io.php::guess"
+      ]
+    },
+    "FILE:src/Models.php::Order::parse": {
+      "resolved": [],
+      "candidate": [
+        "FILE:src/Io.php::guess"
+      ]
+    },
+    "FILE:src/Models.php::Base::save": {
+      "resolved": [
+        "FILE:src/Models.php::User::rename"
+      ],
+      "candidate": []
+    },
+    "FILE:src/Models.php::Base::validate": {
+      "resolved": [
+        "FILE:src/Models.php::Base::save"
+      ],
+      "candidate": []
+    },
+    "FILE:src/Models.php::User::rename": {
+      "resolved": [
+        "FILE:src/main.php::main"
+      ],
+      "candidate": []
+    }
+  },
+  "callees": {
+    "FILE:src/main.php::main": {
+      "resolved": [
+        "FILE:src/Models.php::User",
+        "FILE:src/Models.php::User::rename",
+        "FILE:src/Io.php::load",
+        "FILE:src/Io.php::Reader"
+      ]
+    },
+    "FILE:src/Io.php::guess": {
+      "resolved": [],
+      "candidate": [
+        "$thing->parse"
+      ]
+    },
+    "FILE:src/main.php::misuse": {
+      "resolved": [
+        "FILE:src/Models.php::User"
+      ],
+      "unresolved": [
+        "$user->parse"
+      ]
+    }
+  },
+  "flatten": {
+    "FILE:src/Models.php::User": [
+      "rename",
+      "save",
+      "validate"
+    ]
+  },
+  "path": [
+    [
+      "FILE:src/main.php::main",
+      "FILE:src/Io.php::Reader::parse",
+      [
+        "FILE:src/Io.php::load",
+        "FILE:src/Io.php::Reader::parse"
+      ]
+    ]
+  ],
+  "refused": [
+    "parse",
+    "validate"
+  ],
+  "external": {
+    "FILE:src/Io.php::Reader::parse": [
+      "json_decode"
+    ]
+  }
+}

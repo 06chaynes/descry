@@ -5,16 +5,6 @@ caching to avoid regenerating indices for unchanged projects. Language support
 is registry-driven: each adapter in `descry.scip.adapter.ADAPTERS` contributes
 its own discovery + command-building logic, and this module loops over the
 registry rather than hardcoding per-language branches.
-
-Currently registered adapters (see `descry.scip.adapters`):
-- Rust crates (via rust-analyzer)
-- TypeScript/JavaScript packages (via scip-typescript)
-- Python packages (via scip-python)
-
-Performance optimizations:
-- Pre-warm rust-analyzer cache with parallel workers (Rust-specific)
-- Run all adapters concurrently
-- Dynamic worker count based on available memory
 """
 
 from __future__ import annotations
@@ -27,14 +17,13 @@ import re
 import shutil
 import stat
 import subprocess
-import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import ClassVar
 from urllib.parse import quote
 
 import descry.scip.adapters  # noqa: F401 — side-effect: populate ADAPTERS registry
+from descry._files import create_sibling, open_regular
 from descry.scip.adapter import (
     ADAPTERS,
     AdapterConfig,
@@ -72,21 +61,10 @@ class ScipCacheManager:
     {project_root}/.descry_cache/scip/)
     """
 
-    _DEFAULT_EXCLUDED_DIRS: ClassVar[set[str]] = {
-        "target",
-        "node_modules",
-        "dist",
-        "docs",
-        ".git",
-        "__pycache__",
-        "build",
-        "vendor",
-    }
-
     def __init__(
         self,
         project_root: Path,
-        excluded_dirs: set[str] | None = None,
+        excluded_dirs: set[str],
         scip_timeout_minutes: int | None = None,
         scip_extra_args: list[str] | None = None,
         scip_skip_crates: list[str] | None = None,
@@ -97,9 +75,8 @@ class ScipCacheManager:
 
         Args:
             project_root: Root directory of the project
-            excluded_dirs: Directory names to skip during discovery.
-                Defaults to a standard set including target, node_modules,
-                dist, docs, .git, __pycache__, build, and vendor.
+            excluded_dirs: Directory names to skip during discovery and
+                source hashing.
             scip_timeout_minutes: Timeout in minutes for SCIP generation.
                 0 means unlimited. None means use env var or default.
             scip_extra_args: Extra arguments to pass to rust-analyzer scip.
@@ -123,9 +100,7 @@ class ScipCacheManager:
         self.checksums_file = self.cache_dir / "checksums.json"
         # Guards the read-modify-write of checksums.json across adapter threads.
         self._checksums_lock = threading.Lock()
-        self.excluded_dirs = (
-            excluded_dirs if excluded_dirs is not None else self._DEFAULT_EXCLUDED_DIRS
-        )
+        self.excluded_dirs = excluded_dirs
         self._scip_timeout_minutes = scip_timeout_minutes
         self._scip_extra_args = (
             scip_extra_args
@@ -164,7 +139,7 @@ class ScipCacheManager:
             return None
         return (st.st_ino, st.st_mtime_ns, st.st_size)
 
-    def needs_update(self, project: str, project_type: str = "rust") -> bool:
+    def needs_update(self, project: str, adapter_name: str) -> bool:
         """Check if project SCIP needs regeneration.
 
         A project needs regeneration if:
@@ -173,29 +148,24 @@ class ScipCacheManager:
 
         Args:
             project: Name of the project to check
-            project_type: Type of project ("rust" or "typescript")
+            adapter_name: Name of the adapter that discovered it
 
         Returns:
             True if SCIP should be regenerated
         """
-        scip_file = self._index_path(project_type, project)
+        scip_file = self._index_path(adapter_name, project)
         if not scip_file.exists():
             return True
 
         checksums = self._load_checksums()
-        current_hash = self._hash_project(project, project_type)
-        return checksums.get(self._project_key(project_type, project)) != current_hash
+        current_hash = self._hash_project(project, adapter_name)
+        return checksums.get(self._project_key(adapter_name, project)) != current_hash
 
-    def _update_changed_for_adapter(
-        self, adapter: LanguageAdapter, parallel: bool
-    ) -> dict[str, Path]:
-        """Shared body of `update_changed_<lang>` — runs one adapter.
-
-        Discovers projects via the adapter, applies language-specific skip
-        lists (currently only Rust's `scip_skip_crates`), filters by
+    def _update_changed_for_adapter(self, adapter: LanguageAdapter) -> dict[str, Path]:
+        """Runs one adapter: discovers its projects, applies language-specific
+        skip lists (currently only Rust's `scip_skip_crates`), filters by
         checksum, pre-warms where the adapter wants it (currently only
-        rust-analyzer), and dispatches `_generate_scip` either serially or
-        through a bounded ThreadPoolExecutor.
+        rust-analyzer), and runs `_generate_scip` for each changed project.
         """
         projects = adapter.discover(self.project_root, self.excluded_dirs)
 
@@ -225,17 +195,7 @@ class ScipCacheManager:
             if adapter.name == "rust" and len(changed) > 1:
                 self._prime_rust_analyzer_cache()
 
-            if parallel and len(changed) > 1:
-                max_workers = self._get_max_workers(len(changed))
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    results = list(
-                        executor.map(
-                            lambda project: self._generate_scip(adapter, project),
-                            changed,
-                        )
-                    )
-            else:
-                results = [self._generate_scip(adapter, p) for p in changed]
+            results = [self._generate_scip(adapter, p) for p in changed]
 
             with self._checksums_lock:
                 checksums = self._load_checksums()
@@ -249,7 +209,7 @@ class ScipCacheManager:
 
         return self._get_scip_paths(adapter.name, names)
 
-    def update_all(self, parallel: bool = False) -> dict[str, Path]:
+    def update_all(self) -> dict[str, Path]:
         """Update SCIP for every registered adapter concurrently.
 
         Each adapter's generation runs in its own worker since adapters use
@@ -269,9 +229,7 @@ class ScipCacheManager:
 
         with ThreadPoolExecutor(max_workers=max(1, len(ADAPTERS))) as executor:
             futures = {
-                executor.submit(
-                    self._update_changed_for_adapter, adapter, parallel
-                ): adapter.name
+                executor.submit(self._update_changed_for_adapter, adapter): adapter.name
                 for adapter in ADAPTERS.values()
             }
             for future in as_completed(futures):
@@ -387,10 +345,9 @@ class ScipCacheManager:
             )
             return False
 
-        # Post-hoc rename for adapters whose indexer lacks an --output flag
-        # (scip-go contingency). The indexer is assumed to have written
-        # `index.scip` in `cwd`; move it into the expected location. We
-        # accept non-zero exit codes here so long as an index file was
+        # Post-hoc rename for adapters whose indexer lacks an --output flag.
+        # The indexer is assumed to have written `index.scip` in `cwd`; move
+        # it into the expected location. We accept non-zero exit codes here so long as an index file was
         # actually produced — scip-ruby, scip-dotnet, and some
         # scip-typescript sub-project runs exit non-zero on typecheck
         # errors but the index is still usable for the subset of files
@@ -425,51 +382,25 @@ class ScipCacheManager:
                 )
             return True
 
-        # Without the stack frames that bury the error above them
-        said = [line for line in result.stderr.splitlines() if not _FRAME.match(line)]
-        stderr_tail = "\n".join(said)[-500:]
+        # Without the stack frames that bury the error above them, and
+        # blank lines. The reason is on stderr or stdout, per indexer;
+        # carry whichever wrote it.
+        tail = ""
+        for stream in (result.stderr, result.stdout):
+            said = [
+                line
+                for line in stream.splitlines()
+                if line.strip() and not _FRAME.match(line)
+            ]
+            if said:
+                tail = "\n".join(said)[-500:]
+                break
         logger.warning(
             f"SCIP: Failed to generate {adapter.name} index for {project.name} "
             f"(exit={result.returncode}, output_exists={output_path.exists()}, "
-            f"stderr_len={len(result.stderr)}): {stderr_tail}"
+            f"stderr_len={len(result.stderr)}): {tail}"
         )
         return False
-
-    def _get_max_workers(self, num_items: int) -> int:
-        """Get number of parallel workers based on memory constraints.
-
-        Modern systems (32GB+ RAM) can safely run 3-4 rust-analyzer instances.
-        Override with DESCRY_SCIP_WORKERS environment variable.
-
-        Args:
-            num_items: Number of items to process
-
-        Returns:
-            Number of workers to use
-        """
-        env_workers = os.environ.get("DESCRY_SCIP_WORKERS")
-        if env_workers:
-            try:
-                return min(int(env_workers), num_items)
-            except ValueError:
-                logger.warning(
-                    f"DESCRY_SCIP_WORKERS={env_workers!r} is not an integer; ignoring"
-                )
-
-        # Detect available memory and adjust
-        try:
-            import psutil
-
-            mem_gb = psutil.virtual_memory().total / (1024**3)
-            if mem_gb >= 32:
-                return min(4, num_items)  # 4 workers for 32GB+
-            elif mem_gb >= 16:
-                return min(3, num_items)  # 3 workers for 16GB+
-            else:
-                return min(2, num_items)  # Conservative for <16GB
-        except ImportError:
-            # psutil not available, use safe default
-            return min(3, num_items)
 
     def _get_prime_threads(self) -> int:
         """Get thread count for rust-analyzer cache priming.
@@ -492,14 +423,11 @@ class ScipCacheManager:
 
         return max(2, multiprocessing.cpu_count() - 2)
 
-    def _prime_rust_analyzer_cache(self) -> bool:
+    def _prime_rust_analyzer_cache(self) -> None:
         """Pre-warm rust-analyzer cache with parallel workers.
 
         Uses `rust-analyzer analysis-stats` which can utilize multiple threads
         for initial analysis, reducing subsequent SCIP generation time.
-
-        Returns:
-            True if cache priming succeeded, False otherwise
         """
         num_threads = self._get_prime_threads()
         logger.info(f"SCIP: Pre-warming rust-analyzer cache ({num_threads} threads)...")
@@ -523,24 +451,16 @@ class ScipCacheManager:
                 env={**os.environ, "RUST_ANALYZER_THREADS": str(num_threads)},
                 check=False,
             )
-            # analysis-stats returns non-zero for warnings (like cyclic deps)
-            # but still warms the cache, so we consider it a success
-            if result.returncode == 0:
-                logger.info("SCIP: Cache priming complete")
-            else:
-                # Warnings are logged but don't prevent caching
-                logger.info("SCIP: Cache priming complete (with warnings)")
-                logger.debug(f"SCIP: analysis-stats output: {result.stderr[:200]}")
-            return True
+            # analysis-stats exits non-zero for warnings (like cyclic deps)
+            # but still warms the cache.
+            logger.info("SCIP: Cache priming complete")
+            logger.debug(f"SCIP: analysis-stats output: {result.stderr[:200]}")
         except subprocess.TimeoutExpired:
             logger.warning("SCIP: Cache priming timed out")
-            return False
         except FileNotFoundError:
             logger.debug("SCIP: rust-analyzer not found for cache priming")
-            return False
         except (OSError, ValueError) as e:
             logger.debug(f"SCIP: Cache priming error: {e}")
-            return False
 
     def _get_timeout(self) -> int | None:
         """Get SCIP-generation timeout in seconds.
@@ -565,7 +485,7 @@ class ScipCacheManager:
             return self._scip_timeout_minutes * 60 or None
         return None
 
-    def _hash_project(self, project: str, project_type: str = "rust") -> str:
+    def _hash_project(self, project: str, adapter_name: str) -> str:
         """Hash project sources for change detection.
 
         Rust/TS/Python have bespoke hashers that include dep manifests so
@@ -574,14 +494,32 @@ class ScipCacheManager:
         extensions — dep-change invalidation is weaker but still catches
         source edits.
         """
-        if project_type == "rust":
+        if adapter_name == "rust":
             return self._hash_rust_crate(project)
-        elif project_type == "typescript":
+        elif adapter_name == "typescript":
             return self._hash_typescript_package(project)
-        elif project_type == "python":
+        elif adapter_name == "python":
             return self._hash_python_package(project)
         else:
-            return self._hash_generic_adapter(project, project_type)
+            return self._hash_generic_adapter(project, adapter_name)
+
+    def _hash_sources(self, hasher, root: Path, extensions: tuple[str, ...]) -> None:
+        """Add to ``hasher`` each file under ``root`` with one of
+        ``extensions``, outside hidden and excluded directories, in sorted
+        order: its path relative to ``root``, so renames are detected, then
+        its bytes."""
+        for file in sorted(f for ext in extensions for f in root.rglob(f"*{ext}")):
+            relative = file.relative_to(root)
+            if not file.is_file() or any(
+                part.startswith(".") or part in self.excluded_dirs
+                for part in relative.parts[:-1]
+            ):
+                continue
+            try:
+                hasher.update(str(relative).encode())
+                hasher.update(file.read_bytes())
+            except OSError:
+                pass
 
     def _hash_generic_adapter(self, project: str, adapter_name: str) -> str:
         """Fallback hasher for adapters without bespoke logic.
@@ -592,38 +530,12 @@ class ScipCacheManager:
         edit won't invalidate the cache; accepted trade-off until each
         adapter gets its own hasher.
         """
-        adapter = ADAPTERS.get(adapter_name)
-        if adapter is None:
-            raise ValueError(f"Unknown project type: {adapter_name}")
-
         candidate = self.project_root / project
         pkg_path = candidate if candidate.is_dir() else self.project_root
 
         hasher = hashlib.sha256()
         hasher.update(f"adapter:{adapter_name}".encode())
-
-        source_files: list[Path] = []
-        for ext in adapter.extensions:
-            source_files.extend(pkg_path.rglob(f"*{ext}"))
-        source_files.sort()
-
-        for src_file in source_files:
-            if not src_file.is_file():
-                continue
-            rel_parts = src_file.relative_to(pkg_path).parts
-            skip = False
-            for part in rel_parts[:-1]:
-                if part.startswith(".") or part in self.excluded_dirs:
-                    skip = True
-                    break
-            if skip:
-                continue
-            try:
-                hasher.update(str(Path(*rel_parts)).encode())
-                hasher.update(src_file.read_bytes())
-            except (OSError, ValueError):
-                pass
-
+        self._hash_sources(hasher, pkg_path, ADAPTERS[adapter_name].extensions)
         return hasher.hexdigest()[:16]
 
     def _hash_rust_crate(self, crate: str) -> str:
@@ -632,7 +544,7 @@ class ScipCacheManager:
         Hashes:
         - Cargo.toml (dependencies affect types)
         - Workspace Cargo.lock (if present) — resolved dep versions affect types
-        - All .rs files in the crate
+        - All .rs files in the crate, outside hidden and excluded directories
         - Pinned rust toolchain and scip extra args (so cache invalidates when
           the user changes either)
         """
@@ -653,20 +565,7 @@ class ScipCacheManager:
         if cargo_lock.is_file():
             hasher.update(cargo_lock.read_bytes())
 
-        # Hash all .rs files (sorted for determinism)
-        rs_files = sorted(crate_path.rglob("*.rs"))
-        for rs_file in rs_files:
-            # Skip target directory
-            if "target" in rs_file.parts or not rs_file.is_file():
-                continue
-            try:
-                # Include relative path in hash so renames are detected
-                rel_path = rs_file.relative_to(crate_path)
-                hasher.update(str(rel_path).encode())
-                hasher.update(rs_file.read_bytes())
-            except (OSError, ValueError):
-                pass
-
+        self._hash_sources(hasher, crate_path, (".rs",))
         return hasher.hexdigest()[:16]
 
     def _hash_typescript_package(self, package: str) -> str:
@@ -675,7 +574,7 @@ class ScipCacheManager:
         Hashes:
         - package.json (dependencies affect types)
         - tsconfig.json if present
-        - All .ts, .tsx, .js, .jsx files in src/
+        - All .ts, .tsx, .js, .jsx files under the package root
 
         Args:
             package: Name of the package to hash
@@ -696,27 +595,9 @@ class ScipCacheManager:
         if tsconfig.is_file():
             hasher.update(tsconfig.read_bytes())
 
-        # Hash all source files (sorted for determinism)
-        extensions = ("*.ts", "*.tsx", "*.js", "*.jsx")
-        source_files = []
-        for ext in extensions:
-            source_files.extend(pkg_path.glob(f"src/**/{ext}"))
-        source_files = sorted(source_files)
-
-        for src_file in source_files:
-            # Skip node_modules and dist directories
-            if "node_modules" in src_file.parts or "dist" in src_file.parts:
-                continue
-            if not src_file.is_file():
-                continue
-            try:
-                # Include relative path in hash so renames are detected
-                rel_path = src_file.relative_to(pkg_path)
-                hasher.update(str(rel_path).encode())
-                hasher.update(src_file.read_bytes())
-            except (OSError, ValueError):
-                pass
-
+        # The indexer reads the package, not just src/ (commander's lib/, a
+        # root index.ts).
+        self._hash_sources(hasher, pkg_path, (".ts", ".tsx", ".js", ".jsx"))
         return hasher.hexdigest()[:16]
 
     def _hash_python_package(self, package: str) -> str:
@@ -762,27 +643,7 @@ class ScipCacheManager:
                 hasher.update(f"{name}:".encode())
                 hasher.update(marker.read_bytes())
 
-        # Hash every in-scope .py file, sorted for determinism.
-        py_files = []
-        for candidate_path in pkg_path.rglob("*.py"):
-            rel = candidate_path.relative_to(pkg_path)
-            parts = rel.parts
-            skip = False
-            for part in parts[:-1]:
-                if part.startswith(".") or part in self.excluded_dirs:
-                    skip = True
-                    break
-            if not skip and candidate_path.is_file():
-                py_files.append(candidate_path)
-        py_files.sort()
-        for py_file in py_files:
-            try:
-                rel_path = py_file.relative_to(pkg_path)
-                hasher.update(str(rel_path).encode())
-                hasher.update(py_file.read_bytes())
-            except (OSError, ValueError):
-                pass
-
+        self._hash_sources(hasher, pkg_path, (".py",))
         return hasher.hexdigest()[:16]
 
     def project_dirs(self, scip_paths: dict[str, Path]) -> dict[Path, str]:
@@ -818,20 +679,17 @@ class ScipCacheManager:
 
     def _load_checksums(self) -> dict[str, str]:
         """Load cached checksums from disk."""
-        if self.checksums_file.is_file():
-            try:
-                with open(self.checksums_file, encoding="utf-8") as f:
-                    data = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                return {}
-            if isinstance(data, dict):
-                return data
-        return {}
+        try:
+            with open_regular(self.checksums_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (ValueError, OSError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def _save_checksums(self, checksums: dict[str, str]):
         """Save checksums to disk atomically (tmp then rename)."""
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.cache_dir, prefix=".checksums.")
+        fd, tmp = create_sibling(self.checksums_file)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(checksums, f, indent=2)

@@ -1,0 +1,78 @@
+{
+  "callers": {
+    "FILE:lib/io.dart::Reader::parse": {
+      "resolved": [
+        "FILE:lib/io.dart::load"
+      ],
+      "candidate": [
+        "FILE:lib/io.dart::guess"
+      ]
+    },
+    "FILE:lib/models.dart::Order::parse": {
+      "resolved": [],
+      "candidate": [
+        "FILE:lib/io.dart::guess"
+      ]
+    },
+    "FILE:lib/models.dart::Base::save": {
+      "resolved": [
+        "FILE:lib/models.dart::User::rename"
+      ],
+      "candidate": []
+    },
+    "FILE:lib/models.dart::Base::validate": {
+      "resolved": [
+        "FILE:lib/models.dart::Base::save"
+      ],
+      "candidate": []
+    },
+    "FILE:lib/models.dart::User::rename": {
+      "resolved": [
+        "FILE:bin/main.dart::main"
+      ],
+      "candidate": []
+    }
+  },
+  "callees": {
+    "FILE:bin/main.dart::main": {
+      "resolved": [
+        "FILE:lib/models.dart::User",
+        "FILE:lib/models.dart::User::rename",
+        "FILE:lib/io.dart::load",
+        "FILE:lib/io.dart::Reader"
+      ]
+    },
+    "FILE:lib/io.dart::guess": {
+      "resolved": [],
+      "candidate": [
+        "thing.parse"
+      ]
+    }
+  },
+  "flatten": {
+    "FILE:lib/models.dart::User": [
+      "rename",
+      "save",
+      "validate"
+    ]
+  },
+  "path": [
+    [
+      "FILE:bin/main.dart::main",
+      "FILE:lib/io.dart::Reader::parse",
+      [
+        "FILE:lib/io.dart::load",
+        "FILE:lib/io.dart::Reader::parse"
+      ]
+    ]
+  ],
+  "refused": [
+    "parse",
+    "validate"
+  ],
+  "external": {
+    "FILE:lib/io.dart::Reader::parse": [
+      "jsonDecode"
+    ]
+  }
+}

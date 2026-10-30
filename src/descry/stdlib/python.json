@@ -1,4 +1,34 @@
 {
+ "attributes": [
+  "_ctypes.CField",
+  "abc.abstractproperty",
+  "builtins.property",
+  "enum.property",
+  "functools.cached_property",
+  "types.DynamicClassAttribute",
+  "types.GetSetDescriptorType",
+  "types.MemberDescriptorType",
+  "unittest.mock.PropertyMock"
+ ],
+ "awaited": {
+  "_asyncio.Future": 0,
+  "_asyncio.Task": 0,
+  "_collections_abc.Awaitable": 0,
+  "_collections_abc.Coroutine": 2,
+  "_typeshed._type_checker_internals.AwaitableGenerator": 2,
+  "asyncio.Future": 0,
+  "asyncio.Task": 0,
+  "asyncio.futures.Future": 0,
+  "asyncio.tasks.Task": 0,
+  "collections.abc.Awaitable": 0,
+  "collections.abc.Coroutine": 2,
+  "types.CoroutineType": 2,
+  "typing.Awaitable": 0,
+  "typing.AwaitableGenerator": 2,
+  "typing.Coroutine": 2,
+  "typing_extensions.Awaitable": 0,
+  "typing_extensions.Coroutine": 2
+ },
  "callbacks": {
   "_asyncio.Future": {
    "add_done_callback": {
@@ -3984,6 +4014,10 @@
    }
   }
  },
+ "context_managers": [
+  "contextlib.asynccontextmanager",
+  "contextlib.contextmanager"
+ ],
  "functions": {
   ".__future__.absolute_import": "__future__._Feature",
   ".__future__.all_feature_names": "list[str]",
@@ -14122,6 +14156,14 @@
   "zoneinfo.available_timezones": "set[str]",
   "zoneinfo.reset_tzpath": null
  },
+ "qualifiers": [
+  "Annotated",
+  "ClassVar",
+  "Final",
+  "NotRequired",
+  "ReadOnly",
+  "Required"
+ ],
  "scope": {
   "ArithmeticError": "builtins.ArithmeticError",
   "AssertionError": "builtins.AssertionError",
@@ -14140,6 +14182,7 @@
   "DeprecationWarning": "builtins.DeprecationWarning",
   "EOFError": "builtins.EOFError",
   "EncodingWarning": "builtins.EncodingWarning",
+  "EnvironmentError": "builtins.EnvironmentError",
   "Exception": "builtins.Exception",
   "ExceptionGroup": "builtins.ExceptionGroup",
   "FileExistsError": "builtins.FileExistsError",
@@ -14147,6 +14190,7 @@
   "FloatingPointError": "builtins.FloatingPointError",
   "FutureWarning": "builtins.FutureWarning",
   "GeneratorExit": "builtins.GeneratorExit",
+  "IOError": "builtins.IOError",
   "ImportCycleError": "builtins.ImportCycleError",
   "ImportError": "builtins.ImportError",
   "ImportWarning": "builtins.ImportWarning",
@@ -14191,6 +14235,7 @@
   "UserWarning": "builtins.UserWarning",
   "ValueError": "builtins.ValueError",
   "Warning": "builtins.Warning",
+  "WindowsError": "builtins.WindowsError",
   "ZeroDivisionError": "builtins.ZeroDivisionError",
   "abs": "builtins.abs",
   "aiter": "builtins.aiter",
@@ -14212,6 +14257,7 @@
   "dict": "builtins.dict",
   "dir": "builtins.dir",
   "divmod": "builtins.divmod",
+  "ellipsis": "builtins.ellipsis",
   "enumerate": "builtins.enumerate",
   "eval": "builtins.eval",
   "exec": "builtins.exec",
@@ -14264,7 +14310,7 @@
   "vars": "builtins.vars",
   "zip": "builtins.zip"
  },
- "source": "typeshed c4b5c1cfaba3da11df6915b12a45c6b3468195ae, stdlib",
+ "source": "typeshed c4b5c1cfaba3da11df6915b12a45c6b3468195ae, stdlib; CPython v3.15.2 typing.py",
  "types": {
   "__future__._Feature": {
    "bases": [],
@@ -38737,6 +38783,8 @@
     "._name_": "str",
     "._order_": "str",
     "._value_": "typing.Any",
+    ".name": "str",
+    ".value": "typing.Any",
     "__copy__": "typing.Self",
     "__deepcopy__": "typing.Self",
     "__dir__": "list[str]",
@@ -38744,9 +38792,7 @@
     "__hash__": "int",
     "__reduce_ex__": "tuple[typing.Any, ...]",
     "_add_alias_": null,
-    "_add_value_alias_": null,
-    "name": null,
-    "value": null
+    "_add_value_alias_": null
    },
    "params": [],
    "statics": {
@@ -38777,6 +38823,7 @@
    ],
    "methods": {
     ".__members__": "types.MappingProxyType[str, _EnumMemberT]",
+    ".__signature__": "typing.Any",
     "._member_map_": "dict[str, enum.Enum]",
     "._member_names_": "list[str]",
     "._value2member_map_": "dict[typing.Any, enum.Enum]",
@@ -38787,8 +38834,7 @@
     "__getitem__": "_EnumMemberT",
     "__iter__": "typing.Iterator[_EnumMemberT]",
     "__len__": "int",
-    "__reversed__": "typing.Iterator[_EnumMemberT]",
-    "__signature__": null
+    "__reversed__": "typing.Iterator[_EnumMemberT]"
    },
    "params": [],
    "statics": {
@@ -38812,6 +38858,8 @@
     "._name_": "str | None",
     "._numeric_repr_": "typing.Callable[[int], str]",
     "._value_": "int",
+    ".name": "str | None",
+    ".value": "int",
     "__and__": "typing.Self",
     "__bool__": "bool",
     "__contains__": "bool",
@@ -38822,9 +38870,7 @@
     "__rand__": "typing.Self",
     "__ror__": "typing.Self",
     "__rxor__": "typing.Self",
-    "__xor__": "typing.Self",
-    "name": null,
-    "value": null
+    "__xor__": "typing.Self"
    },
    "params": [],
    "statics": {}
@@ -38844,7 +38890,7 @@
    ],
    "methods": {
     "._value_": "int",
-    "value": null
+    ".value": "int"
    },
    "params": [],
    "statics": {
@@ -38886,7 +38932,7 @@
    ],
    "methods": {
     "._value_": "str",
-    "value": null
+    ".value": "str"
    },
    "params": [],
    "statics": {
@@ -38899,9 +38945,9 @@
     "builtins.dict[str, typing.Any]"
    ],
    "methods": {
+    ".member_names": "list[str]",
     "__init__": null,
     "__setitem__": null,
-    "member_names": null,
     "update": null
    },
    "params": [],
@@ -38927,13 +38973,13 @@
    "bases": [],
    "methods": {
     "._value_": "typing.Any",
+    ".value": "typing.Any",
     "__and__": "typing.Self",
     "__or__": "typing.Self",
     "__rand__": "typing.Self",
     "__ror__": "typing.Self",
     "__rxor__": "typing.Self",
-    "__xor__": "typing.Self",
-    "value": null
+    "__xor__": "typing.Self"
    },
    "params": [],
    "statics": {

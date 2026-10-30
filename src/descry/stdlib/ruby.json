@@ -396,13 +396,7 @@
      "returns": null
     }
    },
-   "item": {
-    "0": {
-     "params": [],
-     "returns": null
-    }
-   },
-   "self?.benchmark": {
+   "benchmark": {
     "0": {
      "params": [
       "Report"
@@ -410,7 +404,7 @@
      "returns": null
     }
    },
-   "self?.bm": {
+   "bm": {
     "0": {
      "params": [
       "Report"
@@ -418,7 +412,7 @@
      "returns": null
     }
    },
-   "self?.bmbm": {
+   "bmbm": {
     "0": {
      "params": [
       "Job"
@@ -426,13 +420,19 @@
      "returns": null
     }
    },
-   "self?.measure": {
+   "item": {
     "0": {
      "params": [],
      "returns": null
     }
    },
-   "self?.realtime": {
+   "measure": {
+    "0": {
+     "params": [],
+     "returns": null
+    }
+   },
+   "realtime": {
     "0": {
      "params": [],
      "returns": null
@@ -1259,7 +1259,7 @@
    }
   },
   "Etc": {
-   "self?.group": {
+   "group": {
     "0": {
      "params": [
       "::Etc::Group"
@@ -1267,7 +1267,7 @@
      "returns": null
     }
    },
-   "self?.passwd": {
+   "passwd": {
     "0": {
      "params": [
       "::Etc::Passwd"
@@ -1303,7 +1303,7 @@
    }
   },
   "FileUtils": {
-   "self?.cd": {
+   "cd": {
     "0": {
      "params": [
       "String"
@@ -1313,7 +1313,7 @@
    }
   },
   "Find": {
-   "self?.find": {
+   "find": {
     "0": {
      "params": [
       "String"
@@ -1649,7 +1649,7 @@
    }
   },
   "JSON": {
-   "self?.recurse_proc": {
+   "recurse_proc": {
     "0": {
      "params": [
       "untyped"
@@ -1659,6 +1659,20 @@
    }
   },
   "Kernel": {
+   "at_exit": {
+    "0": {
+     "params": [],
+     "returns": null
+    }
+   },
+   "catch": {
+    "0": {
+     "params": [
+      "T"
+     ],
+     "returns": null
+    }
+   },
    "enum_for": {
     "0": {
      "params": [
@@ -1668,47 +1682,25 @@
      "returns": null
     }
    },
-   "public_send": {
-    "0": {
-     "params": [
-      ""
-     ],
-     "returns": null
-    }
-   },
-   "self?.at_exit": {
+   "fork": {
     "0": {
      "params": [],
      "returns": null
     }
    },
-   "self?.catch": {
-    "0": {
-     "params": [
-      "T"
-     ],
-     "returns": null
-    }
-   },
-   "self?.fork": {
+   "lambda": {
     "0": {
      "params": [],
      "returns": null
     }
    },
-   "self?.lambda": {
+   "loop": {
     "0": {
      "params": [],
      "returns": null
     }
    },
-   "self?.loop": {
-    "0": {
-     "params": [],
-     "returns": null
-    }
-   },
-   "self?.open": {
+   "open": {
     "0": {
      "params": [
       "IO"
@@ -1716,7 +1708,15 @@
      "returns": null
     }
    },
-   "self?.proc": {
+   "proc": {
+    "0": {
+     "params": [
+      ""
+     ],
+     "returns": null
+    }
+   },
+   "public_send": {
     "0": {
      "params": [
       ""
@@ -3264,7 +3264,7 @@
    }
   },
   "Signal": {
-   "self?.trap": {
+   "trap": {
     "0": {
      "params": [
       "Integer"
@@ -3827,7 +3827,7 @@
    }
   },
   "Timeout": {
-   "self?.timeout": {
+   "timeout": {
     "0": {
      "params": [
       "Numeric"
@@ -3993,17 +3993,42 @@
    }
   }
  },
+ "evaluators": [
+  "class_eval",
+  "class_exec",
+  "define_singleton_method",
+  "instance_eval",
+  "instance_exec",
+  "module_eval",
+  "module_exec"
+ ],
  "functions": {},
+ "makers": {
+  "Class.new": {
+   "base": true
+  },
+  "Data.define": {
+   "fields": "reader"
+  },
+  "Module.new": {
+   "module": true
+  },
+  "Struct.new": {
+   "fields": "accessor"
+  }
+ },
  "scope": {},
  "source": "the core and stdlib declarations of rbs 3.9.0",
  "types": {
   "Abbrev": {
    "bases": [],
    "methods": {
-    "self?.abbrev": "Hash[String, String]"
+    "abbrev": "Hash[String, String]"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "abbrev": "Hash[String, String]"
+   }
   },
   "Addrinfo": {
    "bases": [],
@@ -4077,10 +4102,10 @@
     "Enumerable[Elem]"
    ],
    "methods": {
-    "&": "Array",
+    "&": "Array[Elem]",
     "*": null,
     "+": null,
-    "-": "Array",
+    "-": "Array[Elem]",
     "<<": null,
     "<=>": "Integer",
     "==": "bool",
@@ -4090,7 +4115,7 @@
     "all?": "bool",
     "any?": "bool",
     "append": null,
-    "assoc": "Array",
+    "assoc": "Array[untyped]",
     "at": "Elem",
     "bsearch": null,
     "bsearch_index": "Integer",
@@ -4098,7 +4123,7 @@
     "collect": null,
     "collect!": null,
     "combination": null,
-    "compact": "Array",
+    "compact": "Array[Elem]",
     "compact!": null,
     "concat": null,
     "count": "Integer",
@@ -4107,9 +4132,9 @@
     "delete": null,
     "delete_at": "Elem",
     "delete_if": null,
-    "difference": "Array",
+    "difference": "Array[Elem]",
     "dig": null,
-    "drop": "Array",
+    "drop": "Array[Elem]",
     "drop_while": null,
     "each": null,
     "each_index": null,
@@ -4122,7 +4147,7 @@
     "filter!": null,
     "find_index": null,
     "first": null,
-    "flatten": "Array",
+    "flatten": "Array[untyped]",
     "flatten!": null,
     "hash": "Integer",
     "include?": "bool",
@@ -4132,7 +4157,7 @@
     "insert": null,
     "inspect": "String",
     "intersect?": "bool",
-    "intersection": "Array",
+    "intersection": "Array[Elem]",
     "join": "String",
     "keep_if": null,
     "last": null,
@@ -4150,46 +4175,46 @@
     "prepend": null,
     "product": null,
     "push": null,
-    "rassoc": "Array",
+    "rassoc": "Array[untyped]",
     "reject": null,
     "reject!": null,
     "repeated_combination": null,
     "repeated_permutation": null,
     "replace": null,
-    "reverse": "Array",
-    "reverse!": "Array",
+    "reverse": "Array[Elem]",
+    "reverse!": "Array[Elem]",
     "reverse_each": null,
     "rindex": null,
-    "rotate": "Array",
+    "rotate": "Array[Elem]",
     "rotate!": null,
     "sample": null,
     "select": null,
     "select!": null,
     "shelljoin": "String",
     "shift": null,
-    "shuffle": "Array",
+    "shuffle": "Array[Elem]",
     "shuffle!": null,
     "size": "Integer",
     "slice": null,
     "slice!": null,
-    "sort": "Array",
+    "sort": "Array[Elem]",
     "sort!": null,
     "sort_by!": null,
     "sum": null,
-    "take": "Array",
+    "take": "Array[Elem]",
     "take_while": null,
-    "to_a": "Array",
+    "to_a": "Array[Elem]",
     "to_ary": null,
     "to_csv": "String",
     "to_h": null,
     "to_json": "String",
     "to_s": "String",
-    "transpose": "Array",
+    "transpose": "Array[::Array[untyped]]",
     "union": null,
-    "uniq": "Array",
+    "uniq": "Array[Elem]",
     "uniq!": null,
     "unshift": null,
-    "values_at": "Array",
+    "values_at": "Array[Elem?]",
     "zip": null,
     "|": null
    },
@@ -4197,22 +4222,29 @@
     "unchecked out Elem"
    ],
    "statics": {
-    "[]": "Array",
-    "try_convert": "Array"
+    "[]": "Array[U]",
+    "try_convert": "Array[U]"
    }
   },
   "Base64": {
    "bases": [],
    "methods": {
-    "self?.decode64": "String",
-    "self?.encode64": "String",
-    "self?.strict_decode64": "String",
-    "self?.strict_encode64": "String",
-    "self?.urlsafe_decode64": "String",
-    "self?.urlsafe_encode64": "String"
+    "decode64": "String",
+    "encode64": "String",
+    "strict_decode64": "String",
+    "strict_encode64": "String",
+    "urlsafe_decode64": "String",
+    "urlsafe_encode64": "String"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "decode64": "String",
+    "encode64": "String",
+    "strict_decode64": "String",
+    "strict_encode64": "String",
+    "urlsafe_decode64": "String",
+    "urlsafe_encode64": "String"
+   }
   },
   "BasicObject": {
    "bases": [],
@@ -4281,19 +4313,19 @@
     "/": null,
     "add": null,
     "add!": null,
+    "benchmark": "Array[Tms]",
+    "bm": "Array[Tms]",
+    "bmbm": "Array[Tms]",
     "cstime": "Float",
     "cutime": "Float",
     "format": "String",
     "item": null,
     "label": "String",
     "list": null,
+    "measure": "Tms",
     "real": "Float",
+    "realtime": "Float",
     "report": null,
-    "self?.benchmark": "Array[Tms]",
-    "self?.bm": "Array[Tms]",
-    "self?.bmbm": "Array[Tms]",
-    "self?.measure": "Tms",
-    "self?.realtime": "Float",
     "stime": "Float",
     "to_a": null,
     "to_s": "String",
@@ -4302,7 +4334,13 @@
     "width": "Integer"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "benchmark": "Array[Tms]",
+    "bm": "Array[Tms]",
+    "bmbm": "Array[Tms]",
+    "measure": "Tms",
+    "realtime": "Float"
+   }
   },
   "BigDecimal": {
    "bases": [
@@ -4383,17 +4421,26 @@
   "BigMath": {
    "bases": [],
    "methods": {
-    "self?.E": "BigDecimal",
-    "self?.PI": "BigDecimal",
-    "self?.atan": "BigDecimal",
-    "self?.cos": "BigDecimal",
-    "self?.exp": "BigDecimal",
-    "self?.log": "BigDecimal",
-    "self?.sin": "BigDecimal",
-    "self?.sqrt": "BigDecimal"
+    "E": "BigDecimal",
+    "PI": "BigDecimal",
+    "atan": "BigDecimal",
+    "cos": "BigDecimal",
+    "exp": "BigDecimal",
+    "log": "BigDecimal",
+    "sin": "BigDecimal",
+    "sqrt": "BigDecimal"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "E": "BigDecimal",
+    "PI": "BigDecimal",
+    "atan": "BigDecimal",
+    "cos": "BigDecimal",
+    "exp": "BigDecimal",
+    "log": "BigDecimal",
+    "sin": "BigDecimal",
+    "sqrt": "BigDecimal"
+   }
   },
   "Binding": {
    "bases": [],
@@ -4520,15 +4567,15 @@
     "each": null,
     "headers": null,
     "initialize": null,
-    "read": "Array",
-    "readline": "Array"
+    "read": "Array[::Array[String?]]",
+    "readline": "Array[String?]"
    },
    "params": [],
    "statics": {
     "foreach": null,
     "generate": "String",
-    "parse": "Array",
-    "parse_line": "Array",
+    "parse": "Array[::Array[String?]]",
+    "parse_line": "Array[String?]",
     "read": null
    }
   },
@@ -4727,7 +4774,6 @@
     "rectangular": null,
     "reminder": "bot",
     "round": "bot",
-    "self.rectangular": null,
     "step": "bot",
     "to_c": "Complex",
     "to_d": "BigDecimal",
@@ -4744,7 +4790,8 @@
    "statics": {
     "json_create": null,
     "polar": "Complex",
-    "rect": "Complex"
+    "rect": "Complex",
+    "rectangular": "Complex"
    }
   },
   "ConditionVariable": {
@@ -4755,9 +4802,7 @@
   },
   "Coverage": {
    "bases": [],
-   "methods": {
-    "self.start": null
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "line_stub": "Array[Integer?]",
@@ -4766,6 +4811,7 @@
     "resume": null,
     "running?": "bool",
     "setup": null,
+    "start": null,
     "state": null,
     "supported?": "bool",
     "suspend": null
@@ -5035,11 +5081,12 @@
    "methods": {
     "correct": "Array[String]",
     "corrections": null,
-    "initialize": null,
-    "self?.distance": "Integer"
+    "distance": "Integer",
+    "initialize": null
    },
    "params": [],
    "statics": {
+    "distance": "Integer",
     "message_for": "String",
     "requireables": "Array[String]"
    }
@@ -5183,10 +5230,6 @@
     "read": "String",
     "rewind": null,
     "seek": null,
-    "self.foreach": null,
-    "self.pwd": null,
-    "self.rmdir": null,
-    "self.unlink": null,
     "tell": "Integer",
     "to_path": "String"
    },
@@ -5203,13 +5246,17 @@
     "exist?": "bool",
     "fchdir": null,
     "for_fd": "Dir",
+    "foreach": null,
     "getwd": "String",
     "glob": null,
     "home": "String",
     "mkdir": null,
     "mktmpdir": null,
     "open": null,
-    "tmpdir": "String"
+    "pwd": "String",
+    "rmdir": null,
+    "tmpdir": "String",
+    "unlink": null
    }
   },
   "EOFError": {
@@ -5229,7 +5276,8 @@
     "encoding": "Encoding",
     "filename": null,
     "filename=": null,
-    "h": null,
+    "h": "String",
+    "html_escape": "String",
     "initialize": null,
     "lineno": "Integer",
     "lineno=": null,
@@ -5237,16 +5285,17 @@
     "result": "String",
     "result_with_hash": "String",
     "run": null,
-    "self.h": null,
-    "self.u": null,
-    "self?.html_escape": "String",
-    "self?.url_encode": "String",
     "src": "String",
-    "u": null
+    "u": "String",
+    "url_encode": "String"
    },
    "params": [],
    "statics": {
     "def_erb_method": null,
+    "h": "String",
+    "html_escape": "String",
+    "u": "String",
+    "url_encode": "String",
     "version": "String"
    }
   },
@@ -5325,22 +5374,22 @@
     "any?": "bool",
     "call": "T",
     "chain": null,
-    "chunk": "Enumerator",
-    "chunk_while": "Enumerator",
+    "chunk": null,
+    "chunk_while": "Enumerator[::Array[Elem]]",
     "collect": null,
     "collect_concat": null,
     "compact": "Array[Elem]",
     "count": "Integer",
     "cycle": null,
     "detect": null,
-    "drop": "Array",
+    "drop": "Array[Elem]",
     "drop_while": null,
     "each_cons": null,
     "each_entry": null,
     "each_slice": null,
     "each_with_index": null,
     "each_with_object": null,
-    "entries": "Array",
+    "entries": "Array[Elem]",
     "enum_for": null,
     "filter": null,
     "filter_map": null,
@@ -5349,8 +5398,8 @@
     "find_index": null,
     "first": null,
     "flat_map": null,
-    "grep": "Array",
-    "grep_v": "Array",
+    "grep": null,
+    "grep_v": null,
     "group_by": null,
     "include?": "bool",
     "inject": null,
@@ -5370,20 +5419,20 @@
     "reject": null,
     "reverse_each": null,
     "select": null,
-    "slice_after": "Enumerator",
-    "slice_before": "Enumerator",
-    "slice_when": "Enumerator",
-    "sort": "Array",
+    "slice_after": "Enumerator[::Array[Elem]]",
+    "slice_before": "Enumerator[::Array[Elem]]",
+    "slice_when": "Enumerator[::Array[Elem]]",
+    "sort": "Array[Elem]",
     "sort_by": null,
     "sum": null,
-    "take": "Array",
+    "take": "Array[Elem]",
     "take_while": null,
-    "tally": "Hash",
-    "to_a": "Array",
+    "tally": "Hash[Elem, Integer]",
+    "to_a": "Array[Elem]",
     "to_enum": null,
-    "to_h": "Hash",
+    "to_h": null,
     "to_set": null,
-    "uniq": "Array",
+    "uniq": "Array[Elem]",
     "zip": null
    },
    "params": [
@@ -5402,9 +5451,9 @@
     "initialize": null,
     "inspect": "String",
     "next": "Elem",
-    "next_values": "Array",
+    "next_values": "Array[Elem]",
     "peek": "Elem",
-    "peek_values": "Array",
+    "peek_values": "Array[Elem]",
     "rewind": null,
     "size": null,
     "with_index": null,
@@ -5484,54 +5533,72 @@
    "methods": {
     "change": "Integer",
     "change=": null,
+    "confstr": "String",
     "dir": "String",
     "dir=": null,
+    "endgrent": null,
+    "endpwent": null,
     "expire": "Integer",
     "expire=": null,
     "gecos": "String",
     "gecos=": null,
+    "getgrent": "Etc::Group",
+    "getgrgid": "Etc::Group",
+    "getgrnam": "Etc::Group",
+    "getlogin": "String",
+    "getpwent": "Etc::Passwd",
+    "getpwnam": "Etc::Passwd",
+    "getpwuid": "Etc::Passwd",
     "gid": "Integer",
     "gid=": null,
+    "group": null,
     "mem": "Array[String]",
     "mem=": null,
     "name": "String",
     "name=": null,
-    "passwd": "String",
+    "nprocessors": "Integer",
+    "passwd": null,
     "passwd=": null,
-    "self?.confstr": "String",
-    "self?.endgrent": null,
-    "self?.endpwent": null,
-    "self?.getgrent": "Etc::Group",
-    "self?.getgrgid": "Etc::Group",
-    "self?.getgrnam": "Etc::Group",
-    "self?.getlogin": "String",
-    "self?.getpwent": "Etc::Passwd",
-    "self?.getpwnam": "Etc::Passwd",
-    "self?.getpwuid": "Etc::Passwd",
-    "self?.group": null,
-    "self?.nprocessors": "Integer",
-    "self?.passwd": null,
-    "self?.setgrent": null,
-    "self?.setpwent": null,
-    "self?.sysconf": "Integer",
-    "self?.sysconfdir": "String",
-    "self?.systmpdir": "String",
-    "self?.uname": null,
+    "setgrent": null,
+    "setpwent": null,
     "shell": "String",
     "shell=": null,
+    "sysconf": "Integer",
+    "sysconfdir": "String",
+    "systmpdir": "String",
     "uclass": "String",
     "uclass=": null,
     "uid": "Integer",
-    "uid=": null
+    "uid=": null,
+    "uname": null
    },
    "params": [],
    "statics": {
     "[]": null,
+    "confstr": "String",
     "each": null,
+    "endgrent": null,
+    "endpwent": null,
+    "getgrent": "Etc::Group",
+    "getgrgid": "Etc::Group",
+    "getgrnam": "Etc::Group",
+    "getlogin": "String",
+    "getpwent": "Etc::Passwd",
+    "getpwnam": "Etc::Passwd",
+    "getpwuid": "Etc::Passwd",
+    "group": null,
     "inspect": null,
     "keyword_init?": null,
     "members": null,
-    "new": null
+    "new": null,
+    "nprocessors": "Integer",
+    "passwd": null,
+    "setgrent": null,
+    "setpwent": null,
+    "sysconf": "Integer",
+    "sysconfdir": "String",
+    "systmpdir": "String",
+    "uname": null
    }
   },
   "Exception": {
@@ -5629,9 +5696,6 @@
     "lstat": null,
     "mtime": "Time",
     "path": "String",
-    "self.delete": null,
-    "self.empty?": null,
-    "self.fnmatch?": null,
     "size": "Integer",
     "to_path": "String",
     "truncate": null
@@ -5648,8 +5712,10 @@
     "chmod": "Integer",
     "chown": "Integer",
     "ctime": "Time",
+    "delete": null,
     "directory?": "bool",
     "dirname": "String",
+    "empty?": null,
     "executable?": "bool",
     "executable_real?": "bool",
     "exist?": "bool",
@@ -5657,6 +5723,7 @@
     "extname": "String",
     "file?": "bool",
     "fnmatch": "bool",
+    "fnmatch?": "bool",
     "ftype": "String",
     "grpowned?": "bool",
     "identical?": "bool",
@@ -5762,118 +5829,181 @@
   "FileTest": {
    "bases": [],
    "methods": {
+    "blockdev?": "bool",
+    "chardev?": "bool",
+    "directory?": "bool",
     "empty?": null,
-    "self.empty?": null,
-    "self?.blockdev?": "bool",
-    "self?.chardev?": "bool",
-    "self?.directory?": "bool",
-    "self?.executable?": "bool",
-    "self?.executable_real?": "bool",
-    "self?.exist?": "bool",
-    "self?.file?": "bool",
-    "self?.grpowned?": "bool",
-    "self?.identical?": "bool",
-    "self?.owned?": "bool",
-    "self?.pipe?": "bool",
-    "self?.readable?": "bool",
-    "self?.readable_real?": "bool",
-    "self?.setgid?": "bool",
-    "self?.setuid?": "bool",
-    "self?.size": "Integer",
-    "self?.size?": "Integer",
-    "self?.socket?": "bool",
-    "self?.sticky?": "bool",
-    "self?.symlink?": "bool",
-    "self?.world_readable?": "Integer",
-    "self?.world_writable?": "Integer",
-    "self?.writable?": "bool",
-    "self?.writable_real?": "bool",
-    "self?.zero?": "bool"
+    "executable?": "bool",
+    "executable_real?": "bool",
+    "exist?": "bool",
+    "file?": "bool",
+    "grpowned?": "bool",
+    "identical?": "bool",
+    "owned?": "bool",
+    "pipe?": "bool",
+    "readable?": "bool",
+    "readable_real?": "bool",
+    "setgid?": "bool",
+    "setuid?": "bool",
+    "size": "Integer",
+    "size?": "Integer",
+    "socket?": "bool",
+    "sticky?": "bool",
+    "symlink?": "bool",
+    "world_readable?": "Integer",
+    "world_writable?": "Integer",
+    "writable?": "bool",
+    "writable_real?": "bool",
+    "zero?": "bool"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "blockdev?": "bool",
+    "chardev?": "bool",
+    "directory?": "bool",
+    "empty?": null,
+    "executable?": "bool",
+    "executable_real?": "bool",
+    "exist?": "bool",
+    "file?": "bool",
+    "grpowned?": "bool",
+    "identical?": "bool",
+    "owned?": "bool",
+    "pipe?": "bool",
+    "readable?": "bool",
+    "readable_real?": "bool",
+    "setgid?": "bool",
+    "setuid?": "bool",
+    "size": "Integer",
+    "size?": "Integer",
+    "socket?": "bool",
+    "sticky?": "bool",
+    "symlink?": "bool",
+    "world_readable?": "Integer",
+    "world_writable?": "Integer",
+    "writable?": "bool",
+    "writable_real?": "bool",
+    "zero?": "bool"
+   }
   },
   "FileUtils": {
    "bases": [],
    "methods": {
+    "cd": null,
     "chdir": null,
-    "cmp": null,
+    "chmod": null,
+    "chmod_R": null,
+    "chown": null,
+    "chown_R": null,
+    "cmp": "bool",
+    "compare_file": "bool",
+    "compare_stream": "bool",
     "copy": null,
-    "getwd": null,
-    "identical?": null,
+    "copy_entry": null,
+    "copy_file": null,
+    "copy_stream": null,
+    "cp": null,
+    "cp_lr": null,
+    "cp_r": null,
+    "getwd": "String",
+    "identical?": "bool",
+    "install": null,
     "link": null,
+    "link_entry": null,
+    "ln": null,
+    "ln_s": null,
+    "ln_sf": null,
+    "ln_sr": null,
     "makedirs": null,
+    "mkdir": null,
+    "mkdir_p": null,
     "mkpath": null,
     "move": null,
+    "mv": null,
+    "pwd": "String",
     "remove": null,
+    "remove_dir": null,
+    "remove_entry": null,
+    "remove_entry_secure": null,
+    "remove_file": null,
+    "rm": null,
+    "rm_f": null,
+    "rm_r": null,
+    "rm_rf": null,
+    "rmdir": null,
     "rmtree": null,
     "safe_unlink": null,
-    "self.chdir": null,
-    "self.cmp": null,
-    "self.copy": null,
-    "self.getwd": null,
-    "self.identical?": null,
-    "self.link": null,
-    "self.makedirs": null,
-    "self.mkpath": null,
-    "self.move": null,
-    "self.remove": null,
-    "self.rmtree": null,
-    "self.safe_unlink": null,
-    "self.symlink": null,
-    "self?.cd": null,
-    "self?.chmod": null,
-    "self?.chmod_R": null,
-    "self?.chown": null,
-    "self?.chown_R": null,
-    "self?.compare_file": "bool",
-    "self?.compare_stream": "bool",
-    "self?.copy_entry": null,
-    "self?.copy_file": null,
-    "self?.copy_stream": null,
-    "self?.cp": null,
-    "self?.cp_lr": null,
-    "self?.cp_r": null,
-    "self?.install": null,
-    "self?.link_entry": null,
-    "self?.ln": null,
-    "self?.ln_s": null,
-    "self?.ln_sf": null,
-    "self?.ln_sr": null,
-    "self?.mkdir": null,
-    "self?.mkdir_p": null,
-    "self?.mv": null,
-    "self?.pwd": "String",
-    "self?.remove_dir": null,
-    "self?.remove_entry": null,
-    "self?.remove_entry_secure": null,
-    "self?.remove_file": null,
-    "self?.rm": null,
-    "self?.rm_f": null,
-    "self?.rm_r": null,
-    "self?.rm_rf": null,
-    "self?.rmdir": null,
-    "self?.touch": null,
-    "self?.uptodate?": "bool",
-    "symlink": null
+    "symlink": null,
+    "touch": null,
+    "uptodate?": "bool"
    },
    "params": [],
    "statics": {
+    "cd": null,
+    "chdir": null,
+    "chmod": null,
+    "chmod_R": null,
+    "chown": null,
+    "chown_R": null,
+    "cmp": "bool",
     "collect_method": "Array[String]",
     "commands": "Array[String]",
+    "compare_file": "bool",
+    "compare_stream": "bool",
+    "copy": null,
+    "copy_entry": null,
+    "copy_file": null,
+    "copy_stream": null,
+    "cp": null,
+    "cp_lr": null,
+    "cp_r": null,
+    "getwd": "String",
     "have_option?": "bool",
+    "identical?": "bool",
+    "install": null,
+    "link": null,
+    "link_entry": null,
+    "ln": null,
+    "ln_s": null,
+    "ln_sf": null,
+    "ln_sr": null,
+    "makedirs": null,
+    "mkdir": null,
+    "mkdir_p": null,
+    "mkpath": null,
+    "move": null,
+    "mv": null,
     "options": "Array[String]",
-    "options_of": "Array[String]"
+    "options_of": "Array[String]",
+    "pwd": "String",
+    "remove": null,
+    "remove_dir": null,
+    "remove_entry": null,
+    "remove_entry_secure": null,
+    "remove_file": null,
+    "rm": null,
+    "rm_f": null,
+    "rm_r": null,
+    "rm_rf": null,
+    "rmdir": null,
+    "rmtree": null,
+    "safe_unlink": null,
+    "symlink": null,
+    "touch": null,
+    "uptodate?": "bool"
    }
   },
   "Find": {
    "bases": [],
    "methods": {
-    "self?.find": null,
-    "self?.prune": null
+    "find": null,
+    "prune": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "find": null,
+    "prune": null
+   }
   },
   "Float": {
    "bases": [
@@ -6036,7 +6166,7 @@
     "any?": "bool",
     "assoc": null,
     "clear": null,
-    "compact": "Hash",
+    "compact": "Hash[K, V]",
     "compact!": null,
     "compare_by_identity": null,
     "compare_by_identity?": "bool",
@@ -6054,7 +6184,7 @@
     "each_value": null,
     "empty?": "bool",
     "eql?": null,
-    "except": "Hash",
+    "except": "Hash[K, V]",
     "fetch": null,
     "fetch_values": null,
     "filter": null,
@@ -6067,11 +6197,11 @@
     "initialize": null,
     "initialize_copy": null,
     "inspect": "String",
-    "invert": "Hash",
+    "invert": "Hash[V, K]",
     "keep_if": null,
     "key": "K",
     "key?": "bool",
-    "keys": "Array",
+    "keys": "Array[K]",
     "length": "Integer",
     "member?": "bool",
     "merge": null,
@@ -6085,9 +6215,9 @@
     "select!": null,
     "shift": null,
     "size": "Integer",
-    "slice": "Hash",
+    "slice": "Hash[K, V]",
     "store": "V",
-    "to_a": "Array",
+    "to_a": "Array[[ K, V ]]",
     "to_h": null,
     "to_hash": null,
     "to_json": "String",
@@ -6099,15 +6229,15 @@
     "transform_values!": null,
     "update": null,
     "value?": "bool",
-    "values": "Array",
-    "values_at": "Array"
+    "values": "Array[V]",
+    "values_at": "Array[V?]"
    },
    "params": [
     "unchecked out K",
     "unchecked out V"
    ],
    "statics": {
-    "[]": "Hash",
+    "[]": null,
     "try_convert": null
    }
   },
@@ -6194,14 +6324,13 @@
     "readbyte": "Integer",
     "readchar": "String",
     "readline": "String",
-    "readlines": "Array",
+    "readlines": "Array[String]",
     "readpartial": "String",
     "reopen": "IO",
     "rewind": "Integer",
     "scroll_backward": null,
     "scroll_forward": null,
     "seek": "Integer",
-    "self.for_fd": null,
     "set_encoding": null,
     "set_encoding_by_bom": "Encoding",
     "stat": "File::Stat",
@@ -6231,12 +6360,13 @@
     "console_size": null,
     "copy_stream": "Integer",
     "default_console_size": null,
+    "for_fd": null,
     "foreach": null,
     "open": null,
     "pipe": null,
     "popen": null,
     "read": "String",
-    "readlines": "Array",
+    "readlines": "Array[String]",
     "select": null,
     "sysopen": "Integer",
     "try_convert": "IO",
@@ -6438,7 +6568,7 @@
     "conj": "Integer",
     "conjugate": "Integer",
     "denominator": "Integer",
-    "digits": "Array",
+    "digits": "Array[Integer]",
     "div": "Integer",
     "divmod": null,
     "downto": null,
@@ -6516,27 +6646,23 @@
   "JSON": {
    "bases": [],
    "methods": {
-    "fast_unparse": null,
+    "dump": null,
+    "fast_generate": "String",
+    "fast_unparse": "String",
     "flush": null,
+    "generate": "String",
+    "load": null,
+    "load_file": null,
+    "load_file!": null,
+    "parse": null,
+    "parse!": null,
+    "pretty_generate": null,
     "pretty_unparse": null,
     "read": "String",
+    "recurse_proc": null,
     "restore": null,
-    "self.fast_unparse": null,
-    "self.pretty_unparse": null,
-    "self.restore": null,
-    "self.unparse": null,
-    "self?.dump": null,
-    "self?.fast_generate": "String",
-    "self?.generate": "String",
-    "self?.load": null,
-    "self?.load_file": null,
-    "self?.load_file!": null,
-    "self?.parse": null,
-    "self?.parse!": null,
-    "self?.pretty_generate": null,
-    "self?.recurse_proc": null,
     "to_io": null,
-    "unparse": null,
+    "unparse": "String",
     "write": null
    },
    "params": [],
@@ -6545,17 +6671,31 @@
     "create_id": "_ToS",
     "create_id=": "_ToS",
     "deep_const_get": null,
+    "dump": null,
     "dump_default_options": "options",
     "dump_default_options=": "options",
+    "fast_generate": "String",
+    "fast_unparse": "String",
+    "generate": "String",
     "generator": "generator",
     "generator=": null,
     "iconv": "String",
+    "load": null,
     "load_default_options": "options",
     "load_default_options=": "options",
+    "load_file": null,
+    "load_file!": null,
+    "parse": null,
+    "parse!": null,
     "parser": "parser",
     "parser=": null,
+    "pretty_generate": null,
+    "pretty_unparse": null,
+    "recurse_proc": null,
+    "restore": null,
     "state": "state",
-    "state=": "state"
+    "state=": "state",
+    "unparse": "String"
    }
   },
   "JSON::Ext": {
@@ -6679,7 +6819,30 @@
     "/": "T",
     "<=>": null,
     "===": null,
+    "Array": null,
+    "BigDecimal": "BigDecimal",
+    "Complex": "Complex",
+    "Float": "Float",
+    "Hash": "Hash[K, V]",
+    "Integer": "Integer",
     "JSON": null,
+    "Pathname": "Pathname",
+    "Rational": null,
+    "String": "String",
+    "URI": "URI::Generic",
+    "__callee__": "Symbol",
+    "__dir__": "String",
+    "__method__": "Symbol",
+    "`": "String",
+    "abort": "bot",
+    "at_exit": "Proc",
+    "autoload": "NilClass",
+    "autoload?": "String",
+    "binding": "Binding",
+    "block_given?": "bool",
+    "caller": "Array[String]",
+    "caller_locations": "Array[Thread::Backtrace::Location]",
+    "catch": null,
     "class": "Class",
     "clone": null,
     "define_singleton_method": "Symbol",
@@ -6688,9 +6851,18 @@
     "dup": null,
     "enum_for": "Enumerator[untyped, untyped]",
     "eql?": "bool",
+    "eval": null,
+    "exec": "bot",
+    "exit": "bot",
+    "exit!": "bot",
     "extend": null,
+    "fail": "bot",
+    "fork": "Integer",
+    "format": "String",
     "freeze": null,
     "frozen?": "bool",
+    "gets": "String",
+    "global_variables": "Array[Symbol]",
     "hash": "Integer",
     "initialize_clone": null,
     "initialize_copy": null,
@@ -6706,92 +6878,119 @@
     "j": null,
     "jj": null,
     "kind_of?": "bool",
+    "lambda": "Proc",
+    "load": "bool",
+    "local_variables": "Array[Symbol]",
+    "loop": null,
     "method": "Method",
     "methods": "Array[Symbol]",
     "nil?": "false",
     "object_id": null,
+    "open": null,
+    "p": null,
+    "pp": null,
     "pretty_inspect": "String",
+    "print": null,
+    "printf": null,
     "private_methods": "Array[Symbol]",
+    "proc": "Proc",
     "protected_methods": "Array[Symbol]",
     "public_method": "Method",
     "public_methods": "Array[Symbol]",
     "public_send": null,
-    "raise": null,
+    "putc": null,
+    "puts": null,
+    "raise": "bot",
+    "rand": null,
+    "readline": "String",
+    "readlines": "Array[String]",
     "remove_instance_variable": null,
+    "require": "bool",
+    "require_relative": "bool",
     "respond_to?": "bool",
-    "self.raise": null,
-    "self.sprintf": null,
-    "self?.Array": null,
-    "self?.BigDecimal": "BigDecimal",
-    "self?.Complex": "Complex",
-    "self?.Float": "Float",
-    "self?.Hash": "Hash[K, V]",
-    "self?.Integer": "Integer",
-    "self?.Pathname": "Pathname",
-    "self?.Rational": null,
-    "self?.String": "String",
-    "self?.URI": "URI::Generic",
-    "self?.__callee__": "Symbol",
-    "self?.__dir__": "String",
-    "self?.__method__": "Symbol",
-    "self?.`": "String",
-    "self?.abort": "bot",
-    "self?.at_exit": "Proc",
-    "self?.autoload": "NilClass",
-    "self?.autoload?": "String",
-    "self?.binding": "Binding",
-    "self?.block_given?": "bool",
-    "self?.caller": "Array",
-    "self?.caller_locations": "Array",
-    "self?.catch": null,
-    "self?.eval": null,
-    "self?.exec": "bot",
-    "self?.exit": "bot",
-    "self?.exit!": "bot",
-    "self?.fail": "bot",
-    "self?.fork": "Integer",
-    "self?.format": "String",
-    "self?.gets": "String",
-    "self?.global_variables": "Array",
-    "self?.lambda": "Proc",
-    "self?.load": "bool",
-    "self?.local_variables": "Array",
-    "self?.loop": null,
-    "self?.open": null,
-    "self?.p": null,
-    "self?.pp": null,
-    "self?.print": null,
-    "self?.printf": null,
-    "self?.proc": "Proc",
-    "self?.putc": null,
-    "self?.puts": null,
-    "self?.rand": null,
-    "self?.readline": "String",
-    "self?.readlines": "Array",
-    "self?.require": "bool",
-    "self?.require_relative": "bool",
-    "self?.select": "Array",
-    "self?.sleep": null,
-    "self?.spawn": "Integer",
-    "self?.srand": "Integer",
-    "self?.syscall": null,
-    "self?.system": null,
-    "self?.test": null,
-    "self?.throw": "bot",
-    "self?.warn": null,
+    "select": "Array[String]",
     "send": null,
     "singleton_class": "Class",
     "singleton_method": "Method",
     "singleton_methods": "Array[Symbol]",
-    "sprintf": null,
+    "sleep": null,
+    "spawn": "Integer",
+    "sprintf": "String",
+    "srand": "Integer",
+    "syscall": null,
+    "system": null,
     "tap": null,
+    "test": null,
     "then": null,
+    "throw": "bot",
     "to_enum": "Enumerator[untyped, untyped]",
     "to_s": "String",
+    "warn": null,
     "yield_self": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "Array": null,
+    "BigDecimal": "BigDecimal",
+    "Complex": "Complex",
+    "Float": "Float",
+    "Hash": "Hash[K, V]",
+    "Integer": "Integer",
+    "Pathname": "Pathname",
+    "Rational": null,
+    "String": "String",
+    "URI": "URI::Generic",
+    "__callee__": "Symbol",
+    "__dir__": "String",
+    "__method__": "Symbol",
+    "`": "String",
+    "abort": "bot",
+    "at_exit": "Proc",
+    "autoload": "NilClass",
+    "autoload?": "String",
+    "binding": "Binding",
+    "block_given?": "bool",
+    "caller": "Array[String]",
+    "caller_locations": "Array[Thread::Backtrace::Location]",
+    "catch": null,
+    "eval": null,
+    "exec": "bot",
+    "exit": "bot",
+    "exit!": "bot",
+    "fail": "bot",
+    "fork": "Integer",
+    "format": "String",
+    "gets": "String",
+    "global_variables": "Array[Symbol]",
+    "lambda": "Proc",
+    "load": "bool",
+    "local_variables": "Array[Symbol]",
+    "loop": null,
+    "open": null,
+    "p": null,
+    "pp": null,
+    "print": null,
+    "printf": null,
+    "proc": "Proc",
+    "putc": null,
+    "puts": null,
+    "raise": "bot",
+    "rand": null,
+    "readline": "String",
+    "readlines": "Array[String]",
+    "require": "bool",
+    "require_relative": "bool",
+    "select": "Array[String]",
+    "sleep": null,
+    "spawn": "Integer",
+    "sprintf": "String",
+    "srand": "Integer",
+    "syscall": null,
+    "system": null,
+    "test": null,
+    "throw": "bot",
+    "warn": null
+   }
   },
   "KeyError": {
    "bases": [
@@ -6890,11 +7089,14 @@
   "Logger::Period": {
    "bases": [],
    "methods": {
-    "self?.next_rotate_time": null,
-    "self?.previous_period_end": null
+    "next_rotate_time": null,
+    "previous_period_end": null
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "next_rotate_time": null,
+    "previous_period_end": null
+   }
   },
   "Logger::Severity": {
    "bases": [],
@@ -6906,14 +7108,15 @@
    "bases": [],
    "methods": {
     "call": "T",
+    "dump": null,
     "getbyte": null,
-    "read": "String",
-    "self.restore": null,
-    "self?.dump": null
+    "read": "String"
    },
    "params": [],
    "statics": {
-    "load": null
+    "dump": null,
+    "load": null,
+    "restore": null
    }
   },
   "MatchData": {
@@ -7180,10 +7383,10 @@
     "assert_performance_logarithmic": null,
     "assert_performance_power": null,
     "fit_error": null,
-    "fit_exponential": "Array",
-    "fit_linear": "Array",
-    "fit_logarithmic": "Array",
-    "fit_power": "Array",
+    "fit_exponential": "Array[untyped]",
+    "fit_linear": "Array[untyped]",
+    "fit_logarithmic": "Array[untyped]",
+    "fit_power": "Array[untyped]",
     "io": null,
     "sigma": null,
     "validation_for_fit": null
@@ -7390,7 +7593,7 @@
     "failures": null,
     "failures=": null,
     "initialize": null,
-    "marshal_dump": "Array",
+    "marshal_dump": "Array[untyped]",
     "marshal_load": null,
     "metadata": null,
     "metadata=": null,
@@ -7613,7 +7816,7 @@
     ">": "bool",
     ">=": "bool",
     "alias_method": "Symbol",
-    "ancestors": "Array",
+    "ancestors": "Array[Module]",
     "append_features": null,
     "attr": "Array[Symbol]",
     "attr_accessor": "Array[Symbol]",
@@ -7626,14 +7829,14 @@
     "class_variable_defined?": "bool",
     "class_variable_get": null,
     "class_variable_set": null,
-    "class_variables": "Array",
+    "class_variables": "Array[Symbol]",
     "const_added": null,
     "const_defined?": "bool",
     "const_get": null,
     "const_missing": null,
     "const_set": null,
     "const_source_location": null,
-    "constants": "Array",
+    "constants": "Array[Symbol]",
     "define_method": "Symbol",
     "deprecate_constant": null,
     "eql?": "bool",
@@ -7644,11 +7847,11 @@
     "include": null,
     "include?": "bool",
     "included": null,
-    "included_modules": "Array",
+    "included_modules": "Array[Module]",
     "initialize": null,
     "inspect": "String",
     "instance_method": "UnboundMethod",
-    "instance_methods": "Array",
+    "instance_methods": "Array[Symbol]",
     "method_added": null,
     "method_defined?": "bool",
     "method_removed": null,
@@ -7662,16 +7865,16 @@
     "private": null,
     "private_class_method": null,
     "private_constant": null,
-    "private_instance_methods": "Array",
+    "private_instance_methods": "Array[Symbol]",
     "private_method_defined?": "bool",
     "protected": null,
-    "protected_instance_methods": "Array",
+    "protected_instance_methods": "Array[Symbol]",
     "protected_method_defined?": "bool",
     "public": null,
     "public_class_method": null,
     "public_constant": null,
     "public_instance_method": "UnboundMethod",
-    "public_instance_methods": "Array",
+    "public_instance_methods": "Array[Symbol]",
     "public_method_defined?": "bool",
     "refine": "Refinement",
     "refinements": "Array[Refinement]",
@@ -7687,9 +7890,9 @@
    },
    "params": [],
    "statics": {
-    "constants": "Array",
-    "nesting": "Array",
-    "used_modules": "Array",
+    "constants": "Array[Integer]",
+    "nesting": "Array[Module]",
+    "used_modules": "Array[Module]",
     "used_refinements": "Array[Refinement]"
    }
   },
@@ -7794,7 +7997,7 @@
    ],
    "methods": {
     "initialize": null,
-    "local_variables": "Array",
+    "local_variables": "Array[Symbol]",
     "name": "String",
     "receiver": "T"
    },
@@ -7943,9 +8146,6 @@
     "request_put": "Net::HTTPResponse",
     "response": null,
     "response_body_permitted?": "bool",
-    "self.is_version_1_1?": null,
-    "self.is_version_1_2?": null,
-    "self.newobj": null,
     "self.proxy_address": "String",
     "self.proxy_pass": "String",
     "self.proxy_port": "Integer",
@@ -7996,7 +8196,10 @@
     "get_response": "Net::HTTPResponse",
     "http_default_port": "Integer",
     "https_default_port": "Integer",
+    "is_version_1_1?": "FalseClass",
+    "is_version_1_2?": "TrueClass",
     "new": "Net::HTTP",
+    "newobj": null,
     "post": "Net::HTTPResponse",
     "post_form": "Net::HTTPResponse",
     "proxy_class?": "bool",
@@ -8157,38 +8360,60 @@
   "ObjectSpace": {
    "bases": [],
    "methods": {
+    "allocation_class_path": "String",
+    "allocation_generation": null,
+    "allocation_method_id": "Symbol",
+    "allocation_sourcefile": "String",
+    "allocation_sourceline": "Integer",
+    "count_imemo_objects": "Hash[Symbol, Integer]",
+    "count_nodes": "Hash[Symbol, Integer]",
+    "count_objects_size": "Hash[Symbol, Integer]",
+    "count_symbols": "Hash[Symbol, Integer]",
+    "count_tdata_objects": "Hash[untyped, Integer]",
+    "dump": null,
+    "dump_all": null,
     "garbage_collect": null,
-    "self?.allocation_class_path": "String",
-    "self?.allocation_generation": null,
-    "self?.allocation_method_id": "Symbol",
-    "self?.allocation_sourcefile": "String",
-    "self?.allocation_sourceline": "Integer",
-    "self?.count_imemo_objects": "Hash[Symbol, Integer]",
-    "self?.count_nodes": "Hash[Symbol, Integer]",
-    "self?.count_objects_size": "Hash[Symbol, Integer]",
-    "self?.count_symbols": "Hash[Symbol, Integer]",
-    "self?.count_tdata_objects": "Hash[untyped, Integer]",
-    "self?.dump": null,
-    "self?.dump_all": null,
-    "self?.internal_class_of": "Class",
-    "self?.internal_super_of": null,
-    "self?.memsize_of": "Integer",
-    "self?.memsize_of_all": "Integer",
-    "self?.reachable_objects_from": null,
-    "self?.reachable_objects_from_root": "Hash[String, untyped]",
-    "self?.trace_object_allocations_clear": null,
-    "self?.trace_object_allocations_debug_start": null,
-    "self?.trace_object_allocations_start": null,
-    "self?.trace_object_allocations_stop": null
+    "internal_class_of": "Class",
+    "internal_super_of": null,
+    "memsize_of": "Integer",
+    "memsize_of_all": "Integer",
+    "reachable_objects_from": null,
+    "reachable_objects_from_root": "Hash[String, untyped]",
+    "trace_object_allocations_clear": null,
+    "trace_object_allocations_debug_start": null,
+    "trace_object_allocations_start": null,
+    "trace_object_allocations_stop": null
    },
    "params": [],
    "statics": {
     "_id2ref": null,
+    "allocation_class_path": "String",
+    "allocation_generation": null,
+    "allocation_method_id": "Symbol",
+    "allocation_sourcefile": "String",
+    "allocation_sourceline": "Integer",
+    "count_imemo_objects": "Hash[Symbol, Integer]",
+    "count_nodes": "Hash[Symbol, Integer]",
     "count_objects": "Hash[Symbol, Integer]",
+    "count_objects_size": "Hash[Symbol, Integer]",
+    "count_symbols": "Hash[Symbol, Integer]",
+    "count_tdata_objects": "Hash[untyped, Integer]",
     "define_finalizer": null,
+    "dump": null,
+    "dump_all": null,
     "each_object": null,
     "garbage_collect": null,
+    "internal_class_of": "Class",
+    "internal_super_of": null,
+    "memsize_of": "Integer",
+    "memsize_of_all": "Integer",
+    "reachable_objects_from": null,
+    "reachable_objects_from_root": "Hash[String, untyped]",
     "trace_object_allocations": null,
+    "trace_object_allocations_clear": null,
+    "trace_object_allocations_debug_start": null,
+    "trace_object_allocations_start": null,
+    "trace_object_allocations_stop": null,
     "undefine_finalizer": "X"
    }
   },
@@ -8551,11 +8776,11 @@
     "q": "BN",
     "random_iv": "String",
     "random_key": "String",
-    "read": "String",
+    "read": null,
     "read_nonblock": null,
     "readchar": "String",
     "readline": "String",
-    "readlines": "Array",
+    "readlines": "Array[String]",
     "readpartial": "String",
     "recipients": "Array[RecipientInfo]",
     "renegotiation_cb": null,
@@ -8575,8 +8800,6 @@
     "security_level=": "Integer",
     "seed": "String",
     "seed=": "String",
-    "self.parse": null,
-    "self?.read": "PKey",
     "serial": null,
     "serial=": null,
     "serial_number": null,
@@ -8778,6 +9001,7 @@
     "rand_range": null,
     "random_add": null,
     "random_bytes": "String",
+    "read": "PKey",
     "read_smime": null,
     "register": "bool",
     "scan": null,
@@ -9194,12 +9418,11 @@
   },
   "PTY": {
    "bases": [],
-   "methods": {
-    "self.getpty": null
-   },
+   "methods": {},
    "params": [],
    "statics": {
     "check": "Process::Status",
+    "getpty": null,
     "open": null,
     "spawn": null
    }
@@ -9413,9 +9636,9 @@
     "getsid": "Integer",
     "gid": "Integer",
     "gid=": "Integer",
-    "groups": "Array",
-    "groups=": "Array",
-    "initgroups": "Array",
+    "groups": "Array[Integer]",
+    "groups=": "Array[Integer]",
+    "initgroups": "Array[Integer]",
     "kill": "Integer",
     "maxgroups": "Integer",
     "maxgroups=": "Integer",
@@ -9431,7 +9654,7 @@
     "uid=": "Integer",
     "wait": "Integer",
     "wait2": null,
-    "waitall": "Array",
+    "waitall": "Array[[ Integer, Process::Status ]]",
     "waitpid": "Integer",
     "waitpid2": null,
     "warmup": "bool"
@@ -9640,6 +9863,7 @@
     "params": "String",
     "params=": null,
     "parse": "Markup::Document",
+    "parse_files_matching": null,
     "path": "String",
     "pretty_name": "String",
     "relative_name": "String",
@@ -9647,7 +9871,6 @@
     "rw": null,
     "rw=": null,
     "scan": "RDoc::TopLevel",
-    "self?.parse_files_matching": null,
     "singleton": "bool",
     "singleton=": null,
     "start_collecting_tokens": null,
@@ -9662,7 +9885,8 @@
    },
    "params": [],
    "statics": {
-    "each": null
+    "each": null,
+    "parse_files_matching": null
    }
   },
   "Ractor": {
@@ -9688,7 +9912,6 @@
     "receive": null,
     "receive_if": null,
     "recv": null,
-    "self.recv": null,
     "send": "Ractor",
     "take": null,
     "to_s": "String"
@@ -9706,6 +9929,7 @@
     "new": "Ractor",
     "receive": null,
     "receive_if": null,
+    "recv": null,
     "select": null,
     "shareable?": "bool",
     "store_if_absent": "A",
@@ -9906,8 +10130,6 @@
     "named_captures": "Hash[String, Array[Integer]]",
     "names": "Array[String]",
     "options": "Integer",
-    "self.compile": null,
-    "self.quote": null,
     "source": "String",
     "timeout": "Float",
     "to_json": "String",
@@ -9917,10 +10139,12 @@
    },
    "params": [],
    "statics": {
+    "compile": null,
     "escape": "String",
     "json_create": null,
     "last_match": null,
     "linear_time?": "bool",
+    "quote": "String",
     "timeout": "Float",
     "timeout=": "T",
     "try_convert": "Regexp",
@@ -10992,7 +11216,6 @@
     "pos": null,
     "pos=": null,
     "scan": "Array[Lexer::Elem]",
-    "self.compile": null,
     "state": null,
     "state=": null,
     "string": null,
@@ -11012,6 +11235,7 @@
    },
    "params": [],
    "statics": {
+    "compile": null,
     "dedent_string": "Integer",
     "lex": "Array[[ [ Integer, Integer ], Symbol, String, Lexer::State ]]",
     "lex_state_name": "String",
@@ -11208,28 +11432,36 @@
   "Shellwords": {
    "bases": [],
    "methods": {
-    "self.escape": null,
-    "self.join": null,
-    "self.shellwords": null,
-    "self.split": null,
-    "self?.shellescape": "String",
-    "self?.shelljoin": "String",
-    "self?.shellsplit": "Array[String]",
-    "shellwords": null
+    "shellescape": "String",
+    "shelljoin": "String",
+    "shellsplit": "Array[String]",
+    "shellwords": "Array[String]"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "escape": "String",
+    "join": "String",
+    "shellescape": "String",
+    "shelljoin": "String",
+    "shellsplit": "Array[String]",
+    "shellwords": "Array[String]",
+    "split": "Array[String]"
+   }
   },
   "Signal": {
    "bases": [],
    "methods": {
     "call": null,
-    "self?.list": "Hash[String, Integer]",
-    "self?.signame": "String",
-    "self?.trap": "trap_command"
+    "list": "Hash[String, Integer]",
+    "signame": "String",
+    "trap": "trap_command"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "list": "Hash[String, Integer]",
+    "signame": "String",
+    "trap": "trap_command"
+   }
   },
   "SignalException": {
    "bases": [
@@ -11512,7 +11744,7 @@
     "next!": null,
     "oct": "Integer",
     "ord": "Integer",
-    "parse_csv": "Array",
+    "parse_csv": "Array[String?]",
     "partition": null,
     "prepend": null,
     "replace": null,
@@ -11621,7 +11853,7 @@
     "readbyte": "Integer",
     "readchar": "String",
     "readline": "String",
-    "readlines": "Array",
+    "readlines": "Array[String]",
     "readpartial": "String",
     "reopen": null,
     "rewind": "Integer",
@@ -11915,15 +12147,15 @@
     "abort_on_exception=": null,
     "add_trace_func": null,
     "alive?": "bool",
-    "backtrace": "Array",
-    "backtrace_locations": "Array",
+    "backtrace": "Array[untyped]",
+    "backtrace_locations": "Array[untyped]",
     "exit": "Thread",
     "fetch": null,
     "group": "ThreadGroup",
     "initialize": null,
     "join": "Thread",
     "key?": "bool",
-    "keys": "Array",
+    "keys": "Array[Symbol]",
     "kill": "Thread",
     "name": "String",
     "name=": null,
@@ -11942,7 +12174,7 @@
     "thread_variable?": "bool",
     "thread_variable_get": null,
     "thread_variable_set": null,
-    "thread_variables": "Array",
+    "thread_variables": "Array[Symbol]",
     "value": null,
     "wakeup": "Thread"
    },
@@ -12129,8 +12361,6 @@
     "round": "Time",
     "saturday?": "bool",
     "sec": "Integer",
-    "self.iso8601": null,
-    "self.rfc822": null,
     "strftime": "String",
     "subsec": null,
     "sunday?": "bool",
@@ -12164,12 +12394,14 @@
     "at": "Time",
     "gm": "Time",
     "httpdate": "Time",
+    "iso8601": "Time",
     "json_create": null,
     "local": "Time",
     "mktime": "Time",
     "now": "Time",
     "parse": "Time",
     "rfc2822": "Time",
+    "rfc822": "Time",
     "strptime": "Time",
     "utc": "Time",
     "xmlschema": "Time",
@@ -12179,10 +12411,12 @@
   "Timeout": {
    "bases": [],
    "methods": {
-    "self?.timeout": "T"
+    "timeout": "T"
    },
    "params": [],
-   "statics": {}
+   "statics": {
+    "timeout": "T"
+   }
   },
   "Timeout::Error": {
    "bases": [
@@ -12515,13 +12749,14 @@
   "Warning": {
    "bases": [],
    "methods": {
-    "self?.warn": null
+    "warn": null
    },
    "params": [],
    "statics": {
     "[]": "bool",
     "[]=": "T",
-    "categories": "Array[Symbol]"
+    "categories": "Array[Symbol]",
+    "warn": null
    }
   },
   "YAML": {
@@ -12596,7 +12831,7 @@
     "readbyte": "Integer",
     "readchar": "String",
     "readline": "String",
-    "readlines": "Array",
+    "readlines": "Array[String]",
     "readpartial": "String",
     "reset": null,
     "rewind": "Integer",

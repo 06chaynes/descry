@@ -5,14 +5,16 @@ Falls back to TF-IDF search if dependencies are not available.
 
 Usage:
     # Check if available
-    if embeddings_available():
+    if EMBEDDINGS_AVAILABLE:
         searcher = SemanticSearcher(graph_path)
         results = searcher.search("authentication logic", limit=10)
 """
 
 import contextlib
 import hashlib
+import hmac
 import importlib.util
+import io
 import json
 import logging
 import os
@@ -23,7 +25,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from descry._files import create_sibling, remove_orphans
+from descry._files import create_sibling, open_regular, remove_orphans
+from descry._parse_cache import signing_key
 from descry.query import _read_file_cached, source_path
 
 try:
@@ -358,12 +361,7 @@ EMBEDDINGS_AVAILABLE = (
 )
 
 
-def embeddings_available() -> bool:
-    """Check if embedding dependencies are available."""
-    return EMBEDDINGS_AVAILABLE
-
-
-def _load_sentence_transformer(model_name: str, revision: str | None = None):
+def _load_sentence_transformer(model_name: str):
     """Construct a SentenceTransformer, pinned where descry has a pin.
 
     Registered models supply their own pinned revision. Anything else - an
@@ -376,18 +374,15 @@ def _load_sentence_transformer(model_name: str, revision: str | None = None):
 
     Args:
         model_name: Registry alias, HuggingFace repo id, or local path.
-        revision: Overrides the registry's pinned revision.
     """
     global SentenceTransformer
     if SentenceTransformer is None:
         from sentence_transformers import SentenceTransformer
     spec = resolve_model_spec(model_name)
     target = spec.repo_id if spec else model_name
-    if revision is None and spec:
-        revision = spec.revision
     kwargs: dict = {"trust_remote_code": False}
-    if revision:
-        kwargs["revision"] = revision
+    if spec and spec.revision:
+        kwargs["revision"] = spec.revision
     if spec and spec.config_kwargs:
         kwargs["config_kwargs"] = dict(spec.config_kwargs)
     try:
@@ -416,6 +411,29 @@ def _load_sentence_transformer(model_name: str, revision: str | None = None):
         ) from e
 
 
+def _verified(npz_path: Path, source_root) -> tuple:
+    """The bytes and sidecar of the cache at ``npz_path``, unread as arrays;
+    ValueError where descry did not sign them with the user's key, which a
+    cache a repository ships cannot carry."""
+    with open_regular(npz_path) as f:
+        data = f.read()
+    with open_regular(npz_path.with_suffix(".json"), "r", encoding="utf-8") as f:
+        sidecar = json.load(f)
+    # A sidecar that is no object carries no signature.
+    sidecar = sidecar if isinstance(sidecar, dict) else {}
+    key = signing_key(source_root)
+    mac = sidecar.pop("mac", "")
+    if not (key and hmac.compare_digest(str(mac), _signature(key, data, sidecar))):
+        raise ValueError(f"{npz_path.name} is not signed by descry")
+    return data, sidecar
+
+
+def _signature(key: bytes, data: bytes, sidecar: dict) -> str:
+    """What a cache's `.npz` bytes and sidecar are signed with."""
+    text = data + json.dumps(sidecar, sort_keys=True).encode()
+    return hmac.new(key, text, "sha256").hexdigest()
+
+
 class SemanticSearcher:
     """Semantic search using sentence embeddings.
 
@@ -426,10 +444,6 @@ class SemanticSearcher:
     # The default model, by repo id. Its dimensionality, licence and prompts
     # live on its MODEL_REGISTRY entry, not here.
     MODEL_NAME = MODEL_REGISTRY[DEFAULT_MODEL_ALIAS].repo_id
-    # Pinned HF revision (git sha) for the default model. The revision is part
-    # of the cache key, so bumping it invalidates existing caches; the model
-    # name alone would not, since the name is unchanged by a revision bump.
-    DEFAULT_MODEL_REVISION = MODEL_REGISTRY[DEFAULT_MODEL_ALIAS].revision
 
     def __init__(
         self,
@@ -505,8 +519,12 @@ class SemanticSearcher:
         if spec and spec.config_kwargs:
             parts.append(f"config_kwargs={sorted(spec.config_kwargs.items())!r}")
         # A local checkpoint can change under a stable path, so fold in the
-        # directory's file sizes and mtimes rather than just its name.
+        # directory's file sizes and mtimes rather than just its name. The
+        # path is read from the project root, not the process cwd, so the
+        # key holds wherever the server was started.
         local = Path(self.model_name)
+        if not local.is_absolute() and self.source_root:
+            local = Path(self.source_root) / local
         if local.is_dir():
             for f in sorted(local.rglob("*")):
                 if f.is_file():
@@ -521,13 +539,7 @@ class SemanticSearcher:
 
     def _resolved_revision(self) -> str | None:
         spec = self.spec
-        if spec is None:
-            return None
-        # Honour a monkeypatched class constant for the default model so the
-        # cache key still moves when the pinned revision is bumped.
-        if spec.alias == DEFAULT_MODEL_ALIAS:
-            return self.DEFAULT_MODEL_REVISION
-        return spec.revision
+        return spec.revision if spec else None
 
     def _resolved_repo_id(self) -> str:
         spec = self.spec
@@ -556,13 +568,16 @@ class SemanticSearcher:
         return next((c for c in candidates if c in self.model.prompts), None)
 
     def _cache_key(self) -> str:
-        """Compute content-addressed cache key.
-
-        Composition: int(mtime) + sha256[:16] of graph bytes + sha256[:8] of the
-        recipe fingerprint (model name, revision, recipe version, truncation).
+        """The cache key of this graph's vectors: int(mtime) + sha256[:16] of
+        the graph's bytes + the recipe fingerprint (model name, revision,
+        recipe version, truncation). The time is in it because the vectors
+        embed source the graph does not hold: an edit can leave the graph's
+        bytes as they were. A rebuild reuses each unchanged text's vector
+        (`_kept_vectors`).
         """
         graph_mtime = int(self.graph_path.stat().st_mtime)
-        graph_hash = hashlib.sha256(self.graph_path.read_bytes()).hexdigest()[:16]
+        with open_regular(self.graph_path) as f:
+            graph_hash = hashlib.sha256(f.read()).hexdigest()[:16]
         return f"{graph_mtime}_{graph_hash}_{self._recipe_fingerprint()}"
 
     def _cache_paths(self) -> tuple[Path, Path]:
@@ -601,26 +616,31 @@ class SemanticSearcher:
         cleanup glob never matches them, and unique, so two concurrent
         writers cannot collide on one.
         """
+        buffer = io.BytesIO()
+        np.savez(
+            buffer, embeddings=self.embeddings, digests=np.array(self.digests, "U32")
+        )
+        data = buffer.getvalue()
+        sidecar = {
+            "node_count": len(self.node_texts),
+            "recipe_version": RECIPE_VERSION,
+            "model": self.model_name,
+            "revision": self._resolved_revision(),
+            "dim": int(self.embeddings.shape[1]),
+            "document_prompt": self._document_prompt,
+        }
+        if key := signing_key(self.source_root):
+            sidecar["mac"] = _signature(key, data, sidecar)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         npz_fd, npz_tmp = create_sibling(npz_path)
         cleanup = [npz_tmp]
         try:
             with os.fdopen(npz_fd, "wb") as f:
-                np.savez(f, embeddings=self.embeddings)
+                f.write(data)
             json_fd, json_tmp = create_sibling(json_path)
             cleanup.append(json_tmp)
             with os.fdopen(json_fd, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "node_count": len(self.node_texts),
-                        "recipe_version": RECIPE_VERSION,
-                        "model": self.model_name,
-                        "revision": self._resolved_revision(),
-                        "dim": int(self.embeddings.shape[1]),
-                        "document_prompt": self._document_prompt,
-                    },
-                    f,
-                )
+                json.dump(sidecar, f)
             os.replace(npz_tmp, npz_path)
             os.replace(json_tmp, json_path)
         finally:
@@ -683,41 +703,25 @@ class SemanticSearcher:
             if (
                 npz_path.is_file()
                 and json_path.is_file()
-                and self._try_load_cache(npz_path, json_path)
+                and self._try_load_cache(npz_path)
             ):
                 return True
         self.model_name = candidates[0]
         return False
 
-    def _try_load_cache(self, npz_path: Path, json_path: Path) -> bool:
+    def _signed(self, npz_path: Path) -> tuple:
+        """The arrays and sidecar of the cache at ``npz_path``; ValueError
+        where descry did not sign it with the user's key."""
+        data, sidecar = _verified(npz_path, self.source_root)
+        return np.load(io.BytesIO(data), allow_pickle=False), sidecar
+
+    def _try_load_cache(self, npz_path: Path) -> bool:
         """Attempt to load embeddings from cache. Returns True on success."""
         try:
-            data = np.load(npz_path, allow_pickle=False)
-            embeddings = data["embeddings"]
-            with open(json_path, encoding="utf-8") as f:
-                sidecar = json.load(f)
-            node_count = sidecar["node_count"]
-            if sidecar.get("recipe_version") != RECIPE_VERSION:
-                logger.warning(
-                    "Embedding cache built by recipe v%s, current is v%s; regenerating",
-                    sidecar.get("recipe_version"),
-                    RECIPE_VERSION,
-                )
-                return False
-            # Consistency check: an interrupted _atomic_save (or two racing
-            # writers) could leave a mismatched pair on disk. Refuse to load
-            # it — the cache will regenerate and overwrite with a consistent
-            # pair. Cheaper than silently serving wrong embeddings.
-            if node_count != embeddings.shape[0]:
-                logger.warning(
-                    "Embedding cache mismatch (%d nodes vs %d embeddings); regenerating",
-                    node_count,
-                    embeddings.shape[0],
-                )
-                return False
-            self.embeddings = embeddings
+            data, sidecar = self._signed(npz_path)
+            self.embeddings = data["embeddings"]
             self._document_prompt = sidecar.get("document_prompt")
-            logger.info(f"Loaded {node_count} embeddings from cache")
+            logger.info(f"Loaded {sidecar['node_count']} embeddings from cache")
             # No pruning here: this runs on the lock-free fast path, where it
             # could delete files another process is writing. Pruning happens
             # under the lock in _load_or_create_embeddings.
@@ -744,20 +748,29 @@ class SemanticSearcher:
         """Encode one composite text per node in a single pass."""
         if not self.nodes:
             # An empty batch encodes to an array with no second axis to norm.
-            self.node_texts = []
+            self.node_texts = self.digests = []
             self.embeddings = np.zeros((0, 0), dtype="float32")
             self._document_prompt = None
             return
 
-        logger.info("Loading embedding model...")
-        self.ensure_model()
-
         self.node_texts = [
             node_text(n, code=code_excerpt(n, self.source_root)) for n in self.nodes
         ]
-        logger.info(f"Generating embeddings for {len(self.node_texts)} nodes...")
+        self.digests = [
+            hashlib.sha256(t.encode()).hexdigest()[:32] for t in self.node_texts
+        ]
 
-        prompt_name = self._prompt_name("document")
+        kept_prompt, vectors = self._kept_vectors()
+        if self.spec and all(d in vectors for d in self.digests):
+            # A registered model's prompt is pinned with it in the cache key:
+            # a cache holding every text needs no model.
+            prompt_name = kept_prompt
+        else:
+            logger.info("Loading embedding model...")
+            self.ensure_model()
+            prompt_name = self._prompt_name("document")
+            if prompt_name != kept_prompt:
+                vectors = {}
         # Recorded in the sidecar: the cache key cannot hold the prompt an
         # unregistered model resolves to, which is only known once it loads.
         self._document_prompt = prompt_name
@@ -767,12 +780,33 @@ class SemanticSearcher:
         if prompt_name:
             kwargs["prompt_name"] = prompt_name
 
-        embeddings = self.model.encode(self.node_texts, **kwargs)
-        embeddings = np.asarray(embeddings, dtype="float32")
-
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        self.embeddings = embeddings / np.where(norms == 0, 1, norms)
+        fresh = {
+            d: t for d, t in zip(self.digests, self.node_texts) if d not in vectors
+        }
+        reused = sum(d in vectors for d in self.digests)
+        logger.info(
+            f"Generating embeddings for {len(self.digests) - reused} nodes, "
+            f"reusing {reused}..."
+        )
+        if fresh:
+            encoded = self.model.encode(list(fresh.values()), **kwargs)
+            encoded = np.asarray(encoded, dtype="float32")
+            norms = np.linalg.norm(encoded, axis=1, keepdims=True)
+            vectors.update(zip(fresh, encoded / np.where(norms == 0, 1, norms)))
+        self.embeddings = np.stack([vectors[d] for d in self.digests])
         logger.info("Embeddings generated successfully")
+
+    def _kept_vectors(self) -> tuple:
+        """(document prompt, {text digest: vector}) of the newest cache of
+        this model and recipe that descry signed; (None, {}) where there is
+        none."""
+        try:
+            kept = self.cache_dir.glob(f"embeddings_*_{self._recipe_fingerprint()}.npz")
+            held, sidecar = self._signed(max(kept, key=os.path.getmtime))
+            vectors = dict(zip(held["digests"].tolist(), held["embeddings"]))
+            return sidecar.get("document_prompt"), vectors
+        except Exception:  # noqa: BLE001 — a cache that cannot be read is none; numpy/zipfile signal it with open-ended types
+            return None, {}
 
     def search(
         self, query: str, limit: int = 10, min_score: float = 0.3, keep=None
@@ -890,8 +924,8 @@ def get_embeddings_status(
 
     Recomputes the cache key the searcher would use, so a cache left over from
     an older graph or a different model is reported as stale rather than as
-    Ready. Reads only the JSON sidecar - never np.load of a user-controlled
-    .npz.
+    Ready, and one descry did not sign as not cached. Never `np.load`s a
+    cache: its signature is checked over its bytes and sidecar.
 
     Pass the `model_name`, `cache_dir` and `source_root` the searcher is
     constructed with, or the key will not match.
@@ -928,14 +962,15 @@ def get_embeddings_status(
             return status
 
         if expected_npz.is_file() and expected_json.is_file():
+            # A cache counts as the searcher would take it: signed by descry.
+            try:
+                _, sidecar = _verified(expected_npz, source_root)
+            except (OSError, ValueError, RecursionError):
+                continue
             status["cached"] = True
             status["model"] = probe._resolved_repo_id()
             status["cache_path"] = str(expected_npz)
-            try:
-                with open(expected_json, encoding="utf-8") as f:
-                    status["node_count"] = json.load(f).get("node_count", 0)
-            except (OSError, json.JSONDecodeError, KeyError):
-                pass
+            status["node_count"] = sidecar["node_count"]
             return status
 
     # Something is cached, but not for this graph/model/recipe combination.

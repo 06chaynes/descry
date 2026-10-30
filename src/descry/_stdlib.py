@@ -19,6 +19,14 @@
                {"params": the parameter types of the callable passed there,
                 "returns": the type parameter that stands for its result,
                            None where none does}}}
+    by_argument  qualified type name -> {method name -> {argument position ->
+               {the argument's type, or `{integer}` for an integer literal
+                without a suffix -> the type the method returns given it}}},
+               for a method whose return type depends on an argument's
+    lang       Rust: the name of a language item -> the qualified name of the
+               type it is, `Range` for what `a..b` makes
+    same       Rust: a qualified type name that is another path to a type, or
+               an alias of one without arguments -> the name of that type
     extensions qualified type name -> {name of a method it has only from
                extension methods -> the namespaces that declare them}
     functional qualified name of a type a lambda converts to, a C# delegate
@@ -26,12 +34,43 @@
                the lambda declares
     modules    the names of the modules the runtime's declarations give, as an import
                writes them
+    ref_structs the C# types that are `ref struct`s, which no type
+               argument can be unless its parameter allows one
+    qualifiers the `typing` names written around a type to say how a variable
+               is used (`Final[T]` is `T`)
+    evaluators the Ruby methods that run their block in the object they are
+               called on (`[self: self]`)
+    attributes the Python data descriptors, which make the method they
+               decorate an attribute (`builtins.property`)
+    context_managers  the Python decorators that make a generator function
+               return a context manager (`contextlib.contextmanager`)
+    pointers   the C++ class templates whose `->` reaches their first type
+               argument, as the compiler instantiates them (`unique_ptr`)
+    writers    the functions of a JavaScript global that put members on the
+               object passed first and hand it back (`Object.assign`)
+    awaited    Python type -> the position of its type parameter that awaiting
+               an instance gives (`Coroutine` 2), read from its `__await__`
+    makers     Ruby `Type.method` -> what calling it makes: a type, its base
+               the argument (`base`), a module (`module`), or one with a
+               member for each symbol passed (`fields`: "accessor" or
+               "reader")
+    implicit   C# type -> the types a user-defined implicit conversion the
+               library declares converts to it
+    platforms  Go: {"os": the GOOS values, "arch": the GOARCH values} its
+               build constraints know
+    implicit_usings  .NET SDK name -> the `<Using>` items `<ImplicitUsings>`
+               brings into its projects, ``[Include or Remove, namespace,
+               [[property, == or !=, value]]]`` in the order MSBuild reads
+               them, as the SDK that bundles the runtime declares them
 
 `node.json` holds `source` and `modules` alone: Node's built-in modules as
 `@types/node` declares them.
 
-`variants`, `callbacks`, `extensions`, `functional` and `modules` are there
-only for a language that has them.
+`variants`, `callbacks`, `by_argument`, `lang`, `same`, `extensions`, `functional`, `modules`,
+`ref_structs`, `qualifiers`, `evaluators`, `attributes`,
+`context_managers`, `awaited`, `pointers`, `writers`, `makers`, `implicit`,
+`implicit_usings` and `platforms` are there only for a language that has
+them.
 C++ (`cpp.json`, read with `c.json`) keys a class by its name and the number
 of its template parameters, `std::vector`2`, a specialization being its
 template's, and gives each type `aliases`, its member typedefs by name; its
@@ -56,10 +95,10 @@ def load(lang: str) -> dict:
 
 
 @cache
-def modules(lang: str) -> frozenset:
-    """The modules `lang`'s data names as the runtime's declarations give
-    them."""
-    return frozenset(load(lang).get("modules", ()))
+def section(lang: str, key: str) -> frozenset:
+    """The names `lang`'s data lists under ``key`` (see the module
+    docstring)."""
+    return frozenset(load(lang).get(key, ()))
 
 
 @cache

@@ -1,0 +1,17 @@
+{
+  "callers": {
+    "FILE:Io.cs::Reader::Parse": {"resolved": ["FILE:Io.cs::Io::Load"], "candidate": []},
+    "FILE:Models.cs::Order::Parse": {"resolved": [], "candidate": []},
+    "FILE:Models.cs::User::Rename": {"resolved": ["FILE:Program.cs::Program::Main"], "candidate": []},
+    "FILE:Models.cs::Base::Save": {"resolved": ["FILE:Models.cs::User::Rename"], "candidate": []},
+    "FILE:Models.cs::Base::Validate": {"resolved": ["FILE:Models.cs::Base::Save"], "candidate": []}
+  },
+  "callees": {
+    "FILE:Program.cs::Program::Main": {"resolved": ["FILE:Models.cs::User", "FILE:Models.cs::User::Rename", "FILE:Io.cs::Io::Load", "FILE:Io.cs::Reader"]}
+  },
+  "flatten": {"FILE:Models.cs::User": ["Rename", "Save", "Validate"]},
+  "path": [
+    ["FILE:Program.cs::Program::Main", "FILE:Io.cs::Reader::Parse", ["FILE:Io.cs::Io::Load", "FILE:Io.cs::Reader::Parse"]]
+  ],
+  "refused": ["Parse", "Validate"]
+}

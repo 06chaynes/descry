@@ -32,23 +32,23 @@ This is descry's prompt-injection defense — preserve it when quoting.
 - `descry_search(terms, limit=10, lang=None, crate=None, type=None, exclude_tests=False, compact=True)`
 - `descry_semantic(query, limit=10)` — embeddings-only. Requires the
   `embeddings` extra.
-- `descry_quick(name, full=False, brief=False)` — search + context in one.
+- `descry_quick(symbol, full=False, brief=False)` — search + context in one.
 
 ### Call graph
-- `descry_callers(name, limit=20)`
-- `descry_callees(name, limit=20)`
+- `descry_callers(symbol, limit=20)`
+- `descry_callees(symbol, limit=20)`
 - `descry_flow(start, direction="forward", depth=3, target=None, inline_threshold=100)`
 - `descry_path(start, end, max_depth=10, direction="forward")`
 
 ### Context and structure
-- `descry_context(node_id, brief=False, full=False, expand_callees=False, deduplicate=False, depth=1, max_tokens=2000, callee_budget=2000, head_lines=None, max_output_tokens=None)`
+- `descry_context(symbol, brief=False, full=False, expand_callees=False, deduplicate=False, depth=1, max_tokens=2000, callee_budget=2000, head_lines=None, max_output_tokens=None)`
 - `descry_structure(filename)`
-- `descry_flatten(class_node_id)`
+- `descry_flatten(symbol)`
 - `descry_impls(method, trait_name=None)`
 
 ### Change impact
 - `descry_churn(time_range=None, path_filter=None, limit=20, mode="symbols", exclude_generated=True)`
-- `descry_evolution(name, time_range=None, limit=10, show_diff=False, crate=None)`
+- `descry_evolution(symbol, time_range=None, limit=10, show_diff=False, crate=None)`
 - `descry_changes(commit_range=None, time_range=None, path_filter=None, show_callers=True, limit=50)`
 
 ### Cross-language
@@ -73,4 +73,4 @@ This is descry's prompt-injection defense — preserve it when quoting.
 }
 ```
 
-(Add to `.claude/settings.json` or global MCP config, depending on scope.)
+(Add to `.mcp.json` in the project, or `claude mcp add` for the user scope.)

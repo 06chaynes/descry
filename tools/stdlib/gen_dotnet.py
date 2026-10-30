@@ -17,6 +17,7 @@ call through an instance of a type that has it as a base resolves to.
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -25,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from common import new_type, record
+from common import main, new_type, record
 
 DUMP = r"""
 $dir = $args[0]
@@ -91,6 +92,7 @@ foreach ($path in Get-ChildItem $dir -Filter "*.dll") {
         $out += @{
             name = $t.FullName
             params = @($t.GetGenericArguments() | ForEach-Object { $_.Name })
+            byref = $t.IsByRefLike
             base = if ($null -ne $t.BaseType) { ($t.BaseType.FullName ?? $t.BaseType.ToString()) } else { $null }
             interfaces = @($t.GetInterfaces() | ForEach-Object { $_.FullName ?? $_.ToString() })
             methods = $methods
@@ -149,6 +151,85 @@ def _runtime_pack(origin):
                 if library.startswith("runtimepack.Microsoft.NETCore.App."):
                     return [Path(name).name for name in held.get("runtime", ())]
     return []
+
+
+def sdk_folder(origin, version):
+    """The `Sdks` folder of the .NET SDK that bundles the runtime of
+    ``version``, beside ``origin`` or any `dotnet` on the path; None for
+    none."""
+    roots = [Path(origin).resolve().parents[2] / "sdk"] + [
+        (Path(folder) / name).resolve().parent / "sdk"
+        for folder in os.environ.get("PATH", "").split(os.pathsep)
+        for name in ("dotnet", "dotnet.exe")
+        if (Path(folder) / name).is_file()
+    ]
+    bundles = re.compile(r"<BundledNETCoreAppPackageVersion>([^<]+)<")
+    return next(
+        (
+            folder / "Sdks"
+            for root in roots
+            for folder in sorted(root.glob("*"))
+            if (
+                props := folder / "Microsoft.NETCoreSdk.BundledVersions.props"
+            ).is_file()
+            and (found := bundles.search(props.read_text(encoding="utf-8")))
+            and found[1] == version
+        ),
+        None,
+    )
+
+
+def implicit_usings(origin, version):
+    """``{SDK name: [[Include or Remove, namespace, conditions]]}``: the
+    `<Using>` items of the SDK that bundles the runtime of ``version``,
+    beside ``origin`` or the `dotnet` on the path, that its own files
+    declare under `<ImplicitUsings>`, in the order MSBuild reads them; each
+    holds where its ``conditions``, ``[property, == or !=, value]``, hold
+    of the project. Microsoft.NET.Sdk's, with those of the SDKs it imports,
+    are every project's; a `Static` or `Alias` item names no namespace."""
+    sdk = sdk_folder(origin, version)
+    if sdk is None:
+        raise SystemExit(f"no .NET SDK bundling the {version} runtime is installed")
+    clause = re.compile(r"'\$\((\w+)\)'\s*(==|!=)\s*'([^']*)'")
+    found = {}
+    for path in sorted(sdk.rglob("*")):
+        if path.suffix not in (".props", ".targets") or not path.is_file():
+            continue
+        text = re.sub(
+            r"<!--.*?-->", "", path.read_text("utf-8", "replace"), flags=re.DOTALL
+        )
+        for group in re.finditer(
+            r"<ItemGroup\s+Condition=\"([^\"]*ImplicitUsings[^\"]*)\"\s*>(.*?)</ItemGroup>",
+            text,
+            re.DOTALL,
+        ):
+            for item in re.finditer(
+                r"<Using\s+(Include|Remove)=\"([^\"]+)\"([^>]*)/>", group[2]
+            ):
+                if "Static=" in item[3] or "Alias=" in item[3]:
+                    continue
+                conditions = [
+                    list(held)
+                    for held in clause.findall(f"{group[1]} {item[3]}")
+                    if held[0] != "ImplicitUsings"
+                ]
+                name = path.relative_to(sdk).parts[0]
+                found.setdefault(name, []).append([item[1], item[2], conditions])
+    # An SDK that Microsoft.NET.Sdk imports itself (WindowsDesktop) has its
+    # items read in every project, after the base's own.
+    base = "Microsoft.NET.Sdk"
+    imported = {
+        name
+        for path in (sdk / base).rglob("*")
+        if path.suffix in (".props", ".targets") and path.is_file()
+        for name in re.findall(
+            r"<Import\s+Project=\"\$\(MSBuildThisFileDirectory\)\.\./\.\./([\w.]+)/",
+            path.read_text("utf-8", "replace"),
+        )
+    }
+    for name in sorted(imported - {base}):
+        found.setdefault(base, []).extend(found.pop(name, ()))
+    return found
 
 
 def build(origin):
@@ -210,7 +291,6 @@ def build(origin):
         held = written(base, params)
         if parts(base)[0] in types or held.split("<")[0] in types:
             kind["bases"].append(held)
-        # else: a base outside the data is left out
 
     # An extension method of `this T` is a method of T; the parameters it
     # declares in `this` take the names T declares for them, and a
@@ -222,8 +302,6 @@ def build(origin):
         ``mapping`` renamed, and each of ``names`` left itself."""
         if not text:
             return text
-        if not mapping:
-            return written(text, names)
         for old, new in mapping.items():
             text = re.sub(rf"\b{re.escape(old)}\b", new, text)
         return written(text, names)
@@ -244,6 +322,7 @@ def build(origin):
             "returns": ret if ret in names else None,
         }
 
+    implicit = {}  # type -> the types an operator converts to it implicitly
     for t in raw:
         name = keyed(t["name"])
         if name not in types:
@@ -289,6 +368,9 @@ def build(origin):
                 m["name"],
                 ret,
             )
+            if m["name"] == "op_Implicit" and ret and args and args[0]:
+                # A user-defined implicit conversion, to its return type
+                implicit.setdefault(ret, set()).add(written(args[0], names))
             if not m["is_static"]:
                 own.setdefault(name, set()).add(m["name"])
             for position, arg in enumerate(args):
@@ -333,16 +415,20 @@ def build(origin):
         }
         for target, names in extended.items()
     }
-    return (
-        f"the .NET {version} shared runtime, by reflection",
-        types,
-        {},
-        scope,
-        None,
-        callbacks,
-        {target: names for target, names in extensions.items() if names},
-        {name: len(held["takes"]) for name, held in delegates.items()},
-    )
+    return {
+        "source": f"the .NET {version} shared runtime, by reflection",
+        "types": types,
+        "functions": {},
+        "scope": scope,
+        "callbacks": callbacks,
+        "extensions": {target: names for target, names in extensions.items() if names},
+        "functional": {name: len(held["takes"]) for name, held in delegates.items()},
+        "ref_structs": sorted(
+            keyed(t["name"]) for t in raw if t["byref"] and _OWNED.match(t["name"])
+        ),
+        "implicit": {target: sorted(sources) for target, sources in implicit.items()},
+        "implicit_usings": implicit_usings(origin, version.split("-")[0]) or None,
+    }
 
 
 def _runtime_version(origin):
@@ -353,25 +439,20 @@ def _runtime_version(origin):
         )
         if found:
             return found[1]
-    try:
-        out = subprocess.run(
-            [
-                "pwsh",
-                "-NoProfile",
-                "-Command",
-                "[System.Diagnostics.FileVersionInfo]::GetVersionInfo("
-                + f"'{origin}/System.Private.CoreLib.dll').ProductVersion",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        return out.split("+")[0] or "unknown"
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
+    out = subprocess.run(
+        [
+            "pwsh",
+            "-NoProfile",
+            "-Command",
+            "[System.Diagnostics.FileVersionInfo]::GetVersionInfo("
+            + f"'{origin}/System.Private.CoreLib.dll').ProductVersion",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    return out.split("+")[0] or "unknown"
 
 
 if __name__ == "__main__":
-    from common import main
-
     main(build)

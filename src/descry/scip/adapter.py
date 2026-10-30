@@ -14,10 +14,11 @@ adapter module plus an import in `adapters/__init__.py`.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from descry._env import env_flag
 
@@ -33,9 +34,6 @@ class DiscoveredProject:
 
     root: Path
     """Directory to run the indexer in (subprocess cwd)."""
-
-    language: str
-    """Owning adapter's `name` (e.g. ``"rust"``, ``"typescript"``)."""
 
 
 @dataclass(frozen=True)
@@ -55,7 +53,7 @@ class CommandSpec:
     """"direct": indexer writes to the requested out_path.
     "rename": indexer writes to its default location (``index.scip`` in cwd)
     and the shared runner moves the file into place after success. Used for
-    indexers that don't expose an --output flag (scip-go contingency)."""
+    indexers that don't expose an --output flag."""
 
 
 @dataclass(frozen=True)
@@ -69,7 +67,6 @@ class AdapterConfig:
     """Validated positional/flag extras appended to argv."""
 
 
-@runtime_checkable
 class LanguageAdapter(Protocol):
     """Contract each SCIP language integration implements."""
 
@@ -130,6 +127,53 @@ def project_dir(root: Path, name: str, *markers: str) -> Path:
     return root
 
 
+def subdir_projects(
+    root: Path,
+    excluded_dirs: set[str],
+    patterns: tuple[str, ...],
+    has_sources,
+    taken: frozenset[str] = frozenset(),
+) -> list[DiscoveredProject]:
+    """The projects in the directories below ``root`` that hold a file the
+    glob ``patterns`` match and sources, as ``has_sources`` tells, sorted by
+    name. A directory on a hidden or excluded path, or with the name of one
+    found before or in ``taken``, is none."""
+    seen = set(taken)
+    projects: list[DiscoveredProject] = []
+    for pattern in patterns:
+        for found in root.glob(pattern):
+            pkg_dir = found.parent
+            parts = pkg_dir.relative_to(root).parts
+            if any(p.startswith(".") or p in excluded_dirs for p in parts):
+                continue
+            if pkg_dir.name in seen or not has_sources(pkg_dir):
+                continue
+            seen.add(pkg_dir.name)
+            projects.append(DiscoveredProject(name=pkg_dir.name, root=pkg_dir))
+    projects.sort(key=lambda p: p.name)
+    return projects
+
+
+# A descriptor's name and its suffix
+_DESCRIPTOR = re.compile(r"([a-zA-Z_$][a-zA-Z0-9_$]*)(\([^)]*\)|[#./\[\]])?")
+
+
+def descriptor_names(
+    raw: str, skipped: frozenset[str] = frozenset(), suffixes: tuple[str, ...] = ("/",)
+) -> list[str]:
+    """The names of the descriptors in ``raw``, but those with one of the
+    ``suffixes`` (``/``, a namespace, is in the file path) and those in
+    ``skipped``.
+
+    Example: ``"state/AppState#new()."`` -> ``["AppState", "new"]``.
+    """
+    return [
+        name
+        for name, suffix in _DESCRIPTOR.findall(raw)
+        if suffix not in suffixes and name not in skipped
+    ]
+
+
 def scip_disabled_by_env() -> bool:
     return env_flag("DESCRY_NO_SCIP")
 
@@ -137,11 +181,6 @@ def scip_disabled_by_env() -> bool:
 def register(adapter: LanguageAdapter) -> None:
     """Register an adapter in the global registry. Idempotent on `name`."""
     ADAPTERS[adapter.name] = adapter
-
-
-def reset_registry_state() -> None:
-    """Clear cached binary probe results (for tests)."""
-    _binary_cache.clear()
 
 
 def _probe_binary(adapter: LanguageAdapter) -> dict:
@@ -174,7 +213,7 @@ def _probe_binary(adapter: LanguageAdapter) -> dict:
                 logger.debug(f"SCIP: {path} found but failed to run")
         except subprocess.TimeoutExpired:
             logger.debug(f"SCIP: {path} version check timed out")
-        except (OSError, FileNotFoundError) as e:
+        except OSError as e:
             logger.debug(f"SCIP: {path} check failed: {e.strerror or e}")
     else:
         logger.debug(f"SCIP: none of {names} found")
@@ -185,26 +224,13 @@ def _probe_binary(adapter: LanguageAdapter) -> dict:
 
 def indexer_status(lang_name: str) -> dict:
     """Return the cached binary-probe status dict for `lang_name`."""
-    adapter = ADAPTERS.get(lang_name)
-    if adapter is None:
-        return {"available": False, "path": None, "version": None}
-    return _probe_binary(adapter)
+    return _probe_binary(ADAPTERS[lang_name])
 
 
 def resolved_binary(adapter: LanguageAdapter) -> str:
     """The path the probe found for `adapter.binary` or one of its
     `binary_alternatives`, else `adapter.binary`."""
     return _probe_binary(adapter).get("path") or adapter.binary
-
-
-def indexer_available(lang_name: str) -> bool:
-    """True if the adapter for `lang_name` is registered and its binary is on PATH."""
-    if scip_disabled_by_env():
-        return False
-    adapter = ADAPTERS.get(lang_name)
-    if adapter is None:
-        return False
-    return bool(_probe_binary(adapter).get("available"))
 
 
 def available_adapters() -> list[LanguageAdapter]:
@@ -218,17 +244,5 @@ def adapter_for_scheme(scheme: str) -> LanguageAdapter | None:
     """Return the adapter whose SCIP scheme token matches `scheme`."""
     for adapter in ADAPTERS.values():
         if adapter.scheme == scheme:
-            return adapter
-    return None
-
-
-def adapter_for_extension(ext: str) -> LanguageAdapter | None:
-    """Return the adapter that owns source file extension `ext`.
-
-    Used by `ScipIndex.resolve` to pick the right stats bucket based on the
-    source file being resolved.
-    """
-    for adapter in ADAPTERS.values():
-        if ext in adapter.extensions:
             return adapter
     return None

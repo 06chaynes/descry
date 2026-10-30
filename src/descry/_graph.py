@@ -9,6 +9,8 @@ results.
 import json
 from pathlib import Path
 
+from descry._files import open_regular
+
 CURRENT_SCHEMA = 2
 
 # The edges by which one symbol calls or constructs another: its callers
@@ -98,17 +100,27 @@ def load_graph_with_schema(path: Path | str) -> dict:
         FileNotFoundError: if path does not exist.
         json.JSONDecodeError: if path is not valid JSON.
     """
-    path = Path(path)
-    if path.exists() and not path.is_file():
-        raise _malformed("not a regular file")
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        f = open_regular(Path(path), "r", encoding="utf-8")
+    except FileNotFoundError:
+        raise
+    except OSError:
+        raise _malformed("not a regular file") from None
+    with f:
+        try:
+            data = json.load(f)
+        except RecursionError:
+            # Nesting deeper than the decoder's stack is an unusable
+            # graph, not a crash.
+            raise _malformed("nesting overflows the decoder") from None
     if not isinstance(data, dict):
         raise _malformed("top level is not an object")
     ver = data.get("schema_version")
     if ver != CURRENT_SCHEMA:
+        # The version a graph file carries is the file's text, and a
+        # repository can ship the file: it is not repeated.
         raise GraphSchemaError(
-            f"Graph schema version {ver!r} (expected {CURRENT_SCHEMA}); "
+            f"Graph schema version is not {CURRENT_SCHEMA}; "
             f"run 'descry index' to rebuild."
         )
     _check_shape(data)

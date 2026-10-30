@@ -13,23 +13,25 @@ import math
 import re
 from bisect import bisect_left, bisect_right
 
-from descry.generate import (
-    _STATEMENT_START_RE,
+from descry._parsing import (
+    _SPACES,
     BaseParser,
+    _blank,
     _bracketed_parts,
     _ends_with,
     _innermost,
     _is_call_chain,
     _js_brackets,
     _nested,
-    _place,
     _run_start,
     _tails,
-    _use_leaves,
     blank_strings,
     is_generated_source,
     source_lines,
+    token_count,
 )
+from descry.rust_parser import _STATEMENT_START_RE, _use_leaves
+from descry.ts_parser import _place
 
 # namespace App\\Foo;  (one-line) or  namespace App\\Foo { ... }  (block),
 # and  namespace { ... }  for the global one
@@ -88,6 +90,8 @@ _RE_CALL = re.compile(
     r"\s*\("
 )
 _RE_ACCESS = re.compile(r"\?->|->|::")
+# A variable, its name in group 1
+_RE_VARIABLE = re.compile(r"\$(\w+)")
 # `new Type` without arguments
 _RE_NEW = re.compile(
     r"(?<![\w$])new\s+((?!class\b)\\?[A-Za-z_][\w\\]*)(?![\w\\]|\s*[(:])"
@@ -322,7 +326,7 @@ def _branches(codes: list[str]) -> list:
     def body(offset):
         """``(start, end)`` offsets of the block or the statement at
         ``offset``, and the offset past it."""
-        offset = re.compile(r"\s*").match(text, offset).end()
+        offset = _SPACES.match(text, offset).end()
         if text[offset : offset + 1] == "{":
             close = closer.get(offset, len(text))
             return (offset + 1, close), close + 1
@@ -331,20 +335,42 @@ def _branches(codes: list[str]) -> list:
             end = closer.get(end, end) + 1
         return (offset, end), end + 1
 
+    def else_ways(after):
+        """``(ways, after)`` of the `else` and `elseif` clauses from offset
+        ``after``, the end of an `if`'s body: the way each runs, plus an
+        empty one where no `else` closes them, and the offset past them."""
+        ways = []
+        while other := _RE_ELSE.match(text, after):
+            start = other.end()
+            if other[0].endswith("("):
+                start = closer.get(start - 1, start) + 1
+            way, after = body(start)
+            ways.append([way])
+            if not other[0].endswith("("):
+                return ways, after
+        return [*ways, []], after
+
+    def switch_ways(labels, end):
+        """The ways of a `switch` whose section labels are ``labels`` and
+        whose body ends at ``end``: the span each section runs, plus an
+        empty one where no `default` is among them."""
+        ways = [
+            [(label_end(m.end(), end), n.start() if n else end)]
+            for m, n in zip(labels, [*labels[1:], None])
+        ]
+        if not any(m[0] == "default" for m in labels):
+            ways.append([])
+        return ways
+
     def alt_ways(word, colon, marks, end):
         """``(ways, after)`` of an alternative-syntax statement whose body
         runs from ``colon``, the `:` of its head, to ``end``, the offset of
         its `end…`: the span each of its ways runs — ``marks`` are its
         `elseif`/`else`/`case`/`default` boundaries — and the
         offset past the `end…`."""
+        after = end + len(_ALT_END[word])
         if word == "switch":
-            ways = [
-                [(label_end(m.end(), end), n.start() if n else end)]
-                for m, n in zip(marks, [*marks[1:], None])
-            ]
-            if not any(m[0].startswith("default") for m in marks):
-                ways.append([])
-            return ways, end + len(_ALT_END[word])
+            return switch_ways(marks, end), after
         if word == "if":
             ways, start = [], colon + 1
             for m in marks:
@@ -358,10 +384,8 @@ def _branches(codes: list[str]) -> list:
             ways.append([(start, end)])
             if not marks or not re.match(r"else\s*:", marks[-1][0]):
                 ways.append([])
-            return [w for w in ways if not w or w[0][0] < w[0][1]], end + len(
-                _ALT_END[word]
-            )
-        return [[], [(colon + 1, end)]], end + len(_ALT_END[word])
+            return [w for w in ways if not w or w[0][0] < w[0][1]], after
+        return [[], [(colon + 1, end)]], after
 
     def emit(word, ways, after):
         """File the branch of ``word`` whose ways are ``ways``, ending at
@@ -404,13 +428,7 @@ def _branches(codes: list[str]) -> list:
             else:
                 _, after = body(close + 1)
                 if token.startswith("if"):
-                    while other := _RE_ELSE.match(text, after):
-                        start = other.end()
-                        if other[0].endswith("("):
-                            start = closer.get(start - 1, start) + 1
-                        _, after = body(start)
-                        if not other[0].endswith("("):
-                            break
+                    after = else_ways(after)[1]
                 stack.append(["nonalt", after])
             pos = close + 1
         elif token.startswith("end"):
@@ -445,16 +463,8 @@ def _branches(codes: list[str]) -> list:
             way, after = body(close + 1)
             ways = [[way]]
             if word == "if":
-                while other := _RE_ELSE.match(text, after):
-                    start = other.end()
-                    if other[0].endswith("("):
-                        start = closer.get(start - 1, start) + 1
-                    way, after = body(start)
-                    ways.append([way])
-                    if not other[0].endswith("("):
-                        break
-                else:
-                    ways.append([])
+                more, after = else_ways(after)
+                ways += more
             elif word == "switch":
                 block = _innermost(spans, way[0])
                 labels = [
@@ -462,12 +472,7 @@ def _branches(codes: list[str]) -> list:
                     for m in _RE_LABEL.finditer(text, *way)
                     if _innermost(spans, m.start()) == block
                 ]
-                ways = [
-                    [(label_end(m.end(), way[1]), n.start() if n else way[1])]
-                    for m, n in zip(labels, [*labels[1:], None])
-                ]
-                if not any(m[0] == "default" for m in labels):
-                    ways.append([])
+                ways = switch_ways(labels, way[1])
             else:
                 ways = [[], [way]]
         emit(word, ways, after)
@@ -505,7 +510,7 @@ def _code_lines(lines: list[str]) -> list[str]:
             heredoc = opener[2]
             held = "<<<" if opener[1] != "'" else None
             code = code[:opened]
-        codes.append(_RE_ATTRIBUTE.sub(lambda found: " " * len(found.group()), code))
+        codes.append(_RE_ATTRIBUTE.sub(_blank, code))
     return codes
 
 
@@ -887,6 +892,7 @@ class PhpParser(BaseParser):
         # (ID, name, line, return type) of each method a class declares by
         # a `@method` tag of its doc comment
         tags: list[tuple[str, str, int, str | None]] = []
+        anonymous: dict[int, str] = {}  # line -> name of the anonymous class on it
 
         i = 0
         n = len(lines)
@@ -961,7 +967,7 @@ class PhpParser(BaseParser):
                     namespace=self._namespace.replace("::", "\\"),
                     lineno=lineno,
                     end_lineno=end_lineno,
-                    token_count=(end_lineno - lineno + 1) * 10,
+                    token_count=token_count(lineno, end_lineno),
                     docstring=docstring,
                 )
                 self.builder.add_edge(parent_id, type_id, "DEFINES")
@@ -1002,12 +1008,13 @@ class PhpParser(BaseParser):
                 header = [code[m_anonymous.end() :], *codes[i + 1 : brace_line_idx + 1]]
                 bases[anonymous_id] = self._bases(" ".join(header).partition("{")[0])
                 types[anonymous_id] = None
+                anonymous[lineno] = anonymous_id.rpartition("::")[2]
                 bound = re.search(r"\$(\w+)\s*=\s*$", code[: m_anonymous.start()])
                 if bound:
                     self.declared.setdefault(bound[1], []).append(
                         (
                             lineno,
-                            f"={anonymous_id.rpartition('::')[2]}()",
+                            f"={anonymous[lineno]}()",
                             self._binds_file(bound[1]),
                             bound.start(1),
                         )
@@ -1047,7 +1054,7 @@ class PhpParser(BaseParser):
                     name=name,
                     lineno=lineno,
                     end_lineno=end_lineno,
-                    token_count=(end_lineno - lineno + 1) * 10,
+                    token_count=token_count(lineno, end_lineno),
                     docstring=docstring,
                     return_type=returns or "",
                     **({} if in_type else space),
@@ -1113,7 +1120,7 @@ class PhpParser(BaseParser):
                 )
             for rebinding in _REBINDINGS:
                 for found in rebinding.finditer(code):
-                    names = re.compile(r"\$(\w+)").finditer(code, *found.span("names"))
+                    names = _RE_VARIABLE.finditer(code, *found.span("names"))
                     for name in names:
                         self._unbind(name[1], lineno, name.start(1))
             narrowed: dict[str, set[str]] = {}
@@ -1199,7 +1206,9 @@ class PhpParser(BaseParser):
                     elif re.search(r"\bnew$", before):
                         if name == "class":
                             # The anonymous class the line declares.
-                            callee = f"class@{lineno}"
+                            if lineno not in anonymous:
+                                continue
+                            callee = anonymous[lineno]
                             origin = f"={callee}"
                         else:
                             origin = self._created(name, owner)
@@ -1235,9 +1244,7 @@ class PhpParser(BaseParser):
                     over = found and self._expression_origin(
                         code, *found.span("over"), lineno, since, owner
                     )
-                    names = found and re.compile(r"\$(\w+)").finditer(
-                        code, *found.span("names")
-                    )
+                    names = found and _RE_VARIABLE.finditer(code, *found.span("names"))
                     for name in names if over else ():
                         if self._declared(name[1], lineno, lineno) == "?":
                             self._rebind(name[1], lineno, name.start(1), f"{over}.*")

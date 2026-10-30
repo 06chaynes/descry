@@ -1,5 +1,6 @@
 """Tests for descry.cli — command-line interface."""
 
+import argparse
 import json
 import os
 import signal
@@ -10,6 +11,7 @@ from typing import ClassVar
 import pytest
 
 from descry import cli
+from descry._answers import fail
 from descry.handlers import DescryService, ServiceError
 
 
@@ -63,6 +65,24 @@ class TestCliNoCommand:
         assert result.returncode == 1
 
 
+class TestCliArguments:
+    @pytest.mark.parametrize(
+        "args", [["callers", "x", "--limit", "ten"], ["search", "x", "--frob", "1"]]
+    )
+    def test_an_argument_it_cannot_read_answers_invalid_with_json(self, args):
+        """With `--json` an argument the parser cannot read is answered as
+        every failure is; without it, the usage text says what is wrong."""
+        command = [sys.executable, "-m", "descry.cli", *args]
+        found = subprocess.run(
+            [*command, "--json"], capture_output=True, text=True, check=False
+        )
+        assert found.returncode == 2
+        assert json.loads(found.stdout)["reason"] == "invalid"
+        plain = subprocess.run(command, capture_output=True, text=True, check=False)
+        assert plain.returncode == 2
+        assert "usage:" in plain.stderr
+
+
 class TestCliHealth:
     def test_health_returns_json(self):
         result = subprocess.run(
@@ -76,37 +96,47 @@ class TestCliHealth:
         assert '"version"' in result.stdout
         assert '"status"' in result.stdout
 
+    def test_health_takes_json_as_every_tool_does(self):
+        assert cli.build_parser().parse_args(["health", "--json"]).json
+
+    @pytest.mark.parametrize(
+        ("argv", "flag"),
+        [(["search", "x"], "compact"), (["changes"], "show_callers")],
+    )
+    def test_on_by_default_flags_turn_off_with_no(self, argv, flag):
+        parse = cli.build_parser().parse_args
+        option = "--no-" + flag.replace("_", "-")
+        assert getattr(parse(argv), flag) is True
+        assert getattr(parse([*argv, option]), flag) is False
+
 
 class TestCliExitStatus:
     @staticmethod
-    async def _returns(value):
-        return value
+    def _print(answer, text, as_json=False):
+        """`_print_answer` of ``answer``, whose text is ``text``."""
 
-    @pytest.mark.parametrize(
-        "failure",
-        [
-            "Index path '/etc' outside project root; must be relative to /repo.",
-            "Index failed:\nTraceback ...",
-            "Index timed out after 30 minutes.",
-            "Index error: [Errno 2] No such file or directory",
-            "Error analyzing churn: boom",
-            "[Graph: NOT FOUND]\n\nERROR: Graph not found. Run descry ensure first.",
-        ],
-    )
-    def test_service_error_exits_nonzero_whatever_its_text(self, failure, capsys):
+        async def given():
+            return answer
+
+        async def render(_answer):
+            return text
+
+        cli._print_answer(argparse.Namespace(json=as_json), given(), render)
+
+    @pytest.mark.parametrize("as_json", [False, True])
+    def test_a_failed_answer_exits_nonzero(self, as_json, capsys):
+        failure = "Index timed out after 30 minutes."
         with pytest.raises(SystemExit) as exit_info:
-            cli._print_result(self._returns(ServiceError(failure)))
+            self._print(fail("failed", failure), ServiceError(failure), as_json)
         assert exit_info.value.code == 2
         assert failure in capsys.readouterr().out
 
-    def test_plain_result_exits_zero(self, capsys):
-        cli._print_result(self._returns("No matches for 'x'."))
+    @pytest.mark.parametrize("as_json", [False, True])
+    def test_an_answer_exits_zero(self, as_json, capsys):
+        self._print(
+            {"ok": True, "message": "No matches"}, "No matches for 'x'.", as_json
+        )
         assert "No matches" in capsys.readouterr().out
-
-    def test_error_prefix_exits_nonzero(self):
-        with pytest.raises(SystemExit) as exit_info:
-            cli._print_result(self._returns("ERROR: Node 'x' not found in graph."))
-        assert exit_info.value.code == 2
 
     def test_index_outside_the_root_exits_nonzero(self, tmp_path):
         (tmp_path / ".git").mkdir()
@@ -125,9 +155,12 @@ class TestCliExitStatus:
         seen = {}
 
         class Service:
-            async def ensure(self, max_age_hours):
+            async def ensure_answer(self, max_age_hours):
                 seen["max_age_hours"] = max_age_hours
-                return "Graph ready"
+                return {"ok": True, "summary": "Graph ready", "_report": None}
+
+            async def ensure_text(self, answer):
+                return answer["summary"]
 
         monkeypatch.setattr(cli, "_make_service", Service)
         monkeypatch.setattr(sys, "argv", ["descry", "ensure"])
@@ -140,7 +173,6 @@ class TestCliExitStatus:
     ):
         (tmp_path / ".git").mkdir()
         monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("DESCRY_CACHE_DIR", raising=False)
         monkeypatch.setenv("DESCRY_NO_EMBEDDINGS", "1")
         indexed = []
 
@@ -159,7 +191,6 @@ class TestCliExitStatus:
     def test_negative_limit_exits_nonzero(self, tmp_path, monkeypatch, capsys):
         (tmp_path / ".git").mkdir()
         monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("DESCRY_CACHE_DIR", raising=False)
         monkeypatch.setenv("DESCRY_NO_EMBEDDINGS", "1")
         monkeypatch.setattr(sys, "argv", ["descry", "callers", "f", "--limit", "-1"])
         with pytest.raises(SystemExit) as exit_info:
@@ -195,7 +226,6 @@ class TestCliStopped:
         the test is parametrized with."""
         (tmp_path / ".git").mkdir()
         env = {**os.environ, "DESCRY_NO_EMBEDDINGS": "1"}
-        env.pop("DESCRY_CACHE_DIR", None)
         script = [sys.executable, "-c", _INDEX_WITH, json.dumps(indexer_tree.argv)]
         index = subprocess.Popen(
             [*script, *getattr(request, "param", ())],
@@ -228,26 +258,13 @@ class TestCliStopped:
 
 
 class TestSearchType:
-    """`--type` takes the types descry has, in any case, and refuses others."""
+    """`--type` takes the types descry has, as every interface writes them,
+    and refuses others."""
 
-    def test_a_type_is_passed_lowercased(self, monkeypatch):
-        seen = {}
-
-        class Service:
-            async def search(self, **kwargs):
-                seen.update(kwargs)
-                return "ok"
-
-        monkeypatch.setattr(cli, "_make_service", Service)
-        monkeypatch.setattr(
-            sys, "argv", ["descry", "search", "x", "--type", "Function"]
-        )
-        cli.main()
-        assert seen["symbol_type"] == "function"
-
-    def test_an_unknown_type_is_refused(self, monkeypatch, capsys):
-        monkeypatch.setattr(sys, "argv", ["descry", "search", "x", "--type", "struct"])
+    @pytest.mark.parametrize("written", ["struct", "Function"])
+    def test_an_unknown_type_is_refused(self, monkeypatch, capsys, written):
+        monkeypatch.setattr(sys, "argv", ["descry", "search", "x", "--type", written])
         with pytest.raises(SystemExit) as exit_:
             cli.main()
         assert exit_.value.code == 2
-        assert "invalid choice: 'struct'" in capsys.readouterr().err
+        assert f"invalid choice: '{written}'" in capsys.readouterr().err

@@ -12,14 +12,13 @@ type the declaration writes. No list of names is kept.
 """
 
 import re
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from common import dump_ast, main
+from common import dump_ast, main, record, returned, version
 
 # The public headers the translation unit written for the dump includes.
 HEADERS = (
@@ -112,7 +111,7 @@ def _spot_file(place):
     only where the file differs from the declaration before, so absence
     does not say a decl is not in a header."""
     text = place.get("file")
-    if not isinstance(text, str):
+    if text is None:
         return None
     return str(Path(text).resolve()) if ".." in text else text
 
@@ -126,19 +125,10 @@ def _file_of(node):
         node.get("loc", {}).get("spellingLoc", {}),
         node.get("loc", {}).get("expansionLoc", {}),
     ):
-        if isinstance(place, dict):
-            text = _spot_file(place)
-            if text:
-                return text
+        text = _spot_file(place)
+        if text:
+            return text
     return None
-
-
-def _returned(written):
-    """The type a Clang `type` string returns, before its `(...)`."""
-    head = written.split("(", 1)[0].strip()
-    head = re.sub(r"^(?:const|volatile)\s+", "", head)
-    head = re.sub(r"\s*[&*]+\s*$", "", head)
-    return head or None
 
 
 def _walk(node, build, headers_dir):
@@ -151,52 +141,31 @@ def _walk(node, build, headers_dir):
         build.file = text
     kind = node.get("kind")
     name = node.get("name", "")
-    if kind == "FunctionDecl":
-        in_headers = build.file.startswith(("/usr/include", headers_dir))
-        if name and not name.startswith("_") and in_headers:
-            returns = _returned(node.get("type", {}).get("qualType", ""))
-            if name not in build.functions:
-                build.functions[name] = returns
-            elif returns is not None and build.functions[name] not in (
-                None,
-                returns,
-            ):
-                build.functions[name] = None
-        return
-    if kind == "VarDecl":
-        if (
-            name
-            and not name.startswith("_")
-            and build.file.startswith(("/usr/include", headers_dir))
-        ):
+    if kind in ("FunctionDecl", "VarDecl"):
+        public = name and not name.startswith("_")
+        if not public or not build.file.startswith(("/usr/include", headers_dir)):
+            return
+        if kind == "VarDecl":
             build.values.add(name)
+        else:
+            written = node.get("type", {}).get("qualType", "")
+            record(build.functions, name, returned(written) or None)
         return
     for item in node.get("inner", ()):
         _walk(item, build, headers_dir)
 
 
-def _version(compiler, origin):
-    """`clang A.B.C, glibc <root>, -std=c23` — the toolchain the data was
-    read from."""
-    run = subprocess.run(
-        [compiler, "--version"], capture_output=True, text=True, check=True
-    )
-    compiler_version = re.search(r"version (\d+\.\d+\.\d+)", run.stdout)
-    run = subprocess.run(
-        [compiler, "-std=c23", "-E", "-dM", "-x", "c", "-"],
-        input="#include <features.h>\n",
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    minor = re.search(r"#define __GLIBC_MINOR__ (\d+)", run.stdout)
-    major = re.search(r"#define __GLIBC__ (\d+)", run.stdout)
-    libc_version = f"glibc {major[1]}.{minor[1]}" if major and minor else "glibc"
-    return (
-        f"{compiler} {compiler_version[1]}, {libc_version}, -std=c23"
-        if compiler_version
-        else f"{compiler}, {libc_version}, -std=c23"
-    )
+def _glibc(macros):
+    """`glibc A.B` as the macros of `features.h` give it."""
+    minor = re.search(r"#define __GLIBC_MINOR__ (\d+)", macros)
+    major = re.search(r"#define __GLIBC__ (\d+)", macros)
+    return f"glibc {major[1]}.{minor[1]}" if major and minor else "glibc"
+
+
+def _version(compiler):
+    """`clang A.B.C, glibc A.B, -std=c23` — the toolchain the data was read
+    from."""
+    return version(compiler, "c", "c23", "features.h", _glibc)
 
 
 class _Build:
@@ -216,11 +185,15 @@ def build(origin):
     with tempfile.TemporaryDirectory() as tmp:
         tree = dump_ast(["clang", "-std=c23"], Path(tmp) / "dump.c", headers)
     _walk(tree, held, str(Path(origin).resolve()))
-    functions = dict(sorted(held.functions.items()))
-    scope = {name: name for name in functions}
+    scope = {name: name for name in held.functions}
     for name in held.values:
         scope.setdefault(name, name)
-    return _version("clang", origin), {}, functions, scope, None, None
+    return {
+        "source": _version("clang"),
+        "types": {},
+        "functions": held.functions,
+        "scope": scope,
+    }
 
 
 if __name__ == "__main__":

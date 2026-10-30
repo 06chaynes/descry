@@ -31,7 +31,7 @@ GENERATORS = Path(__file__).parent.parent / "tools" / "stdlib"
 # $DESCRY_STDLIB_SOURCES names; Java is read from the JDK at $JAVA_HOME.
 DOWNLOADS = {
     "typescript": "typescript/typescript-6.0.2.tgz",
-    "python": "typeshed/typeshed-c4b5c1cfaba3da11df6915b12a45c6b3468195ae.tar.gz",
+    "python": "python",
     "go": "go/go1.26.0",
     "rust": "rust/nightly-2026-09-09/json",
     "php": "phpstorm-stubs/phpstorm-stubs-e4f5f6c3de39f3bab3e9f3fca4b8cdb8b061e681.tar.gz",
@@ -42,6 +42,42 @@ DOWNLOADS = {
 
 # (language, path into the loaded data, what is there)
 FACTS = [
+    # A value-returning overload, its implementation typedef followed
+    (
+        "cpp",
+        ("types", "std::basic_ostringstream`3", "methods", "str"),
+        "basic_string<_CharT, _Traits, _Alloc>",
+    ),
+    # A member template defined outside its class is no function of `std`.
+    ("cpp", ("scope", "string"), "std::basic_string`3"),
+    # A class's template parameter, not an alias of that name elsewhere
+    (
+        "cpp",
+        ("types", "std::basic_string`3", "methods", "front"),
+        "_Traits::char_type",
+    ),
+    ("python", ("scope", "IOError"), "builtins.IOError"),
+    (
+        "python",
+        ("context_managers",),
+        ["contextlib.asynccontextmanager", "contextlib.contextmanager"],
+    ),
+    # A module function (`def self?.require`) is a method and a static.
+    ("ruby", ("types", "Kernel", "methods", "require"), "bool"),
+    ("ruby", ("types", "Kernel", "statics", "require"), "bool"),
+    (
+        "ruby",
+        ("evaluators",),
+        [
+            "class_eval",
+            "class_exec",
+            "define_singleton_method",
+            "instance_eval",
+            "instance_exec",
+            "module_eval",
+            "module_exec",
+        ],
+    ),
     (
         "dotnet",
         ("types", "System.Collections.Generic.IEnumerable`1", "methods", "Where"),
@@ -248,6 +284,13 @@ FACTS = [
         {"1": {"params": ["U", "U"], "returns": None}},
     ),
     ("rust", ("types", "std::option::Option", "params"), ["T"]),
+    # What `[T]::get` returns is decided by its argument's type.
+    ("rust", ("by_argument", "[T]", "get", "0", "usize"), "Option<&T>"),
+    ("rust", ("by_argument", "[T]", "get", "0", "{integer}"), "Option<&T>"),
+    ("rust", ("by_argument", "[T]", "get", "0", "std::ops::Range"), "Option<&[T]>"),
+    ("rust", ("lang", "Range"), "std::ops::Range"),
+    ("rust", ("lang", "RangeInclusiveStruct"), "std::ops::RangeInclusive"),
+    ("rust", ("same", "std::os::fd::RawFd"), "std::os::raw::c_int"),
     ("rust", ("types", "std::option::Option", "methods", "unwrap"), "T"),
     ("rust", ("types", "std::option::Option", "methods", "as_ref"), "Option<&T>"),
     ("rust", ("types", "std::option::Option", "methods", "ok_or"), "Result<T, _>"),
@@ -410,12 +453,29 @@ def _base_name(base):
 @pytest.mark.parametrize("lang", LANGUAGES)
 def test_data_has_the_documented_shape(lang):
     data = load(lang)
-    assert set(data) - {"variants", "callbacks", "extensions", "functional"} == {
-        "source",
-        "types",
-        "functions",
-        "scope",
+    optional = {
+        "variants",
+        "callbacks",
+        "by_argument",
+        "lang",
+        "same",
+        "extensions",
+        "functional",
+        "ref_structs",
+        "qualifiers",
+        "evaluators",
+        "attributes",
+        "context_managers",
+        "pointers",
+        "writers",
+        "makers",
+        "awaited",
+        "implicit",
+        "implicit_usings",
+        "platforms",
     }
+    assert set(data) - optional == {"source", "types", "functions", "scope"}
+    assert set(data.get("ref_structs", ())) <= set(data["types"])
     assert data["source"]
     assert data["types"]
     tables = [data["functions"]]
@@ -425,6 +485,10 @@ def test_data_has_the_documented_shape(lang):
         tables += [kind["methods"], kind["statics"]]
     returns = [returns for table in tables for returns in table.values()]
     assert all(it is None or isinstance(it, str) and it for it in returns)
+    for key, methods in data.get("by_argument", {}).items():
+        assert set(methods) <= set(data["types"][key]["methods"]), key
+        given = [r for p in methods.values() for t in p.values() for r in t.values()]
+        assert all(isinstance(it, str) and it for it in given)
 
 
 @pytest.mark.parametrize("lang", LANGUAGES)
@@ -513,6 +577,14 @@ def test_generator_reproduces_the_file(lang, tmp_path):
         source = Path(shell).parent if shell else None
         if not source or not (source / "System.Private.CoreLib.dll").is_file():
             pytest.skip("pwsh is not installed to reflect the .NET runtime with")
+        spec = importlib.util.spec_from_file_location(
+            lang, GENERATORS / "gen_dotnet.py"
+        )
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        runtime = load(lang)["source"].split()[2].split("-")[0]
+        if generator.sdk_folder(source, runtime) is None:
+            pytest.skip(f"no .NET SDK bundling the {runtime} runtime is installed")
     elif lang in ("c", "cpp"):
         compiler = shutil.which("clang" if lang == "c" else "clang++")
         roots = sorted(Path("/usr/include/c++").glob("*")) if lang == "cpp" else []
@@ -525,7 +597,9 @@ def test_generator_reproduces_the_file(lang, tmp_path):
         )
         generator = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(generator)
-        toolchain = generator._version(Path(compiler).name, source)
+        # Only the C++ toolchain is named from the include directory.
+        given = (source,) if lang == "cpp" else ()
+        toolchain = generator._version(Path(compiler).name, *given)
         if toolchain != load(lang)["source"]:
             pytest.skip(
                 f"this machine's toolchain is {toolchain}, not {load(lang)['source']}"
@@ -542,3 +616,48 @@ def test_generator_reproduces_the_file(lang, tmp_path):
     if lang == "dotnet" and json.loads(out.read_text("utf-8"))["source"] != read_from:
         pytest.skip(f"this machine's toolchain is not {read_from}")
     assert out.read_bytes() == _file(lang).read_bytes()
+
+
+def _generator(lang):
+    """The module of `tools/stdlib/gen_<lang>.py`."""
+    sys.path.insert(0, str(GENERATORS))
+    try:
+        spec = importlib.util.spec_from_file_location(
+            f"gen_{lang}", GENERATORS / f"gen_{lang}.py"
+        )
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+    finally:
+        sys.path.remove(str(GENERATORS))
+    return generator
+
+
+def test_ruby_reads_the_arguments_of_a_type_written_from_the_root():
+    """`::Array[Integer]` is `Array[Integer]`, as `Array[Integer]` is."""
+    assert _generator("ruby")._written("::Array[Integer]") == "Array[Integer]"
+
+
+def test_dart_reads_a_libraries_directory_given_itself(tmp_path):
+    """The generator reads the `sdk/lib` directory named on its own, not
+    only a checkout holding it."""
+    (tmp_path / "core").mkdir()
+    (tmp_path / "core" / "widget.dart").write_text("class Widget {\n}\n")
+    assert "Widget" in _generator("dart").build(tmp_path)["types"]
+
+
+def test_dotnet_sdk_is_found_beside_dotnet_exe(tmp_path, monkeypatch):
+    """The SDK that bundles a runtime is found beside a `dotnet.exe` on the
+    path, as Windows names it."""
+    spec = importlib.util.spec_from_file_location(
+        "dotnet", GENERATORS / "gen_dotnet.py"
+    )
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    sdk = tmp_path / "bin" / "sdk" / "10.0.100"
+    sdk.mkdir(parents=True)
+    (tmp_path / "bin" / "dotnet.exe").write_text("")
+    (sdk / "Microsoft.NETCoreSdk.BundledVersions.props").write_text(
+        "<BundledNETCoreAppPackageVersion>10.0.1<"
+    )
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    assert generator.sdk_folder(tmp_path / "a" / "b" / "c", "10.0.1") == sdk / "Sdks"

@@ -22,10 +22,12 @@ from descry.handlers import (
     _DEFAULT_SYNTAX_LANG_MAP,
     DescryConfig,
     DescryService,
+    LanguageName,
     ServiceError,
     format_compact_result,
     format_search_result,
     is_natural_language_query,
+    public,
 )
 
 # --- DescryConfig ---
@@ -56,13 +58,15 @@ class TestDescryConfig:
         (tmp_path / ".git").mkdir()
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("DESCRY_LOG_LEVEL", "LOUD")
-        with caplog.at_level(logging.WARNING, logger="descry"):
+        # caplog restores the logger's level when its block ends.
+        with caplog.at_level(logging.DEBUG, logger="descry"):
             DescryConfig.from_env()
+            level = logging.getLogger("descry").level
         assert any(
             "DESCRY_LOG_LEVEL" in r.message and "'LOUD'" in r.message
             for r in caplog.records
         )
-        assert logging.getLogger("descry").level == logging.WARNING
+        assert level == logging.WARNING
 
     def test_importing_handlers_does_not_import_the_embedding_stack(self):
         code = (
@@ -182,21 +186,6 @@ class TestFormatCompactResult:
         assert "80t" in result
         assert "12c" in result
 
-    def test_compact_with_parent(self):
-        node = {
-            "id": "FILE:src/auth.rs::AuthService::validate",
-            "type": "Method",
-            "metadata": {
-                "name": "validate",
-                "parent_name": "AuthService",
-                "lineno": 50,
-                "token_count": 100,
-                "in_degree": 8,
-            },
-        }
-        result = format_compact_result(node, rank=2)
-        assert "AuthService.validate" in result
-
 
 class TestIsNaturalLanguageQuery:
     def test_natural_language_phrases(self):
@@ -232,6 +221,13 @@ class TestDescryServiceHealth:
         assert '"no_graph"' in result
 
     @pytest.mark.asyncio
+    async def test_evolution_with_no_graph_answers_no_graph(self, tmp_path):
+        config = DescryConfig(project_root=tmp_path, enable_embeddings=False)
+        svc = DescryService(config)
+        answer = await svc.evolution_answer("anything")
+        assert answer["reason"] == "no_graph"
+
+    @pytest.mark.asyncio
     async def test_health_with_graph(self, tmp_path):
         config = DescryConfig(project_root=tmp_path, enable_embeddings=False)
         graph = {
@@ -257,6 +253,20 @@ class TestDescryServiceHealth:
             or "does not exist" in result.lower()
         )
 
+    def test_scip_state_tells_disabled_unavailable_and_not_loaded(self, tmp_path):
+        """Each state is reachable: disabled where SCIP is off, unavailable
+        where it is on but no indexer is, not_loaded where the module is."""
+        off = DescryConfig(project_root=tmp_path, enable_scip=False)
+        assert DescryService(off)._scip_state()["state"] == "disabled"
+        on = DescryService(DescryConfig(project_root=tmp_path, enable_scip=True))
+        on._get_scip_status_fn = lambda: {
+            "available": False,
+            "disabled_by_env": False,
+        }
+        assert on._scip_state()["state"] == "unavailable"
+        on._get_scip_status_fn = None
+        assert on._scip_state()["state"] == "not_loaded"
+
 
 class TestDescryServiceSearch:
     @pytest.fixture
@@ -280,6 +290,26 @@ class TestDescryServiceSearch:
     async def test_search_no_results(self, svc_with_graph):
         result = await svc_with_graph.search(["nonexistent_xyz_symbol"])
         assert "No matches" in result
+
+    @pytest.mark.asyncio
+    async def test_a_search_filter_of_no_language_is_refused(self, svc_with_graph):
+        for kwargs in ({"lang": "klingon"}, {"symbol_type": "bogus"}):
+            answer = await svc_with_graph.search_answer(["x"], **kwargs)
+            assert answer["ok"] is False
+            assert answer["reason"] == "invalid"
+
+    @pytest.mark.asyncio
+    async def test_an_empty_symbol_is_invalid_not_an_empty_success(
+        self, svc_with_graph
+    ):
+        for tool in (
+            svc_with_graph.callers_answer,
+            svc_with_graph.callees_answer,
+            svc_with_graph.context_answer,
+        ):
+            answer = await tool("")
+            assert answer["ok"] is False
+            assert answer["reason"] == "invalid"
 
     @pytest.mark.asyncio
     async def test_callers(self, svc_with_graph):
@@ -319,11 +349,15 @@ class TestDescryServiceSearch:
         svc_with_graph.config.graph_path.write_text(json.dumps(graph))
         result = await svc_with_graph.callers("validate_token")
         assert "one of 2 candidates" in result
-        data = await svc_with_graph.callers_data("validate_token")
-        assert data["ambiguous"] == {"FILE:src/server.rs::run_server": 2}
+        answer = await svc_with_graph.callers_answer("validate_token")
         # The certain callers are listed first.
-        assert data["callers"][-1] == "FILE:src/server.rs::run_server"
-        assert len(data["callers"]) > 1
+        last = answer["callers"][-1]
+        assert (last["id"], last["kind"], last["candidates"]) == (
+            "FILE:src/server.rs::run_server",
+            "candidate",
+            2,
+        )
+        assert len(answer["callers"]) > 1 and answer["possible"] == 1
         result = await svc_with_graph.path("run_server", "validate_token")
         assert "one of" not in result
         result = await svc_with_graph.path("run_server", "helper")
@@ -336,10 +370,14 @@ class TestDescryServiceSearch:
         assert "run_server" in result
 
     @pytest.mark.asyncio
-    async def test_quick(self, svc_with_graph):
+    async def test_quick_of_a_symbol_whose_source_is_gone_is_an_error(
+        self, svc_with_graph
+    ):
         result = await svc_with_graph.quick("main")
-        assert "main" in result
-        assert "Application entry point" in result or "fn main()" in result
+        assert isinstance(result, ServiceError)
+        assert "'src/main.rs' not found on disk" in result
+        answer = await svc_with_graph.quick_answer("main")
+        assert (answer["ok"], answer["reason"]) == (False, "not_found")
 
 
 class TestDescryServiceIndex:
@@ -643,11 +681,11 @@ class TestOneIndexRunAtATime:
 
     @pytest.mark.asyncio
     async def test_ensure_needs_the_lock_only_to_rebuild(self, busy):
-        ready = await busy.ensure_data()
+        ready = await busy.ensure_answer()
         assert (ready["ok"], ready["action"]) == (True, "ready")
 
         busy.config.graph_path.unlink()
-        refused = await busy.ensure_data()
+        refused = await busy.ensure_answer()
         assert (refused["ok"], refused["reason"]) == (False, "busy")
         assert await busy.ensure() == "An index run is already in progress"
 
@@ -715,6 +753,24 @@ class TestIndexPath:
         assert "def hello():" in context
 
     @pytest.mark.asyncio
+    async def test_a_relative_path_is_read_from_the_root_not_the_cwd(
+        self, project, real_indexer_env, monkeypatch
+    ):
+        config = _plain_config(project)
+        svc = DescryService(config)
+        monkeypatch.chdir(project / "src")
+        result = await svc.index("./")
+        assert result.startswith("Index complete."), result
+        ids = {n["id"] for n in json.loads(config.graph_path.read_text())["nodes"]}
+        assert "FILE:other/b.py::elsewhere" in ids, "`./` indexes the root"
+
+        result = await svc.index("src")
+        assert result.startswith("Index complete."), result
+        ids = {n["id"] for n in json.loads(config.graph_path.read_text())["nodes"]}
+        assert "FILE:src/app.py::hello" in ids
+        assert not any("other/b.py" in i for i in ids), "walk was not narrowed"
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("escape", ["/etc", "..", "../sibling", "link-out"])
     async def test_path_outside_the_root_is_refused_before_any_subprocess(
         self, tmp_path, escape
@@ -734,6 +790,7 @@ class TestIndexPath:
 
         assert isinstance(result, ServiceError)
         assert "outside project root" in result
+        assert result.reason == "invalid"
 
     @pytest.mark.asyncio
     async def test_a_path_that_is_not_a_directory_does_not_replace_the_graph(
@@ -834,18 +891,20 @@ class TestUnusableGraph:
         assert json.loads(await svc.health())["graph"]["nodes"] == 0
 
     @pytest.mark.asyncio
-    async def test_unreadable_graph_is_parsed_once_per_mtime(self, tmp_path):
+    async def test_unreadable_graph_is_parsed_once_per_mtime(
+        self, tmp_path, monkeypatch
+    ):
         config = _plain_config(tmp_path)
         config.cache_dir.mkdir(parents=True)
         config.graph_path.write_text("{")
         svc = DescryService(config)
         loads = []
 
-        def counting(path, config=None):
+        def counting(path, config):
             loads.append(path)
             raise ValueError("bad")
 
-        svc._GraphQuerier = counting
+        monkeypatch.setattr("descry.handlers.GraphQuerier", counting)
         await svc._get_querier()
         await svc._get_querier()
         assert len(loads) == 1
@@ -858,6 +917,7 @@ class TestGraphRemovedBetweenTwoLooks:
         config = _plain_config(tmp_path)
         svc = DescryService(config)
         svc._semantic_available, svc._SemanticSearcher = True, object
+        svc._get_embeddings_status_fn = lambda *args, **kwargs: {}
         real_exists = Path.exists
         monkeypatch.setattr(
             Path,
@@ -931,7 +991,7 @@ class TestEnsure:
         assert isinstance(result, ServiceError)
         assert "max_age_hours must be a finite, non-negative number" in result
         assert svc.indexed == []
-        data = await svc.ensure_data(max_age_hours=age)
+        data = await svc.ensure_answer(max_age_hours=age)
         assert (data["ok"], data["reason"]) == (False, "invalid")
 
     @pytest.mark.asyncio
@@ -941,25 +1001,29 @@ class TestEnsure:
 
     @pytest.mark.asyncio
     async def test_data_names_what_was_done(self, svc):
-        ready = await svc.ensure_data(max_age_hours=100)
-        assert (ready["action"], ready["result"]) == ("ready", None)
+        ready = await svc.ensure_answer(max_age_hours=100)
+        assert (ready["action"], ready["_report"]) == ("ready", None)
         assert ready["summary"] == await svc.ensure(max_age_hours=100)
 
-        refreshed = await svc.ensure_data(max_age_hours=1)
-        assert (refreshed["action"], refreshed["result"]) == (
+        refreshed = await svc.ensure_answer(max_age_hours=1)
+        assert (refreshed["action"], refreshed["_report"]) == (
             "refreshed",
             "Index complete.",
         )
 
         svc.config.graph_path.write_text("{")
-        assert (await svc.ensure_data())["action"] == "generated"
+        assert (await svc.ensure_answer())["action"] == "generated"
         svc.config.graph_path.unlink()
-        assert (await svc.ensure_data())["action"] == "generated"
+        assert (await svc.ensure_answer())["action"] == "generated"
 
     @pytest.mark.asyncio
     async def test_status_is_rendered_from_its_data(self, svc):
-        data = await svc.status_data()
+        data = await svc.status_answer()
         assert data == {
+            "ok": True,
+            "scip": {"state": "disabled", "indexers": [], "cached": None},
+            # Switched off, not missing
+            "embeddings": {"state": "disabled", "nodes": 0, "model": None},
             "exists": True,
             "age_str": "2.0h ago",
             "age_hours": 2.0,
@@ -972,8 +1036,9 @@ class TestEnsure:
         assert (await svc.status()).startswith(
             "Graph: 0 nodes, 0 edges, updated 2.0h ago\n"
         )
+        assert "Embeddings: Disabled (DESCRY_NO_EMBEDDINGS=1" in await svc.status()
         svc.config.max_stale_hours = 1
-        assert (await svc.status_data())["stale"] is True
+        assert (await svc.status_answer())["stale"] is True
         assert "updated 2.0h ago (STALE - run descry index)" in await svc.status()
 
     @pytest.mark.asyncio
@@ -1001,7 +1066,11 @@ class TestServiceErrors:
         _run_as_the_indexer(svc, "import sys; sys.exit('traceback')")
         result = await svc.index()
         assert isinstance(result, ServiceError)
-        assert result == "Index failed:\ntraceback\n"
+        assert result == "Index failed: the indexer exited with code 1.\ntraceback\n"
+        answer = await svc.index_answer()
+        assert answer["error"] == "Index failed: the indexer exited with code 1."
+        assert "traceback" not in str(handlers.public(answer))
+        assert await svc.index_text(answer) == result
 
     @pytest.mark.asyncio
     async def test_index_output_is_decoded_as_text_mode_would(self, svc):
@@ -1012,7 +1081,9 @@ class TestServiceErrors:
             svc,
             "import sys; sys.stderr.buffer.write(b'one\\r\\ntwo\\r\\n'); sys.exit(1)",
         )
-        assert await svc.index() == "Index failed:\none\ntwo\n"
+        assert await svc.index() == (
+            "Index failed: the indexer exited with code 1.\none\ntwo\n"
+        )
 
     @pytest.mark.asyncio
     async def test_index_timeout(self, svc):
@@ -1050,6 +1121,8 @@ class TestServiceErrors:
             return Analyzer()
 
         svc._get_git_analyzer = analyzer
+        node = {"id": "FILE:x.py::f", "type": "Function", "metadata": {"name": "f"}}
+        _write_graph(svc.config, nodes=[node])
         result = await getattr(svc, tool)(**args)
         assert isinstance(result, ServiceError)
         assert result.startswith(f"Error analyzing {tool}")
@@ -1063,8 +1136,13 @@ class TestServiceErrors:
 
     @pytest.mark.asyncio
     async def test_a_miss_is_an_answer_not_a_failure(self, svc):
-        for result in (await svc.search(["nothing_here"]), await svc.callers("nope")):
-            assert not isinstance(result, ServiceError)
+        """A search that finds nothing is an answer; a callers of a name
+        nothing has is a not_found refusal."""
+        result = await svc.search(["nothing_here"])
+        assert not isinstance(result, ServiceError)
+        refusal = await svc.callers("nope")
+        assert isinstance(refusal, ServiceError)
+        assert "not found" in refusal
 
     @pytest.mark.asyncio
     async def test_openapi_path_that_is_a_directory(self, svc, tmp_path):
@@ -1096,7 +1174,8 @@ class TestNegativeLimit:
         svc = DescryService(config)
 
         result = await getattr(svc, tool)(**args, limit=-1)
-        data = await getattr(svc, f"{tool}_data")(**args, limit=-1)
+        answer = getattr(svc, f"{tool}_answer", None) or getattr(svc, f"{tool}_data")
+        data = await answer(**args, limit=-1)
 
         assert isinstance(result, ServiceError)
         assert "limit must be at least 1, got -1." in result
@@ -1166,14 +1245,6 @@ class TestSearchLanguageFilter:
         assert indexed - _DEFAULT_CODE_EXTENSIONS == set()
         assert indexed - set(_DEFAULT_SYNTAX_LANG_MAP) == set()
 
-    def test_fallback_defaults_are_the_configured_defaults(self):
-        from descry.git_history import CODE_EXTENSIONS
-        from descry.query import _get_syntax_lang
-
-        assert CODE_EXTENSIONS is _DEFAULT_CODE_EXTENSIONS
-        for ext, lang in _DEFAULT_SYNTAX_LANG_MAP.items():
-            assert _get_syntax_lang(f"file{ext}") == lang
-
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("file", "lang"),
@@ -1227,9 +1298,10 @@ class TestSearchLanguageFilter:
         assert match in result
 
     @pytest.mark.asyncio
-    async def test_unknown_language_matches_nothing(self, svc):
+    async def test_unknown_language_is_refused(self, svc):
         result = await svc.search(["handler"], lang="klingon")
-        assert result.endswith("No matches for 'handler' [lang=klingon, compact].")
+        assert "Unknown language" in result
+        assert isinstance(result, ServiceError)
 
     @pytest.mark.asyncio
     async def test_all_does_not_filter(self, svc):
@@ -1321,14 +1393,6 @@ class TestPathMessages:
         assert "within 50 hops" in result
 
     @pytest.mark.asyncio
-    async def test_node_budget_is_not_reported_as_no_path(self, tmp_path):
-        svc = self._svc(tmp_path, 30, max_nodes=5)
-        result = await svc.path("n0", "n29", max_depth=40)
-        assert "[query] max_nodes" in result
-        assert "may still exist" in result
-        assert "No path found" not in result
-
-    @pytest.mark.asyncio
     async def test_timeout_is_not_reported_as_no_path(self, tmp_path):
         svc = self._svc(tmp_path, 30, query_timeout_ms=-1)
         result = await svc.path("n0", "n29", max_depth=40)
@@ -1341,41 +1405,38 @@ class TestPathMessages:
         [
             ("n7", {}, "found"),
             ("island", {}, "not_found"),
-            ("n29", {"max_nodes": 5}, "node_budget"),
+            ("n7", {"max_nodes": 5}, "found"),
             ("n29", {"query_timeout_ms": -1}, "timeout"),
         ],
     )
-    async def test_data_says_how_the_search_ended(self, tmp_path, end, limits, status):
+    async def test_answer_says_how_the_search_ended(
+        self, tmp_path, end, limits, status
+    ):
         svc = self._svc(tmp_path, 30, **limits)
-        data = await svc.path_data("n0", end, max_depth=40)
-        assert data["status"] == status
-        if status == "found":
-            assert len(data["path"]) == 7
-            assert data["message"] is None
-        else:
-            assert data["path"] == []
-            assert await svc.path("n0", end, max_depth=40) == data["message"]
+        answer = await svc.path_answer("n0", end, max_depth=40)
+        assert answer["status"] == status
+        assert len(answer["hops"]) == (7 if status == "found" else 0)
 
 
 class TestTextRendersFromData:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("tool", "args"),
+        ("tool", "method", "args"),
         [
-            ("flow", {"start": "f"}),
-            ("structure", {"filename": "x.py"}),
-            ("quick", {"name": "f"}),
-            ("impls", {"method": "f"}),
-            ("path", {"start": "a", "end": "b"}),
-            ("semantic", {"query": "f"}),
-            ("cross_lang", {"mode": "stats"}),
-            ("churn", {}),
-            ("evolution", {"name": "f"}),
-            ("changes", {}),
+            ("flow", "flow_answer", {"start": "f"}),
+            ("structure", "structure_answer", {"filename": "x.py"}),
+            ("quick", "quick_answer", {"name": "f"}),
+            ("impls", "impls_answer", {"method": "f"}),
+            ("path", "path_answer", {"start": "a", "end": "b"}),
+            ("semantic", "semantic_answer", {"query": "f"}),
+            ("cross_lang", "cross_lang_answer", {"mode": "stats"}),
+            ("churn", "churn_answer", {}),
+            ("evolution", "evolution_answer", {"name": "f"}),
+            ("changes", "changes_answer", {}),
         ],
     )
     async def test_data_method_failure_is_the_text_methods_error(
-        self, tmp_path, tool, args
+        self, tmp_path, tool, method, args
     ):
         svc = DescryService(_plain_config(tmp_path))
         calls = []
@@ -1384,7 +1445,7 @@ class TestTextRendersFromData:
             calls.append((a, kw))
             return {"ok": False, "error": "boom", "reason": "failed"}
 
-        setattr(svc, f"{tool}_data", failed)
+        setattr(svc, method, failed)
         result = await getattr(svc, tool)(**args)
 
         assert isinstance(result, ServiceError)
@@ -1424,7 +1485,8 @@ class TestSemanticText:
                     raise ValueError("bad vector")
                 return [(node, 0.9)]
 
-        svc._semantic_available = case != "unavailable"
+        svc._semantic_available = case not in ("unavailable", "disabled")
+        svc.config.enable_embeddings = case != "disabled"
         svc._SemanticSearcher = Searcher
         if case == "no-graph":
             config.graph_path.unlink()
@@ -1440,8 +1502,16 @@ class TestSemanticText:
                 ServiceError,
                 (
                     "Semantic search not available. Install dependencies:\n"
-                    "  pip install sentence-transformers numpy\n\n"
-                    "Falling back to TF-IDF keyword search..."
+                    "  pip install sentence-transformers numpy"
+                ),
+            ),
+            (
+                "disabled",
+                "unavailable",
+                ServiceError,
+                (
+                    "Embeddings are disabled by DESCRY_NO_EMBEDDINGS or "
+                    "[features] enable_embeddings = false."
                 ),
             ),
             (
@@ -1458,18 +1528,25 @@ class TestSemanticText:
             ),
             (
                 "load-fails",
-                "failed",
+                "unavailable",
                 ServiceError,
-                "Failed to initialize semantic search: model is gated",
+                "Failed to initialize semantic search (RuntimeError); the log says why.",
             ),
             (
                 "search-fails",
                 "failed",
                 ServiceError,
-                "Semantic search error: bad vector",
+                "Semantic search failed (ValueError); the log says why.",
             ),
         ],
-        ids=["unavailable", "no-graph", "loading", "load-fails", "search-fails"],
+        ids=[
+            "unavailable",
+            "disabled",
+            "no-graph",
+            "loading",
+            "load-fails",
+            "search-fails",
+        ],
     )
     async def test_each_failure_has_its_own_message(
         self, tmp_path, case, reason, result_type, text
@@ -1478,7 +1555,7 @@ class TestSemanticText:
         result = await svc.semantic("q")
         assert type(result) is result_type
         assert result == text
-        assert (await svc.semantic_data("q"))["reason"] == reason
+        assert (await svc.semantic_answer("q"))["reason"] == reason
 
     @pytest.mark.asyncio
     async def test_load_failure_without_a_message_is_not_reported_as_loading(
@@ -1486,14 +1563,20 @@ class TestSemanticText:
     ):
         """Nor is a retry of a failed load."""
         svc = self._svc(tmp_path, "load-fails-silently")
-        assert (await svc.semantic_data("q"))["reason"] == "loading"
+        assert (await svc.semantic_answer("q"))["reason"] == "loading"
         await svc._semantic_cache["load"]
-        data = await svc.semantic_data("q")
-        assert (data["ok"], data["reason"]) == (False, "failed")
-        assert data["error"] == "Semantic search unavailable."
+        data = await svc.semantic_answer("q")
+        assert (data["ok"], data["reason"]) == (False, "unavailable")
+        assert (
+            data["error"]
+            == "Failed to initialize semantic search (RuntimeError); the log says why."
+        )
         result = await svc.semantic("q")
         assert isinstance(result, ServiceError)
-        assert result == "Semantic search unavailable."
+        assert (
+            result
+            == "Failed to initialize semantic search (RuntimeError); the log says why."
+        )
 
     @pytest.mark.asyncio
     async def test_hits_are_rendered_with_their_scores(self, tmp_path):
@@ -1502,6 +1585,30 @@ class TestSemanticText:
         assert not isinstance(result, ServiceError)
         assert "1 semantic match(es) for 'q':" in result
         assert "[0.90] [Fun] f | x.py" in result
+
+
+@pytest.mark.asyncio
+async def test_cross_lang_answer_leaves_the_specs_summaries_to_the_text(tmp_path):
+    config = _plain_config(tmp_path)
+    _write_graph(config)
+    spec = tmp_path / "public" / "api" / "openapi.json"
+    spec.parent.mkdir(parents=True)
+    spec.write_text(
+        '{"paths": {"/users": {"get": {"operationId": "list_users",'
+        ' "summary": "Lists every user", "tags": ["users"]}}}}'
+    )
+    svc = DescryService(config)
+    answer = await svc.cross_lang_answer(mode="list")
+    assert answer["endpoints"] == [
+        {
+            "method": "GET",
+            "path": "/users",
+            "operation_id": "list_users",
+            "tags": ["users"],
+            "node_id": None,
+        }
+    ]
+    assert "Lists every user" in await svc.cross_lang_text(answer, None, None, None)
 
 
 class TestCrossLangSpecDiscovery:
@@ -1524,10 +1631,10 @@ class TestCrossLangSpecDiscovery:
     async def test_conventional_location_needs_no_config(self, svc, tmp_path):
         spec = self._conventional(tmp_path, "openapi.json")
 
-        data = await svc.cross_lang_data(mode="stats")
+        data = await svc.cross_lang_answer(mode="stats")
         assert data["ok"]
-        assert data["result"]["openapi_path"] == str(spec)
-        assert data["result"]["total_endpoints"] == 1
+        assert data["_result"]["openapi_path"] == str(spec)
+        assert data["total_endpoints"] == 1
         assert svc.cross_lang_error() is None
         assert str(spec) in await svc.cross_lang(mode="stats")
 
@@ -1535,8 +1642,8 @@ class TestCrossLangSpecDiscovery:
     async def test_latest_json_is_preferred_to_openapi_json(self, svc, tmp_path):
         self._conventional(tmp_path, "openapi.json")
         latest = self._conventional(tmp_path, "latest.json")
-        data = await svc.cross_lang_data(mode="stats")
-        assert data["result"]["openapi_path"] == str(latest)
+        data = await svc.cross_lang_answer(mode="stats")
+        assert data["_result"]["openapi_path"] == str(latest)
 
     @pytest.mark.asyncio
     async def test_configured_path_is_preferred_to_a_conventional_one(
@@ -1545,8 +1652,8 @@ class TestCrossLangSpecDiscovery:
         self._conventional(tmp_path, "openapi.json")
         svc.config.openapi_path = tmp_path / "custom.json"
         svc.config.openapi_path.write_text(self.SPEC)
-        data = await svc.cross_lang_data(mode="stats")
-        assert data["result"]["openapi_path"] == str(tmp_path / "custom.json")
+        data = await svc.cross_lang_answer(mode="stats")
+        assert data["_result"]["openapi_path"] == str(tmp_path / "custom.json")
 
     @pytest.mark.asyncio
     async def test_configured_path_that_is_missing_does_not_fall_back(
@@ -1554,7 +1661,7 @@ class TestCrossLangSpecDiscovery:
     ):
         self._conventional(tmp_path, "openapi.json")
         svc.config.openapi_path = tmp_path / "gone.json"
-        data = await svc.cross_lang_data(mode="stats")
+        data = await svc.cross_lang_answer(mode="stats")
         assert (data["ok"], data["reason"]) == (False, "unavailable")
         assert "OpenAPI spec not found" in data["error"]
 
@@ -1569,7 +1676,7 @@ class TestCrossLangSpecDiscovery:
         (root / "public" / "api" / "openapi.json").symlink_to(outside)
         svc = DescryService(_plain_config(root))
 
-        data = await svc.cross_lang_data(mode="stats")
+        data = await svc.cross_lang_answer(mode="stats")
 
         assert (data["ok"], data["reason"]) == (False, "unavailable")
         assert "not configured" in data["error"]
@@ -1599,7 +1706,7 @@ async def test_a_search_during_the_pre_warm_waits_for_it(tmp_path):
     warm = asyncio.create_task(svc._load_embeddings_background())
     await asyncio.sleep(0)
 
-    data = await svc.semantic_data("q")
+    data = await svc.semantic_answer("q")
     await warm
     assert data["ok"]
     assert len(built) == 1
@@ -1612,6 +1719,29 @@ async def test_no_impls_says_they_are_recorded_for_rust(tmp_path):
     result = await DescryService(config).impls("f")
     assert "recorded for Rust code only" in result
     assert "index" not in result
+
+
+@pytest.mark.asyncio
+async def test_impls_answer_has_no_signature_and_the_text_has_it(tmp_path):
+    config = _plain_config(tmp_path)
+    impl = {
+        "id": "FILE:s.rs::Circle::area",
+        "type": "Method",
+        "metadata": {"name": "area", "trait_impl": "Shape", "signature": "fn area()"},
+    }
+    _write_graph(config, nodes=[impl])
+    svc = DescryService(config)
+    answer = await svc.impls_answer("area")
+    assert answer["implementations"] == [
+        {
+            "id": impl["id"],
+            "type": "Circle",
+            "trait": "Shape",
+            "file": "s.rs",
+            "line": None,
+        }
+    ]
+    assert "`fn area()`" in await svc.impls_text(answer)
 
 
 class TestUnresolvedCallsInText:
@@ -1671,7 +1801,7 @@ class TestUnresolvedCallsInText:
     @pytest.mark.asyncio
     async def test_callers_of_a_name(self, svc):
         text = await svc.callers("parse", limit=1)
-        assert "0 caller(s) of 'parse' (+1 possible, +1 unresolved):" in text
+        assert "0 caller(s) of 'FILE:a.py::parse' (+1 possible, +1 unresolved):" in text
         assert "FILE:a.py::run (a.py:5) (one of 2 candidates)" in text
         assert "(1 more unresolved callers, limit 1)" in text
         assert (
@@ -1682,7 +1812,9 @@ class TestUnresolvedCallsInText:
     @pytest.mark.asyncio
     async def test_callees(self, svc):
         text = await svc.callees("run", limit=2)
-        assert "'run' calls 1 function(s) (+1 possible, +1 unresolved):" in text
+        assert (
+            "'FILE:a.py::run' calls 1 function(s) (+1 possible, +1 unresolved):" in text
+        )
         assert "(1 more unresolved callees, limit 2)" in text
         assert "REF:y.read (unresolved)" in await svc.callees("run")
 
@@ -1701,7 +1833,9 @@ class TestUnresolvedCallsInText:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bound", ["max_tokens", "callee_budget"])
+@pytest.mark.parametrize(
+    "bound", ["max_tokens", "callee_budget", "head_lines", "max_output_tokens"]
+)
 async def test_a_context_budget_below_one_is_refused(tmp_path, bound):
     """One of zero listed no callees, as if the symbol called nothing."""
     config = _plain_config(tmp_path)
@@ -1709,6 +1843,34 @@ async def test_a_context_budget_below_one_is_refused(tmp_path, bound):
     result = await DescryService(config).context("FILE:x.py::f", depth=2, **{bound: 0})
     assert isinstance(result, ServiceError)
     assert f"{bound} must be at least 1, got 0." in result
+
+
+@pytest.mark.asyncio
+async def test_callers_of_a_node_id_the_graph_lacks_is_refused(tmp_path):
+    config = _plain_config(tmp_path)
+    _write_graph(config, nodes=[TestSemanticText.NODE])
+    answer = await DescryService(config).callers_answer("FILE:nope.py::ghost")
+    assert (answer["ok"], answer["reason"]) == (False, "not_found")
+
+
+@pytest.mark.asyncio
+async def test_a_context_shown_before_answers_symbol_and_repeated(tmp_path):
+    config = _plain_config(tmp_path)
+    (tmp_path / "x.py").write_text("def f():\n    pass\n")
+    node = {
+        "id": "FILE:x.py::f",
+        "type": "Function",
+        "metadata": {"name": "f", "lineno": 1, "end_lineno": 2},
+    }
+    _write_graph(config, nodes=[node])
+    svc = DescryService(config)
+    first = await svc.context_answer("f", deduplicate=True)
+    again = await svc.context_answer("f", deduplicate=True)
+    assert "callers" in public(first)
+    assert set(public(again)) == {"symbol", "repeated"}
+    assert "[Source shown above" in await svc.context_text(again)
+    # Asked by name, the text says which definition the name was matched to
+    assert "(Matched 'f' → `FILE:x.py::f`)" in await svc.context_text(first)
 
 
 @pytest.mark.asyncio
@@ -1745,5 +1907,234 @@ async def test_search_keeps_semantic_matches_no_keyword_finds(
             ]
 
     svc._semantic_available, svc._SemanticSearcher = True, Searcher
-    data = await svc.search_data(terms, lang=lang)
+    data = await svc.search_answer(terms, lang=lang)
     assert ([n["id"] for n in data["results"]], data["method"]) == (found, "hybrid")
+
+
+@pytest.mark.asyncio
+async def test_a_file_name_several_files_share_is_refused(tmp_path):
+    config = _plain_config(tmp_path)
+    files = ["FILE:a/GlobalUsings.cs", "FILE:b/GlobalUsings.cs"]
+    _write_graph(
+        config,
+        nodes=[
+            {
+                "id": f,
+                "type": "File",
+                "metadata": {"path": f[5:], "name": "GlobalUsings.cs"},
+            }
+            for f in files
+        ],
+    )
+    svc = DescryService(config)
+    answer = await svc.structure_answer("GlobalUsings.cs")
+    assert (answer["reason"], answer["choices"]) == ("ambiguous", files)
+    assert (await svc.structure_answer("a/GlobalUsings.cs"))["file"] == files[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool",
+    [
+        lambda svc, name: svc.quick_answer(name),
+        lambda svc, name: svc.context_answer(name),
+        lambda svc, name: svc.flow_answer(name),
+        lambda svc, name: svc.flatten_answer(name),
+        lambda svc, name: svc.path_answer(name, "FILE:a.py::alpha"),
+        lambda svc, name: svc.evolution_answer(name),
+    ],
+)
+async def test_a_name_no_definition_has_is_refused_with_close_matches(tmp_path, tool):
+    """A part of one name used to answer for that definition unmarked."""
+    config = _plain_config(tmp_path)
+    (tmp_path / "a.py").write_text("def alpha():\n    pass\n")
+    meta = {"name": "alpha", "lineno": 1, "end_lineno": 2}
+    node = {"id": "FILE:a.py::alpha", "type": "Function", "metadata": meta}
+    _write_graph(config, nodes=[node])
+    svc = DescryService(config)
+    answer = await tool(svc, "alph")
+    assert answer["reason"] == "not_found"
+    assert "Close matches:\n  - FILE:a.py::alpha" in answer["error"]
+
+
+@pytest.mark.asyncio
+async def test_crate_counts_the_definitions_of_that_crate_only(tmp_path):
+    """`crate` is the first directory of a definition's path, as `search
+    --crate` reads it, not any part of its ID; one no definition is in
+    finds none."""
+    config = _plain_config(tmp_path)
+    nodes = [
+        {"id": f"FILE:{path}::f", "type": "Function", "metadata": {"name": "f"}}
+        for path in ("lib/a.py", "src/lib.py")
+    ]
+    _write_graph(config, nodes=nodes)
+    q = await DescryService(config)._get_querier()
+    assert DescryService._one_symbol(q, "f", "lib") == ("FILE:lib/a.py::f", None)
+    assert DescryService._one_symbol(q, "f", "src")[0] == "FILE:src/lib.py::f"
+    for crate in ("nope", "a.py"):
+        assert DescryService._one_symbol(q, "f", crate)[1]["reason"] == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_status_languages_are_those_a_lang_filter_names(tmp_path):
+    """A `[syntax.lang_map]` name of no language only tags fences: the
+    repository's TOML text is no language `status` lists."""
+    config = _plain_config(tmp_path)
+    config.syntax_lang_map[".zz"] = "SYSTEM_NOTE.run_index"
+    node = {"id": "FILE:a.zz::f", "type": "Function", "metadata": {"name": "f"}}
+    _write_graph(config, nodes=[node, {**node, "id": "FILE:b.py::g"}])
+    answer = await DescryService(config).status_answer()
+    assert answer["languages"] == ["python"]
+
+
+@pytest.mark.asyncio
+async def test_examples_leave_out_test_code_as_test_detection_says(tmp_path):
+    config = _plain_config(tmp_path, test_path_patterns=("/qa/",))
+    nodes = [
+        {"id": f"FILE:{path}::{name}", "type": "Function", "metadata": {"name": name}}
+        for path, name in (("attest.py", "contest"), ("qa/check.py", "probe"))
+    ]
+    _write_graph(config, nodes=nodes)
+    answer = await DescryService(config).examples_data()
+    shown = json.dumps(answer)
+    assert "contest" in shown and "probe" not in shown
+
+
+@pytest.mark.asyncio
+async def test_flow_refuses_a_target_that_names_no_definition(tmp_path):
+    """`--target` is resolved as `start` is: a name no definition has is
+    not_found, not silently picked."""
+    config = _plain_config(tmp_path)
+    node = {"id": "FILE:a.py::alpha", "type": "Function", "metadata": {"name": "alpha"}}
+    _write_graph(config, nodes=[node])
+    svc = DescryService(config)
+    answer = await svc.flow_answer("FILE:a.py::alpha", target="bet")
+    assert answer["reason"] == "not_found"
+    answer = await svc.flow_answer("FILE:a.py::alpha", target="FILE:a.py::alpha")
+    assert answer["ok"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool",
+    [
+        lambda svc, name: svc.callers_answer(name),
+        lambda svc, name: svc.callees_answer(name),
+    ],
+)
+async def test_callers_and_callees_name_close_matches_not_ambiguity(tmp_path, tool):
+    """A name no definition has is not_found with the close matches, even
+    for the tools that answer for one close match."""
+    config = _plain_config(tmp_path)
+    (tmp_path / "a.py").write_text(
+        "def validate_token_format():\n    pass\n"
+        "def validate_token_check():\n    pass\n"
+    )
+    meta = {"name": "validate_token_format", "lineno": 1, "end_lineno": 2}
+    node1 = {
+        "id": "FILE:a.py::validate_token_format",
+        "type": "Function",
+        "metadata": meta,
+    }
+    meta2 = {"name": "validate_token_check", "lineno": 3, "end_lineno": 4}
+    node2 = {
+        "id": "FILE:a.py::validate_token_check",
+        "type": "Function",
+        "metadata": meta2,
+    }
+    _write_graph(config, nodes=[node1, node2])
+    svc = DescryService(config)
+    answer = await tool(svc, "validate_token")
+    assert answer["reason"] == "not_found"
+    assert "Close matches:" in answer["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool",
+    [
+        lambda svc, name: svc.callers_answer(name),
+        lambda svc, name: svc.callees_answer(name),
+    ],
+)
+async def test_callers_and_callees_do_not_answer_for_one_close_match(tmp_path, tool):
+    """A name exactly one close match has is refused with it named, never
+    answered for with `fuzzy` set."""
+    config = _plain_config(tmp_path)
+    (tmp_path / "a.py").write_text("def frobnicate_all():\n    pass\n")
+    node = {
+        "id": "FILE:a.py::frobnicate_all",
+        "type": "Function",
+        "metadata": {"name": "frobnicate_all", "lineno": 1, "end_lineno": 2},
+    }
+    _write_graph(config, nodes=[node])
+    svc = DescryService(config)
+    answer = await tool(svc, "frobnicate")
+    assert answer["reason"] == "not_found"
+    assert "Close matches:" in answer["error"]
+
+
+@pytest.mark.asyncio
+async def test_callers_of_a_name_nothing_has_is_not_found(tmp_path):
+    """No definition has the name and no call writes it: not an empty
+    success."""
+    config = _plain_config(tmp_path)
+    node = {
+        "id": "FILE:a.py::alpha",
+        "type": "Function",
+        "metadata": {"name": "alpha", "lineno": 1, "end_lineno": 2},
+    }
+    _write_graph(config, nodes=[node])
+    svc = DescryService(config)
+    answer = await svc.callers_answer("nosuchthing")
+    assert answer["ok"] is False
+    assert answer["reason"] == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_the_cli_waits_for_the_embeddings_it_loads(tmp_path, monkeypatch):
+    """A one-shot process answered `loading` after the load it then dropped."""
+    from descry import cli
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".descry.toml").write_text("[timeouts]\nembedding_seconds = 0.01\n")
+    svc = cli._make_service()
+    _write_graph(svc.config)
+
+    class Slow:
+        def __init__(self, graph_path, **kwargs):
+            time.sleep(0.2)
+
+    svc._semantic_available, svc._SemanticSearcher = True, Slow
+    assert isinstance(await svc._get_semantic_searcher(), Slow)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda svc: svc.search_answer(["  "]),
+        lambda svc: svc.semantic_answer(" "),
+        lambda svc: svc.structure_answer(""),
+        lambda svc: svc.impls_answer(" "),
+        lambda svc: svc.search_answer(["x"], symbol_type="Function"),
+        lambda svc: svc.cross_lang_answer("endpoint", "FROB", "/x"),
+    ],
+)
+async def test_every_interface_refuses_the_same_arguments(tmp_path, call):
+    """The service refuses an empty value, a type in another case and an
+    unknown HTTP method, so no interface answers what another refuses."""
+    config = _plain_config(tmp_path)
+    _write_graph(config)
+    answer = await call(DescryService(config))
+    assert answer["reason"] == "invalid"
+
+
+@pytest.mark.asyncio
+async def test_a_search_language_alias_is_taken_in_every_interface(tmp_path):
+    config = _plain_config(tmp_path)
+    _write_graph(config)
+    svc = DescryService(config)
+    assert (await svc.search_answer(["x"], lang="ts"))["ok"]
+    assert "ts" in {member.value for member in LanguageName}

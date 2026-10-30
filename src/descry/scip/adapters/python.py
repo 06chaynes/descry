@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 from descry.scip.adapter import (
@@ -10,10 +9,9 @@ from descry.scip.adapter import (
     CommandSpec,
     DiscoveredProject,
     register,
+    subdir_projects,
 )
 from descry.scip.adapters.typescript import parse_backtick_descriptors
-
-logger = logging.getLogger(__name__)
 
 # A Python environment with no packages installed, in scip-python's format
 _EMPTY_ENVIRONMENT = Path(__file__).parent / "_empty_environment.json"
@@ -62,46 +60,13 @@ class PythonAdapter:
             )
             if not any(in_scope):
                 return []
-            return [DiscoveredProject(name=root.name, root=root, language=self.name)]
-        seen: set[str] = set()
-        projects: list[DiscoveredProject] = []
-
-        for marker in root.glob("*/pyproject.toml"):
-            pkg_dir = marker.parent
-            if pkg_dir.name.startswith(".") or pkg_dir.name in excluded_dirs:
-                continue
-            if not any(pkg_dir.rglob("*.py")):
-                continue
-            if pkg_dir.name in seen:
-                continue
-            seen.add(pkg_dir.name)
-            projects.append(
-                DiscoveredProject(
-                    name=pkg_dir.name,
-                    root=pkg_dir,
-                    language=self.name,
-                )
-            )
-
-        for marker in root.glob("*/setup.py"):
-            pkg_dir = marker.parent
-            if pkg_dir.name.startswith(".") or pkg_dir.name in excluded_dirs:
-                continue
-            if pkg_dir.name in seen:
-                continue
-            if not any(pkg_dir.rglob("*.py")):
-                continue
-            seen.add(pkg_dir.name)
-            projects.append(
-                DiscoveredProject(
-                    name=pkg_dir.name,
-                    root=pkg_dir,
-                    language=self.name,
-                )
-            )
-
-        projects.sort(key=lambda p: p.name)
-        return projects
+            return [DiscoveredProject(name=root.name, root=root)]
+        return subdir_projects(
+            root,
+            excluded_dirs,
+            ("*/pyproject.toml", "*/setup.py"),
+            lambda pkg_dir: any(pkg_dir.rglob("*.py")),
+        )
 
     def build_command(
         self,
@@ -139,6 +104,25 @@ class PythonAdapter:
         # scip-python uses the same backtick-wrapped file-path format as
         # scip-typescript, so we share the parser.
         return parse_backtick_descriptors(raw)
+
+    def leaving(self, defined, root, implemented):
+        """A test of whether a call of a symbol no index defines cannot
+        reach the project: a function or method of a package the indexes
+        define nothing of (`python-stdlib`'s `pathlib/Path#resolve().`) that
+        no symbol of theirs overrides, ``implemented`` naming what they
+        override. ``root`` is not read."""
+        own = {symbol.split(" ")[2] for symbol in defined if symbol.count(" ") >= 4}
+
+        def leaves(symbol: str) -> bool:
+            parts = symbol.split(" ")
+            return (
+                len(parts) >= 5
+                and parts[2] not in own
+                and symbol.endswith(").")
+                and symbol not in implemented
+            )
+
+        return leaves
 
 
 register(PythonAdapter())

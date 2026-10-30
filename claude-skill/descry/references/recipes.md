@@ -92,8 +92,9 @@ descry impls render                          # all implementors of render()
 descry impls render --trait-name Component   # only under Component
 ```
 
-Works cross-language: a method name that appears in both a Rust trait and
-a TypeScript class interface will surface implementations in both.
+Trait implementations are recorded for Rust: `impls` lists what Rust
+`impl` blocks define, not implementations of interfaces in other
+languages.
 
 ## Recipe: "Explore an unfamiliar repo"
 
@@ -125,7 +126,7 @@ the actual invocation, not just the caller's file/line.
 descry cross-lang --mode list --tag auth                       # all auth endpoints
 descry cross-lang --mode endpoint --method POST --path /api/v1/auth/login
 # result includes the backend handler node_id, which you can then:
-descry context <node_id>
+descry context <symbol>
 ```
 
 Requires an OpenAPI spec: set `[cross_lang] openapi_path = "..."` in
@@ -138,8 +139,10 @@ Requires an OpenAPI spec: set `[cross_lang] openapi_path = "..."` in
   target — use `--target`, reduce `--depth`, or start with `path`.
 - **Don't** use `descry search` for behavior-worded queries; `descry semantic`
   is built for that and will do better.
-- **Don't** bypass `ensure` / `status` on a stale graph. Out-of-date graphs
-  produce plausible-looking wrong answers. `descry ensure` is cheap.
+- **Don't** bypass `status` on a stale graph. Out-of-date graphs
+  produce plausible-looking wrong answers. After edits that change
+  structure, `descry index` (not `ensure`, which rebuilds only a graph
+  older than `max_stale_hours`) brings the graph current.
 - **Don't** shell out to grep when the question is structural. Even one
   descry call beats three Greps for "who calls X".
 
@@ -152,5 +155,5 @@ names a symbol, use `Read` to see the full source, `Edit` to change it, and
 1. `descry search` / `descry semantic` / `descry callers` — locate.
 2. `Read` — see the actual code.
 3. `Edit` — change it.
-4. `descry ensure` — if the change affects structure (new symbols, renames),
+4. `descry index` — if the change affects structure (new symbols, renames),
    so subsequent queries see the new layout.

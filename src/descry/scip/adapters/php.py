@@ -17,7 +17,6 @@ move the emitted ``index.scip`` into the descry cache.
 
 from __future__ import annotations
 
-import logging
 import shutil
 from pathlib import Path
 
@@ -26,35 +25,23 @@ from descry.scip.adapter import (
     CommandSpec,
     DiscoveredProject,
     register,
+    subdir_projects,
 )
 from descry.scip.adapters.typescript import parse_backtick_descriptors
-
-logger = logging.getLogger(__name__)
 
 _SCIP_PHP_GLOB_BUG_CACHE: dict[str, bool] = {}
 
 
 def _scip_php_has_glob_bug() -> bool:
-    """Return True when the installed scip-php still has the glob→PCRE
-    crash bug.
+    """Whether the installed scip-php has the glob→PCRE crash bug.
 
-    Detection is by **source inspection**, not version pinning, so
-    this auto-clears as soon as upstream fixes the bug in any future
-    release. We resolve the ``scip-php`` binary, walk to
-    ``src/Composer/Composer.php`` (the file that constructs the bad
-    regex), and look for the canonical buggy pattern:
-
-        $exclusionRegex = '{(' . implode('|', $exclusions) . ')}';
-
-    with ``$exclusions`` assigned directly from the raw composer
-    exclude-from-classmap list (no glob→PCRE translation). When
-    upstream adds a translation step — a ``str_replace('**/'`` call,
-    a ``fnmatch`` → PCRE helper, or a known class-map-generator glob
-    helper like ``GlobMatch`` / ``Glob::toRegex`` — the detector
-    returns False and the pre-check becomes inert.
-
-    The result is cached per-binary-path for the lifetime of the
-    process to avoid repeated filesystem reads.
+    Read from its source, ``src/Composer/Composer.php`` beside the resolved
+    ``scip-php`` binary: the bug is there unless ``loadProjectFiles``
+    translates the raw composer exclude-from-classmap globs before it
+    builds ``'{(' . implode('|', $exclusions) . ')}'`` from them (a
+    ``str_replace('**/'``, a ``fnmatch`` → PCRE helper, ``GlobMatch``,
+    ``Glob::toRegex``). Source that cannot be read counts as buggy. The
+    result is cached per binary path.
     """
     binary = shutil.which("scip-php")
     if binary is None:
@@ -194,31 +181,10 @@ class PhpAdapter:
             # A root package is the one project scip-php indexes.
             if not _has_php_sources(root):
                 return []
-            return [DiscoveredProject(name=root.name, root=root, language=self.name)]
-        seen: set[str] = set()
-        projects: list[DiscoveredProject] = []
-
-        for marker in root.glob("*/composer.json"):
-            pkg_dir = marker.parent
-            if pkg_dir.name.startswith("."):
-                continue
-            if pkg_dir.name in excluded_dirs:
-                continue
-            if pkg_dir.name in seen:
-                continue
-            if not _has_php_sources(pkg_dir):
-                continue
-            seen.add(pkg_dir.name)
-            projects.append(
-                DiscoveredProject(
-                    name=pkg_dir.name,
-                    root=pkg_dir,
-                    language=self.name,
-                )
-            )
-
-        projects.sort(key=lambda p: p.name)
-        return projects
+            return [DiscoveredProject(name=root.name, root=root)]
+        return subdir_projects(
+            root, excluded_dirs, ("*/composer.json",), _has_php_sources
+        )
 
     def build_command(
         self,
@@ -234,23 +200,13 @@ class PhpAdapter:
         exceptions from build_command and logs a warning; the descry
         parser still indexes the PHP sources regardless, so the
         project degrades to regex-only resolution instead of producing
-        a confusing PCRE crash trace.
-
-        Future-proofing: the pre-check runs only when the installed
-        scip-php's source still contains the buggy pattern. Once
-        upstream fixes the glob→PCRE translation in
-        ``src/Composer/Composer.php``, ``_scip_php_has_glob_bug()``
-        returns False and the pre-check is skipped automatically —
-        no user intervention, no config flags.
+        a confusing PCRE crash trace. The pre-check runs only where
+        ``_scip_php_has_glob_bug()`` finds the bug in the installed scip-php.
         """
         if _scip_php_has_glob_bug():
             reason = _scip_php_incompatibility_reason(project.root)
             if reason is not None:
-                logger.warning(
-                    f"SCIP: skipping scip-php for {project.name}: {reason}. "
-                    f"Falling back to regex-only resolution for this package."
-                )
-                raise RuntimeError(f"scip-php incompatibility: {reason}")
+                raise RuntimeError(reason)
 
         argv: list[str] = [self.binary]
         return CommandSpec(argv=argv, cwd=project.root, output_mode="rename")
@@ -260,8 +216,7 @@ class PhpAdapter:
 
         scip-php's descriptor format is not publicly documented. The
         shared backtick helper handles both backtick-wrapped and
-        path-style descriptors, so it's a safe default; verify on a
-        real index during the smoke test and swap if needed.
+        path-style descriptors.
         """
         return parse_backtick_descriptors(raw)
 

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+import pytest
 
 from descry.scip.adapter import AdapterConfig, DiscoveredProject
 from descry.scip.adapters.dart import DartAdapter
-from descry.scip.parser import ScipIndex
 
 
 class TestDartAdapterDiscovery:
@@ -17,7 +19,6 @@ class TestDartAdapterDiscovery:
 
         projects = DartAdapter().discover(tmp_path, set())
         assert len(projects) == 1
-        assert projects[0].language == "dart"
         assert projects[0].root == tmp_path
 
     def test_melos_workspace(self, tmp_path):
@@ -50,6 +51,8 @@ class TestDartAdapterDiscovery:
         the adapter probes both spellings."""
         import shutil
 
+        if os.name == "nt":
+            pytest.skip("the fake indexer is a shell script")
         fake = tmp_path / "scip_dart"
         fake.write_text("#!/bin/sh\nexit 0\n")
         fake.chmod(0o755)
@@ -116,7 +119,7 @@ class TestDartAdapterDiscovery:
 
 class TestDartAdapterBuildCommand:
     def test_positional_dot_arg(self, tmp_path):
-        project = DiscoveredProject(name="app", root=tmp_path, language="dart")
+        project = DiscoveredProject(name="app", root=tmp_path)
         spec = DartAdapter().build_command(
             project, tmp_path / "app.scip", AdapterConfig()
         )
@@ -125,7 +128,7 @@ class TestDartAdapterBuildCommand:
         assert spec.cwd == tmp_path
 
     def test_output_mode_rename(self, tmp_path):
-        project = DiscoveredProject(name="app", root=tmp_path, language="dart")
+        project = DiscoveredProject(name="app", root=tmp_path)
         spec = DartAdapter().build_command(
             project, tmp_path / "app.scip", AdapterConfig()
         )
@@ -136,16 +139,11 @@ class TestScipDartHealthStatus:
     def test_dart_listed_in_scip_status(self):
         from descry.scip import support
 
-        support.reset_scip_state()
         status = support.get_scip_status()
         assert "scip-dart" in status["indexers"]
 
 
 class TestScipDartResolution:
-    def test_dart_stats_bucket_exists(self):
-        idx = ScipIndex([])
-        assert "dart" in idx._resolution_stats
-
     def test_scheme_routes_scip_dart_symbols(self):
         from descry.scip.adapter import adapter_for_scheme
 

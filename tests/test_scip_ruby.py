@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from descry.scip.adapter import AdapterConfig, DiscoveredProject
 from descry.scip.adapters.ruby import RubyAdapter
-from descry.scip.parser import ScipIndex
 
 
 class TestRubyAdapterDiscovery:
@@ -17,7 +16,6 @@ class TestRubyAdapterDiscovery:
 
         assert len(projects) == 1
         assert projects[0].name == tmp_path.name
-        assert projects[0].language == "ruby"
 
     def test_monorepo(self, tmp_path):
         for name in ("svc-a", "svc-b"):
@@ -40,7 +38,7 @@ class TestRubyAdapterDiscovery:
 
 class TestRubyAdapterBuildCommand:
     def test_basic_command(self, tmp_path):
-        project = DiscoveredProject(name="svc", root=tmp_path, language="ruby")
+        project = DiscoveredProject(name="svc", root=tmp_path)
         spec = RubyAdapter().build_command(
             project, tmp_path / "svc.scip", AdapterConfig()
         )
@@ -70,12 +68,5 @@ class TestScipRubyHealthStatus:
     def test_ruby_listed_in_scip_status(self):
         from descry.scip import support
 
-        support.reset_scip_state()
         status = support.get_scip_status()
         assert "scip-ruby" in status["indexers"]
-
-
-class TestScipRubyResolution:
-    def test_ruby_stats_bucket_exists(self):
-        idx = ScipIndex([])
-        assert "ruby" in idx._resolution_stats

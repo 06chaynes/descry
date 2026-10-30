@@ -19,12 +19,12 @@ import bisect
 import re
 from itertools import pairwise
 
-from descry.generate import (
-    _LOOP_RE,
-    _STATEMENT_START_RE,
+from descry import _stdlib
+from descry._parsing import (
+    _SPACES,
     _TRAILING_PATH_RE,
     BaseParser,
-    _bounded_parameters,
+    _blank,
     _bracketed_parts,
     _generic_metadata,
     _innermost,
@@ -34,7 +34,10 @@ from descry.generate import (
     blank_strings,
     is_generated_source,
     source_lines,
+    token_count,
 )
+from descry.rust_parser import _STATEMENT_START_RE
+from descry.ts_parser import _LOOP_RE, _bounded_parameters, _place
 
 # import 'package:foo/bar.dart'; / export 'src/baz.dart'; / part 'foo.g.dart';
 _RE_DIRECTIVE = re.compile(r"\s*(import|export|part)\s+(?!of\b)")
@@ -197,9 +200,11 @@ _RE_CAST_RECEIVER = re.compile(
 )
 
 # The type a declaration gives a name: a class, possibly behind an import
-# prefix, or a number or boolean
+# prefix, or one of the classes `dart:core` names in lower case (`int`)
 _DECLARED_TYPE = (
-    r"(?P<type>(?:[a-z_$][\w$]*\.)?[_$]*[A-Z][\w$]*|int|double|num|bool)"
+    r"(?P<type>(?:[a-z_$][\w$]*\.)?[_$]*[A-Z][\w$]*|"
+    + "|".join(sorted(t for t in _stdlib.load("dart")["types"] if t[:1].islower()))
+    + ")"
     r"(?P<generic><(?:[^<>;(){}=]|<(?:[^<>;(){}=]|<[^<>;(){}=]*>)*>)*>)?\??"
 )
 
@@ -299,7 +304,6 @@ _DART_CONTROL_KEYWORDS = frozenset(
         "break",
         "continue",
         "default",
-        "print",
         "Function",
     }
 )
@@ -397,13 +401,6 @@ def _read_header(lines, index, column=0):
                 text += char
         text += "~" if depth or angle else " "
     return text, starts, len(lines) - 1, len(lines[-1])
-
-
-def _locate(starts, offset):
-    """``(line, column)`` of ``offset`` in a header whose lines start at the
-    offsets ``starts``, the line counted from the header's first."""
-    line = bisect.bisect_right(starts, offset) - 1
-    return line, offset - starts[line]
 
 
 # A clause of a type's heritage, or a base it lists with its type arguments
@@ -715,7 +712,7 @@ class DartParser(BaseParser):
             before = self._read_from(column, self._declared, name, line, self._since)
             before = before or "?"
         for live in valued:
-            origin = f"%{len(self.builder.narrowings)}"
+            origin = f"%{self.builder.serial(self.builder.narrowings)}"
             # The origin path of each value, once its line is read
             values = [None] * len(live)
             self.builder.narrowings[origin] = values, promotion[1], before
@@ -785,9 +782,10 @@ class DartParser(BaseParser):
         list pattern has the variable; None where it is not told."""
         text = self._blocks[0]
         while True:
-            start = re.compile(r"\s*").match(text, start).end()
+            start = _SPACES.match(text, start).end()
+            origin = self._value_origin(*value) if isinstance(value, tuple) else value
             if start == at:
-                return self._value_origin(*value) if isinstance(value, tuple) else value
+                return origin
             named = _RE_OBJECT.match(text, start)
             opened = named.end() - 1 if named else start
             if text[opened] not in "([":
@@ -801,9 +799,6 @@ class DartParser(BaseParser):
             head, tail = elements[index]
             field = _RE_FIELD.match(text, head, tail)
             if named:
-                origin = (
-                    self._value_origin(*value) if isinstance(value, tuple) else value
-                )
                 if not field or origin is None:
                     return None
                 getter = field[1] or re.match(r"[\w$]+", text[at:])[0]
@@ -818,9 +813,7 @@ class DartParser(BaseParser):
             ):
                 start = head
                 continue
-            within = isinstance(value, tuple) and re.compile(r"\s*").match(
-                text, value[0]
-            )
+            within = isinstance(value, tuple) and _SPACES.match(text, value[0])
             if not within or text[within.end()] != text[opened]:
                 return None
             places = self._places(elements)
@@ -1033,7 +1026,7 @@ class DartParser(BaseParser):
                 depth -= 1
             elif token == ":" and colon is None:
                 colon = at
-            elif token in ("", ",", ";", ")", "]", "}", ":"):
+            elif token in _ARM_ENDS or token == ":":
                 return (colon, at) if colon is not None else None
             at += len(token)
 
@@ -1153,7 +1146,7 @@ class DartParser(BaseParser):
                     patterns = []
             return bodies
         at = opened + 1
-        while (at := re.compile(r"\s*").match(text, at).end()) < block[1]:
+        while (at := _SPACES.match(text, at).end()) < block[1]:
             token, arrow = self._operand_end(at, ("=>", *_ARM_ENDS))
             if token != "=>":
                 break
@@ -1315,7 +1308,7 @@ class DartParser(BaseParser):
                     name=name,
                     lineno=at + 1,
                     end_lineno=last + 1,
-                    token_count=(last - first + 1) * 10,
+                    token_count=token_count(first, last),
                     docstring=self.get_leading_docstring(raw_lines, first),
                     **metadata,
                 )
@@ -1334,9 +1327,7 @@ class DartParser(BaseParser):
                     return None
                 kind = " ".join(match["kind"].split())
                 # Read where brackets hide their commas, written from source.
-                heritage = re.sub(
-                    r"\(~*\)", lambda m: " " * len(m[0]), header[match.end() :]
-                )
+                heritage = re.sub(r"\(~*\)", _blank, header[match.end() :])
                 aligned = source[match.end() :]
             opened = lines[at][col : col + 1]
             if opened == "=":
@@ -1369,8 +1360,8 @@ class DartParser(BaseParser):
             else:
                 last = self._statement_end(lines, at, col)[0]
             named = match.start("name") if match["name"] else begin
-            named_at, column = _locate(starts, named)
-            named_at += index
+            named_at, column = _place(starts, named)
+            named_at += index - 1
             written = match["generics"] and source[slice(*match.span("generics"))]
             define(
                 "Class",
@@ -1422,18 +1413,18 @@ class DartParser(BaseParser):
             if kind == "enum":
                 values, value_starts, ended_at, _ = _read_header(lines, at, col + 1)
                 for value in _RE_ENUM_VALUE.finditer(values):
-                    line, column = _locate(value_starts, value.start(1))
+                    line, column = _place(value_starts, value.start(1))
                     value_id = f"{type_id}::{value[1]}"
                     self.builder.add_node(
                         value_id,
                         "Constant",
                         name=value[1],
-                        lineno=at + line + 1,
+                        lineno=at + line,
                         docstring="",
                         value_type=name,
                     )
                     self.builder.add_edge(type_id, value_id, "DEFINES")
-                    declared_at.setdefault(at + line, set()).add(column)
+                    declared_at.setdefault(at + line - 1, set()).add(column)
                 return ended_at + 1
             return at + 1
 
@@ -1467,8 +1458,8 @@ class DartParser(BaseParser):
                 re.match(r"[\w$]*", match["type"] or "")[0],
             } & _STATEMENT_KEYWORDS:
                 return None
-            named_at, column = _locate(starts, match.start("name"))
-            named_at += index
+            named_at, column = _place(starts, match.start("name"))
+            named_at += index - 1
             if not match["params"] and accessor != "get":
                 # A variable or a field, and those declared with it.
                 valued = match["modifiers"] or match["type"]

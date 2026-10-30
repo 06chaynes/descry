@@ -1,0 +1,19 @@
+{
+  "callers": {
+    "FILE:src/gt/Reader.java::Reader::parse": {"resolved": ["FILE:src/gt/Io.java::Io::load"], "candidate": []},
+    "FILE:src/gt/Order.java::Order::parse": {"resolved": [], "candidate": []},
+    "FILE:src/gt/User.java::User::rename": {"resolved": ["FILE:src/gt/Main.java::Main::main"], "candidate": []},
+    "FILE:src/gt/Base.java::Base::save": {"resolved": ["FILE:src/gt/User.java::User::rename"], "candidate": []},
+    "FILE:src/gt/Base.java::Base::validate": {"resolved": ["FILE:src/gt/Base.java::Base::save"], "candidate": []}
+  },
+  "callees": {
+    "FILE:src/gt/Main.java::Main::main": {
+      "resolved": ["FILE:src/gt/User.java::User", "FILE:src/gt/User.java::User::rename", "FILE:src/gt/Io.java::Io::load", "FILE:src/gt/Reader.java::Reader"]
+    }
+  },
+  "flatten": {"FILE:src/gt/User.java::User": ["rename", "save", "validate"]},
+  "path": [
+    ["FILE:src/gt/Main.java::Main::main", "FILE:src/gt/Reader.java::Reader::parse", ["FILE:src/gt/Io.java::Io::load", "FILE:src/gt/Reader.java::Reader::parse"]]
+  ],
+  "refused": ["parse", "validate"]
+}

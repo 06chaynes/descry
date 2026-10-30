@@ -37,6 +37,15 @@ processor:
   key. A derive macro of the prelude is in `scope` too, as the trait it
   implements (`Debug`), and a variant as its enum's key and its name
   (`std::option::Option::Some`).
+- `by_argument` has, for a method that returns an associated type of the
+  type of an argument (`[T]::get<I: SliceIndex<[T]>>` returns
+  `Option<&I::Output>`), what it returns for each type an impl of the trait
+  fits, and under `{integer}` what every integer type's impl returns where
+  they agree, where that says more than its return type in `methods`.
+- `lang` has the key of each type that is a language item, by the item's
+  name (`Range` for what `a..b` makes), and `same` the type each other
+  path a type is importable by, and each alias of a type without
+  arguments, names (`std::os::fd::RawFd`: `std::os::raw::c_int`).
 """
 
 import json
@@ -105,6 +114,40 @@ def _callables(generics):
         if signature:
             called[name] = (signature["inputs"], signature["output"])
     return called
+
+
+# The primitive types an integer literal without a suffix may be
+INTEGERS = {
+    *(f"{sign}{bits}" for sign in "iu" for bits in (8, 16, 32, 64, 128)),
+    "isize",
+    "usize",
+}
+
+
+def _replaced(node, old, new):
+    """``node`` with each node equal to ``old`` in it written ``new``."""
+    if node == old:
+        return new
+    if isinstance(node, dict):
+        return {k: _replaced(v, old, new) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_replaced(v, old, new) for v in node]
+    return node
+
+
+def _projection(node, parameter):
+    """The `<P as Trait>::Name` of the type parameter ``parameter`` that the
+    rustdoc type ``node`` is written with, None where it has none."""
+    if isinstance(node, dict):
+        held = node.get("qualified_path")
+        if held and held["self_type"] == {"generic": parameter}:
+            return held
+        values = node.values()
+    elif isinstance(node, list):
+        values = node
+    else:
+        return None
+    return next((p for v in values if (p := _projection(v, parameter))), None)
 
 
 def _agreed(written):
@@ -187,8 +230,17 @@ class Generator:
         self.types = {}  # key -> entry, its bases still to be merged
         self.variants = {}
         self.callbacks = {}
+        self.by_argument = {}
         # key -> [(trait, arguments, associated types, bounded parameters, borrow)]
         self.impls = {}
+        # trait identity -> [(crate, impl)] of every impl of it
+        self.trait_impls = {}
+        for crate, data in self.crates.items():
+            for item in data["index"].values():
+                impl = isinstance(item["inner"], dict) and item["inner"].get("impl")
+                if impl and impl["trait"] and not impl["is_negative"]:
+                    trait = self._reference(crate, impl["trait"]["id"])
+                    self.trait_impls.setdefault(trait, []).append((crate, impl))
 
     def _reference(self, crate, item_id):
         entry = self.crates[crate]["paths"].get(str(item_id))
@@ -319,7 +371,9 @@ class Generator:
             self.impls[key] = []
         return self.types[key]
 
-    def _add_functions(self, crate, key, item_ids, names, public_only):
+    def _add_functions(
+        self, crate, key, item_ids, names, public_only, implementor=None
+    ):
         index = self.crates[crate]["index"]
         for item_id in item_ids:
             item = index[str(item_id)]
@@ -353,6 +407,138 @@ class Generator:
             record(table, item["name"], returns)
             if takes:
                 record(self.callbacks.setdefault(key, {}), item["name"], takes)
+            argued = implementor and self._argued(
+                crate, item["inner"]["function"], named, implementor
+            )
+            if argued:
+                record(self.by_argument.setdefault(key, {}), item["name"], argued)
+
+    def _argued(self, crate, function, names, implementor):
+        """``{argument position: {type: return type}}`` of a method whose
+        return type is an associated type of the type of an argument, the
+        method's own parameter `I: Trait<..>`, as each impl of the trait
+        whose arguments fit gives it, and under `{integer}` what every
+        impl for an integer type gives alike; None for any other method."""
+        signature = function["sig"]
+        inputs = [node for name, node in signature["inputs"] if name != "self"]
+        own = {p["name"] for p in function["generics"]["params"]}
+        for position, node in enumerate(inputs):
+            parameter = node.get("generic")
+            if parameter not in own:
+                continue
+            projected = _projection(signature["output"], parameter)
+            bounds = [t for n, t in _bounds(function["generics"]) if n == parameter]
+            if not projected or len(bounds) != 1:
+                continue
+            trait = self._reference(crate, bounds[0]["id"])
+            wanted = _replaced(
+                self._arguments_nodes(bounds[0]), {"generic": "Self"}, implementor
+            )
+            given, integers = {}, set()
+            for other, impl in self.trait_impls.get(trait, ()):
+                variables = {p["name"] for p in impl["generics"]["params"]}
+                bound = {}
+                written = self._arguments_nodes(impl["trait"])
+                if not self._unify(other, written, crate, wanted, variables, bound):
+                    continue
+                output = next(
+                    (
+                        other_item["inner"]["assoc_type"]["type"]
+                        for i in impl["items"]
+                        if (other_item := self.crates[other]["index"][str(i)])["name"]
+                        == projected["name"]
+                        and other_item["inner"].get("assoc_type", {}).get("type")
+                    ),
+                    None,
+                )
+                identity = self._implementor(other, impl["for"])[0]
+                key = self.keys.get(identity)
+                if output is None or key is None:
+                    continue
+                for variable, held in bound.items():
+                    output = _replaced(output, {"generic": variable}, held)
+                text = self._type(
+                    crate,
+                    _replaced(
+                        signature["output"], {"qualified_path": projected}, output
+                    ),
+                    names,
+                )
+                given[key] = text
+                if identity[0] == "primitive" and identity[1][0] in INTEGERS:
+                    integers.add(text)
+            if len(integers) == 1:
+                given["{integer}"] = integers.pop()
+            return {str(position): given} if given else None
+        return None
+
+    def _lang(self):
+        """The key of each type that is a language item, by the item's name,
+        as `#[lang = ...]` marks it: what `a..b` is, `Range`."""
+        found = {}
+        for identity, (_, item) in self.defined.items():
+            key = self.keys.get(identity)
+            for attribute in item.get("attrs") or ():
+                text = attribute.get("other", "") if isinstance(attribute, dict) else ""
+                named = re.search(r"\bLang\((\w+)\)", text)
+                if named and key and identity[0] in TYPE_KINDS:
+                    found[named[1]] = key
+        return found
+
+    def _told(self):
+        """`by_argument` with only what an argument's type tells beyond the
+        return type the method is written with."""
+        told = {}
+        for key, methods in self.by_argument.items():
+            for name, positions in methods.items():
+                plain = self.types[key]["methods"].get(name)
+                for position, given in (positions or {}).items():
+                    kept = {t: r for t, r in given.items() if r != plain}
+                    if kept:
+                        told.setdefault(key, {}).setdefault(name, {})[position] = kept
+        return told
+
+    def _unify(self, crate, pattern, target_crate, target, variables, bound):
+        """Whether ``pattern``, rustdoc type nodes of ``crate`` in which the
+        names ``variables`` are any type, can be ``target``, of
+        ``target_crate``; ``bound`` takes the type each variable is."""
+        if isinstance(pattern, dict) and pattern.get("generic") in variables:
+            held = bound.setdefault(pattern["generic"], target)
+            return held == target
+        if isinstance(pattern, list) and isinstance(target, list):
+            return len(pattern) == len(target) and all(
+                self._unify(crate, p, target_crate, t, variables, bound)
+                for p, t in zip(pattern, target)
+            )
+        if not (isinstance(pattern, dict) and isinstance(target, dict)):
+            return pattern == target
+        if pattern.keys() != target.keys():
+            return False
+        if "resolved_path" in pattern:
+            mine, theirs = pattern["resolved_path"], target["resolved_path"]
+            if self._reference(crate, mine["id"]) != self._reference(
+                target_crate, theirs["id"]
+            ):
+                return False
+            return self._unify(
+                crate,
+                self._arguments_nodes(mine),
+                target_crate,
+                self._arguments_nodes(theirs),
+                variables,
+                bound,
+            )
+        return all(
+            self._unify(crate, pattern[k], target_crate, target[k], variables, bound)
+            for k in pattern
+            if k not in ("id", "path", "lifetime")
+        )
+
+    @staticmethod
+    def _arguments_nodes(path):
+        """The type nodes of a path's angle-bracketed arguments."""
+        args = (path.get("args") or {}).get("angle_bracketed", {}).get("args", ())
+        return [a.get("type") for a in args if "lifetime" not in a]
 
     def _implementor(self, crate, node):
         """``(identity, type arguments, borrow)`` of the type an impl is
@@ -448,7 +634,9 @@ class Generator:
                 if name in names and output and "generic" in output:
                     names.setdefault(output["generic"], names[name])
             if impl["trait"] is None:
-                self._add_functions(crate, keys[0], impl["items"], names, True)
+                self._add_functions(
+                    crate, keys[0], impl["items"], names, True, impl["for"]
+                )
                 return
         associated = {
             index[str(item_id)]["name"]: self._type(
@@ -569,6 +757,12 @@ class Generator:
             entry["bases"] = self._bases(key, own_bounds.get(key, set()))
             if aliases.get(key, "_") != "_":
                 entry["bases"] = [aliases[key]]
+        # An alias of a type without its arguments, `RawFd` of `c_int`
+        same = {
+            key: target
+            for key, target in aliases.items()
+            if target != "_" and "<" not in target and not self.types[key]["params"]
+        }
         functions = {}
         for identity, paths in self.paths.items():
             key = self.keys[identity]
@@ -586,6 +780,7 @@ class Generator:
                 for path in paths - {key}:
                     self.types[path] = new_type(params)
                     self.types[path]["bases"] = [target]
+                    same[path] = key
         versions = {
             " ".join(crate["crate_version"].split()) for crate in self.crates.values()
         }
@@ -598,7 +793,17 @@ class Generator:
             key: {name: takes for name, takes in methods.items() if takes}
             for key, methods in self.callbacks.items()
         }
-        return source, self.types, functions, self.scope, self.variants, callbacks
+        return {
+            "source": source,
+            "types": self.types,
+            "functions": functions,
+            "scope": self.scope,
+            "variants": self.variants,
+            "callbacks": callbacks,
+            "by_argument": self._told(),
+            "lang": self._lang(),
+            "same": same,
+        }
 
 
 def build(directory):

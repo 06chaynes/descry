@@ -1,0 +1,91 @@
+{
+  "callers": {
+    "FILE:src/io.js::Reader::parse": {
+      "resolved": [
+        "FILE:src/io.js::load"
+      ],
+      "candidate": [
+        "FILE:src/io.js::guess"
+      ]
+    },
+    "FILE:src/models.js::Order::parse": {
+      "resolved": [],
+      "candidate": [
+        "FILE:src/io.js::guess"
+      ]
+    },
+    "FILE:src/models.js::Base::save": {
+      "resolved": [
+        "FILE:src/models.js::User::rename"
+      ],
+      "candidate": []
+    },
+    "FILE:src/models.js::Base::validate": {
+      "resolved": [
+        "FILE:src/models.js::Base::save"
+      ],
+      "candidate": []
+    },
+    "FILE:src/models.js::User::rename": {
+      "resolved": [
+        "FILE:src/main.js::main"
+      ],
+      "candidate": []
+    }
+  },
+  "callees": {
+    "FILE:src/main.js::main": {
+      "resolved": [
+        "FILE:src/models.js::User",
+        "FILE:src/models.js::User::rename",
+        "FILE:src/io.js::load"
+      ]
+    },
+    "FILE:src/io.js::load": {
+      "resolved": [
+        "FILE:src/io.js::Reader",
+        "FILE:src/io.js::Reader::parse"
+      ]
+    },
+    "FILE:src/io.js::guess": {
+      "resolved": [],
+      "candidate": [
+        "thing.parse"
+      ]
+    },
+    "FILE:src/main.js::misuse": {
+      "resolved": [
+        "FILE:src/models.js::User"
+      ],
+      "unresolved": [
+        "user.parse"
+      ]
+    }
+  },
+  "flatten": {
+    "FILE:src/models.js::User": [
+      "rename",
+      "save",
+      "validate"
+    ]
+  },
+  "path": [
+    [
+      "FILE:src/main.js::main",
+      "FILE:src/io.js::Reader::parse",
+      [
+        "FILE:src/io.js::load",
+        "FILE:src/io.js::Reader::parse"
+      ]
+    ]
+  ],
+  "refused": [
+    "parse",
+    "validate"
+  ],
+  "external": {
+    "FILE:src/io.js::Reader::parse": [
+      "JSON.parse"
+    ]
+  }
+}

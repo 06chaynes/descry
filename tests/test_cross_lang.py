@@ -1,10 +1,12 @@
 """Tests for descry.cross_lang — endpoint -> backend handler tracing."""
 
+import asyncio
 import json
 
 import pytest
 
 from descry.cross_lang import CrossLangTracer
+from descry.handlers import DescryConfig, DescryService
 
 SPEC = {
     "openapi": "3.0.0",
@@ -33,8 +35,9 @@ SPEC = {
             "get": {"operationId": "health_check", "tags": ["Ops"]},
             # No operationId: nothing to map to a handler.
             "put": {"summary": "anonymous"},
-            # Outside the supported method set.
             "options": {"operationId": "health_options"},
+            # No HTTP method: an extension of the path item.
+            "x-internal": {"operationId": "health_internal"},
         },
     },
 }
@@ -85,6 +88,12 @@ def graph_path(tmp_path):
     return _write_json(tmp_path / "codebase_graph.json", GRAPH)
 
 
+def _operation(tracer, method, path):
+    """The operationId of the endpoint ``method`` ``path``, or None."""
+    info = tracer.get_handler_info(method, path)
+    return info and info["operationId"]
+
+
 @pytest.fixture
 def tracer(spec_path):
     return CrossLangTracer(str(spec_path))
@@ -108,6 +117,7 @@ class TestParseOpenapi:
             ("GET", "/actions/{id}"),
             ("GET", "/files/{name}.json"),
             ("GET", "/health"),
+            ("OPTIONS", "/health"),
             ("POST", "/actions"),
         ]
 
@@ -123,7 +133,7 @@ class TestParseOpenapi:
     def test_missing_spec_yields_empty_tracer(self, tmp_path):
         tracer = CrossLangTracer(str(tmp_path / "absent.json"))
         assert tracer.path_to_operation == {}
-        assert tracer.endpoint_to_handler("GET", "/actions") is None
+        assert _operation(tracer, "GET", "/actions") is None
         assert tracer.list_endpoints() == []
 
     @pytest.mark.parametrize(
@@ -134,7 +144,7 @@ class TestParseOpenapi:
         path = _write_json(tmp_path / "openapi.json", spec)
         tracer = CrossLangTracer(str(path))
         assert tracer.path_to_operation == {}
-        assert tracer.endpoint_to_handler("GET", "/actions") is None
+        assert _operation(tracer, "GET", "/actions") is None
 
     def test_non_object_path_items_and_operations_are_skipped(self, tmp_path):
         spec = {
@@ -152,6 +162,20 @@ class TestParseOpenapi:
         tracer = CrossLangTracer(str(path))
         assert list(tracer.path_to_operation) == [("DELETE", "/mixed")]
 
+    def test_an_operation_is_under_its_lower_case_field_only(self, tmp_path):
+        """OpenAPI's operation fields are lower case: `GET` is no operation,
+        and does not stand in for `get`."""
+        spec = {
+            "paths": {
+                "/items": {
+                    "get": {"operationId": "listItems", "tags": ["items"]},
+                    "GET": {"operationId": "upperGet"},
+                }
+            }
+        }
+        tracer = CrossLangTracer(str(_write_json(tmp_path / "openapi.json", spec)))
+        assert _operation(tracer, "GET", "/items") == "listItems"
+
     def test_malformed_spec_yields_empty_tracer(self, tmp_path):
         bad = tmp_path / "openapi.json"
         bad.write_text("{not json", encoding="utf-8")
@@ -168,40 +192,48 @@ class TestParseOpenapi:
 
 class TestEndpointToHandler:
     def test_exact_path(self, tracer):
-        assert tracer.endpoint_to_handler("GET", "/actions") == "list_actions"
-        assert tracer.endpoint_to_handler("POST", "/actions") == "create_action"
+        assert _operation(tracer, "GET", "/actions") == "list_actions"
+        assert _operation(tracer, "POST", "/actions") == "create_action"
 
-    def test_method_is_case_insensitive(self, tracer):
-        assert tracer.endpoint_to_handler("get", "/actions") == "list_actions"
+    def test_method_is_case_insensitive(self, spec_path):
+        config = DescryConfig(
+            project_root=spec_path.parent,
+            openapi_path=spec_path,
+            enable_embeddings=False,
+        )
+        answer = asyncio.run(
+            DescryService(config).cross_lang_answer("endpoint", "get", "/actions")
+        )
+        assert answer["endpoint"]["operation_id"] == "list_actions"
 
     def test_method_must_match(self, tracer):
-        assert tracer.endpoint_to_handler("PATCH", "/actions") is None
+        assert _operation(tracer, "PATCH", "/actions") is None
 
     def test_path_parameter(self, tracer):
-        assert tracer.endpoint_to_handler("GET", "/actions/abc123") == "get_action"
-        assert tracer.endpoint_to_handler("DELETE", "/actions/7") == "delete_action"
+        assert _operation(tracer, "GET", "/actions/abc123") == "get_action"
+        assert _operation(tracer, "DELETE", "/actions/7") == "delete_action"
 
     def test_path_parameter_does_not_span_segments(self, tracer):
-        assert tracer.endpoint_to_handler("GET", "/actions/1/2") is None
-        assert tracer.endpoint_to_handler("GET", "/actions/") is None
+        assert _operation(tracer, "GET", "/actions/1/2") is None
+        assert _operation(tracer, "GET", "/actions/") is None
 
     def test_literal_path_beats_parameterised_one(self, tracer):
-        assert tracer.endpoint_to_handler("GET", "/actions/search") == "search_actions"
+        assert _operation(tracer, "GET", "/actions/search") == "search_actions"
 
     def test_regex_metacharacters_in_spec_path_are_literal(self, tracer):
-        assert tracer.endpoint_to_handler("GET", "/files/a.json") == "get_file_json"
+        assert _operation(tracer, "GET", "/files/a.json") == "get_file_json"
         # An unescaped "." would let any character stand in for the dot.
-        assert tracer.endpoint_to_handler("GET", "/files/aXjson") is None
+        assert _operation(tracer, "GET", "/files/aXjson") is None
 
     def test_unknown_path(self, tracer):
-        assert tracer.endpoint_to_handler("GET", "/nope") is None
+        assert _operation(tracer, "GET", "/nope") is None
 
 
 class TestApiPrefixes:
     @pytest.mark.parametrize("prefix", ["/api/v1", "/api/v2", "/api"])
     def test_default_prefixes_are_stripped(self, tracer, prefix):
-        assert tracer.endpoint_to_handler("GET", f"{prefix}/actions") == "list_actions"
-        assert tracer.endpoint_to_handler("GET", f"{prefix}/actions/9") == "get_action"
+        assert _operation(tracer, "GET", f"{prefix}/actions") == "list_actions"
+        assert _operation(tracer, "GET", f"{prefix}/actions/9") == "get_action"
 
     def test_prefix_stripping_applies_to_handler_info(self, tracer):
         info = tracer.get_handler_info("GET", "/api/v1/health")
@@ -213,18 +245,16 @@ class TestApiPrefixes:
             tmp_path / "root.json", {"paths": {"/": {"get": {"operationId": "index"}}}}
         )
         tracer = CrossLangTracer(str(spec))
-        assert tracer.endpoint_to_handler("GET", "/api/v1") == "index"
+        assert _operation(tracer, "GET", "/api/v1") == "index"
 
     def test_custom_prefixes_replace_the_defaults(self, spec_path):
         tracer = CrossLangTracer(str(spec_path), api_prefixes=["/svc"])
-        assert tracer.endpoint_to_handler("GET", "/svc/actions") == "list_actions"
-        assert tracer.endpoint_to_handler("GET", "/api/v1/actions") is None
+        assert _operation(tracer, "GET", "/svc/actions") == "list_actions"
+        assert _operation(tracer, "GET", "/api/v1/actions") is None
 
     def test_nested_prefixes_are_stripped_one_at_a_time(self, spec_path):
         tracer = CrossLangTracer(str(spec_path), api_prefixes=["/gateway", "/api"])
-        assert (
-            tracer.endpoint_to_handler("GET", "/gateway/api/actions") == "list_actions"
-        )
+        assert _operation(tracer, "GET", "/gateway/api/actions") == "list_actions"
 
     @pytest.mark.parametrize("prefixes", [[""], ["", "/api"], ["/"], ["/", ""]])
     @pytest.mark.parametrize("path", ["/nope", "/", "", "/api/nope"])
@@ -232,12 +262,12 @@ class TestApiPrefixes:
         self, spec_path, prefixes, path
     ):
         tracer = CrossLangTracer(str(spec_path), api_prefixes=prefixes)
-        assert tracer.endpoint_to_handler("GET", path) is None
+        assert _operation(tracer, "GET", path) is None
         assert tracer.get_handler_info("GET", path) is None
 
     def test_empty_prefix_does_not_hide_the_ones_after_it(self, spec_path):
         tracer = CrossLangTracer(str(spec_path), api_prefixes=["", "/api"])
-        assert tracer.endpoint_to_handler("GET", "/api/actions") == "list_actions"
+        assert _operation(tracer, "GET", "/api/actions") == "list_actions"
         assert tracer.get_handler_info("GET", "/api/actions")["path"] == "/actions"
 
 
@@ -322,33 +352,33 @@ class TestGraphLinking:
     def test_handler_info_is_a_copy(self, tracer):
         info = tracer.get_handler_info("GET", "/actions")
         info["operationId"] = "tampered"
-        assert tracer.endpoint_to_handler("GET", "/actions") == "list_actions"
+        assert _operation(tracer, "GET", "/actions") == "list_actions"
         assert "node_id" not in tracer.path_to_operation[("GET", "/actions")]
 
     def test_missing_graph_leaves_endpoints_unlinked(self, spec_path, tmp_path):
         tracer = CrossLangTracer(str(spec_path), str(tmp_path / "absent.json"))
         assert tracer.operation_to_handler == {}
-        assert tracer.endpoint_to_handler("GET", "/actions") == "list_actions"
+        assert _operation(tracer, "GET", "/actions") == "list_actions"
 
     def test_stale_schema_graph_is_rejected_not_linked(self, spec_path, tmp_path):
         stale = _write_json(tmp_path / "stale.json", {**GRAPH, "schema_version": 0})
         tracer = CrossLangTracer(str(spec_path), str(stale))
         assert tracer.operation_to_handler == {}
-        assert tracer.get_stats()["total_endpoints"] == 7
+        assert tracer.get_stats()["total_endpoints"] == 8
 
     def test_undecodable_graph_leaves_endpoints_unlinked(self, spec_path, tmp_path):
         bad = tmp_path / "bad.json"
         bad.write_bytes(b'{"schema_version": 2, "nodes": [], "edges": [], "x": "\xff"}')
         tracer = CrossLangTracer(str(spec_path), str(bad))
         assert tracer.operation_to_handler == {}
-        assert tracer.get_stats()["total_endpoints"] == 7
+        assert tracer.get_stats()["total_endpoints"] == 8
 
 
 class TestListEndpointsAndStats:
     def test_sorted_by_path_then_method(self, tracer):
         listed = [(e["path"], e["method"]) for e in tracer.list_endpoints()]
         assert listed == sorted(listed)
-        assert len(listed) == 7
+        assert len(listed) == 8
 
     def test_tag_filter_is_case_insensitive(self, tracer):
         assert [e["operationId"] for e in tracer.list_endpoints(tag="ops")] == [
@@ -364,7 +394,7 @@ class TestListEndpointsAndStats:
 
     def test_stats(self, linked_tracer, spec_path, graph_path):
         assert linked_tracer.get_stats() == {
-            "total_endpoints": 7,
+            "total_endpoints": 8,
             "linked_to_graph": 2,
             "openapi_path": str(spec_path),
             "graph_path": str(graph_path),

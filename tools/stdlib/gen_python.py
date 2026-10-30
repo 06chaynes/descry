@@ -1,13 +1,17 @@
 """Generate python.json from typeshed's standard-library stubs.
 
-usage: gen_python.py TYPESHED.tar.gz OUTPUT
+usage: gen_python.py SOURCES OUTPUT
 
-TYPESHED.tar.gz is GitHub's archive of one typeshed commit; it is read in
-place, not unpacked.
+SOURCES holds `typeshed-<commit>.tar.gz`, GitHub's archive of one typeshed
+commit, read in place, not unpacked, and `cpython-<tag>-typing.py`, the
+`Lib/typing.py` of the CPython release whose version typeshed's newest
+stubs are for: it says which class each `typing` alias the stubs leave
+opaque (`List = _Alias()`) stands for.
 """
 
 import ast
 import copy
+import re
 import sys
 import tarfile
 from pathlib import Path
@@ -15,7 +19,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from common import main, new_type
+from common import lineage, main, new_type
 
 # The kinds of binding that define a name where they stand.
 OWN = ("class", "function", "value")
@@ -28,11 +32,6 @@ STATIC = ("builtins.staticmethod", "builtins.classmethod")
 # Static or class methods without a decorator (Python Language Reference,
 # "Basic customization" and "Emulating generic types").
 IMPLICITLY_STATIC = ("__new__", "__init_subclass__", "__class_getitem__")
-ATTRIBUTE = (
-    "builtins.property",
-    "types.DynamicClassAttribute",
-    "functools.cached_property",
-)
 ACCESSORS = ("setter", "getter", "deleter")
 UNCHANGED = (
     "typing.overload",
@@ -44,21 +43,19 @@ UNCHANGED = (
 UNIONS = ("typing.Optional", "typing.Union")
 # What says how a variable is used, around the type it holds.
 QUALIFIERS = ("typing.Final", "typing.ClassVar")
-# The names `typing` has for classes of other modules, which the stubs
-# declare without saying what they stand for (PEP 585).
-RENAMED = {
-    "typing.ChainMap": "collections.ChainMap",
-    "typing.Counter": "collections.Counter",
-    "typing.DefaultDict": "collections.defaultdict",
-    "typing.Deque": "collections.deque",
-    "typing.Dict": "builtins.dict",
-    "typing.FrozenSet": "builtins.frozenset",
-    "typing.List": "builtins.list",
-    "typing.OrderedDict": "collections.OrderedDict",
-    "typing.Set": "builtins.set",
-    "typing.Tuple": "builtins.tuple",
-    "typing.Type": "builtins.type",
-}
+# The type qualifiers, which the typing specification has `typing` write
+# around the type a variable holds and no stub marks: `ClassVar` (PEP 526),
+# `Final` (PEP 591), `Annotated` (PEP 593), `Required` and `NotRequired`
+# (PEP 655), `ReadOnly` (PEP 705). Emitted as the `qualifiers` section,
+# without the `typing.`.
+QUALIFIER_NAMES = (
+    "Annotated",
+    "ClassVar",
+    "Final",
+    "NotRequired",
+    "ReadOnly",
+    "Required",
+)
 # What a union says nothing with: no value has a method through them.
 EMPTY = ("None", "typing.Any")
 
@@ -108,15 +105,86 @@ def alternatives(node):
     return [node]
 
 
-def lineage(key, types, scope):
-    """The type `key` and the types it has the methods of, nearest first."""
-    found = [key]
-    for name in found:
-        for base in types[name]["bases"]:
-            head = base.partition("[")[0]
-            if scope.get(head, head) not in found:
-                found.append(scope.get(head, head))
+def _has(key, method, types, scope):
+    """Whether the type `key` has `method`, its own or a base's."""
+    return any(
+        method in types.get(found, {}).get("methods", ())
+        for found in lineage(key, types, "[", scope)
+    )
+
+
+def descriptors(types, scope):
+    """The data descriptors: the types with `__get__` and `__set__`."""
+    return {
+        key
+        for key in types
+        if _has(key, "__get__", types, scope) and _has(key, "__set__", types, scope)
+    }
+
+
+def _arguments(written):
+    """``(name, [argument, ...])`` of a type the data writes,
+    `typing.Generator[typing.Any, None, _T]`."""
+    tree = ast.parse(written, mode="eval").body
+    if not isinstance(tree, ast.Subscript):
+        return ast.unparse(tree), []
+    held = tree.slice.elts if isinstance(tree.slice, ast.Tuple) else [tree.slice]
+    return ast.unparse(tree.value), [ast.unparse(each) for each in held]
+
+
+def awaited(types, scope):
+    """`type` -> the position of its type parameter that awaiting an
+    instance gives: what the generator its `__await__` returns, own or a
+    base's, returns, which `Generator.close` says."""
+    generator = types["typing.Generator"]
+    returned = generator["methods"]["close"].partition("|")[0].strip()
+    position = generator["params"].index(returned)
+
+    def gives(key, bound, seen=()):
+        entry = types.get(key)
+        if entry is None or key in seen:
+            return None
+        if held := entry["methods"].get("__await__"):
+            name, arguments = _arguments(held)
+            if (
+                scope.get(name, name) == "typing.Generator"
+                and len(arguments) > position
+            ):
+                return bound.get(arguments[position])
+            return None
+        for base in entry["bases"]:
+            name, arguments = _arguments(base)
+            name = scope.get(name, name)
+            params = types.get(name, {}).get("params", [])
+            inner = dict(zip(params, (bound.get(a, a) for a in arguments)))
+            if found := gives(name, inner, (*seen, key)):
+                return found
+        return None
+
+    found = {}
+    for key, entry in types.items():
+        param = gives(key, {p: p for p in entry["params"]})
+        if param in entry["params"]:
+            found[key] = entry["params"].index(param)
     return found
+
+
+def context_managers(functions, types, scope):
+    """The decorators that make a function a context manager: those that
+    return a callable of the function's parameters, `Callable[P, M]` for a
+    `ParamSpec` P, whose result M has `__enter__` or `__aenter__`."""
+    found = []
+    for name, returns in functions.items():
+        held = isinstance(returns, str) and re.fullmatch(
+            r"typing\.Callable\[(\w+), ([\w.]+)(?:\[.*\])?\]", returns
+        )
+        entered = held and any(
+            _has(held[2], method, types, scope)
+            for method in ("__enter__", "__aenter__")
+        )
+        if entered and not name.startswith("."):
+            found.append(name)
+    return sorted(found)
 
 
 def merged(returns, params, types, scope):
@@ -169,7 +237,7 @@ def merged(returns, params, types, scope):
         return f"{heads.pop()}[{', '.join(items)}]{optional}"
     keys = sorted(scope.get(head, head) for head in heads)
     if all(key in types for key in keys):
-        lines = [lineage(key, types, scope) for key in keys]
+        lines = [lineage(key, types, "[", scope) for key in keys]
         common = [key for key in lines[0] if all(key in line for line in lines)]
         key = common[0] if common else "builtins.object"
         name = key.rpartition(".")[2] if key in scope.values() else key
@@ -261,6 +329,9 @@ class Stubs:
         # owner -> function -> argument -> what each overload says of the
         # callable passed there: (the types of its parameters, its result)
         self.callbacks = {}
+        # The data descriptors, which a decorator makes a method an
+        # attribute with
+        self.attributes = ()
 
     def find(self, module, name, seen=()):
         """What `name` is in `module`, followed through imports and plain
@@ -401,7 +472,7 @@ class Stubs:
             if role in STATIC:
                 table = statics
                 bound = role != "builtins.staticmethod"
-            elif role in ATTRIBUTE:
+            elif role in self.attributes:
                 name = f".{name}"
             elif role not in UNCHANGED:
                 known = False
@@ -525,7 +596,37 @@ class Speller(ast.NodeTransformer):
         return node
 
 
-def build(archive):
+def typing_aliases(typing_source, stubs_typing):
+    """`typing.Name` -> the class it stands for (PEP 585): each name the
+    stubs bind to an opaque alias or a special form that CPython's
+    `typing.py` makes with `_alias(Class, ...)` or `_TupleType(Class, ...)`."""
+    opaque = {
+        name
+        for name, bound in stubs_typing.names.items()
+        if bound[0] == "value"
+        and isinstance(bound[1], ast.Call)
+        and ast.unparse(bound[1].func) == "_Alias"
+    } | {
+        name
+        for name, written in stubs_typing.typed.items()
+        if ast.unparse(written) == "_SpecialForm"
+    }
+    # Each is a statement of its own line at the top of the module, read
+    # as written: the module may use syntax newer than this Python reads.
+    found = {}
+    for name, target in re.findall(
+        r"^(\w+) = (?:_alias|_TupleType)\(([\w.]+),", typing_source, re.MULTILINE
+    ):
+        if name in opaque:
+            found[f"typing.{name}"] = target if "." in target else f"builtins.{target}"
+    return found
+
+
+def build(sources):
+    sources = Path(sources)
+    (archive,) = sources.glob("typeshed-*.tar.gz")
+    (typing_py,) = sources.glob("cpython-*-typing.py")
+    cpython = typing_py.name.removesuffix("-typing.py").removeprefix("cpython-")
     with tarfile.open(archive) as tar:
         commit = tar.pax_headers["comment"]
         files = {
@@ -558,19 +659,28 @@ def build(archive):
         if "type_check_only" not in marks:
             stubs.scope[name] = f"builtins.{name}"
 
-    types, functions = {}, {}
-    for module, here in modules.items():
-        own = {}
-        for name, bound in here.names.items():
-            if bound[0] == "class":
-                stubs.describe(types, Found("class", module, name, bound[1]))
-            elif bound[0] == "function":
-                for node in bound[1]:
-                    stubs.signature(module, (), node, own, own)
-            elif name in here.typed:
-                held = stubs.held(module, (), here.typed[name])
-                functions[f".{module}.{name}"] = [held]
-        functions |= {f"{module}.{name}": returns for name, returns in own.items()}
+    def collect():
+        stubs.callbacks = {}
+        types, functions = {}, {}
+        for module, here in modules.items():
+            own = {}
+            for name, bound in here.names.items():
+                if bound[0] == "class":
+                    stubs.describe(types, Found("class", module, name, bound[1]))
+                elif bound[0] == "function":
+                    for node in bound[1]:
+                        stubs.signature(module, (), node, own, own)
+                elif name in here.typed:
+                    held = stubs.held(module, (), here.typed[name])
+                    functions[f".{module}.{name}"] = [held]
+            functions |= {f"{module}.{name}": r for name, r in own.items()}
+        return types, functions
+
+    # What a data descriptor decorates is an attribute (Python Data Model,
+    # "Implementing Descriptors"): reading the stubs' methods needs them.
+    types, _ = collect()
+    stubs.attributes = descriptors(types, stubs.scope)
+    types, functions = collect()
     tables = [((), functions)]
     for kind in types.values():
         tables += [(kind["params"], kind["methods"]), (kind["params"], kind["statics"])]
@@ -598,7 +708,7 @@ def build(archive):
             }
     # A class or function under another module's name: the class as a type
     # with the one it is as its base.
-    renamed = dict(RENAMED)
+    renamed = typing_aliases(typing_py.read_text("utf-8"), modules["typing"])
     for module in modules:
         for name in sorted(stubs.exports(module)):
             found = stubs.find(module, name)
@@ -616,7 +726,22 @@ def build(archive):
         params = types[path]["params"]
         types[alias] = new_type(params)
         types[alias]["bases"] = [path + f"[{', '.join(params)}]" * bool(params)]
-    return f"typeshed {commit}, stdlib", types, functions, stubs.scope, None, callbacks
+        # A builtin that is another name of a class (`IOError = OSError`) is
+        # in scope as the class is.
+        module, _, name = alias.rpartition(".")
+        if module == "builtins" and not name.startswith("_"):
+            stubs.scope.setdefault(name, alias)
+    return {
+        "source": f"typeshed {commit}, stdlib; CPython {cpython} typing.py",
+        "attributes": sorted(stubs.attributes),
+        "context_managers": context_managers(functions, types, stubs.scope),
+        "awaited": awaited(types, stubs.scope),
+        "types": types,
+        "functions": functions,
+        "scope": stubs.scope,
+        "callbacks": callbacks,
+        "qualifiers": QUALIFIER_NAMES,
+    }
 
 
 if __name__ == "__main__":

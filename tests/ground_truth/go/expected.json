@@ -1,0 +1,17 @@
+{
+  "callers": {
+    "FILE:io.go::Reader::Parse": {"resolved": ["FILE:io.go::Load"], "candidate": []},
+    "FILE:models.go::Order::Parse": {"resolved": [], "candidate": []},
+    "FILE:models.go::User::Rename": {"resolved": ["FILE:main.go::main"], "candidate": []},
+    "FILE:models.go::User::Save": {"resolved": ["FILE:models.go::User::Rename"], "candidate": []},
+    "FILE:models.go::User::Validate": {"resolved": ["FILE:models.go::User::Save"], "candidate": []}
+  },
+  "callees": {
+    "FILE:main.go::main": {"resolved": ["FILE:models.go::NewUser", "FILE:models.go::User::Rename", "FILE:io.go::Load"]},
+    "FILE:io.go::Load": {"resolved": ["FILE:io.go::Reader::Parse"]}
+  },
+  "path": [
+    ["FILE:main.go::main", "FILE:io.go::Reader::Parse", ["FILE:io.go::Load", "FILE:io.go::Reader::Parse"]]
+  ],
+  "refused": ["Parse"]
+}

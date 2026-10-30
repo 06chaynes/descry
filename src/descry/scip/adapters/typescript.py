@@ -3,20 +3,16 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 from descry.scip.adapter import (
     AdapterConfig,
     CommandSpec,
     DiscoveredProject,
+    descriptor_names,
     register,
+    subdir_projects,
 )
-
-_BACKTICK_DESCRIPTOR_PATTERN = re.compile(
-    r"([a-zA-Z_$][a-zA-Z0-9_$]*)(\([^)]*\)|[#./\[\]])?"
-)
-
 
 _SOURCE_PATTERNS = ("*.ts", "*.tsx", "*.js", "*.jsx")
 
@@ -104,9 +100,7 @@ def _parse_ts_workspace_packages(root: Path) -> list[Path]:
     root_pkg_json = root / "package.json"
     if root_pkg_json.is_file():
         try:
-            import json as _json
-
-            data = _json.loads(
+            data = json.loads(
                 root_pkg_json.read_text(encoding="utf-8", errors="ignore")
             )
         except (OSError, ValueError):
@@ -170,20 +164,7 @@ def parse_backtick_descriptors(raw: str) -> list[str]:
         symbol_portion = raw
     symbol_portion = symbol_portion.lstrip("/")
 
-    names: list[str] = []
-    for match in _BACKTICK_DESCRIPTOR_PATTERN.finditer(symbol_portion):
-        name = match.group(1)
-        suffix = match.group(2) or ""
-        if not name:
-            continue
-        if suffix == "/":
-            continue
-        if suffix.startswith("["):
-            continue
-        if name in _TS_SKIP_KEYWORDS:
-            continue
-        names.append(name)
-    return names
+    return descriptor_names(symbol_portion, _TS_SKIP_KEYWORDS, ("/", "["))
 
 
 class TypeScriptAdapter:
@@ -211,11 +192,7 @@ class TypeScriptAdapter:
            package layouts with no root package or workspace config.
         """
         projects: list[DiscoveredProject] = []
-        seen_paths: set[Path] = set()
-
         for pkg_dir in _parse_ts_workspace_packages(root):
-            if pkg_dir in seen_paths:
-                continue
             if pkg_dir.name.startswith("."):
                 continue
             if any(part in excluded_dirs for part in pkg_dir.relative_to(root).parts):
@@ -224,43 +201,20 @@ class TypeScriptAdapter:
                 continue
             if not _has_ts_js_sources(pkg_dir):
                 continue
-            seen_paths.add(pkg_dir)
             rel = pkg_dir.relative_to(root)
-            projects.append(
-                DiscoveredProject(
-                    name=str(rel),
-                    root=pkg_dir,
-                    language=self.name,
-                )
-            )
+            projects.append(DiscoveredProject(name=rel.as_posix(), root=pkg_dir))
 
         root_pkg = root / "package.json"
         if root_pkg.exists() and (
             _has_src(root) if projects else _has_ts_js_sources(root)
         ):
             # A root package indexes the tree under it.
-            projects.append(
-                DiscoveredProject(name=root.name, root=root, language=self.name)
-            )
+            projects.append(DiscoveredProject(name=root.name, root=root))
 
         if not projects:
-            for package_json in root.glob("*/package.json"):
-                pkg_dir = package_json.parent
-                if pkg_dir.name.startswith("."):
-                    continue
-                if pkg_dir.name in excluded_dirs:
-                    continue
-                if not _has_ts_js_sources(pkg_dir):
-                    continue
-                seen_paths.add(pkg_dir)
-                projects.append(
-                    DiscoveredProject(
-                        name=pkg_dir.name,
-                        root=pkg_dir,
-                        language=self.name,
-                    )
-                )
-
+            return subdir_projects(
+                root, excluded_dirs, ("*/package.json",), _has_ts_js_sources
+            )
         projects.sort(key=lambda p: p.name)
         return projects
 

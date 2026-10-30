@@ -28,7 +28,6 @@ Examples:
 
 from __future__ import annotations
 
-import logging
 import re
 from pathlib import Path
 from xml.etree import ElementTree
@@ -37,14 +36,8 @@ from descry.scip.adapter import (
     AdapterConfig,
     CommandSpec,
     DiscoveredProject,
+    descriptor_names,
     register,
-)
-
-logger = logging.getLogger(__name__)
-
-
-_JAVA_DESCRIPTOR_PATTERN = re.compile(
-    r"([a-zA-Z_$][a-zA-Z0-9_$]*)(\([^)]*\)|[#./\[\]])?"
 )
 
 # The regular files by which scip-java 0.12.3 detects each build tool it
@@ -120,19 +113,8 @@ def _scip_java_runs(directory: Path) -> bool:
     return tools is not None and len(tools) == 1
 
 
+# The Gradle init script, shipped with the package, that strips `-Werror`
 _COMPAT_INIT_SCRIPT_PATH = Path(__file__).parent / "_java_compat.init.gradle"
-
-
-def _compat_init_script() -> Path | None:
-    """Path to the shipped Gradle compat init-script, or None if missing.
-
-    Shipped as part of the descry package so it travels with installs;
-    returns None defensively so adapters still work even if the file is
-    missing (e.g. a broken zip / packaging).
-    """
-    if _COMPAT_INIT_SCRIPT_PATH.exists():
-        return _COMPAT_INIT_SCRIPT_PATH
-    return None
 
 
 def _has_jvm_sources(pkg_dir: Path) -> bool:
@@ -250,7 +232,7 @@ class JavaAdapter:
             settings if _runs_gradle(root) else _lists_modules(root / "pom.xml")
         )
         if runs and aggregates:
-            return [DiscoveredProject(name=root.name, root=root, language=self.name)]
+            return [DiscoveredProject(name=root.name, root=root)]
 
         projects: list[DiscoveredProject] = []
         for pkg_dir in sorted(root.iterdir()):
@@ -260,22 +242,10 @@ class JavaAdapter:
                 continue
             if not _scip_java_runs(pkg_dir) or not _has_jvm_sources(pkg_dir):
                 continue
-            projects.append(
-                DiscoveredProject(
-                    name=pkg_dir.name,
-                    root=pkg_dir,
-                    language=self.name,
-                )
-            )
+            projects.append(DiscoveredProject(name=pkg_dir.name, root=pkg_dir))
 
         if not projects and runs:
-            projects.append(
-                DiscoveredProject(
-                    name=root.name,
-                    root=root,
-                    language=self.name,
-                )
-            )
+            projects.append(DiscoveredProject(name=root.name, root=root))
 
         projects.sort(key=lambda p: p.name)
         return projects
@@ -311,44 +281,28 @@ class JavaAdapter:
         # On Kotlin DSL projects with precompiled-script-plugins, that
         # query-during-config combination is unsupported by Gradle 8.x
         # and there is no flag (incl. -x / --exclude-task) that defers
-        # it past task creation. Skip with a clear log so the user
-        # sees what's happening instead of an opaque scip-java stderr.
+        # it past task creation. Raise with the reason rather than run
+        # into an opaque scip-java stderr.
         # The plugin runs inside Gradle, so only a Gradle build is skipped.
         kotlin_dsl_marker = (
             _detect_kotlin_dsl_buildSrc(project.root) if gradle else None
         )
         if kotlin_dsl_marker is not None:
-            logger.warning(
-                f"SCIP: skipping scip-java for {project.name}: "
+            raise RuntimeError(
                 f"{kotlin_dsl_marker} applies the `kotlin-dsl` Gradle plugin, "
                 f"which scip-java's SemanticdbGradlePlugin cannot index "
-                f"alongside Gradle 8.x precompiled-script-plugin accessors "
-                f"(upstream sourcegraph/scip-java limitation). "
-                f"Falling back to regex-only resolution for this project."
-            )
-            raise RuntimeError(
-                "scip-java incompatibility: kotlin-dsl precompiled-script-plugins "
-                f"in {kotlin_dsl_marker}"
+                f"alongside Gradle 8.x precompiled-script-plugin accessors"
             )
 
         argv: list[str] = [self.binary, "index", "--output", str(out_path)]
-
-        init_script = _compat_init_script() if gradle else None
-        pass_through: list[str] = []
-        if init_script is not None:
-            pass_through.extend(
-                [
-                    f"--init-script={init_script}",
-                    "clean",
-                    "scipPrintDependencies",
-                    "scipCompileAll",
-                ]
-            )
-
-        if pass_through:
-            argv.append("--")
-            argv.extend(pass_through)
-
+        if gradle:
+            argv += [
+                "--",
+                f"--init-script={_COMPAT_INIT_SCRIPT_PATH}",
+                "clean",
+                "scipPrintDependencies",
+                "scipCompileAll",
+            ]
         return CommandSpec(argv=argv, cwd=project.root)
 
     def parse_descriptors(self, raw: str) -> list[str]:
@@ -367,16 +321,7 @@ class JavaAdapter:
             ``org/example/Foo#Inner#method().`` -> ``["Foo", "Inner", "method"]``
             ``org/example/Color#RED.`` -> ``["Color", "RED"]``
         """
-        names: list[str] = []
-        for match in _JAVA_DESCRIPTOR_PATTERN.finditer(raw):
-            name = match.group(1)
-            suffix = match.group(2) or ""
-            if not name:
-                continue
-            if suffix == "/":
-                continue
-            names.append(name)
-        return names
+        return descriptor_names(raw)
 
 
 register(JavaAdapter())

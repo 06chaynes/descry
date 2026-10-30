@@ -2,9 +2,487 @@
 
 All notable changes to Descry will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to pre-1.0 semver (minor-version bumps may include breaking changes; see README versioning stance).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [semver](https://semver.org/) from 1.0.0.
 
-## [Unreleased]
+## [1.0.0] — 2026-10-29
+
+### Breaking
+
+- Every symbol-taking tool asks for `symbol` (a node ID or a name), where
+  some asked for `name` or `node_id`: MCP `descry_callers`, `descry_callees`,
+  `descry_quick`, `descry_evolution`, `descry_context`, `descry_flatten`; the
+  web's `?name=` / `?node_id=` / `?class_node_id=`; the CLI's positional
+  argument names. `docs/UPGRADING.md` lists the interface changes in full.
+- Every failure is `{error, reason}` (and `choices` for a shared name) in
+  every interface, with `reason` one of `invalid`, `ambiguous`, `not_found`,
+  `busy`, `no_graph`, `unavailable`, `loading`, `failed`. Arguments an
+  interface cannot read as their type (the CLI's too, with `--json`),
+  unknown search languages and types (lower case, aliases such as `ts`
+  taken everywhere), an HTTP method no OpenAPI operation can be under, a
+  date git cannot read, and an empty symbol, search, query, file or method
+  name are `invalid` in every interface where some silently answered. The
+  web's own refusals (host, origin, `/api/source`) carry `reason` too.
+- A name several definitions share is refused with every node ID to choose
+  from, by every tool but `search` and `impls`; a name no definition has is
+  `not_found` naming close matches. `callers` and `callees` no longer answer
+  for one close match, and their `fuzzy` field is removed.
+- Structured answers carry IDs, counts and kinds — and an import line, a
+  file path, or an OpenAPI tag, path or operation ID where the answer names
+  one; other repository text stays in the MCP fence. MCP tools return structured content beside the markdown,
+  the web API the same object, and the CLI prints it with `--json`.
+- `search --type` is lower case in every interface; the CLI no longer
+  lowercases it.
+- A C# overload's node ID is `Type::Name#2`, `#3` and on, where it was
+  `Type::overload2_Name`, a name C# source could write.
+- `DESCRY_SCIP_WORKERS` is removed: SCIP indexers run one at a time, and
+  the variable set nothing.
+
+### Security
+
+- `status` and `health` count an embeddings cache only where descry
+  signed it, as the searcher does.
+- A model that fails to load, when the index is built or at the first
+  search, is reported by the kind of its error; its message, which may
+  name what `.descry.toml` configured, goes to the log rather than into an
+  answer.
+- The incremental parse cache is signed: entries carry an HMAC over their
+  content, and an entry descry did not sign is ignored, never run. The key
+  is made in the user's state directory, `descry/parse.key`
+  (`XDG_STATE_HOME`, or `~/.local/state` where that is unset), and never
+  leaves it.
+- A submodule's own config runs no program: its diff stays inline and a
+  working-tree diff starts no git inside it.
+- `.descry.toml` values are type-checked before use: a quoted boolean, a
+  fractional depth, a string where a list belongs, a list entry that is not
+  a string or a number too large to use is ignored with a warning, where it
+  once crashed or silently took effect. A model path written as prose is
+  refused.
+- The web's own refusals (host, origin, `/api/source`) answer the
+  contract's failure shape.
+
+### Added
+
+- Incremental indexing: unchanged files are not re-parsed, and their
+  resolutions are kept with the keys of the tables they read, a node by
+  the fields read of it, so an edit that moves lines re-resolves only the
+  files that read where something is, and an MSBuild `Exists()` or
+  `GetPathOfFileAbove` condition is asked again; a cache entry of another descry
+  version, or one descry did not sign, is re-parsed. A rebuild whose
+  embeddings are all kept loads no model.
+- `descry embedding-models --json`; with `--json`, an argument the CLI
+  cannot read answers `{error, reason}`.
+- C#: a project's `<ImplicitUsings>` and `<Using>` items put their
+  namespaces in scope, read from its `.csproj` and the nearest
+  `Directory.Build.props` and `Directory.Build.targets` at or above it as
+  MSBuild evaluates them: every property first, the files they `<Import>`
+  (an `<ImportGroup>`'s too) in place, then the items in import order
+  (the props file's, the SDK's usings, the project's, the targets file's);
+  `;`-separated lists, nested `<Choose>`, item metadata as attributes or
+  elements, `Static` and `Alias` items as `using static` and aliases,
+  conditions of `==`, `!=`, `<`, `<=`, `>`, `>=`, `Exists()` (compared
+  on either side), string methods, `[MSBuild]::Version…` comparisons and
+  `GetPathOfFileAbove` and `GetDirectoryNameOfFileAbove` (arguments
+  quoted or a bare `$(Name)`), `$(Name)` with the reserved properties
+  (`MSBuildProjectDirectory`, `MSBuildThisFile…` and the like) and the
+  SDK-default ones (`Configuration`, `TargetFrameworkIdentifier`,
+  `RootNamespace`, `AssemblyName`); a project of several target
+  frameworks has what any of its builds has; what a `<Target>` sets is
+  left out, as it is set only when the target runs. A condition of a
+  function it does not read holds for no `Include` and every `Remove`,
+  and an `<Import>` of such a path is not followed; a file that is no XML,
+  or declares a DTD, is not read. The SDK is the `<Project Sdk>` or
+  `<Sdk Name>` one, and its list is generated from the SDK that bundles
+  the pinned runtime.
+
+### Changed
+
+- Resolution: a local declaration shadows an import only over its block,
+  by line and column, whether a `const`, `let`, `function` or `class`, a
+  sibling block's its own (TS/JS); a method of the class or of a base
+  shadows a static import, and a nested class's inherited method comes
+  before its enclosing class's (Java); a Python import after a definition
+  rebinds it, a star import binding only what the module's `__all__`
+  lists (assigned, annotated, `+=`, `append`, `extend`; any name where it
+  is not written out, or is written in a function, deleted, or written
+  through a subscript or by name), and an awaitable is its own type until `await`,
+  `async for` or `async with` takes what it hands on (`awaited`, read from
+  typeshed's `__await__`), a project `async def`'s call a coroutine; the
+  `typing` aliases (`List`) are read from CPython's `typing.py`; a C# type
+  name is looked up namespace by namespace, a namespace's types before the
+  `using`s and aliases of the declaration of it around the code (another
+  declaration of the namespace has its own), a nested type in the class
+  and the types it derives from, a `global using` in its project's files,
+  and one no namespace or `using` reaches is not the project's, an alias
+  of the compilation unit names a path from the global namespace, one in
+  a namespace is read from there, and a dotted path reaches a type
+  through the namespaces around the code; a Java member type, own or
+  inherited (a base's `private` one is not), comes before a single-type
+  import of its name, a qualified call's too; Ruby's `::Name` is the
+  top-level constant, a constant is looked up by `Module.nesting`, then
+  the ancestors, prepended modules first, then `Object`, which a
+  `BasicObject` subclass does not have, and a `class A::B` body looks
+  names up in `A::B` and where it is written, not in `A`; C#
+  overload resolution follows the most derived type that declares an
+  applicable method (by the language's conversions and the library's
+  declared implicit conversions), a protobuf type is found as protoc finds it, Rust
+  match and `matches!` patterns are never calls while guards and
+  `select!` futures stay calls, and a call a receiver cannot reach stays
+  unresolved with its candidates rather than being dropped. A JavaScript
+  call of a name a local of a block or function around binds is no
+  import's, and a local binds no call past its block; a plain function
+  declared in a block of sloppy code is its function's variable too
+  (Annex B: not an `async` or generator one, not in a module, by its
+  syntax or its package's `"type": "module"`, a class body or under a
+  `"use strict"` prologue, nor where a parameter or a `let` of the name
+  around would clash); a named class expression's name is bound in its
+  body; a call of a class without `new`, or of a name before its `let`,
+  `const` or `class` runs, reaches nothing. A JavaScript file importing a
+  package by its name gets what Node's `exports` give it (its subpath's
+  own key, else the longest pattern; the `node`, `module-sync`, `import`
+  or `require` and `default` conditions; a `null` target, or one not
+  found as written, gives nothing), a TypeScript file `types` and its
+  tsconfig's `customConditions` too, as `require` from a CommonJS-format
+  file under node16, node18, node20 and nodenext (a dynamic `import()` as
+  `import`), without `node` under bundler resolution and without
+  `exports` under node10, the default resolution by the TypeScript
+  version where the tsconfig sets neither, and unknown where it extends
+  a config descry does not read. A C or C++ call of the one macro of its
+  name in reach, defined at the call (by the last `#define` or `#undef`
+  of the name above it, an included file read where it is included,
+  once where an include guard around every directive or a `#pragma once`
+  outside any conditional keeps it, a directive or code in an arm no
+  build compiles none: `#if 0`, `#elif 0`, `#if 0 && …`, `#if 1-1`, an
+  arm after one that always holds; a condition's integer arithmetic and
+  comparisons are evaluated as the preprocessor does, each operator at C's
+  precedence and octal, hex and binary literals read as C reads them, and one with an operator descry does
+  not read is left to the macros), is that macro, before any name is looked up, where every
+  build of the call defines it or every other definition of the name is
+  built only where it does; else the call keeps both as candidates. An
+  `#if A || B` arm is one condition, its `#else` the other. A function
+  of a macro's name has its own body; an out-of-line member is one
+  of a class of the namespace it is written in. C++ `->` reaches what a
+  type's `operator->` points at: a library template's first argument only
+  where the data's `pointers` say so, so a `vector`'s or `weak_ptr`'s no
+  longer does, and a project template's member with its arguments. A Rust
+  bare name is looked up block by block, then in its module: an item,
+  then a `use`, then what the scope's globs bring that the caller can
+  see; a path's first name is first an item a function around declares,
+  and may be a module the function or its module declares, a file one
+  (`mod m;`, `#[path]`) too; a module a function declares sees no other
+  item of that function.
+  An impl block holds a type's members where its `use` of the name leads
+  to the type, or the crate has one type of the name; another type of
+  the name lends it none. A `use` path follows every module's `use`s and
+  globs, `extern crate a as b` at a crate root, and of the files
+  `#[cfg]`s declare one module as, the writing file's own; where a
+  `#[cfg]` alternative or another crate's glob may bind the name
+  elsewhere, or the module tree leads to the module but not the item,
+  the name stays unresolved, never chosen by its file's path.
+- `cross_lang` reads every OpenAPI operation method (`head`, `options`
+  and `trace` too), under its lower-case field name only. `evolution --crate` is the first directory of a
+  definition's path, as `search --crate` is, and a crate no definition is
+  in finds none.
+- The C++ standard-library data reads a class's or a method's template
+  parameter as the parameter, not as an alias of its name elsewhere
+  (`basic_string::front` returns `_Traits::char_type`), and its generator
+  reads Clang's AST one declaration at a time without the parts it never
+  reads (peak memory about 1.5 GB, from over 20).
+- C#'s implicit usings hold where the SDK's conditions do: a WPF project
+  has no `System.IO`, a Windows Forms one has `System.Windows.Forms`.
+- `index(path)` reads the path from the project root; `status` tells the
+  SCIP state (`enabled`/`disabled`/`unavailable`/`not_loaded`) and
+  embeddings switched off as `disabled`; `changes` counts and diffs the
+  commits of its range from their merge base. `status` and `health` list
+  the languages a `lang` filter names; a `[syntax.lang_map]` name of none
+  only tags fences.
+- What the library has comes from the generated standard-library data:
+  `_library.py`, the lists of library names the parsers skipped, and the
+  resolver's lists are gone. Read from the data instead: Ruby's
+  never-returning methods (`-> bot`) and its type makers (`Class.new`,
+  `Struct.new`, `Data.define`, from RBS; a maker whose name a project
+  constant shadows, own or a base's, makes nothing: the constant holds
+  what that constant's `new` gives, and a class that derives from
+  `BasicObject` has no Kernel methods), Dart's lower-case core types, Go's
+  GOOS and GOARCH values (`platforms`, from `internal/syslist`, a file
+  name constraining its build as go/build reads it),
+  C++'s pointer-like templates (`pointers`: those whose `->` the compiler,
+  asked, finds reaching their first type argument), and the JavaScript
+  functions that write members onto `exports` (`writers`: `Object.assign`
+  and the like, by their signatures). A base is dropped as the library's where the
+  data has it as written (a `typing` special form, `IOError`,
+  `fmt::Display` through a `use` in an inner module, a C# type of an
+  enclosing namespace, from `global::` or generic, a C++ typedef of
+  `std`, a class of a Node module). A base the language's lookup leaves
+  unknown is never taken as a project type of its name that the lookup
+  does not reach (a Java class of another package not imported, a C++
+  type of a file not compiled with the subtype's); one from another
+  package stays a reference. The data gains `qualifiers`,
+  `evaluators` (read from RBS `[self: self]`), `attributes` and
+  `context_managers` (Python's data descriptors and context-manager
+  decorators, read from typeshed), `implicit`, `implicit_usings` and
+  `platforms`; a
+  Rust method that hands on what a standard type wraps is read from the
+  type's own return types; the .NET data is read from the 10.0.14 runtime.
+- Ruby's `puts`, `require`, `raise` and the other Kernel and Module
+  methods, Dart's `print` and Go's built-ins are calls like any other: the
+  project's own method or function of the name where scope reaches one,
+  the library's otherwise.
+- A Rust `use` path starts at a crate unless the scope it is written in,
+  or a module a glob `use` brings, has a module or item of its first name
+  (`use util::read_all` with a `mod util`, `use Kind::Alpha` with an
+  `enum Kind`): a module named `std` (or `glob`) elsewhere in the project
+  no longer hides the crate. A glob `use` brings what the `use`s of the
+  modules it reaches bind, renamed ones and their globs too, and a `use`
+  in a body on a function's own line is the function's. A Rust base
+  is looked up by the path it is written with. A Rust bare name
+  reaches a variant or associated function only under a glob import of
+  its type; a call on a standard type that holds a project
+  type (`Option<T>`, `Arc<T>`) is answered by that type's data.
+- `0` lifts `[timeouts] query_ms` and `[query] max_nodes`.
+
+### Fixed
+
+- A PHP `new class` reaches its anonymous class where the parser moved
+  lines; it named a class that did not exist.
+- TypeScript parameter types of function types (`f: () => void`) and of
+  parameters with defaults are read; the list was split at `=>`. A
+  `for await (const x of xs)` head binds nothing, and an interceptor whose
+  callback closes on its line ends there.
+- A Python class's decorators are calls, as a function's are.
+- A Rust type alias whose parameter's bound returns a type
+  (`type A<F: Fn() -> u8> = B<F>;`) is read.
+- Git failures other than "not a repository" (git missing, a timeout) are
+  reported as what they are.
+- SCIP honours the configured `excluded_dirs` when it finds projects and
+  hashes their sources, and sees edits to a Rust project under a directory
+  named `target`.
+- The Ruby standard library data keeps the type arguments of a type
+  written from the root (`::Array[Integer]`); the Dart generator reads a
+  libraries directory given itself.
+- The web UI colours the flow tree's type badges.
+- `context` finds the tests of a name with an acronym (`HTTPServer` →
+  `test_http_server`).
+- The MCP server no longer builds embeddings for a graph indexed without
+  them, and pre-warms a graph's own ready embeddings.
+- A deeply nested graph or embeddings sidecar, or a sidecar that is not
+  text, is reported unusable instead of crashing.
+- A `.descry_cache` shipped as a file, or a graph shipped as a directory,
+  is refused with an error.
+- Parser misses: one-line Java anonymous classes hold their methods, Go
+  statements on a `case` line, protobuf package-qualified names, the
+  members and lines of an unnamed C++ struct, and Rust enum variants named
+  as the prelude's (`None`, `Ok`) or written below a variant's opening
+  bracket.
+- The Ruby data has the module functions RBS declares with `self?.`
+  (`Kernel#puts`) and the singleton aliases; the C++ data gives a method
+  the return of its overloads that return a value, written as the public
+  type the library's own typedefs name (`ostringstream::str` is
+  `basic_string`, where it was `void`).
+- `this` inside a nested non-arrow function is the function's own; a
+  relative local embedding model has one cache key, and is loaded, from
+  the project root whatever the cwd; `context.tests` entries are node
+  IDs of test code as `[test_detection]` marks it: of the test files named
+  after the symbol's file (without the `[test_detection]` suffix or the
+  `test_` prefix that makes them tests), the `test_<name>` functions, and
+  the symbol's file's own tests that name it. `examples` and the usage examples of
+  `context` tell tests as `[test_detection]` does.
+- `descry-web` starts when `DESCRY_LOG_LEVEL` names no level
+  (`basic_format`), at WARNING, as the CLI does.
+- A Rust guard whose `if` ends its line or meets `(` keeps its calls, in a
+  `match` or a `matches!`; a
+  function a type has from a trait it derives (`H::default()`) gives that
+  type; a variant a glob `use` brings (`Ok` under `use Outcome::*`) is
+  that variant, before the prelude's. A Ruby call of a Kernel name in a
+  class's method, outside a block, is Kernel's where neither the class's
+  ancestry nor the project's own `Object`, `Kernel` or `BasicObject` has
+  it.
+- `churn` counts a commit for the symbols its lines were in at that
+  commit, as `git log -L` follows a range: today's spans carried back
+  through the file's own history, each side of a merge in its own lines
+  and past one that left the file alone, across renames whatever
+  `log.follow` says, the path read as written, never as a pattern, lines
+  counted at `\n` as git counts them, a `\r` before one kept, today's file
+  matched to the last commit's without the `\r` a checkout writes (Windows'
+  `core.autocrlf`), added lines by
+  the commit's spans and removed ones by its parent's, a merge where it
+  changed a symbol against every parent. It read them against today's
+  lines, so a function added above shifted history onto its neighbours.
+  `changes` reads its range's lines against the symbols as they stood at
+  its ends. A file whose history cannot be read is counted in the
+  partial-results note.
+- `evolution` lists the commits that changed a symbol's own lines, those no
+  definition inside it holds, followed through history as `churn` follows
+  them, so the two count alike; it read `git log -L`, which counted a nested
+  function's changes for the function around it and a merge for neither.
+- `churn --mode files` counts every commit that changed a file, through
+  each parent of a merge, with the generated-file exclusions or without.
+- `flow`'s tree nodes give the node type (`Function`), not its first
+  three letters. The web page's "Show callers" asks for none when
+  unticked, and an unresolved callee opens no context.
+- With SCIP, a Python call scip-python records to a method of a package
+  the project defines nothing of (`pathlib.Path.resolve`) leaves the
+  project, unless a project class overrides that method; it is no
+  possible caller of a project method of its name.
+- An empty `churn`, `changes` or `evolution` names what narrowed it; a
+  failed git step is named without its arguments run into the range, and
+  what git wrote is kept for the text.
+- A JavaScript or TypeScript call of a constant that names a function
+  (`const x = helper`, `const make = Shape.create`, `const y = x`) calls
+  that function; it reached the constant.
+- A Rust trait's path (`Ex::extra(&v)`) calls that trait's method for the
+  receiver's type, the trait's own body where the impl leaves it; it took
+  any method of the name the type had. A method call of a name two traits
+  give the type is the in-scope trait's, so it keeps both as candidates;
+  an inherent method of the name comes first. Where the type has no impl
+  of the trait, the path reaches the blanket impl it meets; the path of a
+  trait from outside (`Display::fmt(&self.inner, f)`) reaches the type's
+  impl, where it was dropped; a trait function without `self`
+  (`Build::build(1)`) keeps the impls as candidates, where it reached the
+  trait's declaration. A Rust argument dereferenced twice (`&**self`) is
+  of a type not known, as a `Deref` impl gives it; it was taken as the
+  type of what it dereferences.
+- A Rust unit struct or unit variant written by its path (`net::Inner`,
+  `Kind::Unit`), passed, bound by `let` or called on (`m::Kind::A.tick()`),
+  is a value of its type, and so is a struct literal written after its
+  modules (`net::Big { a: 1 }`), passed or called on; a call written
+  inside another's arguments gives what it returns to the call around it.
+  Calls on them were unresolved or dropped. A `use` in a block names the
+  first name of such a path, where the path was left unknown; a glob
+  `use` there still leaves it unknown. A tuple struct or variant written
+  bare is its constructor, not a value of its type, where `let f = Tup;`
+  took it as one, and a name bound to such a constructor or to a function
+  (`let make = Kind::Held; make(1)`, `let f = net::make; f()`) calls it, as
+  does a variant called directly (`Kind::Held(1).tick()`); the call was
+  dropped and what it returned unknown. A constant by its path
+  (`Ready::ALL`, `Self::LIST`) is a value of the type it declares, `Self`
+  in it the impl's type. A call reaches no
+  struct but a tuple struct (`m::Same()` beside `struct Same { .. }` is
+  the function).
+- A Rust method called on an element by index (`xs[0].go()`,
+  `self.items[i].go()`, `let x = &xs[i];`) is of what indexing gives: a
+  `Vec`'s, slice's or array's element, a map's value, a project type's
+  `index`; it was unresolved. A method returning `&Self::Output` returns
+  the impl's associated type, as `Self::Output` did. An index of an index
+  (`m["k"][0]`), and one bound by `let` from a project type's `index`,
+  read each in turn. A range index gives a slice, not an element, and the
+  slice's own elements by index; a range inside the index, `xs[at(0..1)]`,
+  does not make it one. An index of what a call returns
+  (`m.get(&1).unwrap()[0]`, `m.get_mut(&1)?[0]`, or `[0]` on a line of its
+  own after one) is of the call's type.
+- A Rust tuple struct's field, `self.0`, is of the type its declaration
+  writes at that position; it had none. In a block for one instantiation,
+  `impl Named<Own>`, a type parameter is the type the block gives it.
+- A Rust `let` with a pattern that ends with `;` before more code on its
+  line, `{ let Pair(x) = p; x.id() }`, and each later one, and a `let ..
+  else { .. };`, binds its names there; the pattern was taken for a call,
+  an edge to `Pair` nothing constructs. A `match` arm's guard,
+  `Some(x) if x.ok() =>`, binds no name: the arm's `x` read the guard's
+  as of no type, on the arm's own line as on the `match`'s. A `match`
+  whose arms are on its own line binds each arm's names, and a `let x = t`
+  of a name the line binds just before (a `for` or a closure on one line)
+  holds what the name does.
+- What a Rust standard method returns where an argument's type decides it
+  (`v.get(0)`, `v.get(0usize)`, `v.get(i as usize)`, `v.get(0..1)`) is
+  known: the generated
+  data's new `by_argument` table holds, for each such method, what each
+  impl of the bound trait gives (`SliceIndex` for `usize` the element, for
+  a range a slice), and an integer literal without a suffix reads as the
+  integer type, a range as the language item its syntax makes (the data's
+  new `lang` table, read from rustdoc's `#[lang]`). `v.get(0).unwrap().id()`
+  was unresolved. An argument of a standard type fits a parameter of an
+  alias of it, `i32` a `RawFd` (the data's new `same`, the type each other
+  path and argument-free alias names).
+- A Rust value is read by one model of Rust's expressions, wherever it is
+  written (a `let`, an argument, a receiver, a field, a pattern's value, a
+  closure's body), over lines too: a `match` or an `if` is what the arms
+  that do not diverge agree on (arms of different types give none), a
+  `loop` what its `break`s give (those naming its label from an inner
+  loop too), a labelled block its own and its `break`s', an `unsafe` block or a block its last expression's, behind
+  `&`, `*`, `?` or `as`. `let x = match ..` and a multi-line `if` were
+  read as of no type.
+- A Rust value's type arguments pick between blocks for one
+  instantiation each (`impl NamedT for Named<Own>` beside `Named<Pair<T>>`),
+  as written on a parameter or in a turbofish literal, `Named::<Own> { .. }`,
+  or made by a tuple struct's call from what it is passed, `Pair(Own)`; the
+  call was unresolved with every block's method; a struct literal's type
+  arguments are those its fields' values give, `Named { t: Own }`, bound
+  by a `let` or not, a field's value a call too (`Named { t: Pair(Own) }`
+  is a `Named<Pair<Own>>`), written over lines as rustfmt writes it, with
+  a method on the line after its `}`; a struct update, `Named { ..base }`,
+  is of its base's type. A Rust block of one expression, `let u = { o };`,
+  is that expression's value. A
+  struct's fields written
+  on its own line, `struct Named<T> { pub t: T }`, have their types.
+- A Rust closure whose block is one expression, `map(|t| { t })`, returns
+  it; what it returned was not known.
+- A Rust block a crate writes for a type of another crate of the project
+  (`impl Wipe for Buf` after `use olib::buffer::Buffer as Buf`) holds that
+  type's methods: `self.clear()` in it and `b.wipe()` on the type were
+  dropped or unresolved.
+- A path whose fields, indexed or not, go on below with their `.` leading
+  (`self` / `.items` / `.iter()`, `this` / `.items[0]` / `.size()`), as
+  rustfmt and prettier write long chains, keeps its receiver, and a Rust
+  `for` whose value is written so binds its pattern; the receiver was
+  lost. So does a line of `?` alone or an index alone between them, a
+  `for` whose value passes a closure with braces, and in TypeScript a
+  field with `?.` leading or after a non-null `!` (`this.deep!.leaf`), one
+  a line ends with too.
+- A method called with its type arguments on what a call returns,
+  `registry().get<S>()`, is its type's member; it was unresolved with no
+  candidates.
+- A TypeScript object type an exported alias writes on one line, `export
+  type Deep = { leaf: Leaf }`, has its fields, as an interface written so
+  has; a value's field of it was of no type.
+- A value of a Rust type alias is of the type it stands for; where another
+  module declared a type of the alias's name, the alias was taken for that
+  type, and calls on its values reached that type's methods. A type and
+  an alias of one name in one module, each under its own `#[cfg]`, are
+  either, so calls on a value of the name keep both as candidates.
+- Rust and TypeScript types of one name in one file (a struct a function
+  declares, in each of two functions) keep their own fields; each took
+  the other's, and none had a type for a field both declare. A Rust
+  `const` or `static` a function declares is seen in that function's body,
+  nested items too, where it was seen in the whole file.
+- A Rust `impl` block is for the type the path in its header names, read
+  from the module the block is in and through its `use`s (`impl Trait for
+  crate::a::Error` beside another `Error`, `impl F` after `use
+  crate::a::Foo as F`), where only the last name was read: calls of its
+  methods reached another type's or none. A block written beside the type's module, `impl
+  T for m::Unit` beside `mod m`, files its methods under the type
+  (`m::Unit::talk`, where they were `Unit::talk`); one written in another
+  module keeps its own node, `Foo::extra`, as a block in another file
+  does.
+- A Rust dependency renamed in its manifest, `tui = { path = "../core",
+  package = "core" }`, or taken with `workspace = true` from a renamed
+  `[workspace.dependencies]` entry, is that project crate; paths through
+  the name were read as an outside crate's and their calls dropped.
+- A Rust block for a standard type a `use` names, `impl Wait for
+  StdChild` after `use std::process::Child as StdChild`, keeps the name
+  written. A value of a standard type the project implements a trait for
+  is of that type, not of the project's blocks for it, and a method of
+  the type's own of the name a trait gives too, which rustc picks by how
+  each takes the receiver, leaves the call unresolved with the trait's
+  as the candidate; the trait's was taken.
+- A Rust trait's path on a type whose impl of the trait is not in the
+  source read (a macro writes it, and may override the trait's body) is
+  unresolved with the impls as candidates; it reached the trait's
+  declaration. A receiver of the trait's own type, as a bound gives it,
+  still reads the trait's function.
+- A call resolved while another is (what a function returns, a call in
+  the arguments) leaves the other as it was; it changed whether the
+  other was written as a path and what it passed, so a Rust call could
+  keep an impl that cannot take its arguments.
+- A JavaScript or TypeScript `#` specifier resolves through the `imports`
+  of the nearest package.json, as Node's do; it was left unresolved.
+- A PHP method called on a property declared no type is one of the methods
+  of its name, as on an undeclared one; it was unresolved with none.
+- C# files keep their resolution from one index to the next.
+- An index with SCIP switched off no longer probes every indexer.
+- `[test_detection] file_suffixes = []` (or `path_patterns = []`) is the
+  list used; it no longer falls back to a third, different list.
+- `[embeddings] model = "./models/x"` is read as a local path.
+- `semantic` with embeddings switched off says so, not that the
+  dependencies are missing.
 
 ## [0.3.4] — 2026-10-23
 

@@ -126,11 +126,11 @@ def test_hashers_leave_fifos(tmp_path, project_type, files):
     for rel in files:
         _fifo(tmp_path / rel)
 
-    ScipCacheManager(tmp_path)._hash_project(tmp_path.name, project_type)
+    ScipCacheManager(tmp_path, set())._hash_project(tmp_path.name, project_type)
 
 
 def test_fifo_checksums_and_index_are_left(tmp_path):
-    mgr = ScipCacheManager(tmp_path)
+    mgr = ScipCacheManager(tmp_path, set())
     _fifo(mgr.checksums_file)
 
     assert mgr._load_checksums() == {}

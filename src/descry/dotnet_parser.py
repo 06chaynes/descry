@@ -15,12 +15,12 @@ from __future__ import annotations
 import posixpath
 import re
 
-from descry.clang_parser import _if_signs
-from descry.generate import (
-    _STATEMENT_START_RE,
+from descry._parsing import (
     BaseParser,
+    _blank,
     _bracketed_parts,
     _closing,
+    _flat,
     _generic_metadata,
     _innermost,
     _strip_generics,
@@ -29,7 +29,10 @@ from descry.generate import (
     is_generated_source,
     record_lambdas,
     source_lines,
+    token_count,
 )
+from descry.clang_parser import _if_signs
+from descry.rust_parser import _STATEMENT_START_RE
 
 # namespace App.Foo  (block) or  namespace App.Foo;  (file-scoped, C# 10+)
 _RE_NAMESPACE = re.compile(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)")
@@ -81,7 +84,7 @@ _RE_DELEGATE = re.compile(
 # IFoo explicitly.
 _RE_MEMBER = re.compile(
     rf"^\s*+(?P<modifiers>(?:{_METHOD_MODIFIERS}\s++)*)"
-    rf"(?:(?P<type>{_TYPE})\s++)?(?:{_TYPE}\s*\.\s*)?"
+    rf"(?:(?P<type>{_TYPE})\s++)?(?:(?P<explicit>{_TYPE})\s*\.\s*)?"
     rf"(?P<name>~?{_NAME})\s*+(?P<generic>{_GENERIC})?\s*+(?P<next>[(\[{{;=,]|$)"
 )
 # public static Money operator +(Money a, Money b)  /  implicit operator Money(int n)
@@ -142,6 +145,18 @@ _INTEGERS = (
     ("long", 2**63 - 1),
     ("ulong", 2**64 - 1),
 )
+
+
+def _negated_type(kind, literal):
+    """The C# type of `-literal`, ``literal`` of type ``kind``: that of a
+    signed number; `long` of a `uint`, but `int` for `-2147483648`; `long`
+    for `-9223372036854775808`; None for any other."""
+    if kind in ("int", "long", "float", "double", "decimal"):
+        return kind
+    value = literal.lower().replace("_", "")
+    if kind == "uint":
+        return "int" if value == "2147483648" else "long"
+    return "long" if kind == "ulong" and value == "9223372036854775808" else None
 
 
 def _literal_type(literal):
@@ -232,6 +247,8 @@ _RE_UNTYPED = re.compile(
 )
 # `foreach (var name in path)`, whose variable holds an element of the path
 _RE_FOREACH_VAR = re.compile(rf"\bforeach\s*\(\s*var\s+({_NAME})\s+in\s+({_PATH})\s*\)")
+# `var name = path[index];`, whose variable holds an element of the path
+_RE_ELEMENT_VAR = re.compile(rf"\bvar\s+({_NAME})\s*=\s*({_PATH})\s*\[[^\[\];]*\]\s*;")
 # What a variable an expression declares follows: `is` and a type, `out var`,
 # whose `var` is group 1, or `out` and a type
 _RE_EXPRESSION_VARIABLE = re.compile(
@@ -256,6 +273,31 @@ _RE_LITERAL = re.compile(
 # quote in it.
 _RE_VERBATIM_END = re.compile(r'(?:[^"]|"")*"(?!")')
 _RE_DIRECTIVE = re.compile(r"\s*#\s*(\w*)\s?(.*)")
+
+# The keywords that name a type
+_BUILTIN_TYPES = frozenset(
+    {
+        "void",
+        "dynamic",
+        "object",
+        "string",
+        "bool",
+        "byte",
+        "sbyte",
+        "short",
+        "ushort",
+        "int",
+        "uint",
+        "long",
+        "ulong",
+        "char",
+        "float",
+        "double",
+        "decimal",
+        "nint",
+        "nuint",
+    }
+)
 
 _DOTNET_CONTROL_KEYWORDS = frozenset(
     {
@@ -319,30 +361,8 @@ _DOTNET_CONTROL_KEYWORDS = frozenset(
         "by",
         "ascending",
         "descending",
-        # Additional C# contextual / declaration keywords that the
-        # regex call pattern (`ident(`) would otherwise scoop up. `var`
-        # shows up tens of thousands of times in modern C# and is
-        # strictly a declaration keyword.
+        # Declaration keywords
         "var",
-        "dynamic",
-        "void",
-        "object",
-        "string",
-        "bool",
-        "byte",
-        "sbyte",
-        "short",
-        "ushort",
-        "int",
-        "uint",
-        "long",
-        "ulong",
-        "char",
-        "float",
-        "double",
-        "decimal",
-        "nint",
-        "nuint",
         "record",
         "struct",
         "class",
@@ -380,39 +400,16 @@ _DOTNET_CONTROL_KEYWORDS = frozenset(
         "or",
         "with",
     }
+    | _BUILTIN_TYPES
 )
 
-# The keywords that name a type
-_BUILTIN_TYPES = frozenset(
-    {
-        "void",
-        "dynamic",
-        "object",
-        "string",
-        "bool",
-        "byte",
-        "sbyte",
-        "short",
-        "ushort",
-        "int",
-        "uint",
-        "long",
-        "ulong",
-        "char",
-        "float",
-        "double",
-        "decimal",
-        "nint",
-        "nuint",
-    }
-)
 _NOT_TYPES = _DOTNET_CONTROL_KEYWORDS - _BUILTIN_TYPES
 
 # A declared type: a possibly qualified name that is no keyword, and its
 # type arguments
 _DECLARED_TYPE = (
     rf"(?<![\w.])(?!(?:{'|'.join(sorted(_NOT_TYPES))}|dynamic)\b)"
-    rf"(?P<type>{_PATH})(?P<generic>{_GENERIC})?\??"
+    rf"(?P<type>{_PATH})(?P<generic>{_GENERIC})?(?P<nullable>\?)?"
 )
 # A declared name: no word that follows an expression
 _DECLARED_NAME = (
@@ -618,7 +615,7 @@ def _plain(code):
     previous = None
     while code != previous:
         previous = code
-        code = _RE_TYPE_ARGUMENTS.sub(lambda match: " " * len(match[0]), code)
+        code = _RE_TYPE_ARGUMENTS.sub(_blank, code)
     return re.sub(r"[?!](?=\.)", " ", code)
 
 
@@ -645,16 +642,6 @@ def _held_type(written, parameters):
     return written
 
 
-def _flat(code):
-    """``code`` without what its brackets hold, so that a `,` left in it
-    separates its items."""
-    previous = None
-    while code != previous:
-        previous = code
-        code = re.sub(r"\([^()]*\)|\[[^][]*\]|\{[^{}]*\}", "", code)
-    return code
-
-
 def _parameter_counts(parameters):
     """``[[least, most, types]]``: the arguments that a call of a method
     with the parameter list ``parameters`` passes, ``most`` None for no
@@ -678,11 +665,12 @@ class DotnetParser(BaseParser):
 
     def _member_id(self, parent_id, name):
         """ID for a member ``name`` of ``parent_id``: `<parent>::<name>`, or
-        `<parent>::overload<n>_<name>` for the n-th overload of that name."""
+        `<parent>::<name>#<n>` for the n-th overload of that name, a name no
+        C# source can write."""
         member_id, count = f"{parent_id}::{name}", 1
         while member_id in self.builder.node_registry:
             count += 1
-            member_id = f"{parent_id}::overload{count}_{name}"
+            member_id = f"{parent_id}::{name}#{count}"
         return member_id
 
     def _type_id(self, parent_id, name, arity, namespace=None):
@@ -760,6 +748,31 @@ class DotnetParser(BaseParser):
             return self._statement_close(head[1] + 1)
         return held[1] if held else len(text)
 
+    def _argument_origin(self, written, lineno, since):
+        """The origin of what the argument ``written``, its literals'
+        characters as `x`, passes: a literal's type, `null`, a variable's
+        declared value, behind `ref`, `out` or `in` and the parameter's name
+        as written; None for any other."""
+        written = written.strip()
+        if re.fullmatch(r'[$@]*"x*"', written):
+            return "string()"
+        if written == "null":
+            return "null"
+        if literal := re.fullmatch(r"(-\s*)?('x+'|true|false|[0-9][\w.]*)", written):
+            kind = _literal_type(literal[2])
+            kind = _negated_type(kind, literal[2]) if literal[1] else kind
+            return f"{kind}()" if kind else None
+        named = re.match(rf"({_NAME})\s*:(?!:)\s*", written)
+        if named:
+            held = self._argument_origin(written[named.end() :], lineno, since)
+            return held and f"{named[1]}: {held}"
+        passed = re.fullmatch(rf"(?:(ref|out|in)\s+)?({_NAME})", written)
+        if passed:
+            held = BaseParser.call_origin(self, f"{passed[2]}.", lineno, since)
+            held = held and held.removesuffix(".")
+            return f"{passed[1]} {held}" if held and passed[1] else held
+        return None
+
     def call_origin(self, callee, lineno, since, owner=None):
         root, _, path = callee.partition(".")
         if not path:
@@ -771,8 +784,9 @@ class DotnetParser(BaseParser):
             return f"super().{path}"
         held = super().call_origin(f"{root}.", lineno, since)
         # A name that is no variable is a member of an enclosing type, or a
-        # type: the origin path is the callee itself.
-        return f"{held}{path}" if held else callee
+        # type: the origin path is the callee itself. A member of `T?` is
+        # read as one of `T`; only an overload tells the two apart.
+        return f"{held.replace('?()', '()')}{path}" if held else callee
 
     def _scan_calls(self, source_id, code_lines, lines, index, start, since):
         """Record the calls on line ``index`` of ``code_lines``, plain code,
@@ -801,6 +815,15 @@ class DotnetParser(BaseParser):
         for each in _RE_FOREACH_VAR.finditer(code, start):
             element = self.call_origin(f"{each[2]}.*", lineno, since)
             self.declared[each[1]][-1] = (lineno, element, False, each.start(1))
+        for each in _RE_ELEMENT_VAR.finditer(code, start):
+            # The variable holds an element of what it is read from, from the
+            # statement's end on.
+            entries = self.declared[each[1]]
+            for entry in entries.between(lineno, lineno):
+                if entry[1] == "?":
+                    entries.remove(entry)
+            element = self.call_origin(f"{each[2]}.*", lineno, since)
+            entries.append((lineno, element, False, each.end() - 1))
         for created in _RE_CREATION.finditer(code):
             written = created[created.lastgroup]
             if created.end() > start and written not in _NOT_TYPES:
@@ -853,6 +876,20 @@ class DotnetParser(BaseParser):
             if passed is not None:
                 self.builder.edges[-1]["metadata"]["args"] = len(passed)
                 record_lambdas(self.builder.edges[-1]["metadata"], passed, "=>")
+                # What each argument holds, for the overload that takes it
+                written = call_arguments(
+                    code_lines, lines, index, call_match.end(), quotes=True
+                )
+                site = self.builder.edges[-1]["metadata"].setdefault("site", {})
+                site["arguments"] = [
+                    self._argument_origin(a, lineno, since) for a in written
+                ]
+                # What a variable the call is made on holds, `T?` as such
+                receiver = callee.rpartition(".")[0]
+                if re.fullmatch(_NAME, receiver) and (
+                    on := self._argument_origin(receiver, lineno, since)
+                ):
+                    site["on"] = on
             # `out var name` has the type of that `out` parameter of the
             # call it is an argument of: the result after those before it.
             passed = re.finditer(rf"\bout\s+(?:var\s+({_NAME}))?", arguments)
@@ -882,21 +919,15 @@ class DotnetParser(BaseParser):
         # comment and no text of a literal.
         code_lines, guarded = _code_lines(lines)
 
-        # Namespace + using pass
-        namespace = None
-        for code in code_lines[:60]:
-            m = _RE_NAMESPACE.match(code)
-            if m:
-                namespace = m.group(1)
-                break
+        namespace = next(
+            (m[1] for m in map(_RE_NAMESPACE.match, code_lines[:60]) if m), None
+        )
         if namespace:
             self.set_file_metadata(file_id, "dotnet_namespace", namespace)
 
-        # An alias is imported under its name; a `global using` holds for
-        # every file below the directory. A `using static` imports a type's
-        # members, no namespace; each namespace a file's `using`s name is
-        # recorded with the namespace body it is written in, where it is
-        # resolved.
+        # A `global using` holds for the project of the file's directory;
+        # each other `using`, an alias too, is recorded with the namespace
+        # declaration it is written in, where it is resolved.
         directory = posixpath.dirname(rel_path)
         for code in code_lines:
             m = _RE_USING.match(code)
@@ -904,16 +935,13 @@ class DotnetParser(BaseParser):
                 self.builder.add_edge(file_id, f"MODULE:{m['path']}", "IMPORTS")
                 if m["global"] and m["static"]:
                     self.builder.dotnet_global_statics.setdefault(directory, []).append(
-                        (m["path"], "", False, True, bool(m["rooted"]))
+                        (m["path"], "", False, True, bool(m["rooted"]), None, None)
                     )
-                elif not m["static"]:
-                    imports = self.builder.imports.setdefault(file_id, {})
-                    if m["global"]:
-                        imports = self.builder.dotnet_global_usings.setdefault(
-                            directory, {}
-                        )
-                    if m["global"] or m["alias"]:
-                        imports[m["alias"] or f"{m['path']}.*"] = m["path"]
+                elif m["global"]:
+                    imports = self.builder.dotnet_global_usings.setdefault(
+                        directory, {}
+                    )
+                    imports[m["alias"] or f"{m['path']}.*"] = m["path"]
 
         self.scan_declarations(
             [_RE_ARRAY_TYPE.sub(r"System.Array<\1>", code) for code in code_lines],
@@ -930,7 +958,8 @@ class DotnetParser(BaseParser):
         # ID -> the type parameters in scope that are a method's or a local
         # function's, of no type the resolver reads
         generics = {file_id: frozenset()}
-        namespaces = []  # (name, last line) of each namespace the line is in
+        # (name, first line, last line) of each namespace declaration opened
+        namespaces = []
         # Type ID -> (name, origin of its value) of each parameter of its
         # primary constructor
         captured = {}
@@ -939,7 +968,7 @@ class DotnetParser(BaseParser):
         # declaration, and the line the first is on
         self._attributes = []
         attributes_start = None
-        self._arities = {}  # (parent ID, name, type parameter count) -> type ID
+        self._arities = {}  # (parent ID, namespace, name, type parameter count) -> type ID
         # First and last line of the field initializer being read
         initializer = (0, 0)
 
@@ -952,7 +981,7 @@ class DotnetParser(BaseParser):
                 node_type,
                 lineno=index + 1,
                 end_lineno=end_lineno,
-                token_count=(end_lineno - index) * 10,
+                token_count=token_count(index + 1, end_lineno),
                 docstring=self.get_leading_docstring(lines, first),
                 **metadata,
             )
@@ -965,18 +994,20 @@ class DotnetParser(BaseParser):
                 )
 
         def bind(type_id, first_line, written=None):
-            """Declare, from ``first_line`` on, the parameters of the
-            primary constructor of ``type_id`` and, for an accessor of a
-            property declared as ``written``, its `value`."""
+            """Declare, from the start of ``first_line`` on, the parameters
+            of the primary constructor of ``type_id`` and, for an accessor
+            of a property declared as ``written``, its `value`."""
             names = list(captured.get(type_id, ()))
             if written:
                 held = re.fullmatch(_DECLARED_TYPE, written)
-                held = f"{held['type']}{held['generic'] or ''}()" if held else "?"
+                held = (
+                    f"{held['type']}{held['generic'] or ''}{held['nullable'] or ''}()"
+                    if held
+                    else "?"
+                )
                 names.append(("value", held.replace(".", "::")))
             for name, held in names:
-                self.declared.setdefault(name, []).append(
-                    (first_line, held, False, None)
-                )
+                self.declared.setdefault(name, []).append((first_line, held, False, 0))
 
         i = 0
         n = len(lines)
@@ -1066,21 +1097,26 @@ class DotnetParser(BaseParser):
                 last = n
                 if opened and opened[2] == "{":
                     last = self._find_block_end(code_lines, *opened[:2])
-                namespaces.append((m_namespace[1], last))
+                namespaces.append((m_namespace[1], lineno, last))
             m_using = context_id == file_id and _RE_USING.match(code)
-            if m_using and not m_using["global"] and not m_using["alias"]:
-                within = [name for name, last in namespaces if lineno <= last]
+            if m_using and not m_using["global"]:
+                within = [d for d in namespaces if lineno <= d[2]]
+                alias = m_using["alias"]
                 if not within and not m_using["static"]:
                     self.builder.imports.setdefault(file_id, {})[
-                        f"{m_using['path']}.*"
+                        alias or f"{m_using['path']}.*"
                     ] = m_using["path"]
                 self.builder.dotnet_usings.setdefault(file_id, []).append(
                     (
                         m_using["path"],
-                        ".".join(within),
+                        ".".join(name for name, _, _ in within),
                         i in guarded,
                         bool(m_using["static"]),
                         bool(m_using["rooted"]),
+                        alias,
+                        tuple(map(self.source_line, within[-1][1:]))
+                        if within
+                        else None,
                     )
                 )
 
@@ -1089,7 +1125,6 @@ class DotnetParser(BaseParser):
             operator = _RE_OPERATOR.match(code)
             member = _RE_MEMBER.match(code)
             owner = context_id.rpartition("::")[2]
-            opened = None
             if m_type or m_delegate:
                 declared = m_type or m_delegate
                 opened = _closing(code_lines, i, declared.end(), "{;")
@@ -1099,11 +1134,28 @@ class DotnetParser(BaseParser):
                 # What tells the type from others of its name: its
                 # namespace, and for a partial type how many type parameters.
                 metadata = {}
-                within = [name for name, last in namespaces if lineno <= last]
+                within = [name for name, _, last in namespaces if lineno <= last]
                 if context_id == file_id and within:
                     metadata["namespace"] = ".".join(within)
-                if "partial" in code[: declared.start(1)].split():
+                # Its modifiers, those on lines of their own above included,
+                # past comments, preprocessor lines and attribute lists
+                head, above, open_lists = code[: declared.start(1)].split(), i - 1, 0
+                while above >= 0:
+                    line = code_lines[above]
+                    # Read upwards, a `]` opens an attribute list, a `[` closes it.
+                    open_lists += line.count("]") - line.count("[")
+                    if open_lists > 0 or line.lstrip().startswith("["):
+                        pass
+                    elif re.fullmatch(rf"\s*(?:{_TYPE_MODIFIERS}\s*)+", line):
+                        head += line.split()
+                    elif not re.fullmatch(r"\s*(?:#.*)?", line):
+                        break
+                    above -= 1
+                if "partial" in head:
                     metadata.update(partial=True, arity=len(scope))
+                if "ref" in head:
+                    # A `ref struct`, which no type argument can be
+                    metadata["ref"] = True
             if m_type and opened[2] in "{;":
                 kind, name = m_type.groups()
                 type_id = self._type_id(
@@ -1244,18 +1296,34 @@ class DotnetParser(BaseParser):
                     method_id = self._member_id(context_id, name)
                     end_lineno = self._body_end(code_lines, opened)
                     listed = _text(code_lines, i, paren + 1, *close[:2])
+                    read = list(_RE_PARAMETER.finditer(listed))
                     parameters = [
                         (p["modifiers"].split(), _held_type(p["type"], scope))
-                        for p in _RE_PARAMETER.finditer(listed)
+                        for p in read
                     ]
                     modifiers = (operator or member)["modifiers"].split()
                     extra = {
                         "static": "static" in modifiers,
-                        "private": "private" in modifiers,
+                        # `private protected` is reachable from derived
+                        # types, `protected internal` from anywhere.
+                        "private": "private" in modifiers
+                        and "protected" not in modifiers,
+                        "protected": "protected" in modifiers
+                        and "internal" not in modifiers,
+                        "explicit": bool(member and member["explicit"]),
                         "parameters": _parameter_counts(listed),
                     }
+                    if "override" in modifiers:
+                        # Declared where its slot is, for overload resolution
+                        extra["override"] = True
+                    if len(read) == len(extra["parameters"][0][2]):
+                        # Which a named argument is passed to
+                        extra["parameter_names"] = [p["name"] for p in read]
                     if own:
                         extra["type_parameters"] = own
+                        after = _text(code_lines, *close[:2], *opened[:2])
+                        if re.search(r"\bwhere\b", after):
+                            extra["constrained"] = True
                     if name in ("<init>", "<clinit>"):
                         extra["is_constructor"] = True
                     elif returns:

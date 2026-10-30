@@ -1,28 +1,13 @@
-"""Java regex-based baseline parser.
-
-Covers the common case of Java symbol extraction: packages, top-level and
-nested types (``class``, ``interface``, ``enum``, ``record``, ``@interface``),
-methods, constructors, fields, imports, and call sites. Kotlin and Scala
-sources are NOT parsed here — they rely on scip-java for symbol resolution
-when the indexer binary is present. Without scip-java, ``.kt`` and
-``.scala`` files contribute only to file discovery.
-
-The parser is deliberately regex-based (mirroring the existing Rust/TS
-parsers in ``generate.py``). It is not a full Java grammar; it handles
-well-formatted single-line declarations and balanced braces. Multi-line
-return types, deeply nested generics, anonymous inner classes, and lambda
-expressions are approximated — scip-java fills those gaps when available.
-"""
+"""The Java parser."""
 
 from __future__ import annotations
 
 import re
 
 from descry._comments import strip_block_comments, strip_line_comment
-from descry.generate import (
-    _JAVA_BOXES,
-    _STATEMENT_START_RE,
+from descry._parsing import (
     BaseParser,
+    _blank,
     _BoundMap,
     _bracketed_parts,
     _generic_metadata,
@@ -32,7 +17,10 @@ from descry.generate import (
     is_generated_source,
     record_lambdas,
     source_lines,
+    token_count,
 )
+from descry.resolver import _JAVA_BOXES
+from descry.rust_parser import _STATEMENT_START_RE
 
 # Package declaration: `package com.foo.bar;`
 _RE_PACKAGE = re.compile(r"^\s*package\s+([\w.]+)\s*;")
@@ -49,10 +37,11 @@ _RE_TYPE_DECL = re.compile(
     r"(class|interface|enum|record|@interface)\s+"
     r"([A-Za-z_$][A-Za-z0-9_$]*)"
 )
-# What a type's body opens after, and a type a line may go on to after the
-# end of another
+# What a type body's `{` follows from the statement's start: a type's
+# head, or `new T(...)`, an anonymous subclass's
 _TYPE_HEAD_RE = re.compile(
     rf"\s*(?:@[\w.]+\s+)*(?:{_TYPE_MODIFIERS}\s+)*(?:class|interface|enum|record|@interface)\b"
+    r"|.*\bnew\s+[\w$.]+(?:\s*<.*>)?\s*\(.*\)\s*$"
 )
 _DEFINITION_HEAD_RE = re.compile(
     rf"(?:{_TYPE_MODIFIERS}\s+)*(?:class|interface|enum|record|@interface)\b"
@@ -201,7 +190,8 @@ _RE_CONDITION_HEAD = re.compile(r"\s*(?:else\s+)?(?:(if)|while|for)\s*$")
 # `receiver::name`, a reference to a method or with `new` to a constructor
 _RE_METHOD_REFERENCE = re.compile(r"(?<![\w$.])([\w$.]+)\s*::\s*([A-Za-z_$][\w$]*)")
 _RE_NEW_GENERIC = re.compile(r"(?:\bnew\s+[A-Za-z_$][A-Za-z0-9_$.]*|\.)\s*<")
-_RE_BODY_OPENS = re.compile(r"\)\s*\{\s*$")
+# `new T(...) {` opens an anonymous subclass's body, on the line or below.
+_RE_BODY_OPENS = re.compile(r"\)\s*\{")
 
 
 def _supertypes(head):
@@ -301,7 +291,7 @@ def _plain_instantiations(code: str) -> str:
                 break
             if not (char.isalnum() or char in "_$.,?[]<> \t"):
                 break
-    return _RE_EMPTY_BODY.sub(lambda match: " " * len(match.group()), code)
+    return _RE_EMPTY_BODY.sub(_blank, code)
 
 
 class JavaParser(BaseParser):
@@ -326,7 +316,8 @@ class JavaParser(BaseParser):
         """Open the body, lines ``lineno`` to ``last``, of a class source
         cannot name: a subclass of ``base``, a node or a `REF:` to a name,
         made in ``parent_id``. Its members are its own."""
-        anonymous_id = self._nameless_owner(parent_id, f"class@{lineno}", lineno, last)
+        written = f"class@{self.source_line(lineno)}"
+        anonymous_id = self._nameless_owner(parent_id, written, lineno, last)
         self.builder.add_edge(anonymous_id, base, "INHERITS")
         self.enter_context(anonymous_id, lineno + 1, last - 1)
 
@@ -464,16 +455,8 @@ class JavaParser(BaseParser):
         )
         skip_calls = is_generated_source(content)
 
-        # Package declaration (informational only; Java resolution is
-        # fully-qualified and SCIP handles cross-package resolution).
-        package = None
-        for line in lines[:50]:
-            m = _RE_PACKAGE.match(line)
-            if m:
-                package = m.group(1)
-                break
+        package = next((m[1] for m in map(_RE_PACKAGE.match, lines[:50]) if m), None)
         if package:
-            # Annotate the file node with its package for downstream queries.
             self.set_file_metadata(file_id, "java_package", package)
 
         # Imports
@@ -562,7 +545,7 @@ class JavaParser(BaseParser):
             # block declares nothing.
             line = code if texts[i] else strip_line_comment(raw_line, backticks=True)
 
-            # 1. Type declarations (class/interface/enum/record/@interface)
+            # Type declarations (class/interface/enum/record/@interface)
             m_type = _RE_TYPE_DECL.match(line)
             if m_type:
                 kind, name = m_type.groups()
@@ -586,8 +569,9 @@ class JavaParser(BaseParser):
                     kind=kind,
                     lineno=lineno,
                     end_lineno=end_lineno,
-                    token_count=(end_lineno - lineno + 1) * 10,
+                    token_count=token_count(lineno, end_lineno),
                     docstring=docstring,
+                    private=bool(re.search(r"\bprivate\b", line[: m_type.start(1)])),
                     **_generic_metadata(_type_params(line, m_type.end())),
                 )
                 self.builder.add_edge(parent_id, type_id, "DEFINES")
@@ -602,7 +586,7 @@ class JavaParser(BaseParser):
                 i = brace_line_idx + 1 if has_open_brace else i + 1
                 continue
 
-            # 2. Methods and constructors (only inside a type context)
+            # Methods and constructors (only inside a type context)
             if context_id != file_id:
                 m_method = _RE_METHOD.match(line) or _RE_PACKAGE_METHOD.match(line)
                 if not m_method and _RE_PACKAGE_METHOD_OPENS.match(line):
@@ -673,7 +657,7 @@ class JavaParser(BaseParser):
                             name=name,
                             lineno=lineno,
                             end_lineno=end_lineno,
-                            token_count=(end_lineno - lineno + 1) * 10,
+                            token_count=token_count(lineno, end_lineno),
                             docstring=docstring,
                             return_type=returns,
                             params=written or (),
@@ -705,7 +689,7 @@ class JavaParser(BaseParser):
                                 name="<init>",
                                 lineno=lineno,
                                 end_lineno=end_lineno,
-                                token_count=(end_lineno - lineno + 1) * 10,
+                                token_count=token_count(lineno, end_lineno),
                                 docstring="",
                                 is_constructor=True,
                             )
@@ -713,13 +697,11 @@ class JavaParser(BaseParser):
                             if has_body:
                                 bodies.append((ctor_id, lineno, end_lineno))
 
-                # 3. Fields (only inside types, not methods)
+                # Fields (only inside types, not methods)
                 if not inside:
                     m_field = _RE_FIELD.match(line) or _RE_PACKAGE_FIELD.match(line)
                     if m_field:
                         name = m_field["name"]
-                        # Filter common false positives (keywords and control flow
-                        # would already be caught by _METHOD_MODIFIERS requirement).
                         parent_id = context_id
                         field_id = f"{parent_id}::{name}"
                         # A method of the same name keeps `<type>::<name>`.
@@ -757,7 +739,7 @@ class JavaParser(BaseParser):
                         last = self._find_block_end(lines, i + (opened != "{"))
                         self._anonymous(constant_id, context_id, lineno, last)
 
-            # 4. Calls.
+            # Calls
             if not skip_calls and context_id != file_id:
                 # The innermost of the enclosing type and the open method.
                 parent_id = context_id
@@ -862,11 +844,14 @@ class JavaParser(BaseParser):
                     self.add_call(parent_id, callee, lineno, since, start, -1, origin)
                 # `new T(...) {` opens the body of an anonymous subclass; a
                 # call on its closing brace is made on the new object.
-                body = _RE_BODY_OPENS.search(code)
-                created = body and self.call_closed_at(body.start())
-                subclassed = created and _RE_NEW_ENDS.search(code[: created[1]])
+                subclassed = None
+                for body in _RE_BODY_OPENS.finditer(code):
+                    created = self.call_closed_at(body.start())
+                    subclassed = created and _RE_NEW_ENDS.search(code[: created[1]])
+                    if subclassed:
+                        break
                 if subclassed:
-                    last = self._find_block_end(lines, i)
+                    last = self._find_block_end(lines, i, body.end() - 1)
                     anonymous[last] = created[0]
                     self._supers.append((last, subclassed[2].replace(".", "::")))
                     base = f"REF:{subclassed[2]}"

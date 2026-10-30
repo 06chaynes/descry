@@ -7,8 +7,25 @@ from types import SimpleNamespace
 
 import pytest
 
-from descry.handlers import DescryConfig
-from descry.query import MAX_PATH_DEPTH, GraphQuerier
+from descry.handlers import _DEFAULT_SYNTAX_LANG_MAP, DescryConfig
+from descry.query import (
+    _DEFAULT_TEST_FILE_SUFFIXES,
+    _DEFAULT_TEST_PATH_PATTERNS,
+    MAX_PATH_DEPTH,
+    GraphQuerier,
+)
+
+
+def _context(q, node_id, **kwargs):
+    return q.context_markdown(q.context_data(node_id, **kwargs))
+
+
+def _flow(q, start_id, **kwargs):
+    return q.flow_markdown(q.flow_data(start_id, **kwargs))
+
+
+def _flatten(q, class_id):
+    return q.flatten_markdown(q.flatten_data(class_id))
 
 
 class TestGraphQuerier:
@@ -65,21 +82,133 @@ class TestGraphQuerier:
 
     def test_find_nodes_by_name(self, sample_graph):
         """Should find nodes by name."""
-        q = GraphQuerier(sample_graph)
+        q = GraphQuerier(sample_graph, DescryConfig())
         matches = q.find_nodes_by_name("helper")
         assert len(matches) == 1
         assert matches[0]["metadata"]["name"] == "helper"
 
+    def test_test_detection_covers_prefixes_and_the_top_level_tests_dir(self, tmp_path):
+        graph = {
+            "schema_version": 2,
+            "nodes": [
+                {
+                    "id": "FILE:tests/test_foo.py::first",
+                    "type": "Function",
+                    "metadata": {"name": "first"},
+                },
+                {
+                    "id": "FILE:src/test_bar.py::second",
+                    "type": "Function",
+                    "metadata": {"name": "second"},
+                },
+                {
+                    "id": "FILE:src/main.py::third",
+                    "type": "Function",
+                    "metadata": {"name": "third"},
+                },
+                {
+                    "id": "FILE:tests/json.rs::fourth",
+                    "type": "Function",
+                    "metadata": {"name": "fourth"},
+                },
+                {
+                    "id": "FILE:contest/x.rs::fifth",
+                    "type": "Function",
+                    "metadata": {"name": "fifth"},
+                },
+            ],
+            "edges": [],
+        }
+        path = tmp_path / "graph.json"
+        path.write_text(json.dumps(graph))
+        q = GraphQuerier(str(path), DescryConfig())
+        q._ensure_filter_indices()
+        assert q._index_is_test == {
+            "FILE:tests/test_foo.py::first",
+            "FILE:src/test_bar.py::second",
+            "FILE:tests/json.rs::fourth",
+        }
+
+    def test_search_ties_keep_one_order_filtered_or_not(self, tmp_path):
+        nodes = [
+            {
+                "id": f"FILE:{name}.py::area",
+                "type": "Function",
+                "metadata": {"name": "area", "docstring": "the area"},
+            }
+            for name in ("z", "a", "m")
+        ]
+        q = _querier(tmp_path, nodes)
+        ids = [n["id"] for n in q.search_docs(["area"])]
+        assert ids == sorted(ids)
+        assert [n["id"] for n in q.search_docs(["area"], lang="python")] == ids
+
+    def test_a_related_test_in_another_file_is_not_the_symbol_s(self, tmp_path):
+        """A test function named for the symbol counts where it is in the
+        symbol's file, not in a file whose path holds that one's."""
+        nodes = [
+            {
+                "id": f"FILE:{path}::{name}",
+                "type": "Function",
+                "metadata": {"name": name},
+            }
+            for path, name in (
+                ("a.py", "load"),
+                ("a.py", "test_load_twice"),
+                ("data.py", "test_load_once"),
+            )
+        ]
+        q = _querier(tmp_path, nodes)
+        assert q._find_related_tests("a.py", "load") == ["FILE:a.py::test_load_twice"]
+
+    def test_a_path_pattern_of_several_directories_matches_their_run(self, tmp_path):
+        graph = {
+            "schema_version": 2,
+            "nodes": [
+                {"id": f"FILE:{path}::f", "type": "Function", "metadata": {"name": "f"}}
+                for path in ("pkg/src/integ/case.py", "src/x/integ/case.py")
+            ],
+            "edges": [],
+        }
+        path = tmp_path / "graph.json"
+        path.write_text(json.dumps(graph))
+        config = DescryConfig(project_root=tmp_path)
+        config.test_path_patterns = ("/src/integ/",)
+        q = GraphQuerier(str(path), config)
+        q._ensure_filter_indices()
+        assert q._index_is_test == {"FILE:pkg/src/integ/case.py::f"}
+
+    def test_an_empty_suffix_list_marks_no_file_by_suffix(self, tmp_path):
+        """`file_suffixes = []` is the user's list: `a_test.go` is source."""
+        graph = {
+            "schema_version": 2,
+            "nodes": [
+                {
+                    "id": "FILE:pkg/a_test.go::f",
+                    "type": "Function",
+                    "metadata": {"name": "f"},
+                }
+            ],
+            "edges": [],
+        }
+        path = tmp_path / "graph.json"
+        path.write_text(json.dumps(graph))
+        config = DescryConfig(project_root=tmp_path)
+        config.test_file_suffixes = ()
+        q = GraphQuerier(str(path), config)
+        q._ensure_filter_indices()
+        assert q._index_is_test == set()
+
     def test_get_callers(self, sample_graph):
         """Should find callers of a function."""
-        q = GraphQuerier(sample_graph)
+        q = GraphQuerier(sample_graph, DescryConfig())
         callers = q.get_callers("helper")
         assert len(callers) == 1
         assert "main" in callers[0]
 
     def test_get_callees(self, sample_graph):
         """Should find callees of a function."""
-        q = GraphQuerier(sample_graph)
+        q = GraphQuerier(sample_graph, DescryConfig())
         callees = q.get_callees("FILE:test.py::main")
         assert len(callees) == 1
         assert "helper" in callees[0]
@@ -124,7 +253,7 @@ class TestGraphQuerier:
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
             json.dump(graph, f)
             path = f.name
-        q = GraphQuerier(path)
+        q = GraphQuerier(path, DescryConfig())
         assert q.get_callers("work") == ["FILE:a.py::run"]
         assert q.get_ambiguous_callers("work") == {"FILE:a.py::run": 2}
         assert q.get_callees("FILE:a.py::run") == ["REF:work"]
@@ -132,7 +261,7 @@ class TestGraphQuerier:
 
     def test_search_docs(self, sample_graph):
         """Should search by keywords."""
-        q = GraphQuerier(sample_graph)
+        q = GraphQuerier(sample_graph, DescryConfig())
         results = q.search_docs(["helper"])
         assert len(results) > 0
         assert any(r["metadata"]["name"] == "helper" for r in results)
@@ -210,7 +339,7 @@ class TestFindTraitImpls:
 
     def test_find_all_impls_of_method(self, trait_impl_graph):
         """Should find all trait implementations of a method."""
-        q = GraphQuerier(trait_impl_graph)
+        q = GraphQuerier(trait_impl_graph, DescryConfig())
         results = q.find_trait_impls("from_request_parts")
 
         assert len(results) == 3
@@ -219,7 +348,7 @@ class TestFindTraitImpls:
 
     def test_find_impls_filtered_by_trait(self, trait_impl_graph):
         """Should filter by trait name."""
-        q = GraphQuerier(trait_impl_graph)
+        q = GraphQuerier(trait_impl_graph, DescryConfig())
         results = q.find_trait_impls("call", "Service")
 
         assert len(results) == 1
@@ -227,17 +356,22 @@ class TestFindTraitImpls:
 
     def test_find_impls_excludes_inherent_methods(self, trait_impl_graph):
         """Should not return inherent impl methods."""
-        q = GraphQuerier(trait_impl_graph)
+        q = GraphQuerier(trait_impl_graph, DescryConfig())
         results = q.find_trait_impls("new")
 
         assert len(results) == 0  # "new" has no trait_impl
 
     def test_find_impls_no_matches(self, trait_impl_graph):
         """Should return empty list for non-existent methods."""
-        q = GraphQuerier(trait_impl_graph)
+        q = GraphQuerier(trait_impl_graph, DescryConfig())
         results = q.find_trait_impls("nonexistent_method")
 
         assert len(results) == 0
+
+
+HANDLE = "FILE:api.rs::handle_request"
+PROCESS = "FILE:api.rs::process_data"
+VALIDATE = "FILE:auth.rs::validate_token"
 
 
 class TestFindCallPath:
@@ -301,16 +435,12 @@ class TestFindCallPath:
 
         os.unlink(f.name)
 
-    @pytest.mark.parametrize(
-        "target", ["validate_token", "FILE:auth.rs::validate_token"]
-    )
     def test_structured_flow_stops_at_the_target_and_reports_the_path(
-        self, call_path_graph, target
+        self, call_path_graph
     ):
-        """The target is named by name or by node ID."""
-        q = GraphQuerier(call_path_graph)
+        q = GraphQuerier(call_path_graph, DescryConfig())
 
-        tree = q.trace_flow_structured("handle_request", target=target)
+        tree = q.flow_data(HANDLE, target="FILE:auth.rs::validate_token")
 
         assert tree["path_to_target"] == [
             "handle_request",
@@ -319,203 +449,61 @@ class TestFindCallPath:
         ]
         process_data = tree["root"]["children"][0]
         assert [c["name"] for c in process_data["children"]] == ["validate_token"]
-        assert "path_to_target" not in q.trace_flow_structured("handle_request")
+        assert "path_to_target" not in q.flow_data(HANDLE)
 
     def test_find_direct_path(self, call_path_graph):
         """Should find direct call path."""
-        q = GraphQuerier(call_path_graph)
-        path = q.find_call_path_result("handle_request", "process_data")["path"]
+        q = GraphQuerier(call_path_graph, DescryConfig())
+        path = q.find_call_path_result(HANDLE, PROCESS)["path"]
 
         assert len(path) == 1
-        assert path[0]["caller_name"] == "handle_request"
-        assert path[0]["callee_name"] == "process_data"
+        assert path[0]["caller_id"] == HANDLE
+        assert path[0]["callee_id"] == PROCESS
 
     def test_find_two_hop_path(self, call_path_graph):
         """Should find multi-hop path."""
-        q = GraphQuerier(call_path_graph)
-        path = q.find_call_path_result("handle_request", "validate_token")["path"]
+        q = GraphQuerier(call_path_graph, DescryConfig())
+        path = q.find_call_path_result(HANDLE, VALIDATE)["path"]
 
         assert len(path) == 2
-        assert path[0]["caller_name"] == "handle_request"
-        assert path[0]["callee_name"] == "process_data"
-        assert path[1]["caller_name"] == "process_data"
-        assert path[1]["callee_name"] == "validate_token"
+        assert path[0]["caller_id"] == HANDLE
+        assert path[0]["callee_id"] == PROCESS
+        assert path[1]["caller_id"] == PROCESS
+        assert path[1]["callee_id"] == VALIDATE
 
     def test_path_includes_call_line(self, call_path_graph):
         """Should include call line information."""
-        q = GraphQuerier(call_path_graph)
-        path = q.find_call_path_result("handle_request", "process_data")["path"]
+        q = GraphQuerier(call_path_graph, DescryConfig())
+        path = q.find_call_path_result(HANDLE, PROCESS)["path"]
 
         assert path[0]["call_line"] == 15
 
     def test_no_path_returns_empty(self, call_path_graph):
         """Should return empty list when no path exists."""
-        q = GraphQuerier(call_path_graph)
-        path = q.find_call_path_result("validate_token", "handle_request")["path"]
+        q = GraphQuerier(call_path_graph, DescryConfig())
+        path = q.find_call_path_result(VALIDATE, HANDLE)["path"]
 
         # No forward path from validate_token to handle_request
         assert len(path) == 0
 
     def test_backward_direction(self, call_path_graph):
         """Should find backward path (who calls me)."""
-        q = GraphQuerier(call_path_graph)
-        path = q.find_call_path_result(
-            "validate_token", "handle_request", direction="backward"
-        )["path"]
+        q = GraphQuerier(call_path_graph, DescryConfig())
+        path = q.find_call_path_result(VALIDATE, HANDLE, direction="backward")["path"]
 
         # Backward: validate_token is called by process_data is called by handle_request
         assert len(path) == 2
         # In backward direction, roles are swapped for hop info
-        assert path[0]["callee_name"] == "validate_token"
-        assert path[1]["callee_name"] == "process_data"
+        assert path[0]["callee_id"] == VALIDATE
+        assert path[1]["callee_id"] == PROCESS
 
     def test_max_depth_limit(self, call_path_graph):
         """Should respect max_depth limit."""
-        q = GraphQuerier(call_path_graph)
-        path = q.find_call_path_result("handle_request", "validate_token", max_depth=1)[
-            "path"
-        ]
+        q = GraphQuerier(call_path_graph, DescryConfig())
+        path = q.find_call_path_result(HANDLE, VALIDATE, max_depth=1)["path"]
 
         # Path requires 2 hops but max_depth is 1
         assert len(path) == 0
-
-
-class TestFlowDisambiguation:
-    """Tests for trace_flow disambiguation when multiple matches exist."""
-
-    @pytest.fixture
-    def graph_with_duplicate_names(self):
-        """Create a graph with multiple functions named 'new'."""
-        # Create graph with two structs that each have a "new" method
-        graph = {
-            "schema_version": 2,
-            "nodes": [
-                {
-                    "id": "FILE:service_a.rs",
-                    "type": "File",
-                    "metadata": {"path": "service_a.rs", "name": "service_a.rs"},
-                },
-                {
-                    "id": "FILE:service_a.rs::ServiceA::new",
-                    "type": "Method",
-                    "metadata": {
-                        "name": "new",
-                        "signature": "pub fn new() -> Self",
-                        "token_count": 20,
-                        "lineno": 4,
-                        "end_lineno": 6,
-                    },
-                },
-                {
-                    "id": "FILE:service_a.rs::ServiceA::process",
-                    "type": "Method",
-                    "metadata": {
-                        "name": "process",
-                        "signature": "pub fn process(&self)",
-                        "token_count": 15,
-                        "lineno": 8,
-                        "end_lineno": 10,
-                    },
-                },
-                {
-                    "id": "FILE:service_b.rs",
-                    "type": "File",
-                    "metadata": {"path": "service_b.rs", "name": "service_b.rs"},
-                },
-                {
-                    "id": "FILE:service_b.rs::ServiceB::new",
-                    "type": "Method",
-                    "metadata": {
-                        "name": "new",
-                        "signature": "pub fn new() -> Self",
-                        "token_count": 20,
-                        "lineno": 4,
-                        "end_lineno": 6,
-                    },
-                },
-                {
-                    "id": "FILE:service_b.rs::ServiceB::process",
-                    "type": "Method",
-                    "metadata": {
-                        "name": "process",
-                        "signature": "pub fn process(&self)",
-                        "token_count": 15,
-                        "lineno": 8,
-                        "end_lineno": 10,
-                    },
-                },
-            ],
-            "edges": [
-                {
-                    "source": "FILE:service_a.rs",
-                    "target": "FILE:service_a.rs::ServiceA::new",
-                    "relation": "DEFINES",
-                },
-                {
-                    "source": "FILE:service_a.rs",
-                    "target": "FILE:service_a.rs::ServiceA::process",
-                    "relation": "DEFINES",
-                },
-                {
-                    "source": "FILE:service_b.rs",
-                    "target": "FILE:service_b.rs::ServiceB::new",
-                    "relation": "DEFINES",
-                },
-                {
-                    "source": "FILE:service_b.rs",
-                    "target": "FILE:service_b.rs::ServiceB::process",
-                    "relation": "DEFINES",
-                },
-            ],
-        }
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(graph, f)
-            f.flush()
-            yield f.name
-
-        os.unlink(f.name)
-
-    def test_shows_disambiguation_for_multiple_matches(
-        self, graph_with_duplicate_names
-    ):
-        """trace_flow should show which start point was selected when multiple exist."""
-        q = GraphQuerier(graph_with_duplicate_names)
-
-        result = q.trace_flow("new", direction="forward", depth=2)
-
-        # Should contain disambiguation notice
-        assert "Found 2 matches" in result
-        assert "Using:" in result
-        assert "Alternatives" in result
-
-    def test_shows_alternatives_list(self, graph_with_duplicate_names):
-        """trace_flow should list alternative starting points."""
-        q = GraphQuerier(graph_with_duplicate_names)
-
-        result = q.trace_flow("new", direction="forward", depth=2)
-
-        # Should show the alternatives with FILE: prefix
-        assert "FILE:" in result
-        # Should mention full node ID for disambiguation
-        assert "node ID" in result  # "use full node ID to select"
-
-    def test_no_disambiguation_when_using_full_node_id(
-        self, graph_with_duplicate_names
-    ):
-        """trace_flow should not show disambiguation when full node ID is used."""
-        q = GraphQuerier(graph_with_duplicate_names)
-
-        # Using full node ID should not trigger disambiguation
-        result = q.trace_flow(
-            "FILE:service_a.rs::ServiceA::new", direction="forward", depth=2
-        )
-
-        # When exact node ID is provided and matches exactly, no disambiguation needed
-        # The result should contain the flow but not the alternatives message
-        assert "Call Flow:" in result
-        # Should not say "Found X matches" since we provided exact ID
-        assert "Alternatives" not in result
 
 
 class TestExpandCallees:
@@ -639,7 +627,8 @@ fn fetch_user(user_id: &str) -> Result<User> {
         graph_file, source_file = graph_with_callees
         q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
-        result = q.get_context_prompt(
+        result = _context(
+            q,
             f"FILE:{source_file}::authenticate",
             expand_callees=True,
             callee_budget=2000,
@@ -660,9 +649,9 @@ fn fetch_user(user_id: &str) -> Result<User> {
     def test_expand_callees_disabled_by_default(self, graph_with_callees):
         """expand_callees should be disabled by default."""
         graph_file, source_file = graph_with_callees
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, DescryConfig())
 
-        result = q.get_context_prompt(f"FILE:{source_file}::authenticate")
+        result = _context(q, f"FILE:{source_file}::authenticate")
 
         # Should NOT have Expanded Callees section
         assert "Expanded Callees" not in result
@@ -670,7 +659,7 @@ fn fetch_user(user_id: &str) -> Result<User> {
     def test_expand_callees_respects_budget(self, graph_with_callees):
         """expand_callees should respect the token budget."""
         graph_file, source_file = graph_with_callees
-        q = GraphQuerier(graph_file)
+        q = GraphQuerier(graph_file, DescryConfig())
 
         # With very small budget, should skip callees
         expanded = q._expand_callees_full(
@@ -681,12 +670,10 @@ fn fetch_user(user_id: &str) -> Result<User> {
         assert len(expanded) == 0
 
 
-class TestFuzzyNodeMatching:
-    """Tests for fuzzy node ID matching in descry context."""
-
+class TestContextByNodeId:
     @pytest.fixture
     def graph_with_symbols(self, tmp_path):
-        """Create a graph with various symbols for testing fuzzy matching."""
+        """A graph of two functions whose names share a prefix."""
         # Create source file
         source_file = tmp_path / "auth.rs"
         source_content = """\
@@ -743,65 +730,14 @@ fn validate_token_format(token: &str) -> bool {
         return str(graph_file), str(source_file)
 
     def test_exact_node_id_works(self, graph_with_symbols, tmp_path):
-        """Exact node ID should work without fuzzy matching."""
         graph_file, source_file = graph_with_symbols
         q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
 
-        result = q.get_context_prompt(f"FILE:{source_file}::validate_token")
+        result = _context(q, f"FILE:{source_file}::validate_token")
 
         assert "Context for" in result
         assert "validate_token" in result
-        assert "Matched" not in result  # No fuzzy match note
-
-    def test_symbol_name_only_matches(self, graph_with_symbols, tmp_path):
-        """Just symbol name should find the node via fuzzy matching."""
-        graph_file, _ = graph_with_symbols
-        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
-
-        # Just the function name, no FILE: prefix or path
-        result = q.get_context_prompt("validate_token")
-
-        assert "Context for" in result
-        # Should have a fuzzy match note
-        assert "Matched" in result
-        assert "validate_token" in result
-
-    def test_multiple_matches_shows_suggestions(self, graph_with_symbols):
-        """When multiple nodes match, should show suggestions."""
-        graph_file, _ = graph_with_symbols
-        q = GraphQuerier(graph_file)
-
-        # "validate" matches both functions partially
-        resolved_id, msg = q._resolve_node_id("validate")
-
-        # Should not auto-resolve (ambiguous)
-        assert resolved_id is None
-        assert "Did you mean" in msg
-        assert "validate_token" in msg
-        assert "validate_token_format" in msg
-
-    def test_camel_case_finds_snake_case(self, graph_with_symbols, tmp_path):
-        """camelCase query should find snake_case function."""
-        graph_file, _ = graph_with_symbols
-        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
-
-        # camelCase version
-        result = q.get_context_prompt("validateToken")
-
-        assert "Context for" in result
-        # Should match validate_token
-        assert "validate_token" in result
-
-    def test_partial_path_matches(self, graph_with_symbols, tmp_path):
-        """Partial path should help narrow down matches."""
-        graph_file, _ = graph_with_symbols
-        q = GraphQuerier(graph_file, config=DescryConfig(project_root=tmp_path))
-
-        # Just filename::function
-        result = q.get_context_prompt("auth.rs::validate_token")
-
-        assert "Context for" in result
-        assert "validate_token" in result
+        assert "Matched" not in result
 
 
 class TestFullSourceBypass:
@@ -871,11 +807,11 @@ class TestFullSourceBypass:
         node_id = f"FILE:{source_file}::large_function"
 
         # With full=False, should truncate
-        context_truncated = q.get_context_prompt(node_id, full=False)
+        context_truncated = _context(q, node_id, full=False)
         assert "lines omitted" in context_truncated
 
         # With full=True, should not truncate
-        context_full = q.get_context_prompt(node_id, full=True)
+        context_full = _context(q, node_id, full=True)
         assert "lines omitted" not in context_full
 
 
@@ -896,8 +832,8 @@ def _source_shown(q, node_id):
     rel = node_id.split("::")[0].removeprefix("FILE:")
     return "\n".join(
         [
-            q.get_context_prompt(node_id),
-            q.trace_flow(node_id.split("::")[-1], inline_threshold=100),
+            _context(q, node_id),
+            _flow(q, node_id.split("::")[-1], inline_threshold=100),
             q.get_source_segment(rel, 1, 2),
         ]
     )
@@ -914,10 +850,10 @@ def _querier(tmp_path, nodes, edges=(), **config):
         "max_children_per_level": 10,
         "max_callers_shown": 15,
         "query_timeout_ms": 4000,
-        "test_path_patterns": None,
-        "test_file_suffixes": None,
-        "syntax_lang_map": None,
-        "project_root": None,
+        "test_path_patterns": _DEFAULT_TEST_PATH_PATTERNS,
+        "test_file_suffixes": _DEFAULT_TEST_FILE_SUFFIXES,
+        "syntax_lang_map": _DEFAULT_SYNTAX_LANG_MAP,
+        "project_root": tmp_path,
         "max_file_bytes": 0,
     }
     settings.update(config)
@@ -951,13 +887,11 @@ class TestSourcePathsResolveAgainstProjectRoot:
     ):
         monkeypatch.chdir(tmp_path / cwd)
 
-        context = querier.get_context_prompt(
-            "FILE:src/foo.py::caller", expand_callees=True
-        )
+        context = _context(querier, "FILE:src/foo.py::caller", expand_callees=True)
         assert "return helper()" in context
         assert "return 42" in context
 
-        flow = querier.trace_flow("caller", inline_threshold=100)
+        flow = _flow(querier, "FILE:src/foo.py::caller", inline_threshold=100)
         assert "return 42" in flow
         # Inlined code is indented as its fence is, at every level
         fence = None
@@ -966,12 +900,14 @@ class TestSourcePathsResolveAgainstProjectRoot:
                 fence = None if fence is not None else line[: line.index("`")]
             elif fence is not None:
                 assert line.startswith(fence), line
-        tree = querier.trace_flow_structured("caller", inline_threshold=100)
+        tree = querier.flow_data("FILE:src/foo.py::caller", inline_threshold=100)
         assert "return helper()" in tree["root"]["code"]
 
-        hop = querier.find_call_path_result("caller", "helper")["path"][0]
-        assert "return helper()" in hop["call_snippet"]
+        hop = querier.find_call_path_result(
+            "FILE:src/foo.py::caller", "FILE:src/foo.py::helper"
+        )["path"][0]
         assert hop["file_path"] == "src/foo.py"
+        assert "return helper()" in querier.call_snippet("src/foo.py", hop["call_line"])
 
     def test_a_file_over_the_size_limit_is_not_read(self, tmp_path):
         root = tmp_path / "project"
@@ -980,10 +916,10 @@ class TestSourcePathsResolveAgainstProjectRoot:
         nodes = [_fn("FILE:big.py::big", lineno=1, end_lineno=2, token_count=10)]
 
         within = _querier(tmp_path, nodes, project_root=root, max_file_bytes=1024)
-        assert "BODY" in within.get_context_prompt("FILE:big.py::big")
+        assert "BODY" in _context(within, "FILE:big.py::big")
         over = _querier(tmp_path, nodes, project_root=root, max_file_bytes=8)
-        assert "BODY" not in over.get_context_prompt("FILE:big.py::big")
-        assert "BODY" not in over.trace_flow("big", inline_threshold=100)
+        assert "BODY" not in _context(over, "FILE:big.py::big")
+        assert "BODY" not in _flow(over, "FILE:big.py::big", inline_threshold=100)
 
     @pytest.mark.parametrize("link", [False, True])
     def test_a_node_path_leaving_the_project_is_not_read(self, tmp_path, link):
@@ -1002,25 +938,9 @@ class TestSourcePathsResolveAgainstProjectRoot:
             project_root=root,
         )
 
-        assert "TOP SECRET" not in q.get_context_prompt(node_id)
-        assert "TOP SECRET" not in q.trace_flow("leaked", inline_threshold=100)
+        assert "TOP SECRET" not in _context(q, node_id)
+        assert "TOP SECRET" not in _flow(q, node_id, inline_threshold=100)
         assert "TOP SECRET" not in q.get_source_segment(rel, 1, 2)
-
-    @pytest.mark.parametrize("absolute", [False, True])
-    def test_no_source_is_read_without_a_project_root(
-        self, tmp_path, monkeypatch, absolute
-    ):
-        source = tmp_path / "foo.py"
-        source.write_text("def leaked():\n    return 'TOP SECRET'\n")
-        monkeypatch.chdir(tmp_path)
-        rel = str(source) if absolute else "foo.py"
-        node_id = f"FILE:{rel}::leaked"
-        nodes = [_fn(node_id, lineno=1, end_lineno=2, token_count=10)]
-        rootless_config = _querier(tmp_path, nodes)
-        no_config = GraphQuerier(str(tmp_path / "graph.json"))
-
-        for q in (rootless_config, no_config):
-            assert "TOP SECRET" not in _source_shown(q, node_id)
 
 
 class TestLanguageFilter:
@@ -1039,13 +959,7 @@ class TestLanguageFilter:
 
     @pytest.fixture
     def querier(self, tmp_path):
-        from descry.handlers import _DEFAULT_SYNTAX_LANG_MAP
-
-        return _querier(
-            tmp_path,
-            [_fn(f"FILE:{f}::handler") for f in self.FILES],
-            syntax_lang_map=_DEFAULT_SYNTAX_LANG_MAP,
-        )
+        return _querier(tmp_path, [_fn(f"FILE:{f}::handler") for f in self.FILES])
 
     @pytest.mark.parametrize(
         ("lang", "expected"),
@@ -1073,9 +987,8 @@ class TestLanguageFilter:
     def test_lang_with_no_files_matches_nothing(self, querier, lang):
         assert querier.search_docs(["handler"], lang=lang) == []
 
-    @pytest.mark.parametrize("lang", ["all", None])
-    def test_all_and_none_do_not_filter(self, querier, lang):
-        assert len(querier.search_docs(["handler"], lang=lang)) == len(self.FILES)
+    def test_none_does_not_filter(self, querier):
+        assert len(querier.search_docs(["handler"], lang=None)) == len(self.FILES)
 
     @pytest.mark.parametrize(
         ("kind", "found"), [("function", len(FILES)), ("class", 0), ("struct", 0)]
@@ -1100,33 +1013,67 @@ class TestCallPathDepthAndOutcome:
         self, tmp_path
     ):
         q = self._chain(tmp_path, 9, max_depth=3)
-        assert len(q.find_call_path_result("n0", "n8", max_depth=10)["path"]) == 8
-        assert q.find_call_path_result("n0", "n8", max_depth=7)["path"] == []
+        assert (
+            len(
+                q.find_call_path_result("FILE:x.py::n0", "FILE:x.py::n8", max_depth=10)[
+                    "path"
+                ]
+            )
+            == 8
+        )
+        assert (
+            q.find_call_path_result("FILE:x.py::n0", "FILE:x.py::n8", max_depth=7)[
+                "path"
+            ]
+            == []
+        )
 
     def test_max_depth_is_capped_at_the_hard_ceiling(self, tmp_path):
         q = self._chain(tmp_path, MAX_PATH_DEPTH + 5, max_nodes=10_000)
         at_ceiling = q.find_call_path_result(
-            "n0", f"n{MAX_PATH_DEPTH}", max_depth=10**9
+            "FILE:x.py::n0", f"FILE:x.py::n{MAX_PATH_DEPTH}", max_depth=10**9
         )
         assert at_ceiling["status"] == "found"
         assert at_ceiling["max_depth"] == MAX_PATH_DEPTH
         beyond = q.find_call_path_result(
-            "n0", f"n{MAX_PATH_DEPTH + 1}", max_depth=10**9
+            "FILE:x.py::n0", f"FILE:x.py::n{MAX_PATH_DEPTH + 1}", max_depth=10**9
         )
         assert beyond["status"] == "not_found"
 
     def test_status_tells_a_miss_from_a_search_that_was_cut_off(self, tmp_path):
         q = self._chain(tmp_path, 30)
-        assert q.find_call_path_result("n0", "n5")["status"] == "found"
-        assert q.find_call_path_result("n0", "island")["status"] == "not_found"
-        assert q.find_call_path_result("nope", "n5")["status"] == "not_found"
+        assert (
+            q.find_call_path_result("FILE:x.py::n0", "FILE:x.py::n5")["status"]
+            == "found"
+        )
+        assert (
+            q.find_call_path_result("FILE:x.py::n0", "FILE:x.py::island")["status"]
+            == "not_found"
+        )
 
         tight = self._chain(tmp_path, 30, max_nodes=5)
-        cut_off = tight.find_call_path_result("n0", "n29", max_depth=40)
-        assert cut_off == {"status": "node_budget", "max_depth": 40, "path": []}
+        assert (
+            tight.find_call_path_result(
+                "FILE:x.py::n0", "FILE:x.py::n29", max_depth=40
+            )["status"]
+            == "found"
+        )
 
         slow = self._chain(tmp_path, 30, query_timeout_ms=-1)
-        assert slow.find_call_path_result("n0", "n29")["status"] == "timeout"
+        assert (
+            slow.find_call_path_result("FILE:x.py::n0", "FILE:x.py::n29")["status"]
+            == "timeout"
+        )
+
+    def test_a_limit_of_0_sets_none(self, tmp_path):
+        """`query_ms = 0` and `max_nodes = 0` lift the limit, as in context,
+        flow and path alike."""
+        free = self._chain(tmp_path, 30, query_timeout_ms=0, max_nodes=0)
+        assert free.find_call_path_result(
+            "FILE:x.py::n0", "FILE:x.py::n29", max_depth=40
+        )["status"] == ("found")
+        flow = free.flow_data("FILE:x.py::n0", depth=40)
+        assert flow.get("cut") is None
 
 
 class TestCalleeExpansion:
@@ -1152,7 +1099,7 @@ class TestCalleeExpansion:
         return _querier(tmp_path, nodes, edges, project_root=tmp_path)
 
     def expand(self, q, budget, inline_threshold=200):
-        blocks, notes = q._expand_callees(
+        blocks, notes, _ = q._expand_callees(
             "FILE:m.py::start", 3, budget, inline_threshold
         )
         return "\n".join([*(line for block in blocks for line in block), *notes])
@@ -1172,7 +1119,7 @@ class TestCalleeExpansion:
         assert "- `y` (at level 2)" in text
 
     def test_depth_one_holds_to_the_budget(self, querier):
-        text = querier.get_context_prompt("FILE:m.py::start", max_tokens=5)
+        text = _context(querier, "FILE:m.py::start", max_tokens=5)
         assert "*(token budget reached)*" in text
         assert "- `w(...)` (20 toks)" in text
 
@@ -1202,7 +1149,7 @@ class TestLangMapValueInTruncation:
         q = _querier(
             tmp_path, [node], project_root=tmp_path, syntax_lang_map={".py": lang}
         )
-        out = q.get_context_prompt("FILE:x.py::f", full=True, max_output_tokens=50)
+        out = _context(q, "FILE:x.py::f", full=True, max_output_tokens=50)
         assert f"```{lang}" in out
         assert "(170 lines omitted, max_output_tokens limit)" in out
         assert "line 199" not in out
@@ -1239,14 +1186,8 @@ class TestUnresolvedCallsInPathsAndFlows:
 
     def test_context_marks_a_caller_that_may_reach_it(self, querier, tmp_path):
         (tmp_path / "b.py").write_text("def helper():\n    leaf()\n")
-        context = querier.get_context_prompt("FILE:b.py::helper")
+        context = _context(querier, "FILE:b.py::helper")
         assert "- `start` in a.py (0 toks) (one of 2 candidates)" in context
-
-    def test_path_starts_from_every_node_of_the_name(self, querier):
-        found = querier.find_call_path_result("helper", "leaf")
-        assert [(hop["caller_id"], hop["callee_id"]) for hop in found["path"]] == [
-            ("FILE:b.py::helper", "FILE:b.py::leaf")
-        ]
 
     @pytest.mark.parametrize("asked", ["Store::get", "Store.get"])
     def test_dotted_name_is_the_qualified_one(self, tmp_path, asked):
@@ -1345,21 +1286,18 @@ class TestUnresolvedCallsInPathsAndFlows:
     def test_path_between_two_definitions_of_one_name(self, tmp_path):
         nodes = [_fn("FILE:a.py::run"), _fn("FILE:b.py::run")]
         edges = [_calls("FILE:a.py::run", "FILE:b.py::run")]
-        found = _querier(tmp_path, nodes, edges).find_call_path_result("run", "run")
+        found = _querier(tmp_path, nodes, edges).find_call_path_result(
+            "FILE:a.py::run", "FILE:b.py::run"
+        )
         assert [(hop["caller_id"], hop["callee_id"]) for hop in found["path"]] == [
             ("FILE:a.py::run", "FILE:b.py::run")
         ]
 
-    def test_start_nodes_do_not_spend_the_node_budget(self, tmp_path):
-        nodes = [_fn(f"FILE:f{i}.py::h") for i in range(120)]
-        nodes.append(_fn("FILE:z.py::end"))
-        edges = [_calls("FILE:f7.py::h", "FILE:z.py::end")]
-        querier = _querier(tmp_path, nodes, edges)
-        assert querier.find_call_path_result("h", "end")["status"] == "found"
-
     @pytest.mark.parametrize("direction", ["forward", "backward"])
     def test_path_goes_through_a_candidate_and_says_so(self, querier, direction):
-        ends = ("start", "leaf") if direction == "forward" else ("leaf", "start")
+        ends = ("FILE:a.py::start", "FILE:b.py::leaf")
+        if direction == "backward":
+            ends = ends[::-1]
         found = querier.find_call_path_result(*ends, direction=direction)
         assert found["status"] == "found"
         hops = sorted(found["path"], key=lambda hop: hop["caller_id"])
@@ -1370,20 +1308,21 @@ class TestUnresolvedCallsInPathsAndFlows:
         assert [hop.get("candidates") for hop in hops] == [2, None]
 
     def test_path_does_not_reach_a_definition_the_edge_leaves_out(self, querier):
-        found = querier.find_call_path_result("start", "FILE:a.py::helper")
+        found = querier.find_call_path_result("FILE:a.py::start", "FILE:a.py::helper")
         assert found["status"] == "not_found"
-        assert querier.find_call_path_result("bare", "leaf")["status"] == "not_found"
+        found = querier.find_call_path_result("FILE:a.py::bare", "FILE:b.py::leaf")
+        assert found["status"] == "not_found"
 
     def test_backward_flow_marks_a_candidate_caller(self, querier):
-        assert "**start** (0 toks) (one of 2 candidates)" in querier.trace_flow(
-            "FILE:b.py::helper", direction="backward"
+        assert "**start** (0 toks) (one of 2 candidates)" in _flow(
+            querier, "FILE:b.py::helper", direction="backward"
         )
-        tree = querier.trace_flow_structured("FILE:b.py::helper", direction="backward")
+        tree = querier.flow_data("FILE:b.py::helper", direction="backward")
         assert [(c["name"], c["candidates"]) for c in tree["root"]["children"]] == [
             ("start", 2)
         ]
-        assert "**helper** (0 toks)\n" in querier.trace_flow(
-            "leaf", direction="backward"
+        assert "**helper** (0 toks)\n" in _flow(
+            querier, "FILE:b.py::leaf", direction="backward"
         )
 
     def test_flatten_follows_a_base_only_when_one_class_has_the_name(self, tmp_path):
@@ -1408,11 +1347,11 @@ class TestUnresolvedCallsInPathsAndFlows:
                 "relation": "DEFINES",
             },
         ]
-        assert "run" not in _querier(tmp_path, nodes, edges).flatten_class(
-            "FILE:a.py::Child"
+        assert "run" not in _flatten(
+            _querier(tmp_path, nodes, edges), "FILE:a.py::Child"
         )
-        assert "run" in _querier(tmp_path, nodes[:3], edges).flatten_class(
-            "FILE:a.py::Child"
+        assert "run" in _flatten(
+            _querier(tmp_path, nodes[:3], edges), "FILE:a.py::Child"
         )
 
 
@@ -1452,7 +1391,7 @@ class TestCallersOfOneSymbol:
     def test_the_count_is_of_its_callers(self, querier):
         meta = querier.nodes["FILE:a.py::A::parse"]["metadata"]
         assert meta["in_degree"] == 1
-        brief = querier.get_context_prompt("FILE:a.py::A::parse", brief=True)
+        brief = _context(querier, "FILE:a.py::A::parse", brief=True)
         assert "**Callers:** 1 " in brief
 
     @pytest.mark.parametrize("direction", ["forward", "backward"])
@@ -1460,15 +1399,15 @@ class TestCallersOfOneSymbol:
         start = (
             "FILE:use.py::only_a" if direction == "forward" else "FILE:a.py::A::parse"
         )
-        tree = querier.trace_flow_structured(start, direction=direction, depth=1)
+        tree = querier.flow_data(start, direction=direction, depth=1)
         names = [child["name"] for child in tree["root"]["children"]]
         assert ("parse" in names) if direction == "forward" else names == ["only_a"]
         assert all(not child["children"] for child in tree["root"]["children"])
 
     def test_context_and_backward_flow_list_its_callers(self, querier):
         for text in (
-            querier.get_context_prompt("FILE:a.py::A::parse"),
-            querier.trace_flow("FILE:a.py::A::parse", direction="backward"),
+            _context(querier, "FILE:a.py::A::parse"),
+            _flow(querier, "FILE:a.py::A::parse", direction="backward"),
         ):
             assert "only_a" in text
             assert "only_b" not in text
@@ -1478,23 +1417,6 @@ def test_a_call_with_one_candidate_is_not_one_of_several():
     assert GraphQuerier.one_of(1) == " (unresolved; the only candidate)"
     assert GraphQuerier.one_of(3) == " (one of 3 candidates)"
     assert GraphQuerier.one_of(None) == ""
-
-
-def test_flatten_takes_a_class_name(tmp_path):
-    widget = {
-        "id": "FILE:w.py::Widget",
-        "type": "Class",
-        "metadata": {"name": "Widget"},
-    }
-    draw = {
-        "id": "FILE:w.py::Widget::draw",
-        "type": "Method",
-        "metadata": {"name": "draw", "signature": "def draw(self)"},
-    }
-    defines = {"source": widget["id"], "target": draw["id"], "relation": "DEFINES"}
-    flat = _querier(tmp_path, [widget, draw], [defines]).flatten_class("Widget")
-    assert "def draw(self)" in flat
-    assert "`FILE:w.py::Widget`" in flat
 
 
 class TestCertainBeforePossible:
@@ -1540,19 +1462,19 @@ class TestCertainBeforePossible:
     def test_defining_a_symbol_is_not_calling_it(self, tmp_path):
         q = self._graph(tmp_path)
         assert q.get_ambiguous_callers("FILE:a.py::outer::imp")["FILE:a.py::outer"] == 2
-        assert "**Callers:** 0 (+4 possible)" in q.get_context_prompt(
-            "FILE:a.py::outer::imp", brief=True
+        assert "**Callers:** 0 (+4 possible)" in _context(
+            q, "FILE:a.py::outer::imp", brief=True
         )
         assert q.nodes["FILE:a.py::outer::imp"]["metadata"]["in_degree"] == 0
 
     def test_a_cut_list_keeps_the_certain_callers(self, tmp_path):
         q = self._graph(tmp_path, max_callers_shown=1, max_children_per_level=1)
-        context = q.get_context_prompt("FILE:b.py::imp")
+        context = _context(q, "FILE:b.py::imp")
         assert "- `sure` in c.py" in context
         assert "(4 more possible callers)" in context
-        flow = q.trace_flow("FILE:b.py::imp", direction="backward", depth=1)
+        flow = _flow(q, "FILE:b.py::imp", direction="backward", depth=1)
         assert "**sure**" in flow and "*(4 more possible callers)*" in flow
-        tree = q.trace_flow_structured("FILE:b.py::imp", direction="backward", depth=1)
+        tree = q.flow_data("FILE:b.py::imp", direction="backward", depth=1)
         assert [c["name"] for c in tree["root"]["children"]] == ["sure"]
         assert (tree["root"]["more"], tree["root"]["more_possible"]) == (4, 4)
 
@@ -1609,11 +1531,24 @@ def test_a_forward_flow_cut_short_says_what_it_leaves_out(tmp_path):
         }
     )
     q = _querier(tmp_path, nodes, edges, max_children_per_level=1)
-    assert "*(1 more callees, 2 more possible callees)*" in q.trace_flow(
-        "FILE:a.py::start", depth=1
+    assert "*(1 more callees, 2 more possible callees)*" in _flow(
+        q, "FILE:a.py::start", depth=1
     )
-    root = q.trace_flow_structured("FILE:a.py::start", depth=1)["root"]
+    root = q.flow_data("FILE:a.py::start", depth=1)["root"]
     assert (root["more"], root["more_possible"]) == (3, 2)
+
+
+def test_a_target_past_the_per_level_limit_is_still_reached(tmp_path):
+    nodes = [_fn("FILE:a.py::start"), _fn("FILE:a.py::end")]
+    nodes += [_fn(f"FILE:a.py::mid{i}") for i in range(2)]
+    edges = [_calls("FILE:a.py::start", f"FILE:a.py::mid{i}") for i in range(2)]
+    edges.append(_calls("FILE:a.py::mid1", "FILE:a.py::end"))
+    q = _querier(tmp_path, nodes, edges, max_children_per_level=1)
+    flow = q.flow_data("FILE:a.py::start", target="FILE:a.py::end")
+    assert flow["path_to_target"] == ["start", "mid1", "end"]
+    limited = _querier(tmp_path, nodes, edges, max_children_per_level=1, max_nodes=1)
+    flow = limited.flow_data("FILE:a.py::start", target="FILE:a.py::end")
+    assert "path_to_target" not in flow and flow["cut"] == "node limit"
 
 
 def test_calls_written_apart_are_callees_apart(tmp_path):
@@ -1652,8 +1587,8 @@ def test_an_edge_to_a_symbol_the_graph_lacks_does_not_break_context(tmp_path):
         project_root=tmp_path,
     )
     for depth, expand in ((1, False), (2, True)):
-        assert "gone`" in q.get_context_prompt(
-            "FILE:a.py::f", depth=depth, expand_callees=expand
+        assert "gone`" in _context(
+            q, "FILE:a.py::f", depth=depth, expand_callees=expand
         )
 
 
@@ -1701,7 +1636,7 @@ def test_a_deep_context_says_what_it_leaves_out(tmp_path):
     q = _querier(
         tmp_path, nodes, edges, project_root=tmp_path, max_children_per_level=2
     )
-    text = q.get_context_prompt("FILE:a.py::f", depth=2)
+    text = _context(q, "FILE:a.py::f", depth=2)
     assert all(f"**g{i}**" in text for i in range(3))
     assert "*(1 more callees, 1 more unresolved callees)*" in text
 
@@ -1730,7 +1665,7 @@ class TestEachSymbolAtItsLevel:
         return _querier(tmp_path, nodes, edges, project_root=tmp_path)
 
     def test_forward(self, q):
-        root = q.trace_flow_structured("FILE:m.py::start", depth=2)["root"]
+        root = q.flow_data("FILE:m.py::start", depth=2)["root"]
         assert [(c["name"], c.get("seen", False)) for c in root["children"]] == [
             ("a", False),
             ("b", False),
@@ -1739,12 +1674,12 @@ class TestEachSymbolAtItsLevel:
         assert [(c["name"], c.get("seen")) for c in a["children"]] == [("b", 1)]
         assert a["children"][0]["seen"] is not True
         assert [c["name"] for c in b["children"]] == ["c"]
-        text = q.trace_flow("FILE:m.py::start", depth=2)
-        assert "    ├─[Fun] **b** (at level 1)" in text
-        assert "    ├─[Fun] **c** (500 toks)" in text
+        text = _flow(q, "FILE:m.py::start", depth=2)
+        assert "    ├─[Function] **b** (at level 1)" in text
+        assert "    ├─[Function] **c** (500 toks)" in text
 
     def test_backward(self, q):
-        tree = q.trace_flow_structured("FILE:m.py::b", direction="backward", depth=2)
+        tree = q.flow_data("FILE:m.py::b", direction="backward", depth=2)
         a, start = tree["root"]["children"]
         assert (a["name"], start["name"], start.get("seen")) == ("a", "start", None)
         assert [(c["name"], c.get("seen")) for c in a["children"]] == [("start", 1)]
@@ -1753,7 +1688,7 @@ class TestEachSymbolAtItsLevel:
     def test_deep_context_shows_a_callee_met_again(self, q):
         for node in q.nodes.values():
             node["metadata"]["token_count"] = 20
-        text = q.get_context_prompt("FILE:m.py::start", depth=2)
+        text = _context(q, "FILE:m.py::start", depth=2)
         assert "- `b` (at level 1)" in text
         # `b` opens at level 1, so its callee is shown
         assert "**c**" in text
@@ -1797,7 +1732,7 @@ def test_usage_examples_are_calls_of_that_symbol(tmp_path):
     q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
     examples = q._get_usage_examples("FILE:a.py::add", limit=5)
     assert [(e["lineno"], e["candidates"]) for e in examples] == [(2, None), (3, 2)]
-    assert "Line 3: (one of 2 candidates)" in q.get_context_prompt("FILE:a.py::add")
+    assert "Line 3: (one of 2 candidates)" in _context(q, "FILE:a.py::add")
 
 
 def test_a_node_id_names_that_node_alone(tmp_path):
@@ -1830,12 +1765,12 @@ def test_a_recursive_start_is_marked_at_level_zero(tmp_path):
         _calls("FILE:a.py::fact", "FILE:a.py::helper"),
     ]
     q = _querier(tmp_path, nodes, edges)
-    root = q.trace_flow_structured("FILE:a.py::fact", depth=2)["root"]
+    root = q.flow_data("FILE:a.py::fact", depth=2)["root"]
     assert [(c["name"], c.get("seen")) for c in root["children"]] == [
         ("fact", 0),
         ("helper", None),
     ]
-    assert "**fact** (at level 0)" in q.trace_flow("FILE:a.py::fact", depth=2)
+    assert "**fact** (at level 0)" in _flow(q, "FILE:a.py::fact", depth=2)
 
 
 def test_deep_context_lists_an_unresolved_call_met_twice(tmp_path):
@@ -1862,7 +1797,7 @@ def test_deep_context_lists_an_unresolved_call_met_twice(tmp_path):
         )
         edges.append(_calls(f"FILE:a.py::{caller}", "FILE:a.py::gone"))
     q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
-    text = q.get_context_prompt("FILE:a.py::two", depth=2)
+    text = _context(q, "FILE:a.py::two", depth=2)
     assert text.count("`append` (unresolved)") == 2
     assert text.count("gone`") == 2
 
@@ -1879,7 +1814,7 @@ def test_the_node_limit_lists_the_symbols_own_callees(tmp_path):
     edges = [_calls("FILE:a.py::f", f"FILE:a.py::g{i}") for i in range(3)]
     edges += [_calls("FILE:a.py::g0", f"FILE:a.py::h{i}") for i in range(3)]
     q = _querier(tmp_path, nodes, edges, project_root=tmp_path, max_nodes=2)
-    text = q.get_context_prompt("FILE:a.py::f", depth=2)
+    text = _context(q, "FILE:a.py::f", depth=2)
     assert all(f"**g{i}**" in text for i in range(3))
     assert "*(3 more callees)*" in text
     assert "*(node limit reached)*" in text
@@ -1905,7 +1840,7 @@ def test_the_node_limit_counts_what_each_parent_leaves(tmp_path):
     ]
     edges = [_calls(f"FILE:a.py::{a}", f"FILE:a.py::{b}") for a, b in pairs]
     q = _querier(tmp_path, nodes, edges, project_root=tmp_path, max_nodes=2)
-    text = q.get_context_prompt("FILE:a.py::f", depth=2)
+    text = _context(q, "FILE:a.py::f", depth=2)
     assert text.count("*(2 more callees)*") == 2
 
 
@@ -1927,7 +1862,7 @@ def test_the_node_limit_counts_below_what_it_opened(tmp_path):
     ]
     edges = [_calls(f"FILE:m.py::{a}", f"FILE:m.py::{b}") for a, b in pairs]
     q = _querier(tmp_path, nodes, edges, project_root=tmp_path, max_nodes=4)
-    text = q.get_context_prompt("FILE:m.py::f", depth=3)
+    text = _context(q, "FILE:m.py::f", depth=3)
     # `h0` leaves out `m0`; `g0`, cut at the limit, leaves out `h1`
     assert text.count("*(1 more callees)*") == 2
 
@@ -1982,19 +1917,19 @@ class TestOutputCap:
         return _querier(tmp_path, nodes, edges, project_root=tmp_path)
 
     def test_callees_go_whole(self, q):
-        out = q.get_context_prompt("FILE:a.py::f", max_output_tokens=1)
+        out = _context(q, "FILE:a.py::f", max_output_tokens=1)
         assert "*(2 more callees)*" in out
         assert "**c4**" in out and "**c5**" not in out
         assert out.count("#### Linux:") == 5
 
     def test_a_cut_caller_list_keeps_possible_callers_apart(self, q):
-        out = q.get_context_prompt("FILE:a.py::f", max_output_tokens=1)
+        out = _context(q, "FILE:a.py::f", max_output_tokens=1)
         assert "#### Callers (5 shown):" in out
         assert "*(2 more callers, 2 more possible callers)*" in out
 
     def test_a_dropped_section_is_said(self, q, tmp_path):
         q._find_related_tests = lambda *args: ["tests/test_a.py"]
-        out = q.get_context_prompt("FILE:a.py::f", max_output_tokens=1)
+        out = _context(q, "FILE:a.py::f", max_output_tokens=1)
         assert "#### Related Tests:\n*(omitted, max_output_tokens limit)*" in out
 
 
@@ -2003,8 +1938,77 @@ def test_the_source_cut_counts_from_the_symbols_lines(tmp_path):
     (tmp_path / "x.py").write_text("\n".join(f"line {i}" for i in range(300)) + "\n")
     node = _fn("FILE:x.py::f", lineno=1, end_lineno=300, token_count=3000)
     q = _querier(tmp_path, [node], project_root=tmp_path)
-    out = q.get_context_prompt("FILE:x.py::f", max_output_tokens=50)
+    out = _context(q, "FILE:x.py::f", max_output_tokens=50)
     assert "(270 lines omitted, max_output_tokens limit)" in out
+    # Still over the cap with every step taken, it says so
+    assert out.endswith("\n\n*[Output truncated to ~50 tokens]*")
+
+
+def test_related_tests_are_ids_a_call_can_pass_back(tmp_path):
+    """Each entry is a node ID: not a bare path, not prose after one."""
+    nodes = [
+        _fn("FILE:a.py::f"),
+        _fn("FILE:a.py::test_f", lineno=1),
+        {"id": "FILE:test_a.py", "type": "File", "metadata": {"path": "test_a.py"}},
+    ]
+    q = _querier(tmp_path, nodes)
+    assert q._find_related_tests("a.py", "f") == [
+        "FILE:test_a.py",
+        "FILE:a.py::test_f",
+    ]
+
+
+def test_related_tests_of_an_acronym_name_are_its_snake_case_tests(tmp_path):
+    nodes = [
+        _fn("FILE:http.py::HTTPServer"),
+        _fn("FILE:test_http.py::test_http_server"),
+    ]
+    q = _querier(tmp_path, nodes)
+    assert q._find_related_tests("http.py", "HTTPServer") == [
+        "FILE:test_http.py::test_http_server"
+    ]
+
+
+def test_related_test_files_are_named_by_the_configured_suffixes(tmp_path):
+    nodes = [
+        _fn("FILE:a.py::f"),
+        *(
+            {"id": f"FILE:{name}", "type": "File", "metadata": {"path": name}}
+            for name in ("a_check.py", "a.spec.py")
+        ),
+    ]
+    q = _querier(tmp_path, nodes, test_file_suffixes=("_check.py",))
+    assert q._find_related_tests("a.py", "f") == ["FILE:a_check.py"]
+
+
+def test_related_tests_are_test_code_as_test_detection_says(tmp_path):
+    """A file named after the symbol's is among them only where
+    `[test_detection]` makes it test code; the usage examples put tests
+    first by the same rule."""
+    nodes = [
+        _fn("FILE:a.py::f"),
+        {"id": "FILE:a.spec.py", "type": "File", "metadata": {"path": "a.spec.py"}},
+        _fn("FILE:attest.py::use"),
+        _fn("FILE:qa/check.py::use"),
+    ]
+    edges = [
+        {
+            "source": source,
+            "target": "FILE:a.py::f",
+            "relation": "CALLS",
+            "metadata": {"lineno": 1},
+        }
+        for source in ("FILE:attest.py::use", "FILE:qa/check.py::use")
+    ]
+    for path in ("attest.py", "qa/check.py"):
+        (tmp_path / path).parent.mkdir(exist_ok=True)
+        (tmp_path / path).write_text("f()\n")
+    q = _querier(
+        tmp_path, nodes, edges, test_path_patterns=("/qa/",), project_root=tmp_path
+    )
+    assert q._find_related_tests("a.py", "f") == []
+    examples = q._get_usage_examples("FILE:a.py::f")
+    assert [e["file"] for e in examples] == ["qa/check.py", "attest.py"]
 
 
 @pytest.mark.parametrize("a0_calls_p", [False, True])
@@ -2030,7 +2034,7 @@ def test_a_cut_callee_list_keeps_kinds_and_marks_true(tmp_path, a0_calls_p):
             }
         )
     q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
-    out = q.get_context_prompt("FILE:a.py::f", depth=2, max_output_tokens=1)
+    out = _context(q, "FILE:a.py::f", depth=2, max_output_tokens=1)
     # `a5`, cut from f's list, is drawn under `a0`, and so is `x.p` when
     # `a0` makes the call
     assert ("more possible callees" in out) is not a0_calls_p
@@ -2049,5 +2053,5 @@ def test_a_self_call_past_the_callees_cut_is_counted(tmp_path):
     edges = [_calls("FILE:a.py::f", f"FILE:a.py::{n}") for n in small]
     edges.append(_calls("FILE:a.py::f", "FILE:a.py::f"))
     q = _querier(tmp_path, nodes, edges, project_root=tmp_path)
-    out = q.get_context_prompt("FILE:a.py::f", depth=2, max_output_tokens=1)
+    out = _context(q, "FILE:a.py::f", depth=2, max_output_tokens=1)
     assert "*(2 more callees)*" in out

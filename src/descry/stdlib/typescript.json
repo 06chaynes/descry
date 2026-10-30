@@ -24228,5 +24228,10 @@
    "params": [],
    "statics": {}
   }
- }
+ },
+ "writers": [
+  "Object.assign",
+  "Object.defineProperties",
+  "Object.defineProperty"
+ ]
 }
