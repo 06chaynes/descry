@@ -1058,7 +1058,7 @@ def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
         )
     else:
         # The child may have exited without the event loop having seen it yet.
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(proc.pid, signal.SIGKILL)
 
 

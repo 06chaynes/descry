@@ -4,6 +4,18 @@ All notable changes to Descry will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [semver](https://semver.org/) from 1.0.0.
 
+## [1.0.1] — 2026-10-30
+
+### Fixed
+
+- On macOS, stopping `descry index` (Ctrl-C, `SIGINT`) stops the run as
+  `SIGTERM` and `SIGHUP` do; it reported "Index error: Operation not
+  permitted" and exited 2.
+
+### Changed
+
+- `CLAUDE.md` is `AGENTS.md`.
+
 ## [1.0.0] — 2026-10-29
 
 ### Breaking
