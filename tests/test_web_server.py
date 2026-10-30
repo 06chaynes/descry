@@ -381,9 +381,9 @@ class TestSourceRaces:
             if str(path).endswith("pipe.txt") and not writers:
                 target.unlink()
                 os.mkfifo(target)
-                # A writer with a full sample pending, so a blocking open and
-                # read of the FIFO return instead of hanging the test.
-                writers.append(real_open(target, os.O_RDWR))
+                # A writer with data pending, so a blocking open and read of
+                # the FIFO return instead of hanging the test.
+                writers.append(real_open(target, os.O_RDWR | os.O_NONBLOCK))
                 os.write(writers[0], b"x" * 16384)
             return real_open(path, flags, *args, **kwargs)
 

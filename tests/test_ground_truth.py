@@ -52,7 +52,10 @@ def services(tmp_path_factory):
                     project_root=root, enable_scip=False, enable_embeddings=False
                 )
             )
-            asyncio.run(svc.index())
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setenv("DESCRY_NO_SCIP", "1")
+                mp.setenv("DESCRY_NO_EMBEDDINGS", "1")
+                asyncio.run(svc.index())
             built[language] = svc
         return built[language]
 
