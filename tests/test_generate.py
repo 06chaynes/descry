@@ -22,6 +22,7 @@ from descry.python_parser import PythonParser
 from descry.resolver import CallResolver
 from descry.rust_parser import RustParser
 from descry.ts_parser import TSParser
+from tests.test_backtracking import assert_linear
 
 
 class TestPythonParser:
@@ -3168,13 +3169,18 @@ class TestPythonCallResolution:
 
     def test_many_branches_merge_in_time_linear_in_the_code(self, tmp_path):
         """Merging the ways of many branches costs time in the bindings they
-        hold, not in every name the file declares: four thousand `if`s are
-        parsed in seconds."""
-        source = "def f(c):\n" + "".join(f"    if c: x{i} = 1\n" for i in range(4000))
-        (tmp_path / "m.py").write_text(source)
-        started = time.process_time()
-        CodeGraphBuilder(tmp_path).process_directory()
-        assert time.process_time() - started < 3
+        hold, not in every name the file declares."""
+
+        def parse(n):
+            _index(
+                tmp_path / str(n),
+                {
+                    "m.py": "def f(c):\n"
+                    + "".join(f"    if c: x{i} = 1\n" for i in range(n))
+                },
+            )
+
+        assert_linear(parse, 4000)
 
     def test_a_break_in_a_match_case_skips_the_else(self, tmp_path):
         """A `break` inside a `case` body skips the loop's `else`, so `x`
@@ -14989,35 +14995,37 @@ class TestTypeScriptCallResolution:
 
     def test_scopes_are_read_in_time_linear_in_the_code(self, tmp_path):
         """A line of thousands of assignments in one sequence, and of
-        thousands of nested labelled blocks, is read in a few seconds: no
-        token is read back over once per assignment after it."""
-        count = 2000
-        line = (
-            "function f(){var a;"
-            + ",".join(["a=1"] * count)
-            + ";"
-            + "".join(f"l{i}:{{" for i in range(count))
-            + "a=2;"
-            + "}" * count
-            + "}\n"
-        )
-        started = time.process_time()
-        builder = _index(tmp_path, {"a.js": line})
-        assert time.process_time() - started < 6
-        assert any(n["id"] == "FILE:a.js::f" for n in builder.nodes)
+        thousands of nested labelled blocks, is read in time linear in its
+        length: no token is read back over once per assignment after it."""
+
+        def index(n):
+            line = (
+                "function f(){var a;"
+                + ",".join(["a=1"] * n)
+                + ";"
+                + "".join(f"l{i}:{{" for i in range(n))
+                + "a=2;"
+                + "}" * n
+                + "}\n"
+            )
+            return _index(tmp_path / str(n), {"a.js": line})
+
+        assert_linear(index, 2000)
+        assert any(n["id"] == "FILE:a.js::f" for n in index(2000).nodes)
 
     def test_the_bindings_of_one_name_are_read_in_time_linear_in_the_code(
         self, tmp_path
     ):
         """A line of six thousand assignments of one name in one function
-        is indexed in seconds: a read of the name looks only at the
-        bindings that can be in scope where it is read."""
-        count = 6000
-        line = "function f(){var a;" + "a=1," * count + "}\n"
-        started = time.process_time()
-        builder = _index(tmp_path, {"a.js": line})
-        assert time.process_time() - started < 3
-        assert any(n["id"] == "FILE:a.js::f" for n in builder.nodes)
+        is indexed in time linear in its length: a read of the name looks
+        only at the bindings that can be in scope where it is read."""
+
+        def index(n):
+            line = "function f(){var a;" + "a=1," * n + "}\n"
+            return _index(tmp_path / str(n), {"a.js": line})
+
+        assert_linear(index, 6000)
+        assert any(n["id"] == "FILE:a.js::f" for n in index(6000).nodes)
 
     def test_a_block_starts_wherever_a_statement_does(self, tmp_path):
         """A `{` is a block after a label's, a `case`'s or `default`'s `:`,

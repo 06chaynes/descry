@@ -483,7 +483,7 @@ class TestLoopbackHostFlag:
 class TestServiceDelegation:
     """The web layer must not carry its own copy of DescryService's logic.
 
-    CLAUDE.md: "DescryService owns all business logic. cli.py, mcp_server.py
+    AGENTS.md: "DescryService owns all business logic. cli.py, mcp_server.py
     and web/server.py are thin wrappers."
     """
 

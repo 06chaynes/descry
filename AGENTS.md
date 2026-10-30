@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents when working with code in this repository.
 
 ## Commands
 
@@ -23,7 +23,7 @@ just test tests/test_config.py::TestFromToml::test_from_toml_basic  # one test
 just test -k "cross_lang and not slow"                            # by expression
 ```
 
-Python 3.11+ required (enforced by `pyproject.toml`). Pre-commit gate: `just lint && just fmt && just test` all pass (3306 tests pass; a handful more are skipped where the environment lacks their fixture — a drop is a regression signal).
+Python 3.11+ required (enforced by `pyproject.toml`). Pre-commit gate: `just lint && just fmt && just test` all pass (3343 tests pass; a handful more are skipped where the environment lacks their fixture — a drop is a regression signal).
 
 Invoke the tool while developing:
 
