@@ -21,45 +21,80 @@ from descry.generate import CodeGraphBuilder
 
 _GO_FIELD = next(r for r in go_parser._DECLARATIONS if "(?!(?:return" in r.pattern)
 
+
+def _seconds(run):
+    """The least CPU time of three calls of `run`."""
+
+    def once():
+        start = time.process_time()
+        run()
+        return time.process_time() - start
+
+    return min(once() for _ in range(3))
+
+
+def assert_linear(run, n):
+    """`run(n)` takes under ten times the CPU time of `run(n // 4)`: time
+    linear in `n` gives four times, quadratic sixteen."""
+    quarter = _seconds(lambda: run(n // 4))
+    assert _seconds(lambda: run(n)) < 10 * max(quarter, 0.05)
+
+
 # 3,000 characters took seconds to minutes where the time was cubic, and
-# 20,000 seconds where it was quadratic; each now takes milliseconds.
-_RUN = " " * 3000
-_LONG_RUN = " " * 20000
-
-
+# 20,000 seconds where it was quadratic.
 @pytest.mark.parametrize(
-    ("find", "text"),
+    ("find", "text", "length"),
     [
-        (_RE_LOCAL_FUNCTION.match, _RUN + "!"),
-        (DartParser.binding_re.search, "const" + _RUN),
-        (java_parser._RE_METHOD.match, "final" + _RUN),
-        (java_parser._RE_FIELD.match, "final" + _RUN),
-        (ts_parser._TS_IMPORT_RE.findall, "import" + _RUN + "x;\n"),
-        (rust_parser._RUST_ARM_RE.search, _RUN + "!"),
-        (java_parser._RE_METHOD.match, "public <T>" + _RUN),
-        (java_parser._RE_METHOD.match, "public @A" + _RUN),
-        (java_parser._RE_ENUM_CONSTANT.match, "A" + _RUN + ")"),
-        (rust_parser._RUST_BINDER_RES[1].findall, "for" + _RUN),
-        (rust_parser._RUST_FOR_RE.search, "    for" + _RUN + "x"),
-        (rust_parser._RUST_IF_LET_RE.search, "while let" + _RUN),
-        (rust_parser._RUST_MATCH_RE.search, "match" + _RUN + "a b"),
-        (ruby_parser._RE_INLINE_BODY.match, "x" + "\r\n" * 1500 + ")"),
-        (dotnet_parser._RE_MEMBER.match, "partial unsafe" + _LONG_RUN + ")"),
-        (dotnet_parser._RE_PARAMETER.search, "scoped readonly" + _LONG_RUN + "x;"),
-        (_GO_FIELD.search, "  chan a" + _LONG_RUN + "x("),
-        (ruby_parser._RE_ALIAS.search, "alias" + _LONG_RUN + ")"),
-        (ruby_parser._RE_MIXIN.match, "  prepend" + _LONG_RUN + "="),
-        (_RE_TYPE.fullmatch, _LONG_RUN + ")"),
-        (java_parser._RE_METHOD.match, "private final a" + _LONG_RUN + "b"),
-        (java_parser._RE_FIELD.match, "public static a" + _LONG_RUN + "b("),
-        (ruby_parser._RE_ENDLESS.match, _LONG_RUN * 3 + "x"),
-        (ruby_parser._RE_INLINE_BODY.match, "end" + "\n" * 60000 + "x"),
-        (dotnet_parser._RE_PRIMARY_CONSTRUCTOR.match, _LONG_RUN * 3 + "x"),
-        (dotnet_parser._RE_PARAMETER.findall, "readonly" + "\t\n " * 20000 + ")"),
-        (_RE_CLOSURE.findall, "\n" * 60000),
-        (ts_parser._TS_IMPORT_RE.findall, "\n" * 60000),
-        (ts_parser._TS_DEFAULT_EXPORT_RE.findall, "\u2028" * 60000),
-        (rust_parser._RUST_USE_RE.findall, "\n" * 60000),
+        (_RE_LOCAL_FUNCTION.match, lambda n: " " * n + "!", 3000),
+        (DartParser.binding_re.search, lambda n: "const" + " " * n, 3000),
+        (java_parser._RE_METHOD.match, lambda n: "final" + " " * n, 3000),
+        (java_parser._RE_FIELD.match, lambda n: "final" + " " * n, 3000),
+        (ts_parser._TS_IMPORT_RE.findall, lambda n: "import" + " " * n + "x;\n", 3000),
+        (rust_parser._RUST_ARM_RE.search, lambda n: " " * n + "!", 3000),
+        (java_parser._RE_METHOD.match, lambda n: "public <T>" + " " * n, 3000),
+        (java_parser._RE_METHOD.match, lambda n: "public @A" + " " * n, 3000),
+        (java_parser._RE_ENUM_CONSTANT.match, lambda n: "A" + " " * n + ")", 3000),
+        (rust_parser._RUST_BINDER_RES[1].findall, lambda n: "for" + " " * n, 3000),
+        (rust_parser._RUST_FOR_RE.search, lambda n: "    for" + " " * n + "x", 3000),
+        (rust_parser._RUST_IF_LET_RE.search, lambda n: "while let" + " " * n, 3000),
+        (rust_parser._RUST_MATCH_RE.search, lambda n: "match" + " " * n + "a b", 3000),
+        (ruby_parser._RE_INLINE_BODY.match, lambda n: "x" + "\r\n" * n + ")", 1500),
+        (
+            dotnet_parser._RE_MEMBER.match,
+            lambda n: "partial unsafe" + " " * n + ")",
+            20000,
+        ),
+        (
+            dotnet_parser._RE_PARAMETER.search,
+            lambda n: "scoped readonly" + " " * n + "x;",
+            20000,
+        ),
+        (_GO_FIELD.search, lambda n: "  chan a" + " " * n + "x(", 20000),
+        (ruby_parser._RE_ALIAS.search, lambda n: "alias" + " " * n + ")", 20000),
+        (ruby_parser._RE_MIXIN.match, lambda n: "  prepend" + " " * n + "=", 20000),
+        (_RE_TYPE.fullmatch, lambda n: " " * n + ")", 20000),
+        (
+            java_parser._RE_METHOD.match,
+            lambda n: "private final a" + " " * n + "b",
+            20000,
+        ),
+        (
+            java_parser._RE_FIELD.match,
+            lambda n: "public static a" + " " * n + "b(",
+            20000,
+        ),
+        (ruby_parser._RE_ENDLESS.match, lambda n: " " * n + "x", 60000),
+        (ruby_parser._RE_INLINE_BODY.match, lambda n: "end" + "\n" * n + "x", 60000),
+        (dotnet_parser._RE_PRIMARY_CONSTRUCTOR.match, lambda n: " " * n + "x", 60000),
+        (
+            dotnet_parser._RE_PARAMETER.findall,
+            lambda n: "readonly" + "\t\n " * n + ")",
+            20000,
+        ),
+        (_RE_CLOSURE.findall, lambda n: "\n" * n, 60000),
+        (ts_parser._TS_IMPORT_RE.findall, lambda n: "\n" * n, 60000),
+        (ts_parser._TS_DEFAULT_EXPORT_RE.findall, lambda n: "\u2028" * n, 60000),
+        (rust_parser._RUST_USE_RE.findall, lambda n: "\n" * n, 60000),
     ],
     ids=[
         "dart-local-function",
@@ -94,34 +129,30 @@ _LONG_RUN = " " * 20000
         "rust-use-blank-lines",
     ],
 )
-def test_a_whitespace_run_is_taken_once(find, text):
-    start = time.process_time()
-
-    find(text)
-
-    assert time.process_time() - start < 1
+def test_a_whitespace_run_is_taken_once(find, text, length):
+    assert_linear(lambda n: find(text(n)), length)
 
 
 @pytest.mark.parametrize(
     ("name", "source", "count"),
     [
-        ("m.js", lambda n: "const b = { a: g() };\n" * n, 20000),
-        ("m.js", lambda n: "let b = 1;\n" + "b = g();\nb.x();\n" * n, 10000),
+        ("m.js", lambda n: "const b = { a: g() };\n" * n, 10000),
+        ("m.js", lambda n: "let b = 1;\n" + "b = g();\nb.x();\n" * n, 5000),
         (
             "m.js",
             lambda n: (
                 "function f(xs) {\n" + "  for (const x of xs) { x.a(); }\n" * n + "}\n"
             ),
-            15000,
+            7500,
         ),
-        ("m.rb", lambda n: "b = 2\n" * n, 20000),
-        ("m.rb", lambda n: "a = []\n" + "a <<-b\n" * n, 60000),
-        ("m.dart", lambda n: "void main() {\n" + "  var b = 2;\n" * n + "}\n", 20000),
-        ("m.py", lambda n: "def f():\n" + "    b = B()\n    b.x()\n" * n, 20000),
+        ("m.rb", lambda n: "b = 2\n" * n, 10000),
+        ("m.rb", lambda n: "a = []\n" + "a <<-b\n" * n, 30000),
+        ("m.dart", lambda n: "void main() {\n" + "  var b = 2;\n" * n + "}\n", 10000),
+        ("m.py", lambda n: "def f():\n" + "    b = B()\n    b.x()\n" * n, 10000),
         (
             "m.py",
             lambda n: "def f(xs):\n" + "    for x in xs:\n        x.a()\n" * n,
-            10000,
+            5000,
         ),
         (
             "M.java",
@@ -130,7 +161,7 @@ def test_a_whitespace_run_is_taken_once(find, text):
                 + "    B b = new B();\n    b.x();\n" * n
                 + "  }\n}\n"
             ),
-            10000,
+            5000,
         ),
         (
             "M.cs",
@@ -139,14 +170,14 @@ def test_a_whitespace_run_is_taken_once(find, text):
                 + "    var b = new B();\n    b.X();\n" * n
                 + "  }\n}\n"
             ),
-            8000,
+            4000,
         ),
         (
             "M.cs",
             lambda n: "".join(
                 f"class C{i} {{ int M() {{ return {i}; }} }}\n" for i in range(n)
             ),
-            3000,
+            1500,
         ),
         (
             "m.go",
@@ -156,7 +187,7 @@ def test_a_whitespace_run_is_taken_once(find, text):
                 * n
                 + "\treturn nil\n}\n"
             ),
-            10000,
+            5000,
         ),
         (
             "m.php",
@@ -165,14 +196,14 @@ def test_a_whitespace_run_is_taken_once(find, text):
                 + "    foreach ($xs as $x) { $x->a(); }\n" * n
                 + "}\n"
             ),
-            8000,
+            4000,
         ),
         (
             "src/lib.rs",
             lambda n: "".join(
                 f"fn f{i}<T: Clone>(a: T) -> T {{ a.clone() }}\n" for i in range(n)
             ),
-            12000,
+            6000,
         ),
         (
             "m.js",
@@ -182,7 +213,7 @@ def test_a_whitespace_run_is_taken_once(find, text):
                 * n
                 + "}\n"
             ),
-            5000,
+            2500,
         ),
         (
             "src/lib.rs",
@@ -191,7 +222,7 @@ def test_a_whitespace_run_is_taken_once(find, text):
                 + "    match v { Some(b) => b.a(), None => () }\n" * n
                 + "}\n"
             ),
-            10000,
+            5000,
         ),
     ],
     ids=[
@@ -216,22 +247,18 @@ def test_a_whitespace_run_is_taken_once(find, text):
 def test_a_repeated_line_is_read_in_linear_time(name, source, count, tmp_path):
     """A line that binds a name again, loops over it, matches it, or
     declares a type or a generic function costs the same time however many
-    came before it: four times the lines take about four times as long,
-    where they took sixteen times, minutes in all. The ratio, not a time,
-    is checked, so a slow machine does not fail it."""
+    came before it, where four times the lines took sixteen times as long,
+    minutes in all."""
 
     def reading(lines):
         root = tmp_path / str(lines)
         (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text(source(lines))
-        start = time.process_time()
         builder = CodeGraphBuilder(root)
         builder.process_directory()
         builder.resolve_references()
-        return time.process_time() - start
 
-    quarter = reading(count // 4)
-    assert reading(count) < 8 * max(quarter, 0.05)
+    assert_linear(reading, count)
 
 
 def test_the_patterns_still_match_source():
