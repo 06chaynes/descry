@@ -247,7 +247,7 @@ timeout = 30
 scip_minutes = 30      # per indexer; 0 = unlimited
 embedding_seconds = 60 # MCP and web answer `loading` past it; the CLI waits
 query_ms = 4000         # 0 = no time limit
-index_minutes = 30     # Timeout for `descry index` subprocess
+index_minutes = 30     # Timeout for `descry index` subprocess; 0 = unlimited
 
 [query]
 max_depth = 3

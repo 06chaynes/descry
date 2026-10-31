@@ -4,6 +4,26 @@ All notable changes to Descry will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [semver](https://semver.org/) from 1.0.0.
 
+## [Unreleased]
+
+### Fixed
+
+- Rust glob re-exports (`pub use m::*`) that reach a module by several
+  routes, or lead back round a cycle, no longer make indexing exponential:
+  each name a glob brings, and each type alias, is looked up once per
+  file.
+- Rust: `<Self>::f(x)` is read as `Self::f(x)`; it, and a crate-root path
+  `::f(x)` with an argument of a project type, stopped the index.
+- Rust: indexing a nested `vec![vec![..]; n]` twice stopped the index.
+- Rust: a `static` or `const` in a `quote!` template, its type written
+  with `#` interpolations, stopped the index.
+- MCP: arguments a tool cannot read are refused naming what is wrong with
+  each (`terms: Field required`), not the field alone.
+- CLI: without a terminal on stderr, loading the embedding model prints no
+  progress bars or Hugging Face Hub notices; `HF_HUB_DISABLE_PROGRESS_BARS`,
+  `HF_HUB_VERBOSITY` and `TRANSFORMERS_VERBOSITY` set by the user are kept.
+- README: `[timeouts] index_minutes = 0` is no time limit.
+
 ## [1.0.1] — 2026-10-30
 
 ### Fixed

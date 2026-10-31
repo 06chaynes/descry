@@ -4398,6 +4398,99 @@ class TestRustCallResolution:
             "FILE:src/lib.rs::Vec2::new"
         ]
 
+    def test_qualified_self_path_is_the_type_path(self, tmp_path):
+        """`<Self>::make()` and `<W>::make()` call `W::make`."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct W;
+                impl W {
+                    pub fn make() -> W {
+                        W
+                    }
+                    pub fn both() {
+                        <Self>::make();
+                        <W>::make();
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::W::both") == [
+            "FILE:src/lib.rs::W::make",
+            "FILE:src/lib.rs::W::make",
+        ]
+
+    def test_crate_root_path_on_project_argument_indexes(self, tmp_path):
+        """`::try_from(x)`, a Rust 2015 crate-root path, names no trait: an
+        argument of a project type does not make it one."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Sl;
+                pub struct Arr;
+                impl TryFrom<&Sl> for Arr {
+                    type Error = ();
+                    fn try_from(value: &Sl) -> Result<Self, ()> {
+                        Err(())
+                    }
+                }
+                impl TryFrom<&mut Sl> for Arr {
+                    type Error = ();
+                    fn try_from(value: &mut Sl) -> Result<Self, ()> {
+                        ::try_from(&*value)
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::Arr::try_from#2") == []
+
+    def test_index_of_nested_vec_literal_indexes(self, tmp_path):
+        """`data[i][j].go()` on `vec![vec![P; r]; c]` reads the inner
+        literal's element, not a member of the outer literal."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                #[derive(Clone)]
+                pub struct P;
+                impl P {
+                    pub fn go(&self) {}
+                }
+                pub fn grid(r: usize, c: usize) {
+                    let data = vec![vec![P; r]; c];
+                    data[0][0].go();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::grid") == ["REF:go"]
+
+    def test_static_in_quote_template_has_no_type(self, tmp_path):
+        """`static CELL: #path::#ty = ...;` in a `quote!` template writes no
+        type: `#` interpolates a variable."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct Cell;
+                impl Cell {
+                    pub fn get_or_set(&self) {}
+                }
+                pub fn gen(p: u8, cell_type: u8) {
+                    quote! {
+                        static CELL: #p::utility::#cell_type = #p::utility::#cell_type::new();
+                        CELL.get_or_set(|| {});
+                    }
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::gen") == ["REF:CELL.get_or_set"]
+
     def test_a_name_only_hit_does_not_type_its_result(self, tmp_path):
         """`m.start()` where `m` is what `find_at` yields: `find_at` fits
         by name only on a receiver no project type owns, so what it

@@ -1297,7 +1297,9 @@ class CallResolver:
         # signature a call of it is of
         "overloads",
         "reaches",  # file ID -> the files its includes reach (C/C++)
+        "rust_aliases",  # (Rust module, name) -> see _alias_in
         "rust_in_scope",  # Rust scope ID -> the modules named there
+        "rust_used",  # (Rust module, name) -> see _rust_used
         "rust_uses",  # Rust scope ID -> what the `use`s in force bind
         "shared_declaration",  # candidate node IDs -> node ID or None
         # Language -> the last name segments of the types and functions its
@@ -1327,6 +1329,8 @@ class CallResolver:
         "_forwarding",
         "open_aliases",
         "standard",
+        "_rust_walked",
+        "_rust_begun",
     )
 
     def begin_file(self):
@@ -1593,6 +1597,9 @@ class CallResolver:
             builder.rust_mods, files
         )
         self._importing = set()  # (scope ID, name) of the Rust `use`s being read
+        self._rust_cuts = 0  # times a Rust cycle guard stopped a walk
+        self._rust_walked = {}  # see _rust_keep
+        self._rust_begun = []  # see _rust_recall
         # A module is importable by its path below its topmost package and,
         # through namespace packages, by any longer path no other module owns.
         for top, parts, file_id in py_files:
@@ -2104,10 +2111,11 @@ class CallResolver:
         elif (
             verdict == (None, _EXTERNAL)
             and self._path_call
+            and (split := _split_callee(callee))[0]
             and (owner := self._receiver_type())
         ):
             # An outside trait's path: the receiver's project impl of it.
-            path, name = _split_callee(callee)
+            path, name = split
             own = [
                 m
                 for m in self._rust_trait_methods(owner, name, path[-1])
@@ -3124,7 +3132,9 @@ class CallResolver:
                 (target,),
             )
             found = None
-            if (scope_id, name) not in self._importing:
+            if (scope_id, name) in self._importing:
+                self._rust_cuts += 1
+            else:
                 # A `use` may lead back to itself through the module tree.
                 self._importing.add((scope_id, name))
                 try:
@@ -3357,11 +3367,42 @@ class CallResolver:
         ]
         return defined or found
 
+    def _rust_recall(self, memo, key, seen):
+        """``[value]`` kept for the Rust walk through `use`s and globs for
+        ``key`` whose cycle guard holds ``seen`` (see `_rust_keep`); else
+        None, and the walk is begun."""
+        if key in memo:
+            return [memo[key]]
+        if seen and key in self._rust_walked:
+            self._rust_cuts += 1
+            return [self._rust_walked[key]]
+        self._rust_begun.append((self._rust_cuts, self._rust_walked))
+        if not seen:
+            self._rust_walked = {}
+        return None
+
+    def _rust_keep(self, memo, key, seen, found):
+        """``found``, what the walk `_rust_recall` began gives: kept in
+        ``memo`` for the file; where a cycle guard cut it short, only until
+        the walk that began with no ``seen`` ends. A module that globs reach
+        by several routes is then walked once."""
+        cuts, outer = self._rust_begun.pop()
+        if not seen:
+            self._rust_walked = outer
+        if self._rust_cuts == cuts:
+            memo[key] = found
+        elif seen:
+            self._rust_walked[key] = found
+        return found
+
     def _rust_used(self, module, segment, seen):
         """What a `use` of the Rust module ``module`` binds ``segment`` to,
         a path from the module or from a crate, else what each glob `use`
         of the module's own does: IDs, ``"external"`` where one leads
         outside the project. ``seen`` as `_rust_path`'s."""
+        key = (module, segment)
+        if kept := self._rust_recall(self.rust_used, key, seen):
+            return kept[0]
         uses = self._uses(module)
         alternatives = self.builder.rust_use_alternatives.get((module, segment))
         written = [uses[segment]] if segment in uses else []
@@ -3376,16 +3417,18 @@ class CallResolver:
             if segment in uses and not self._rust_rooted(target, module):
                 held = self._imported(segment, module)
             elif self._rust_rooted(target, module):
-                if (module, segment) not in seen:
-                    followed = seen | {(module, segment)}
-                    held = self._rust_path(target.split("::"), module, followed)
+                if key in seen:
+                    self._rust_cuts += 1
+                else:
+                    held = self._rust_path(target.split("::"), module, seen | {key})
             else:
                 # A glob of another crate's module may bring the name.
                 held = _EXTERNAL
             if held == _EXTERNAL:
-                return _EXTERNAL
+                hits = _EXTERNAL
+                break
             hits += held or []
-        return hits
+        return self._rust_keep(self.rust_used, key, seen, hits)
 
     def _rust_library(self, name, scope_id):
         """The root of the library of the project crate ``name`` written in
@@ -4820,7 +4863,7 @@ class CallResolver:
                     value = self._called(member, value if len(value) > 2 else value[1])
                     value = value[1] if value and value[0] == "pointer" else value
                 continue
-            if step == "[]" and isinstance(value, tuple):
+            if step == "[]" and isinstance(value, tuple) and value[0] != "literal":
                 # A subscript gives what the type's `operator[]` returns, in
                 # Rust its `Index` impl's `Output`, the element an iterator
                 # gives where the index decides it: by the data for a
@@ -8152,17 +8195,24 @@ class CallResolver:
         found = self.builder.rust_alias_types.get((module, name))
         if found:
             return module, name, _rust_declared(found)
+        key = (module, name)
+        if kept := self._rust_recall(self.rust_aliases, key, seen):
+            return kept[0]
         uses = self._uses(module)
         written = [uses[name]] if name in uses else []
         written = written or [
             f"{path[:-1]}{name}" for path in uses.values() if path[-3:] == "::*"
         ]
+        hit = None
         for target in written:
             *qualifier, leaf = target.split("::")
             if qualifier and self._rust_child(module, qualifier[0]):
                 qualifier = ["self", *qualifier]
             path = "::".join([*qualifier, leaf])
-            if not qualifier or (module, path) in seen:
+            if not qualifier:
+                continue
+            if (module, path) in seen:
+                self._rust_cuts += 1
                 continue
             if not self._rust_rooted(path, module):
                 continue
@@ -8170,8 +8220,10 @@ class CallResolver:
             for scope in held if isinstance(held, list) else ():
                 hit = self._alias_in(scope, leaf, seen | {(module, path)})
                 if hit:
-                    return hit
-        return None
+                    break
+            if hit:
+                break
+        return self._rust_keep(self.rust_aliases, key, seen, hit)
 
     def _alias_value(self, alias, written, scope_id, receiver):
         """Value of the type ``written`` in ``scope_id`` that names the Rust

@@ -11,6 +11,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import os
 import sys
 
 from descry._answers import fail
@@ -516,6 +517,14 @@ def build_parser():
 
 def main():
     write_utf8()
+    if not sys.stderr.isatty():
+        # Scripted use: no model-loading progress bars or Hub notices.
+        for name, value in (
+            ("HF_HUB_DISABLE_PROGRESS_BARS", "1"),
+            ("HF_HUB_VERBOSITY", "error"),
+            ("TRANSFORMERS_VERBOSITY", "error"),
+        ):
+            os.environ.setdefault(name, value)
     parser = build_parser()
     args = parser.parse_args()
 

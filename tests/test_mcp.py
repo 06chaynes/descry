@@ -294,7 +294,7 @@ class TestLifespan:
             result = await mod.mcp.call_tool("descry_callees", {"symbol": 42})
             assert result.is_error
             assert result.structured_content == {
-                "error": "Invalid arguments for descry_callees: symbol.",
+                "error": "Invalid arguments for descry_callees: symbol: Input should be a valid string.",
                 "reason": "invalid",
             }
 
