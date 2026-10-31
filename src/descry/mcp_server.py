@@ -115,13 +115,13 @@ class _Server(MCPServer):
             if isinstance(exc.__cause__, ValidationError):
                 fields = sorted(
                     {
-                        ".".join(str(part) for part in err["loc"])
+                        f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
                         for err in exc.__cause__.errors()
                     }
                 )
                 answer = fail(
                     "invalid",
-                    f"Invalid arguments for {name}: {', '.join(fields)}.",
+                    f"Invalid arguments for {name}: {'; '.join(fields)}.",
                 )
                 return _answered(json.dumps(public(answer), indent=2), answer)
             raise

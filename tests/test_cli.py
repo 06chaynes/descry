@@ -65,6 +65,29 @@ class TestCliNoCommand:
         assert result.returncode == 1
 
 
+class TestCliHubOutput:
+    _NAMES = (
+        "HF_HUB_DISABLE_PROGRESS_BARS",
+        "HF_HUB_VERBOSITY",
+        "TRANSFORMERS_VERBOSITY",
+    )
+
+    @pytest.mark.parametrize("terminal", [False, True])
+    def test_scripted_use_quiets_model_loading(self, monkeypatch, terminal):
+        """Without a terminal on stderr, model loading shows no progress bars
+        or Hub notices; a value the user set is kept."""
+        for name in self._NAMES:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("HF_HUB_VERBOSITY", "info")
+        monkeypatch.setattr(sys.stderr, "isatty", lambda: terminal)
+        monkeypatch.setattr(sys, "argv", ["descry"])
+        with pytest.raises(SystemExit):
+            cli.main()
+        assert [os.environ.get(name) for name in self._NAMES] == (
+            [None, "info", None] if terminal else ["1", "info", "error"]
+        )
+
+
 class TestCliArguments:
     @pytest.mark.parametrize(
         "args", [["callers", "x", "--limit", "ten"], ["search", "x", "--frob", "1"]]

@@ -50,7 +50,7 @@ _RUST_STRING_LET_RE = re.compile(
 
 _RUST_CONST_RE = re.compile(
     r"\b(?:const|static)\s+(?:mut\s+)?(?P<name>[A-Z][A-Z0-9_]*)\s*:\s*"
-    r"(?P<type>[^=;().]+?)\s*="
+    r"(?P<type>[^=;().#]+?)\s*="
 )
 
 
@@ -1960,6 +1960,10 @@ class RustParser(BaseParser):
                     # with its arguments.
                     typed = re.fullmatch(r"(\w+)::<(.+)>::(\w+)", callee)
                     typed = typed and f"{typed[1]}<{typed[2]}>.{typed[3]}"
+                    # `<Self>::f` is `Self::f`.
+                    closed = callee[:1] == "<" and _angle_end(callee, 0)
+                    if closed and callee[closed + 1 : closed + 3] == "::":
+                        callee = callee[1:closed] + callee[closed + 1 :]
                     # `parse::<T>` calls `parse`; the type arguments are the
                     # call site's, not part of the callee's name.
                     callee = _strip_generics(callee)
