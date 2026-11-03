@@ -46,22 +46,23 @@ Check if the codebase graph exists and its freshness. Returns existence, age, an
 
 No parameters.
 
-Answer: `exists`, `age_str`, `age_hours`, `nodes`, `edges`, `languages`, `stale`, `error`, `scip` (`state`, `indexers`, `cached`), `embeddings` (`state`, `nodes`, `model`)
+Answer: `exists`, `age_str`, `age_hours`, `nodes`, `edges`, `languages`, `stale`, `changed_since_index`, `error`, `scip` (`state`, `indexers`, `cached`), `embeddings` (`state`, `nodes`, `model`)
 
 MCP `descry_status`; web `GET /api/status`; CLI `usage: descry status [--json]`
 
 ## callers
 
-Find all functions/methods that call a given symbol. More reliable than grep for call relationships - distinguishes actual calls from definitions and comments. Use for impact analysis before refactoring or to understand usage patterns.
+Find all functions/methods that call a given symbol. More reliable than grep for call relationships - distinguishes actual calls from definitions and comments. Use for impact analysis before refactoring or to understand usage patterns. Set exclude_tests=true to leave out test callers.
 
 | parameter | type | default |
 |---|---|---|
 | `symbol` | string | required |
 | `limit` | integer | 20 |
+| `exclude_tests` | boolean | false |
 
 Answer: `symbol`, `total`, counts, `more` (counts), `callers` / `callees` (references)
 
-MCP `descry_callers`; web `GET /api/callers`; CLI `usage: descry callers [--json] [--limit LIMIT] symbol`
+MCP `descry_callers`; web `GET /api/callers`; CLI `usage: descry callers [--json] [--limit LIMIT] [--exclude-tests] symbol`
 
 `descry callers load --json`:
 
@@ -91,16 +92,17 @@ MCP `descry_callers`; web `GET /api/callers`; CLI `usage: descry callers [--json
 
 ## callees
 
-Find what functions/methods a given symbol calls. Use for dependency analysis and understanding what a function relies on.
+Find what functions/methods a given symbol calls. Use for dependency analysis and understanding what a function relies on. Set exclude_tests=true to leave out test callees.
 
 | parameter | type | default |
 |---|---|---|
 | `symbol` | string | required |
 | `limit` | integer | 20 |
+| `exclude_tests` | boolean | false |
 
 Answer: `symbol`, `total`, counts, `more` (counts), `callers` / `callees` (references)
 
-MCP `descry_callees`; web `GET /api/callees`; CLI `usage: descry callees [--json] [--limit LIMIT] symbol`
+MCP `descry_callees`; web `GET /api/callees`; CLI `usage: descry callees [--json] [--limit LIMIT] [--exclude-tests] symbol`
 
 `descry callees main --json`:
 

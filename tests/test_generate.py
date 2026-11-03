@@ -846,6 +846,22 @@ class TestCallAccounting:
             "1 external calls not counted"
         ) in caplog.text
 
+    def test_a_long_build_reports_its_progress(self, tmp_path, caplog, monkeypatch):
+        """Every 15 seconds of a build, a line says how far parsing and
+        call resolution have got."""
+        clock = iter(range(0, 10_000, 20))
+        monkeypatch.setattr("descry.generate.time.monotonic", lambda: next(clock))
+        with caplog.at_level(logging.INFO, logger="descry.generate"):
+            _index(
+                tmp_path,
+                {
+                    "a.py": "def f():\n    g()\n",
+                    "b.py": "def g():\n    f()\n",
+                },
+            )
+        assert "Parsing: 1 files so far" in caplog.text
+        assert "Resolving calls: 1 files, 0/" in caplog.text
+
     def test_built_in_method_name_is_not_pinned_to_the_one_project_method(
         self, tmp_path
     ):
@@ -4490,6 +4506,256 @@ class TestRustCallResolution:
             },
         )
         assert _calls(builder, "FILE:src/lib.rs::gen") == ["REF:CELL.get_or_set"]
+
+    _QUALIFIED = """
+        pub trait Tr {
+            fn f(&self) -> u8;
+            fn g(&self) -> u8 {
+                0
+            }
+        }
+        pub struct A;
+        pub struct B;
+        impl B {
+            pub fn f(&self) -> u8 {
+                9
+            }
+        }
+        impl Tr for B {
+            fn f(&self) -> u8 {
+                2
+            }
+        }
+        pub struct W<T>(T);
+        impl<T> Tr for W<T> {
+            fn f(&self) -> u8 {
+                3
+            }
+        }
+        """
+
+    def test_qualified_trait_path_calls_the_types_impl(self, tmp_path):
+        """`<X as Tr>::f` is `X`'s impl of `Tr::f`, not an inherent `f` of
+        `X`; the trait's default body where the impl has none; `Self` is
+        the impl's type, `W<B>` its path."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": self._QUALIFIED
+                + """
+                impl B {
+                    pub fn via_self(&self) -> u8 {
+                        <Self as Tr>::f(self)
+                    }
+                }
+                pub fn calls(b: &B, w: &W<B>) -> u8 {
+                    <B as Tr>::f(b) + <B as Tr>::g(b) + <W<B> as Tr>::f(w)
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::B::via_self") == [
+            "FILE:src/lib.rs::B::f#2"
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::calls") == [
+            "FILE:src/lib.rs::B::f#2",
+            "FILE:src/lib.rs::Tr::g",
+            "FILE:src/lib.rs::W::f",
+        ]
+
+    def test_qualified_trait_path_after_a_generic_on_its_line(self, tmp_path):
+        """The `X` of `<X as Tr>::f` is the type the `<` before `as` opens,
+        not text from an earlier `<` on the line."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": self._QUALIFIED
+                + """
+                pub fn after(b: &B) -> u8 {
+                    let _v: Option<A> = None; <B as Tr>::f(b)
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::after") == ["FILE:src/lib.rs::B::f#2"]
+
+    def test_qualified_path_on_a_macro_interpolation_indexes(self, tmp_path):
+        """`<#ty as Tr>::f()` in `quote!` and `<$t as Tr>::f()` in
+        `macro_rules!` name no type: the index goes on, with no receiver."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": self._QUALIFIED
+                + """
+                pub fn gen() {
+                    quote!(<#ty as nu_protocol::FromValue>::expected_type());
+                }
+                macro_rules! via_macro {
+                    ($t:ty) => {
+                        <$t as Tr>::f()
+                    };
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::gen") == []
+
+    def test_qualified_dyn_slice_and_reference_paths(self, tmp_path):
+        """`<dyn Tr>::f(d)` is `Tr::f(d)`; `<[u8]>::len` and `<&B>::clone`
+        are the standard library's."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": self._QUALIFIED
+                + """
+                pub fn forms(s: &[u8], b: &B, d: &dyn Tr) -> usize {
+                    <dyn Tr>::f(d) as usize + <[u8]>::len(s) + <&B>::clone(&b).f() as usize
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::forms") == [
+            "FILE:src/lib.rs::Tr::f",
+            "REF:f",
+        ]
+
+    def test_a_glob_cycle_is_walked_once(self, tmp_path, monkeypatch):
+        """Glob re-exports that lead back round a cycle: the walk that
+        entered it gives every module of the cycle its answer, so a name
+        looked up through either end of the cycle walks it once."""
+        from descry.resolver import CallResolver
+
+        read = []
+        uses = CallResolver._uses
+
+        def counted(resolver, scope_id):
+            read.append(scope_id)
+            return uses(resolver, scope_id)
+
+        monkeypatch.setattr(CallResolver, "_uses", counted)
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "p"\n',
+                "src/lib.rs": "pub mod a;\npub mod b;\npub mod c;\npub mod u;\n",
+                "src/a.rs": "pub use crate::b::*;\n",
+                "src/b.rs": "pub use crate::a::*;\npub use crate::c::*;\n",
+                "src/c.rs": "pub fn target() {}\n",
+                "src/u.rs": "pub fn one() {\n    crate::a::target();\n}\n\n"
+                "pub fn two() {\n    crate::b::target();\n}\n",
+            },
+        )
+        for caller in ("FILE:src/u.rs::one", "FILE:src/u.rs::two"):
+            assert _calls(builder, caller) == ["FILE:src/c.rs::target"]
+        assert read.count("FILE:src/b.rs") == 1
+
+    def test_a_cycle_a_share_nothing_cut_taints_leaves_no_answer_behind(self, tmp_path):
+        """Sibling glob cycles under one walk, one of them tainted by a
+        `use` that leads back to itself (`g`'s `x` through `e`'s shadowed
+        `std`): the walks waiting on the tainted head are let go, so a later
+        walk does not hand them its own answer (`c::w` for `m::x`)."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "p"\nedition = "2021"\n',
+                "src/lib.rs": "pub mod a;\npub mod b;\npub mod c;\npub mod d;\n"
+                "pub mod e;\npub mod f;\npub mod g;\npub mod m;\nmod user;\n",
+                "src/a.rs": "pub use crate::m::*;\n",
+                "src/b.rs": "pub fn x() {}\n",
+                "src/c.rs": "pub fn w() {}\n",
+                "src/d.rs": "pub use crate::c::*;\n",
+                "src/e.rs": "use std::fmt as std;\n",
+                "src/f.rs": "pub use crate::m::*;\n",
+                "src/g.rs": "use std::fmt::Result as x;\nuse crate::e::*;\n",
+                "src/m.rs": "pub use crate::a::*;\npub use crate::b::*;\n"
+                "pub use crate::f::*;\npub use crate::g::*;\n",
+                "src/user.rs": "pub fn f() {\n    crate::m::x();\n    crate::d::w();\n"
+                "    crate::m::x();\n    crate::a::x();\n    crate::b::x();\n}\n",
+            },
+        )
+        assert _calls(builder, "FILE:src/user.rs::f") == [
+            "FILE:src/b.rs::x",
+            "FILE:src/c.rs::w",
+            "REF:crate::a::x",
+            "REF:crate::m::x",
+            "REF:crate::m::x",
+        ]
+
+    def test_calls_on_a_vec_literal_element_resolve(self, tmp_path):
+        """`d[0].go()` on `let d = vec![P::new(); r]` or `vec![a, b]` is
+        what the elements hold; `Vec`'s own methods stay outside."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                #[derive(Clone)]
+                pub struct P;
+                impl P {
+                    pub fn new() -> P {
+                        P
+                    }
+                    pub fn go(&self) {}
+                }
+                pub struct Q;
+                impl Q {
+                    pub fn go(&self) {}
+                }
+                pub fn one(r: usize) -> usize {
+                    let mut d = vec![P::new(); r];
+                    d[0].go();
+                    d.push(P::new());
+                    d.len()
+                }
+                pub fn two() {
+                    let e = vec![P::new(), P::new()];
+                    e[1].go();
+                }
+                """
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::one") == [
+            "FILE:src/lib.rs::P::go",
+            "FILE:src/lib.rs::P::new",
+            "FILE:src/lib.rs::P::new",
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::two") == [
+            "FILE:src/lib.rs::P::go",
+            "FILE:src/lib.rs::P::new",
+            "FILE:src/lib.rs::P::new",
+        ]
+
+    def test_an_empty_vec_literal_tells_no_element_type(self, tmp_path):
+        """`let mut v = vec![]` filled later: a call on an element keeps
+        the definitions that fit as candidates."""
+        builder = _index(
+            tmp_path,
+            {
+                "src/lib.rs": """
+                pub struct P;
+                impl P {
+                    pub fn go(&self) {}
+                }
+                pub struct Q;
+                impl Q {
+                    pub fn go(&self) {}
+                }
+                pub fn later() {
+                    let mut v = vec![];
+                    v.push(P);
+                    v[0].go();
+                }
+                """
+            },
+        )
+        (edge,) = [
+            e
+            for e in builder.edges
+            if e["source"] == "FILE:src/lib.rs::later" and e["target"] == "REF:go"
+        ]
+        assert edge["metadata"]["candidates"] == [
+            "FILE:src/lib.rs::P::go",
+            "FILE:src/lib.rs::Q::go",
+        ]
 
     def test_a_name_only_hit_does_not_type_its_result(self, tmp_path):
         """`m.start()` where `m` is what `find_at` yields: `find_at` fits
@@ -36061,3 +36327,27 @@ def test_the_walk_follows_no_symlink_out_of_the_root(tmp_path, caplog):
     files = {n["id"] for n in builder.nodes if n["type"] == "File"}
     assert files == {"FILE:kept.py"}
     assert caplog.text.count("escapes project root via symlink") == 2
+
+
+def test_a_cycle_a_share_nothing_cut_taints_keeps_no_walk():
+    """A walk of a cycle waits for the walk that heads it; when a cut that
+    shares nothing (-1) taints the head, the waiting walk is let go, so no
+    later walk hands it its own answer."""
+    from types import SimpleNamespace
+
+    r = SimpleNamespace(
+        rust_used={}, _rust_walked={}, _rust_begun=[], _rust_onstack={}, _rust_cycle=[]
+    )
+    for name in ("_rust_recall", "_rust_cut", "_rust_keep"):
+        setattr(r, name, getattr(CallResolver, name).__get__(r))
+    a, b, c = ("a.rs", "f"), ("b.rs", "f"), ("c.rs", "f")
+    assert r._rust_recall(r.rust_used, a, frozenset()) is None
+    assert r._rust_recall(r.rust_used, b, frozenset({a})) is None
+    r._rust_cut(0)  # b's walk leads back to a
+    r._rust_keep(r.rust_used, b, frozenset({a}), ["a's"])
+    r._rust_cut(-1)  # a's walk meets a guard that shares nothing
+    r._rust_keep(r.rust_used, a, frozenset(), ["a's"])
+    assert r.rust_used == {} and r._rust_cycle == []
+    assert r._rust_recall(r.rust_used, c, frozenset()) is None
+    r._rust_keep(r.rust_used, c, frozenset(), ["c's"])
+    assert r.rust_used == {c: ["c's"]}

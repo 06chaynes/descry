@@ -124,10 +124,12 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			symbol: Type.String({ description: "A node ID, or a symbol name" }),
 			limit: Type.Optional(Type.Number({ description: "Max results", default: 20 })),
+			exclude_tests: Type.Optional(Type.Boolean({ description: "Exclude test files", default: false })),
 		}),
 		async execute(_toolCallId, params, signal) {
 			const args = ["--symbol", params.symbol];
 			if (params.limit !== undefined) args.push("--limit", String(params.limit));
+			if (params.exclude_tests) args.push("--exclude-tests");
 			const result = await runDescry("callers", args, signal);
 			return { content: [{ type: "text", text: result }] };
 		},
@@ -142,10 +144,12 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			symbol: Type.String({ description: "A node ID, or a symbol name" }),
 			limit: Type.Optional(Type.Number({ description: "Max results", default: 20 })),
+			exclude_tests: Type.Optional(Type.Boolean({ description: "Exclude test files", default: false })),
 		}),
 		async execute(_toolCallId, params, signal) {
 			const args = ["--symbol", params.symbol];
 			if (params.limit !== undefined) args.push("--limit", String(params.limit));
+			if (params.exclude_tests) args.push("--exclude-tests");
 			const result = await runDescry("callees", args, signal);
 			return { content: [{ type: "text", text: result }] };
 		},

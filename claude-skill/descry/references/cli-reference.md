@@ -43,8 +43,8 @@ descry quick <symbol>
 ## Call graph
 
 ```bash
-descry callers <symbol> [--limit N]           # default 20
-descry callees <symbol> [--limit N]           # default 20
+descry callers <symbol> [--limit N] [--exclude-tests]   # default 20
+descry callees <symbol> [--limit N] [--exclude-tests]   # default 20
 
 descry flow <start>
     [--direction forward|backward]   # default forward

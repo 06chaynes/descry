@@ -67,14 +67,14 @@ def cmd_ensure(args):
 def cmd_index(args):
     svc = _make_service()
     path = args.path if args.path else "."
-    _print_answer(args, svc.index_answer(path), svc.index_text)
+    _print_answer(args, svc.index_answer(path, echo=True), svc.index_text)
 
 
 def cmd_callers(args):
     svc = _make_service()
     _print_answer(
         args,
-        svc.callers_answer(args.symbol, args.limit),
+        svc.callers_answer(args.symbol, args.limit, args.exclude_tests),
         lambda a: svc.listing_text(a, "callers", args.limit),
     )
 
@@ -83,7 +83,7 @@ def cmd_callees(args):
     svc = _make_service()
     _print_answer(
         args,
-        svc.callees_answer(args.symbol, args.limit),
+        svc.callees_answer(args.symbol, args.limit, args.exclude_tests),
         lambda a: svc.listing_text(a, "callees", args.limit),
     )
 
@@ -289,6 +289,9 @@ def build_parser():
     )
     sub.add_argument("symbol", help="A node ID, or a name")
     sub.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    sub.add_argument(
+        "--exclude-tests", action="store_true", help="Exclude test symbols"
+    )
     sub.set_defaults(func=cmd_callers)
 
     sub = subparsers.add_parser(
@@ -296,6 +299,9 @@ def build_parser():
     )
     sub.add_argument("symbol", help="A node ID, or a name")
     sub.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
+    sub.add_argument(
+        "--exclude-tests", action="store_true", help="Exclude test symbols"
+    )
     sub.set_defaults(func=cmd_callees)
 
     sub = subparsers.add_parser(

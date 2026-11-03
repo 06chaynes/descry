@@ -65,3 +65,23 @@ Document text is a different matter. `corpus.doc_text` delegates to
 *the same assembly minus the docstring* as the row it replaces. A private copy
 would let the two drift, and the leakage control would then quietly measure
 something the index never contained.
+
+## Search on prompt-like questions
+
+`search_eval.py` scores `search` end to end, keyword and semantic sides fused,
+on `search_questions.json`: questions written as an agent sends a prompt, each
+with the node IDs that answer it, over requests v2.28.0 (`da9996f`), flask
+(`d086db85`) and ripgrep (`3fce3b5`). The questions are written as prompts,
+not copied from docstrings, but they share words with their answers'
+docstrings as real questions do: absolute scores lean on that; the paired
+comparison of two runs on the same questions does not.
+
+```bash
+# each repository indexed with embeddings first (CPU)
+.venv/bin/python tests/eval/search_eval.py out.json \
+    requests=/path/requests flask=/path/flask ripgrep=/path/ripgrep
+.venv/bin/python tests/eval/search_eval.py --compare before.json after.json
+```
+
+Run it before changing how `search` ranks: the keyword terms, the fusion, or
+when the semantic side runs.

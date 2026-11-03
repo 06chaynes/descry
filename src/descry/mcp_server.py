@@ -187,18 +187,22 @@ def _answered(text: str, answer: dict) -> CallToolResult:
 
 
 @mcp.tool()
-async def descry_callers(symbol: str, limit: int = 20) -> CallToolResult:
-    """Find all functions/methods that call a given symbol. More reliable than grep for call relationships - distinguishes actual calls from definitions and comments. Use for impact analysis before refactoring or to understand usage patterns."""
+async def descry_callers(
+    symbol: str, limit: int = 20, exclude_tests: bool = False
+) -> CallToolResult:
+    """Find all functions/methods that call a given symbol. More reliable than grep for call relationships - distinguishes actual calls from definitions and comments. Use for impact analysis before refactoring or to understand usage patterns. Set exclude_tests=true to leave out test callers."""
     svc = _svc()
-    answer = await svc.callers_answer(symbol, limit)
+    answer = await svc.callers_answer(symbol, limit, exclude_tests)
     return _answered(await svc.listing_text(answer, "callers", limit), answer)
 
 
 @mcp.tool()
-async def descry_callees(symbol: str, limit: int = 20) -> CallToolResult:
-    """Find what functions/methods a given symbol calls. Use for dependency analysis and understanding what a function relies on."""
+async def descry_callees(
+    symbol: str, limit: int = 20, exclude_tests: bool = False
+) -> CallToolResult:
+    """Find what functions/methods a given symbol calls. Use for dependency analysis and understanding what a function relies on. Set exclude_tests=true to leave out test callees."""
     svc = _svc()
-    answer = await svc.callees_answer(symbol, limit)
+    answer = await svc.callees_answer(symbol, limit, exclude_tests)
     return _answered(await svc.listing_text(answer, "callees", limit), answer)
 
 

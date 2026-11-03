@@ -59,7 +59,7 @@ as its type (`limit=ten`) is `invalid` there too.
 
 | tool | parameters | answer |
 |---|---|---|
-| `callers`, `callees` | `symbol`, `limit`=20 | `symbol`, `total`, counts, `more` (counts), `callers` / `callees` (references) |
+| `callers`, `callees` | `symbol`, `limit`=20, `exclude_tests`=false | `symbol`, `total`, counts, `more` (counts), `callers` / `callees` (references) |
 | `context` | `symbol`, `brief`, `full`, `expand_callees`, `deduplicate`, `depth`=1, `max_tokens`=2000, `callee_budget`=2000, `head_lines`, `max_output_tokens` | `symbol` (definition), `brief`; brief: `callers`, `callees` (counts); else `depth`, `callers`, `callees` (references), `callers_more`, `callees_more` (counts), `examples` (`file`, `line`, `candidates`), `members` (`id`, `name`, `line`, `tokens`), `tests`, `configs` (`id`, `line`, `type`), `omitted`, `truncated`; with `deduplicate`, a symbol shown before answers `symbol` and `repeated` only |
 | `flow` | `start`, `direction`=forward, `depth`=3, `target`, `inline_threshold`=100 | `start`, `direction`, `asked`, `depth`, `target`, `root` (tree: `id`, `name`, `type`, `tokens`, `file`, `line`, `kind`, `candidates`, `children`, `more`, `more_possible`, `seen`), `path_to_target`?, `cut`? |
 | `path` | `start`, `end`, `max_depth`=10, `direction`=forward | `status` (`found`, `not_found`, `timeout`), `start`, `end`, `direction`, `max_depth`, `hops` (`caller`, `callee` references, `file`, `line`) |
@@ -73,7 +73,7 @@ as its type (`limit=ten`) is `invalid` there too.
 | `churn` | `time_range`, `path_filter`, `limit`=20, `mode`=symbols, `exclude_generated`=true | `mode`, `time_range`, `path_filter`, `truncation_note`?, and `symbols`, `files`, `pairs` (with `file_level`?) or `message` |
 | `changes` | `commit_range`, `time_range`, `path_filter`, `show_callers`=true, `limit`=50 | `range`, `commits`, `files_count`, `symbols_count`, and `symbols` (with `callers`) or `changed_files`; or `message` |
 | `evolution` | `symbol`, `time_range`, `limit`=10, `show_diff`, `crate` | `node_id`, `mode` (`lines`, `file`), `truncation_note`?, `authors`, `commits` (`hash`, `date`, and in `lines` mode `added`, `removed`); or `message` |
-| `status` | — | `exists`, `age_str`, `age_hours`, `nodes`, `edges`, `languages`, `stale`, `error`, `scip` (`state`, `indexers`, `cached`), `embeddings` (`state`, `nodes`, `model`) |
+| `status` | — | `exists`, `age_str`, `age_hours`, `nodes`, `edges`, `languages`, `stale`, `changed_since_index`, `error`, `scip` (`state`, `indexers`, `cached`), `embeddings` (`state`, `nodes`, `model`) |
 | `health` | — | `status`, `version`, `project_root`, `cache_dir`, `warm`, `max_depth` (the deepest a `flow` or `context` goes), `features`, `graph` |
 | `ensure` | `max_age_hours` | `action` (`ready`, `refreshed`, `generated`), `summary`, `graph` (status) |
 | `index` | `path`=. (not on the web, which always indexes the project root) | the graph's status after the run |

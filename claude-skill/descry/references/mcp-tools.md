@@ -35,8 +35,8 @@ This is descry's prompt-injection defense — preserve it when quoting.
 - `descry_quick(symbol, full=False, brief=False)` — search + context in one.
 
 ### Call graph
-- `descry_callers(symbol, limit=20)`
-- `descry_callees(symbol, limit=20)`
+- `descry_callers(symbol, limit=20, exclude_tests=False)`
+- `descry_callees(symbol, limit=20, exclude_tests=False)`
 - `descry_flow(start, direction="forward", depth=3, target=None, inline_threshold=100)`
 - `descry_path(start, end, max_depth=10, direction="forward")`
 

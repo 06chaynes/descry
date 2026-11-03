@@ -1,0 +1,510 @@
+[
+ {
+  "repo": "requests",
+  "question": "Where is the redirect limit enforced?",
+  "answers": [
+   "FILE:requests/sessions.py::SessionRedirectMixin::resolve_redirects"
+  ],
+  "rank": 3,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Which function decides whether the Authorization header is removed on a redirect to another host?",
+  "answers": [
+   "FILE:requests/sessions.py::SessionRedirectMixin::should_strip_auth",
+   "FILE:requests/sessions.py::SessionRedirectMixin::rebuild_auth"
+  ],
+  "rank": 3,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "How does requests turn the cookies in a response into a cookie jar?",
+  "answers": [
+   "FILE:requests/cookies.py::extract_cookies_to_jar"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Explain where the HTTP method gets changed to GET after a 303 See Other redirect",
+  "answers": [
+   "FILE:requests/sessions.py::SessionRedirectMixin::rebuild_method"
+  ],
+  "rank": 2,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Find the code that decides whether a URL should skip the configured proxies because of no_proxy",
+  "answers": [
+   "FILE:requests/utils.py::should_bypass_proxies"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Where does requests compute the Content-Length header for a request body?",
+  "answers": [
+   "FILE:requests/models.py::PreparedRequest::prepare_content_length"
+  ],
+  "rank": 3,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Which method raises an exception when the response status is a 4xx or 5xx error?",
+  "answers": [
+   "FILE:requests/models.py::Response::raise_for_status"
+  ],
+  "rank": 2,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Write up how a multipart file upload body is built",
+  "answers": [
+   "FILE:requests/models.py::RequestEncodingMixin::_encode_files"
+  ],
+  "rank": 4,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Where is the default User-Agent string defined?",
+  "answers": [
+   "FILE:requests/utils.py::default_user_agent"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "How does the session pick the transport adapter for a given URL?",
+  "answers": [
+   "FILE:requests/sessions.py::Session::get_adapter"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "I need to know where netrc credentials are read for a URL",
+  "answers": [
+   "FILE:requests/utils.py::get_netrc_auth"
+  ],
+  "rank": 2,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Which function guesses the text encoding of the response body when the server sent none?",
+  "answers": [
+   "FILE:requests/models.py::Response::apparent_encoding"
+  ],
+  "rank": 10,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Where are environment proxy variables like HTTP_PROXY collected?",
+  "answers": [
+   "FILE:requests/utils.py::get_environ_proxies"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Find where the file position of a request body is moved back before a redirect is resent",
+  "answers": [
+   "FILE:requests/utils.py::rewind_body"
+  ],
+  "rank": 3,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "How is a Basic authentication header value constructed?",
+  "answers": [
+   "FILE:requests/auth.py::_basic_auth_str"
+  ],
+  "rank": 3,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Show me where the digest authentication challenge response is computed",
+  "answers": [
+   "FILE:requests/auth.py::HTTPDigestAuth::build_digest_header"
+  ],
+  "rank": 6,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Which code checks a header value for leading whitespace or return characters?",
+  "answers": [
+   "FILE:requests/utils.py::check_header_validity"
+  ],
+  "rank": 2,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Where does requests iterate the response body one line at a time?",
+  "answers": [
+   "FILE:requests/models.py::Response::iter_lines"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Explain how session-level settings are merged with per-request settings",
+  "answers": [
+   "FILE:requests/sessions.py::merge_setting"
+  ],
+  "rank": 3,
+  "method": "hybrid"
+ },
+ {
+  "repo": "requests",
+  "question": "Where is the server certificate verified and the CA bundle chosen?",
+  "answers": [
+   "FILE:requests/adapters.py::HTTPAdapter::cert_verify"
+  ],
+  "rank": 4,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Where does flask find which error handler to call for an exception?",
+  "answers": [
+   "FILE:src/flask/sansio/app.py::App::_find_error_handler"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Find the code that loads .env files into environment variables",
+  "answers": [
+   "FILE:src/flask/cli.py::load_dotenv"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "How does flask convert whatever a view returns into a response object?",
+  "answers": [
+   "FILE:src/flask/app.py::Flask::make_response"
+  ],
+  "rank": 8,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Which function reads configuration values from FLASK_ prefixed environment variables?",
+  "answers": [
+   "FILE:src/flask/config.py::Config::from_prefixed_env"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Explain where a blueprint's routes get attached to the application",
+  "answers": [
+   "FILE:src/flask/sansio/blueprints.py::Blueprint::register",
+   "FILE:src/flask/sansio/app.py::App::register_blueprint"
+  ],
+  "rank": 0,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Where is the signed cookie session opened at the start of a request?",
+  "answers": [
+   "FILE:src/flask/sessions.py::SessionInterface::open_session",
+   "FILE:src/flask/sessions.py::SecureCookieSessionInterface::open_session"
+  ],
+  "rank": 9,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "How does flask decide whether the session cookie needs to be set on the response?",
+  "answers": [
+   "FILE:src/flask/sessions.py::SessionInterface::should_set_cookie"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Find where flask locates the application object inside a module when running the cli",
+  "answers": [
+   "FILE:src/flask/cli.py::find_best_app",
+   "FILE:src/flask/cli.py::find_app_by_string"
+  ],
+  "rank": 2,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Which code serves files from the static folder?",
+  "answers": [
+   "FILE:src/flask/app.py::Flask::send_static_file",
+   "FILE:src/flask/blueprints.py::Blueprint::send_static_file"
+  ],
+  "rank": 2,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Where are flashed messages pulled out of the session?",
+  "answers": [
+   "FILE:src/flask/helpers.py::get_flashed_messages"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Show me where the development server is started",
+  "answers": [
+   "FILE:src/flask/app.py::Flask::run",
+   "FILE:src/flask/cli.py::run_command"
+  ],
+  "rank": 3,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Where are routing exceptions intercepted, for example a missing trailing slash on a POST?",
+  "answers": [
+   "FILE:src/flask/app.py::Flask::raise_routing_exception"
+  ],
+  "rank": 2,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "How does flask build a URL for an endpoint?",
+  "answers": [
+   "FILE:src/flask/app.py::Flask::url_for",
+   "FILE:src/flask/helpers.py::url_for"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Find the function that determines if debug mode is on from the environment",
+  "answers": [
+   "FILE:src/flask/helpers.py::get_debug_flag"
+  ],
+  "rank": 4,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Where are teardown functions called after a request finishes?",
+  "answers": [
+   "FILE:src/flask/app.py::Flask::do_teardown_request"
+  ],
+  "rank": 3,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Which code tags special Python types like tuples and bytes so they survive JSON in the session?",
+  "answers": [
+   "FILE:src/flask/json/tag.py::TaggedJSONSerializer::tag",
+   "FILE:src/flask/json/tag.py::JSONTag::tag"
+  ],
+  "rank": 6,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Where does flask pick the stream that errors are logged to?",
+  "answers": [
+   "FILE:src/flask/logging.py::wsgi_errors_stream"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "How is the instance folder path found when it is not configured?",
+  "answers": [
+   "FILE:src/flask/sansio/app.py::App::auto_find_instance_path"
+  ],
+  "rank": 2,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Which function makes an async view function runnable under WSGI?",
+  "answers": [
+   "FILE:src/flask/app.py::Flask::async_to_sync",
+   "FILE:src/flask/app.py::Flask::ensure_sync"
+  ],
+  "rank": 5,
+  "method": "hybrid"
+ },
+ {
+  "repo": "flask",
+  "question": "Where is the list of all registered routes printed for the cli?",
+  "answers": [
+   "FILE:src/flask/cli.py::routes_command"
+  ],
+  "rank": 3,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "Where does ripgrep turn raw bytes into a readable escaped string for display?",
+  "answers": [
+   "FILE:crates/cli/src/escape.rs::escape"
+  ],
+  "rank": 0,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "Find how ripgrep gets the name of the machine it runs on",
+  "answers": [
+   "FILE:crates/cli/src/hostname.rs::hostname"
+  ],
+  "rank": 0,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "Which function reads the ripgrep config file the user points RIPGREP_CONFIG_PATH at?",
+  "answers": [
+   "FILE:crates/core/flags/config.rs::parse",
+   "FILE:crates/core/flags/config.rs::parse_reader"
+  ],
+  "rank": 0,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "How does ripgrep measure how similar a mistyped flag is to the real flag names?",
+  "answers": [
+   "FILE:crates/core/flags/parse.rs::jaccard_index"
+  ],
+  "rank": 0,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "Where is multi-threaded searching started?",
+  "answers": [
+   "FILE:crates/core/main.rs::search_parallel"
+  ],
+  "rank": 0,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "Which code decides whether a path counts as a hidden file?",
+  "answers": [
+   "FILE:crates/ignore/src/pathutil.rs::is_hidden_path"
+  ],
+  "rank": 4,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "Explain how the program used to decompress a file is looked up on the PATH",
+  "answers": [
+   "FILE:crates/cli/src/decompress.rs::resolve_binary",
+   "FILE:crates/cli/src/decompress.rs::try_resolve_binary"
+  ],
+  "rank": 0,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "Where does ripgrep suggest switching to PCRE2 when a regex fails to compile?",
+  "answers": [
+   "FILE:crates/core/flags/hiargs.rs::suggest_other_engine"
+  ],
+  "rank": 12,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "Find where the number of search threads is chosen",
+  "answers": [
+   "FILE:crates/core/flags/hiargs.rs::HiArgs::from_low_args",
+   "FILE:crates/core/flags/hiargs.rs::HiArgs::threads"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "How are the SIMD CPU features listed in the version output?",
+  "answers": [
+   "FILE:crates/core/flags/doc/version.rs::compile_cpu_features"
+  ],
+  "rank": 1,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "Where are the ignore rules of parent directories added during directory traversal?",
+  "answers": [
+   "FILE:crates/ignore/src/walk.rs::Work::add_parents"
+  ],
+  "rank": 8,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "Which function strips a trailing line terminator from a match?",
+  "answers": [
+   "FILE:crates/printer/src/util.rs::trim_line_terminator"
+  ],
+  "rank": 3,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "Where is a plain list of literal strings compiled into a matcher?",
+  "answers": [
+   "FILE:crates/regex/src/matcher.rs::RegexMatcherBuilder::build_literals"
+  ],
+  "rank": 0,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "How does ripgrep choose whether to search a file through a memory map?",
+  "answers": [
+   "FILE:crates/searcher/src/searcher/mmap.rs::MmapChoice::open",
+   "FILE:crates/searcher/src/searcher/mod.rs::SearcherBuilder::memory_map"
+  ],
+  "rank": 2,
+  "method": "hybrid"
+ },
+ {
+  "repo": "ripgrep",
+  "question": "Find where the user's color settings are collected from the command line",
+  "answers": [
+   "FILE:crates/core/flags/hiargs.rs::take_color_specs"
+  ],
+  "rank": 6,
+  "method": "hybrid"
+ }
+]

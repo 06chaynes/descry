@@ -1,6 +1,7 @@
 """Call resolution: the standard libraries' data and `CallResolver`."""
 
 import contextlib
+import math
 import os
 import posixpath
 import re
@@ -1597,9 +1598,12 @@ class CallResolver:
             builder.rust_mods, files
         )
         self._importing = set()  # (scope ID, name) of the Rust `use`s being read
-        self._rust_cuts = 0  # times a Rust cycle guard stopped a walk
         self._rust_walked = {}  # see _rust_keep
         self._rust_begun = []  # see _rust_recall
+        # `_rust_used` key -> the depths in `_rust_begun` of its walks under
+        # way; the keys of walks a cycle closes, waiting for the walk that
+        # heads it (each walk notes how many wait as it begins)
+        self._rust_onstack, self._rust_cycle = {}, []
         # A module is importable by its path below its topmost package and,
         # through namespace packages, by any longer path no other module owns.
         for top, parts, file_id in py_files:
@@ -2407,10 +2411,11 @@ class CallResolver:
         return bool(re.search(r"\bself\b", params[0]))
 
     def _receiver_type(self):
-        """The project type of the receiver a Rust path call passes first;
-        for a standard type's value, its project impl blocks where their
-        headers write it by one name."""
-        receiver = (self._passed or [None])[0]
+        """The project type of the receiver a Rust path call passes first —
+        for `<X as Trait>::f`, written on the call — or, for a standard
+        type's value, its project impl blocks where their headers write it
+        by one name."""
+        receiver = self._on or (self._passed or [None])[0]
         value = isinstance(receiver, str) and self._value(receiver, self._caller, set())
         if not isinstance(value, tuple) or value[0] not in ("self", "outside"):
             return None
@@ -2430,7 +2435,7 @@ class CallResolver:
         body), or is not known, as for a function without `self`, whose
         type the call's context gives."""
         name = self._name(declared)
-        owner = self._takes_self(declared) and self._receiver_type()
+        owner = (self._on or self._takes_self(declared)) and self._receiver_type()
         trait = self._name(declared.rpartition("::")[0])
         own = owner and (
             self._rust_trait_methods(owner, name, trait)
@@ -3133,7 +3138,7 @@ class CallResolver:
             )
             found = None
             if (scope_id, name) in self._importing:
-                self._rust_cuts += 1
+                self._rust_cut(-1)
             else:
                 # A `use` may lead back to itself through the module tree.
                 self._importing.add((scope_id, name))
@@ -3374,25 +3379,53 @@ class CallResolver:
         if key in memo:
             return [memo[key]]
         if seen and key in self._rust_walked:
-            self._rust_cuts += 1
-            return [self._rust_walked[key]]
-        self._rust_begun.append((self._rust_cuts, self._rust_walked))
+            found, low = self._rust_walked[key]
+            self._rust_cut(low)
+            return [found]
+        if memo is self.rust_used:
+            self._rust_onstack.setdefault(key, []).append(len(self._rust_begun))
+        self._rust_begun.append([math.inf, self._rust_walked, len(self._rust_cycle)])
         if not seen:
             self._rust_walked = {}
         return None
 
+    def _rust_cut(self, low):
+        """Note that a cycle guard cut the walk under way short at the walk
+        ``low`` deep in `_rust_begun`; -1 where no walk of a cycle can stand
+        for the others."""
+        if self._rust_begun:
+            frame = self._rust_begun[-1]
+            frame[0] = min(frame[0], low)
+
     def _rust_keep(self, memo, key, seen, found):
-        """``found``, what the walk `_rust_recall` began gives: kept in
-        ``memo`` for the file; where a cycle guard cut it short, only until
-        the walk that began with no ``seen`` ends. A module that globs reach
-        by several routes is then walked once."""
-        cuts, outer = self._rust_begun.pop()
+        """``found``, what the walk `_rust_recall` began gives, kept in
+        ``memo`` for the file. A walk a cycle guard cut short is kept only
+        until the walk that began with no ``seen`` ends; but the
+        `_rust_used` walk that heads a cycle, the one the cuts in it reach
+        back to, gives what every walk of the cycle does, as each reaches
+        the same definitions: the walks of the cycle that ended under it
+        take its answer. A cut that shares nothing (-1) leaves the walks
+        under it to no head: they are let go. A module that globs reach by
+        several routes is then walked once."""
+        depth = len(self._rust_begun) - 1
+        low, outer, start = self._rust_begun.pop()
+        if memo is self.rust_used:
+            self._rust_onstack[key].pop()
         if not seen:
             self._rust_walked = outer
-        if self._rust_cuts == cuts:
-            memo[key] = found
-        elif seen:
-            self._rust_walked[key] = found
+        if low < depth:
+            self._rust_cut(low)
+            if seen:
+                self._rust_walked[key] = (found, low)
+            if low < 0:
+                del self._rust_cycle[start:]
+            elif memo is self.rust_used:
+                self._rust_cycle.append(key)
+            return found
+        memo[key] = found
+        if memo is self.rust_used:
+            memo.update(dict.fromkeys(self._rust_cycle[start:], found))
+        del self._rust_cycle[start:]
         return found
 
     def _rust_used(self, module, segment, seen):
@@ -3418,7 +3451,7 @@ class CallResolver:
                 held = self._imported(segment, module)
             elif self._rust_rooted(target, module):
                 if key in seen:
-                    self._rust_cuts += 1
+                    self._rust_cut(self._rust_onstack[key][-2])
                 else:
                     held = self._rust_path(target.split("::"), module, seen | {key})
             else:
@@ -8212,7 +8245,7 @@ class CallResolver:
             if not qualifier:
                 continue
             if (module, path) in seen:
-                self._rust_cuts += 1
+                self._rust_cut(-1)
                 continue
             if not self._rust_rooted(path, module):
                 continue

@@ -4,6 +4,36 @@ All notable changes to Descry will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [semver](https://semver.org/) from 1.0.0.
 
+## [1.1.0] — 2026-11-03
+
+### Added
+
+- `callers` and `callees` take `exclude_tests` (CLI `--exclude-tests`, MCP
+  `exclude_tests`, web `?exclude_tests=true`), as `search` does.
+- `status` answers `changed_since_index`: how many files the graph tracks
+  are newer than it or gone; every text answer's header says so
+  (`| 2 file(s) changed since index`).
+- `descry index` logs its progress every 15 seconds while it parses and
+  while it resolves calls.
+
+### Changed
+
+- Rust: `<X as Trait>::f(x)` calls `X`'s impl of `Trait::f`, the trait's
+  default body where the impl has none, and `<dyn Trait>::f(x)` is
+  `Trait::f(x)`; the callee was read from the trait's type arguments
+  (`Trait>::f`).
+- Rust: a call on an element of a `vec![..]` a `let` binds reads what its
+  elements hold (`d[0].go()`).
+- Search: the keyword side leaves out the words a question or prompt is
+  written with ("where", "which", "the", "function"), so a whole prompt
+  searches what it asks about; a search of such words alone is unchanged.
+- Rust: glob re-exports that lead back round a cycle are walked once per
+  file: the walk that entered the cycle gives every module of it its answer.
+- Search: while an embedding model load is under way (the MCP server's at
+  its start, or the one an index run begins), a search answers keyword-only
+  instead of waiting; a search that finds no load under way, as each CLI
+  command's, begins one and waits as before.
+
 ## [1.0.2] — 2026-10-31
 
 ### Fixed
