@@ -48,6 +48,11 @@ _RUST_STRING_LET_RE = re.compile(
 )
 
 
+# A type as source writes it: a path with arguments, a reference, a pointer,
+# a slice, an array, a tuple, a `dyn` or `impl` bound
+_RUST_TYPE_TEXT_RE = re.compile(r"[A-Za-z_&\[(*][\w\s:<>,&'\[\];()*+!-]*")
+
+
 _RUST_CONST_RE = re.compile(
     r"\b(?:const|static)\s+(?:mut\s+)?(?P<name>[A-Z][A-Z0-9_]*)\s*:\s*"
     r"(?P<type>[^=;().#]+?)\s*="
@@ -374,6 +379,22 @@ def _angle_end(text, start):
         depth += (text[at] == "<") - (text[at] == ">" and text[at - 1] != "-")
         if not depth:
             return at
+    return None
+
+
+def _qualified_self(before):
+    """The type `X` of the `<X as Trait>::` path the code ``before`` a
+    callee ends in; None where `X` is no type source writes, as a macro's
+    `#ty` or `$t`."""
+    end = re.search(r"\s+as\s+$", before).start()
+    depth = 0
+    for at in range(end - 1, -1, -1):
+        depth += (before[at] == ">" and before[at - 1 : at] != "-") - (
+            before[at] == "<"
+        )
+        if depth < 0:
+            held = before[at + 1 : end].strip()
+            return held if _RUST_TYPE_TEXT_RE.fullmatch(held) else None
     return None
 
 
@@ -1964,6 +1985,21 @@ class RustParser(BaseParser):
                     closed = callee[:1] == "<" and _angle_end(callee, 0)
                     if closed and callee[closed + 1 : closed + 3] == "::":
                         callee = callee[1:closed] + callee[closed + 1 :]
+                    # `<X as Trait>::f` is `Trait`'s `f` as `X` implements
+                    # it, `<dyn Trait>::f` the trait's `f`: the match starts
+                    # past the space, at `Trait`, with the `>` that closes
+                    # the path in it, and `X` is the call's receiver.
+                    before = code[: call_match.start(1)]
+                    qualified = ">" in callee and re.search(
+                        r"(\sas|<\s*dyn)\s+$", before
+                    )
+                    if qualified:
+                        depth = 0
+                        for at, ch in enumerate(callee):
+                            depth += (ch == "<") - (ch == ">")
+                            if depth < 0:
+                                callee = callee[:at] + callee[at + 1 :]
+                                break
                     # `parse::<T>` calls `parse`; the type arguments are the
                     # call site's, not part of the callee's name.
                     callee = _strip_generics(callee)
@@ -1991,6 +2027,16 @@ class RustParser(BaseParser):
                                 code, start, callee, lineno, fn_start
                             ),
                         )
+                        held = (
+                            qualified
+                            and qualified[1].strip() == "as"
+                            and _qualified_self(before)
+                        )
+                        if held:
+                            edge = self.builder.edges[-1]
+                            edge["metadata"].setdefault("site", {})["on"] = (
+                                "self" if held == "Self" else f"{held}()"
+                            )
                 self._bind_closures(code, i, lines, len(code))
                 self._name_results(code, lineno, fn_start, owner)
                 # What each call closed on the line is passed, but in a
@@ -2043,6 +2089,20 @@ class RustParser(BaseParser):
                     site = self.builder.edges[index]["metadata"]
                     site.setdefault("site", {})["arguments"] = passed
                     site["site"]["borrows"] = borrows
+                # A `vec!` a `let` binds holds what its elements hold, their
+                # calls all read by now; an empty one tells no element type.
+                for found in _RUST_VEC_LET_RE.finditer(code):
+                    at = code.index("vec!", found.start())
+                    sequence = _RUST_SEQUENCE_RE.match(code, at, found.end())
+                    origin = (
+                        sequence
+                        and sequence[1].strip()
+                        and self._sequence_origin(
+                            code, sequence, lineno, fn_start, owner
+                        )
+                    )
+                    if origin:
+                        self._rebind(found["name"], lineno, found.start("name"), origin)
                 for found in lets:
                     self._bind_let(code, found, lineno, fn_start, owner)
                 if body <= len(code):

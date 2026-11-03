@@ -273,7 +273,9 @@ async def api_callers(request: Request) -> JSONResponse:
         return _invalid("Missing 'symbol' parameter")
     return _answered(
         await _get_service().callers_answer(
-            name, limit=_int_param(request, "limit", 20)
+            name,
+            limit=_int_param(request, "limit", 20),
+            exclude_tests=_flag(request, "exclude_tests"),
         )
     )
 
@@ -284,7 +286,9 @@ async def api_callees(request: Request) -> JSONResponse:
         return _invalid("Missing 'symbol' parameter")
     return _answered(
         await _get_service().callees_answer(
-            name, limit=_int_param(request, "limit", 20)
+            name,
+            limit=_int_param(request, "limit", 20),
+            exclude_tests=_flag(request, "exclude_tests"),
         )
     )
 

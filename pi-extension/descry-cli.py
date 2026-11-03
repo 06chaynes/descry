@@ -38,11 +38,13 @@ def main():
     p = subparsers.add_parser("callers")
     p.add_argument("--symbol", required=True)
     p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--exclude-tests", action="store_true")
 
     # callees
     p = subparsers.add_parser("callees")
     p.add_argument("--symbol", required=True)
     p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--exclude-tests", action="store_true")
 
     # context
     p = subparsers.add_parser("context")
@@ -157,9 +159,9 @@ async def dispatch(args):
         elif cmd == "status":
             return await service.status()
         elif cmd == "callers":
-            return await service.callers(args.symbol, args.limit)
+            return await service.callers(args.symbol, args.limit, args.exclude_tests)
         elif cmd == "callees":
-            return await service.callees(args.symbol, args.limit)
+            return await service.callees(args.symbol, args.limit, args.exclude_tests)
         elif cmd == "context":
             return await service.context(
                 args.symbol,

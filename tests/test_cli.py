@@ -291,3 +291,39 @@ class TestSearchType:
             cli.main()
         assert exit_.value.code == 2
         assert f"invalid choice: '{written}'" in capsys.readouterr().err
+
+
+def test_the_pi_extension_cli_leaves_test_callers_out_when_asked(tmp_path):
+    """The pi extension's `callers` and `callees` pass `--exclude-tests`."""
+    from pathlib import Path
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'p'\n")
+    (tmp_path / "app.py").write_text(
+        "def helper():\n    pass\n\n\ndef main():\n    helper()\n"
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_app.py").write_text(
+        "from app import helper\n\n\ndef test_it():\n    helper()\n"
+    )
+    env = {**os.environ, "DESCRY_NO_SCIP": "1", "DESCRY_NO_EMBEDDINGS": "1"}
+    subprocess.run(
+        [sys.executable, "-m", "descry.cli", "index"],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    pi_cli = Path(__file__).resolve().parents[1] / "pi-extension" / "descry-cli.py"
+
+    def callers(*flags):
+        return subprocess.run(
+            [sys.executable, str(pi_cli), "callers", "--symbol", "helper", *flags],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+    assert "test_it" in callers()
+    assert "test_it" not in callers("--exclude-tests")

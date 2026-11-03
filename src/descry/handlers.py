@@ -818,6 +818,98 @@ def format_compact_result(node: dict, rank: int = 0) -> str:
     return f"{rank}. [{node_type}] {name} | {location} ({token_count}t, {in_degree}c)"
 
 
+# Words a question or a prompt is written with, which name no symbol: left
+# out of the keyword side's terms (see `_keyword_terms`).
+_PROMPT_WORDS = frozenset(
+    [
+        "a",
+        "about",
+        "all",
+        "an",
+        "and",
+        "any",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "by",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "doing",
+        "explain",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "how",
+        "i",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "need",
+        "of",
+        "on",
+        "or",
+        "our",
+        "please",
+        "should",
+        "show",
+        "so",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "this",
+        "those",
+        "to",
+        "up",
+        "us",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "while",
+        "who",
+        "whom",
+        "why",
+        "will",
+        "with",
+        "would",
+        "write",
+        "you",
+        "your",
+        "code",
+        "function",
+        "functions",
+        "method",
+        "methods",
+    ]
+)
+
+
+def _keyword_terms(terms: list[str]) -> list[str]:
+    """``terms`` without the words a prompt is written with; all of them
+    where nothing else is left."""
+    return [t for t in terms if t.lower() not in _PROMPT_WORDS] or terms
+
+
 def is_natural_language_query(terms: list[str]) -> bool:
     """Detect if query terms represent natural language vs code identifiers."""
     text = " ".join(terms).lower()
@@ -1157,6 +1249,22 @@ class DescryService:
         age_hours = (time.time() - mtime) / 3600
         return True, f"{age_hours:.1f}h ago", age_hours
 
+    def _changed_since_index(self, mtime: float) -> int:
+        """How many of the files the graph tracks changed on disk since it
+        was written, its mtime the boundary: newer or gone. A path the graph
+        names outside the project is not looked at."""
+        root, count = self.config.project_root.resolve(), 0
+        for path in self._graph_cache.get("paths") or ():
+            try:
+                target = (root / path).resolve()
+                if target.is_relative_to(root):
+                    count += target.stat().st_mtime > mtime
+            except FileNotFoundError:
+                count += 1
+            except (OSError, RuntimeError):
+                pass
+        return count
+
     async def _update_cache(self):
         async with self._graph_cache_lock:
             gp = self.config.graph_path
@@ -1169,6 +1277,11 @@ class DescryService:
                         "nodes": len(data.get("nodes", [])),
                         "edges": len(data.get("edges", [])),
                         "languages": self._graph_languages(data),
+                        "paths": {
+                            file_of(node["id"])
+                            for node in data.get("nodes", ())
+                            if node.get("id", "").startswith("FILE:")
+                        },
                         "error": None,
                     }
                 # ValueError: invalid JSON or invalid UTF-8.
@@ -1180,6 +1293,7 @@ class DescryService:
                         "nodes": 0,
                         "edges": 0,
                         "languages": [],
+                        "paths": [],
                         "error": str(e),
                     }
 
@@ -1311,7 +1425,11 @@ class DescryService:
         stale = (
             " STALE" if age_hours and age_hours > self.config.max_stale_hours else ""
         )
-        header = f"[{self._graph_cache['nodes']:,}n/{self._graph_cache['edges']:,}e | {age_str}{stale}]"
+        changed = self._graph_cache["mtime"] and self._changed_since_index(
+            self._graph_cache["mtime"]
+        )
+        note = f" | {changed} file(s) changed since index" if changed else ""
+        header = f"[{self._graph_cache['nodes']:,}n/{self._graph_cache['edges']:,}e | {age_str}{stale}{note}]"
         return f"{header}\n\n{content}"
 
     def _new_searcher(self):
@@ -1400,16 +1518,19 @@ class DescryService:
             return f"Embeddings: Failed ({cache['error']})"
         return f"Embeddings: {len(searcher.nodes):,} nodes indexed"
 
-    async def _get_semantic_searcher(self):
+    async def _get_semantic_searcher(self, wait: bool = True):
         """Single-flight accessor for the semantic searcher.
 
         Returns the cached SemanticSearcher, loading it again if
         codebase_graph.json mtime changed, and waits up to
-        `embedding_timeout` for a load under way. Returns None if
-        embeddings are unavailable (module missing or disabled), if the
-        graph file does not exist, or while a load is not done; then
-        _semantic_cache["error"] is the last failed load's until a load
-        succeeds.
+        `embedding_timeout` for a load under way. With ``wait`` False a
+        load another call began (the MCP server's at its start, an index
+        run's) is not waited on: a search answers keyword-only until the
+        model is ready.
+        Returns None if embeddings are unavailable (module missing or
+        disabled), if the graph file does not exist, or while a load is not
+        done; then _semantic_cache["error"] is the last failed load's until
+        a load succeeds.
         """
         if not self._semantic_available:
             return None
@@ -1421,6 +1542,8 @@ class DescryService:
             cache = self._semantic_cache
             if cache["instance"] is not None and cache["mtime"] == mtime:
                 return cache["instance"]
+            if cache["load"] and not wait:
+                return None
             load = cache["load"] or self._start_semantic_load(cache, self._new_searcher)
         try:
             return await asyncio.wait_for(
@@ -1529,7 +1652,8 @@ class DescryService:
         embeddings, as a structured answer.
 
         A graph that cannot be loaded counts no nodes or edges, and `error`
-        says why. `scip` is `{state, indexers, cached}` with `state` one of
+        says why. `changed_since_index` counts the files the graph tracks
+        that are newer than it or gone. `scip` is `{state, indexers, cached}` with `state` one of
         "enabled", "disabled", "unavailable" or "not_loaded"; `embeddings`
         is `{state, nodes, model}` with `state` one of "ready", "stale",
         "missing", "disabled" or "unavailable".
@@ -1544,6 +1668,7 @@ class DescryService:
                 "edges": 0,
                 "languages": [],
                 "stale": False,
+                "changed_since_index": 0,
                 "error": None,
             }
         else:
@@ -1556,6 +1681,9 @@ class DescryService:
                 "edges": self._graph_cache["edges"],
                 "languages": self._graph_cache["languages"],
                 "stale": age_hours > self.config.max_stale_hours,
+                "changed_since_index": self._changed_since_index(
+                    self._graph_cache["mtime"]
+                ),
                 "error": self._graph_cache["error"],
             }
         return {
@@ -1745,7 +1873,7 @@ class DescryService:
             "Set [timeouts] index_minutes in .descry.toml to increase."
         )
 
-    async def index(self, path: str = ".") -> str:
+    async def index(self, path: str = ".", echo: bool = False) -> str:
         """Regenerate the codebase graph.
 
         `path` must resolve inside project_root. Prevents prompt-injected
@@ -1805,13 +1933,24 @@ class DescryService:
                 cwd=str(self.config.project_root),
                 env=env,
             ) as proc:
-                stdout, stderr = map(
-                    _decode_output,
-                    await asyncio.wait_for(proc.communicate(), timeout),
+                lines = []
+
+                async def read_stderr():
+                    async for raw in proc.stderr:
+                        lines.append(_decode_output(raw))
+                        if echo:
+                            sys.stderr.write(lines[-1])
+                            sys.stderr.flush()
+
+                out, _, _ = await asyncio.wait_for(
+                    asyncio.gather(proc.stdout.read(), read_stderr(), proc.wait()),
+                    timeout,
                 )
+                stdout, stderr = _decode_output(out), "".join(lines)
 
             if proc.returncode == 0:
-                output = stdout.strip() or stderr.strip()
+                # What `echo` wrote as it came is not reported again.
+                output = stdout.strip() or ("" if echo else stderr.strip())
                 self.reset_caches()
 
                 scip = self._scip_state()
@@ -1905,17 +2044,27 @@ class DescryService:
     def _counts(q, ids: list, marks: dict) -> dict:
         return dict(zip(("certain", "possible", "unresolved"), q.kinds(ids, marks)))
 
-    async def callers_answer(self, name: str, limit: int = 20) -> dict:
+    async def callers_answer(
+        self, name: str, limit: int = 20, exclude_tests: bool = False
+    ) -> dict:
         """The callers of a symbol as a structured answer: who calls it, by
         kind, how many of each, and how many of each a `limit` leaves out."""
-        return await self._listing(self._callers_from, "callers", name, limit)
+        return await self._listing(
+            self._callers_from, "callers", name, limit, exclude_tests
+        )
 
-    async def callees_answer(self, name: str, limit: int = 20) -> dict:
+    async def callees_answer(
+        self, name: str, limit: int = 20, exclude_tests: bool = False
+    ) -> dict:
         """The callees of a symbol as a structured answer, like
         `callers_answer`."""
-        return await self._listing(self._callees_from, "callees", name, limit)
+        return await self._listing(
+            self._callees_from, "callees", name, limit, exclude_tests
+        )
 
-    async def _listing(self, fetch, key: str, name: str, limit: int) -> dict:
+    async def _listing(
+        self, fetch, key: str, name: str, limit: int, exclude_tests: bool
+    ) -> dict:
         if error := limit_error(limit):
             return fail("invalid", error)
         if not name.strip():
@@ -1928,7 +2077,7 @@ class DescryService:
         q = await self._get_querier()
         if not q:
             return self._no_graph()
-        data = fetch(q, name, limit)
+        data = fetch(q, name, limit, exclude_tests)
         if not data["ok"]:
             return data
         marks = data["ambiguous"]
@@ -1942,7 +2091,7 @@ class DescryService:
         }
 
     @staticmethod
-    def _callers_from(q, name: str, limit: int) -> dict:
+    def _callers_from(q, name: str, limit: int, exclude_tests: bool = False) -> dict:
         node_id, choices, fuzzy = q.resolve_symbol(name)
         if fuzzy:
             # The name is no definition's; a close match is named, not
@@ -1956,6 +2105,8 @@ class DescryService:
         # calls of the name; asked by node ID, those resolved or narrowed to it.
         asked = node_id if name == node_id else name
         all_callers, ambiguous = q.ordered_callers(asked)
+        if exclude_tests:
+            all_callers = [c for c in all_callers if not q.is_test(c)]
         if not node_id and not all_callers and not name.startswith("FILE:"):
             # No definition has the name, and no call writes it.
             return DescryService._refusal(name, [], choices)
@@ -1969,11 +2120,13 @@ class DescryService:
         }
 
     @staticmethod
-    def _callees_from(q, name: str, limit: int) -> dict:
+    def _callees_from(q, name: str, limit: int, exclude_tests: bool = False) -> dict:
         node_id, refusal = DescryService._one_symbol(q, name)
         if refusal:
             return refusal
         callees = sorted(q.get_callees(node_id))
+        if exclude_tests:
+            callees = [c for c in callees if not q.is_test(c)]
         return {
             "ok": True,
             "symbol": node_id,
@@ -1984,16 +2137,20 @@ class DescryService:
             "ambiguous": q.get_ambiguous_callees(node_id),
         }
 
-    async def callers(self, name: str, limit: int = 20) -> str:
+    async def callers(
+        self, name: str, limit: int = 20, exclude_tests: bool = False
+    ) -> str:
         """Find all callers of a symbol."""
         return await self.listing_text(
-            await self.callers_answer(name, limit), "callers", limit
+            await self.callers_answer(name, limit, exclude_tests), "callers", limit
         )
 
-    async def callees(self, name: str, limit: int = 20) -> str:
+    async def callees(
+        self, name: str, limit: int = 20, exclude_tests: bool = False
+    ) -> str:
         """Find what a symbol calls."""
         return await self.listing_text(
-            await self.callees_answer(name, limit), "callees", limit
+            await self.callees_answer(name, limit, exclude_tests), "callees", limit
         )
 
     async def listing_text(self, answer: dict, key: str, limit: int) -> str:
@@ -2323,7 +2480,7 @@ class DescryService:
         symbol_type = None if symbol_type == "all" else symbol_type
 
         tfidf_results = q.search_docs(
-            terms,
+            _keyword_terms(terms),
             lang=lang,
             crate=crate,
             symbol_type=symbol_type,
@@ -2340,8 +2497,10 @@ class DescryService:
         ):
             try:
                 # Single-flight async helper (runs in asyncio.to_thread
-                # and respects the cache lock).
-                searcher = await self._get_semantic_searcher()
+                # and respects the cache lock). A model the server is still
+                # loading is not waited on: keyword results answer until
+                # it is ready.
+                searcher = await self._get_semantic_searcher(wait=False)
                 if searcher is not None:
                     # Under the filters the keyword side has
                     semantic_results = await asyncio.to_thread(
@@ -2860,10 +3019,11 @@ class DescryService:
             },
         }
 
-    async def index_answer(self, path: str = ".") -> dict:
+    async def index_answer(self, path: str = ".", echo: bool = False) -> dict:
         """`index` as a structured answer: the graph's status after the run.
-        The indexer's report is `_report`, for the text."""
-        report = await self.index(path)
+        The indexer's report is `_report`, for the text; with ``echo`` its
+        log is written to stderr as the run goes instead."""
+        report = await self.index(path, echo)
         if isinstance(report, ServiceError):
             return failure(report)
         return {"ok": True, **public(await self.status_answer()), "_report": report}

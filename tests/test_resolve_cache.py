@@ -83,6 +83,52 @@ UNTOUCHED = {"z.py": "def alone():\n    return 1\n\n\ndef calls():\n    alone()\
             },
             id="a-re-export-another-module-imports-through-moves",
         ),
+        pytest.param(
+            {
+                "Cargo.toml": '[package]\nname = "p"\n',
+                "src/lib.rs": "pub mod a;\npub mod b;\npub mod c;\npub mod d;\n"
+                "pub mod u1;\npub mod u2;\n",
+                "src/a.rs": "pub use crate::b::*;\n",
+                "src/b.rs": "pub use crate::c::*;\n",
+                "src/c.rs": "pub fn target() {}\n",
+                "src/d.rs": "pub fn target() {}\n",
+                "src/u1.rs": "pub fn one() {\n    crate::a::target();\n}\n",
+                "src/u2.rs": "pub fn two() {\n    crate::a::target();\n}\n",
+            },
+            {"src/b.rs": "pub use crate::d::*;\n"},
+            id="a-glob-chain-two-files-walk-is-repointed-midway",
+        ),
+        pytest.param(
+            {
+                "Cargo.toml": '[package]\nname = "p"\n',
+                "src/lib.rs": "pub mod a;\npub mod b;\npub mod c;\npub mod d;\n"
+                "pub mod u1;\npub mod u2;\n",
+                "src/a.rs": "pub use crate::b::*;\n",
+                "src/b.rs": "pub use crate::a::*;\npub use crate::c::*;\n",
+                "src/c.rs": "pub fn target() {}\n",
+                "src/d.rs": "pub fn target() {}\n",
+                "src/u1.rs": "pub fn one() {\n    crate::a::target();\n}\n",
+                "src/u2.rs": "pub fn two() {\n    crate::b::target();\n}\n",
+            },
+            {"src/b.rs": "pub use crate::a::*;\npub use crate::d::*;\n"},
+            id="a-glob-cycle-two-files-walk-is-repointed",
+        ),
+        pytest.param(
+            {
+                "Cargo.toml": '[package]\nname = "p"\n',
+                "src/lib.rs": "pub mod a;\npub mod b;\npub mod c;\npub mod d;\n"
+                "pub mod u1;\npub mod u2;\n",
+                "src/a.rs": "pub use crate::b::*;\n",
+                "src/b.rs": "pub use crate::c::*;\n",
+                "src/c.rs": "pub fn target() {}\n",
+                "src/d.rs": "pub fn target() {}\n",
+                "src/u1.rs": "use crate::b::*;\n\npub fn one() {\n    target();\n"
+                "    crate::a::target();\n}\n",
+                "src/u2.rs": "pub fn two() {\n    crate::a::target();\n}\n",
+            },
+            {"src/b.rs": "pub use crate::d::*;\n"},
+            id="a-walk-kept-in-a-file-that-read-its-modules-first-is-repointed",
+        ),
     ],
 )
 def test_a_change_re_resolves_what_it_reaches(tmp_path, caplog, before, after):

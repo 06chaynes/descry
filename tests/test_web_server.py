@@ -412,7 +412,7 @@ class TestCrossOriginWrites:
     def index_calls(self, web_project, monkeypatch):
         calls = []
 
-        async def fake_index(path="."):
+        async def fake_index(path=".", echo=False):
             calls.append(path)
             return "Index complete."
 
@@ -632,7 +632,7 @@ class TestServiceBackedEndpoints:
         os.utime(graph, (two_hours_ago, two_hours_ago))
         calls = []
 
-        async def fake_index(path="."):
+        async def fake_index(path=".", echo=False):
             calls.append(path)
             return "Index complete."
 
@@ -668,7 +668,7 @@ class TestServiceBackedEndpoints:
     def test_failed_index_run_is_a_500(self, client, web_project, monkeypatch, path):
         (web_project / ".descry_cache" / "codebase_graph.json").unlink()
 
-        async def failing_index(path="."):
+        async def failing_index(path=".", echo=False):
             return ServiceError("Index failed.", detail="indexer output")
 
         monkeypatch.setattr(web_server._get_service(), "index", failing_index)
@@ -688,6 +688,7 @@ class TestServiceBackedEndpoints:
             "edges": 0,
             "languages": ["python"],
             "stale": False,
+            "changed_since_index": 1,
             "error": None,
         }
         health = client.get("/api/health").json()["graph"]
@@ -711,6 +712,7 @@ class TestServiceBackedEndpoints:
             "edges": 0,
             "languages": [],
             "stale": False,
+            "changed_since_index": 0,
             "error": None,
         }
 
@@ -852,7 +854,7 @@ class TestServiceBackedEndpoints:
         graph.write_text('{"schema_version": 0, "nodes": [], "edges": []}')
         calls = []
 
-        async def fake_index(path="."):
+        async def fake_index(path=".", echo=False):
             calls.append(path)
             return "Index complete."
 
@@ -903,7 +905,7 @@ class TestServiceBackedEndpoints:
         svc = web_server._get_service()
         seeded = object()
 
-        async def fake_index(path="."):
+        async def fake_index(path=".", echo=False):
             svc.reset_caches()
             svc._semantic_cache["instance"] = seeded
             return "Index complete."
@@ -1208,7 +1210,9 @@ class TestGraphEndpoints:
         )
         assert body["markdown"].startswith("### Call Flow: `hello` (forward)")
         text = asyncio.run(web_server._get_service().flow("hello", depth=2))
-        assert text == f"[1n/0e | 0.0h ago]\n\n{body['markdown']}"
+        assert text == (
+            f"[1n/0e | 0.0h ago | 1 file(s) changed since index]\n\n{body['markdown']}"
+        )
 
 
 class TestPathEndpoint:

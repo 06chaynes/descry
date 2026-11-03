@@ -1031,6 +1031,7 @@ class TestEnsure:
             "edges": 0,
             "languages": [],
             "stale": False,
+            "changed_since_index": 0,
             "error": None,
         }
         assert (await svc.status()).startswith(
@@ -1845,6 +1846,75 @@ async def test_a_context_budget_below_one_is_refused(tmp_path, bound):
     assert f"{bound} must be at least 1, got 0." in result
 
 
+def _function(node_id, line=1):
+    return {
+        "id": node_id,
+        "type": "Function",
+        "metadata": {"name": node_id.rpartition("::")[2], "lineno": line},
+    }
+
+
+def _call(source, target, line=2):
+    return {
+        "source": source,
+        "target": target,
+        "relation": "CALLS_RESOLVED",
+        "metadata": {"lineno": line},
+    }
+
+
+@pytest.mark.asyncio
+async def test_callers_and_callees_exclude_tests(tmp_path):
+    """`exclude_tests` leaves test code out of both listings."""
+    config = _plain_config(tmp_path)
+    helper, main = "FILE:app.py::helper", "FILE:app.py::main"
+    test, fixture = "FILE:tests/test_app.py::test_it", "FILE:tests/test_app.py::data"
+    _write_graph(
+        config,
+        nodes=[_function(i) for i in (helper, main, test, fixture)],
+        edges=[_call(main, helper), _call(test, helper), _call(test, fixture)],
+    )
+    svc = DescryService(config)
+
+    def ids(answer, key):
+        return sorted(ref["id"] for ref in answer[key])
+
+    assert ids(await svc.callers_answer(helper), "callers") == [main, test]
+    assert ids(await svc.callers_answer(helper, exclude_tests=True), "callers") == [
+        main
+    ]
+    assert ids(await svc.callees_answer(test), "callees") == [helper, fixture]
+    assert ids(await svc.callees_answer(test, exclude_tests=True), "callees") == [
+        helper
+    ]
+
+
+@pytest.mark.asyncio
+async def test_status_counts_files_changed_since_the_index(tmp_path):
+    """A file newer than the graph, or gone, is changed since the index,
+    once however many symbols it holds; a path the graph names outside the
+    project is not looked at. The count heads every answer."""
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _plain_config(project)
+    files = ["same.py", "newer.py", "gone.py", "../outside.py"]
+    _write_graph(
+        config,
+        nodes=[_function(f"FILE:{f}::f") for f in files]
+        + [_function("FILE:newer.py::g")],
+    )
+    for name in ("same.py", "newer.py", "../outside.py"):
+        (project / name).write_text("def f(): pass\n")
+    written = config.graph_path.stat().st_mtime
+    os.utime(project / "same.py", (written - 60, written - 60))
+    for name in ("newer.py", "../outside.py"):
+        os.utime(project / name, (written + 60, written + 60))
+    svc = DescryService(config)
+    assert (await svc.status_answer())["changed_since_index"] == 2
+    header = (await svc.callers("FILE:same.py::f")).split("\n")[0]
+    assert header.endswith(" | 2 file(s) changed since index]")
+
+
 @pytest.mark.asyncio
 async def test_callers_of_a_node_id_the_graph_lacks_is_refused(tmp_path):
     config = _plain_config(tmp_path)
@@ -1909,6 +1979,37 @@ async def test_search_keeps_semantic_matches_no_keyword_finds(
     svc._semantic_available, svc._SemanticSearcher = True, Searcher
     data = await svc.search_answer(terms, lang=lang)
     assert ([n["id"] for n in data["results"]], data["method"]) == (found, "hybrid")
+
+
+@pytest.mark.asyncio
+async def test_search_does_not_wait_for_a_load_the_server_began(tmp_path):
+    """A model the server began loading (the MCP server's at its start)
+    is not waited on: the search answers keyword-only, and hybrid once
+    the load is done. A search that finds no load under way, as each
+    CLI command's, begins one and waits for it."""
+    config = _plain_config(tmp_path)
+    node = {"id": "FILE:x.py::f", "type": "Function", "metadata": {"name": "f"}}
+    _write_graph(config, nodes=[node])
+    release = threading.Event()
+
+    class Searcher:
+        def __init__(self, graph_path, **kwargs):
+            release.wait(10)
+
+        def ensure_model(self):
+            pass
+
+        def search(self, query, limit=10, min_score=0.0, keep=None):
+            return [(node, 0.9)]
+
+    svc = DescryService(config)
+    svc._semantic_available, svc._SemanticSearcher = True, Searcher
+    began = asyncio.create_task(svc._get_semantic_searcher())
+    await asyncio.sleep(0.05)
+    assert (await svc.search_answer(["which", "function"]))["method"] == "keyword"
+    release.set()
+    await began
+    assert (await svc.search_answer(["which", "function"]))["method"] == "hybrid"
 
 
 @pytest.mark.asyncio
@@ -2138,3 +2239,74 @@ async def test_a_search_language_alias_is_taken_in_every_interface(tmp_path):
     svc = DescryService(config)
     assert (await svc.search_answer(["x"], lang="ts"))["ok"]
     assert "ts" in {member.value for member in LanguageName}
+
+
+@pytest.mark.asyncio
+async def test_search_leaves_the_words_a_question_is_written_with_out(tmp_path):
+    """The keyword side does not match the words a question or prompt is
+    written with ("where", "is", "the"), only what it asks about; a search
+    of such words alone still searches them."""
+    config = _plain_config(tmp_path)
+
+    def node(name, doc, sig):
+        return {
+            "id": f"FILE:x.rs::{name}",
+            "type": "Function",
+            "metadata": {"name": name, "docstring": doc, "signature": sig},
+        }
+
+    _write_graph(
+        config,
+        nodes=[
+            node("is_where", "Is the thing where it is.", "fn is_where(is: bool)"),
+            node("is_the", "Whether the value is the one.", "fn is_the(where: u8)"),
+            node(
+                "search_parallel", "Multi-threaded searching.", "fn search_parallel()"
+            ),
+        ],
+    )
+    svc = DescryService(config)
+    terms = ["Where", "is", "multi-threaded", "searching", "started"]
+    found = [r["id"] for r in (await svc.search_answer(terms))["results"]]
+    assert found[0] == "FILE:x.rs::search_parallel"
+    found = [r["id"] for r in (await svc.search_answer(["where", "is"]))["results"]]
+    assert "FILE:x.rs::is_where" in found
+
+
+@pytest.mark.asyncio
+async def test_index_echoes_the_indexers_log_while_it_runs(tmp_path, monkeypatch):
+    """With `echo`, each line the indexer logs reaches stderr while it runs,
+    and the report does not repeat them."""
+    config = _plain_config(tmp_path)
+    _write_graph(config)
+    seen = tmp_path / "seen"
+    svc = DescryService(config)
+    # The indexer goes on only once its first line has been echoed.
+    _run_as_the_indexer(
+        svc,
+        "import os, sys, time\n"
+        "print('INFO: Parsing: 1 files so far', file=sys.stderr, flush=True)\n"
+        "end = time.time() + 10\n"
+        f"while not os.path.exists({str(seen)!r}):\n"
+        "    if time.time() > end:\n"
+        "        sys.exit(3)\n"
+        "    time.sleep(0.05)\n",
+    )
+
+    class Stderr:
+        written = ""
+
+        def write(self, text):
+            self.written += text
+            if "Parsing:" in text:
+                seen.touch()
+
+        def flush(self):
+            pass
+
+    echoed = Stderr()
+    monkeypatch.setattr(sys, "stderr", echoed)
+    report = await svc.index(echo=True)
+    assert not isinstance(report, ServiceError)
+    assert "Parsing: 1 files so far" in echoed.written
+    assert "Parsing" not in report

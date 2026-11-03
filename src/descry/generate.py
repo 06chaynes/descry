@@ -11,6 +11,7 @@ import re
 import signal
 import stat
 import threading
+import time
 import tomllib
 from collections import Counter
 from pathlib import Path
@@ -704,6 +705,7 @@ class CodeGraphBuilder:
             logger.warning("Skipping %s — escapes project root via symlink", real)
             return False
 
+        parsed_count, heartbeat = 0, time.monotonic()
         for root, dirs, files in os.walk(self.root_dir, followlinks=False):
             dirs.sort()
             # A directory's manifests first: they tell how its files parse.
@@ -809,6 +811,10 @@ class CodeGraphBuilder:
                         rel_path, content, module
                     )
                 self._merge(shell)
+                parsed_count += 1
+                if time.monotonic() - heartbeat > 15:
+                    logger.info("Parsing: %d files so far", parsed_count)
+                    heartbeat = time.monotonic()
         if self.parse_cache:
             self.parse_cache.prune(whole=self.root_dir == self.rel_base)
 
@@ -990,6 +996,7 @@ class CodeGraphBuilder:
         edges_to_remove = set()
         file_stats, file_reads = {}, {}
         resolving = None  # the file whose calls are being resolved
+        resolved_count, heartbeat = 0, time.monotonic()
         for idx, edge in enumerate(self.edges):
             target = edge["target"]
             if (file_id := edge["source"].split("::")[0]) != resolving:
@@ -998,6 +1005,15 @@ class CodeGraphBuilder:
                 stats = file_stats[file_id] = dict.fromkeys(_STATS, 0)
                 if reads:
                     file_reads[file_id] = reads.start()
+                resolved_count += 1
+                if time.monotonic() - heartbeat > 15:
+                    logger.info(
+                        "Resolving calls: %d files, %d/%d edges",
+                        resolved_count,
+                        idx,
+                        len(self.edges),
+                    )
+                    heartbeat = time.monotonic()
             if file_id in kept:
                 continue
             if target.startswith("REF:"):

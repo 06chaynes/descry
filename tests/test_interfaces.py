@@ -495,7 +495,7 @@ CONTRACT = {
     "evolution": ({"symbol": "only_a"}, "node_id mode authors commits"),
     "status": (
         {},
-        "exists age_str age_hours nodes edges languages stale error scip embeddings",
+        "exists age_str age_hours nodes edges languages stale changed_since_index error scip embeddings",
     ),
     "health": (
         {},
@@ -579,3 +579,33 @@ def test_a_refusal_has_the_contracts_shape(project):
         {"error", "reason", "choices"},
     )
     assert set(answer["choices"]) == {A, "FILE:b.py::B::parse"}
+
+
+def test_each_interface_leaves_test_callers_out_when_asked(tmp_path, monkeypatch):
+    """`exclude_tests` reaches the service from the CLI, MCP and the web."""
+    from starlette.testclient import TestClient
+
+    from descry.web import server
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'p'\n")
+    (tmp_path / "app.py").write_text(
+        "def helper():\n    pass\n\n\ndef main():\n    helper()\n"
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_app.py").write_text(
+        "from app import helper\n\n\ndef test_it():\n    helper()\n"
+    )
+    _cli(tmp_path, "index")
+    cli = json.loads(_cli(tmp_path, "callers", "helper", "--exclude-tests", "--json"))
+    mcp = _mcp_result(
+        tmp_path, "callers", symbol="helper", exclude_tests=True
+    ).structured_content
+    for name in ("_config", "_service"):
+        monkeypatch.setattr(server, name, None)
+    monkeypatch.chdir(tmp_path)
+    with TestClient(server.app, base_url="http://127.0.0.1") as client:
+        web = client.get(
+            "/api/callers", params={"symbol": "helper", "exclude_tests": "true"}
+        ).json()
+    assert [c["id"] for c in cli["callers"]] == ["FILE:app.py::main"]
+    assert cli == mcp == web
