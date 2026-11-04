@@ -14,6 +14,7 @@ import json
 import os
 import sys
 
+from descry import __version__
 from descry._answers import fail
 from descry._streams import write_utf8
 from descry.handlers import (
@@ -249,6 +250,7 @@ def build_parser():
         prog="descry",
         description="Codebase knowledge graph tools",
     )
+    parser.add_argument("--version", action="version", version=f"descry {__version__}")
     subparsers = parser.add_subparsers(dest="command")
     answers = argparse.ArgumentParser(add_help=False)
     answers.add_argument(

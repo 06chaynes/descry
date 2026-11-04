@@ -29,7 +29,7 @@ without forcing it on simple file-read tasks.
 ## Prerequisites
 
 - Python 3.11+.
-- `descry-codegraph` installed: `pip install descry-codegraph[all]`.
+- `descry-codegraph` installed: `pip install "descry-codegraph[all]"`.
 - Optional but recommended: the MCP server registered (see below).
 - Optional: `rust-analyzer` (Rust SCIP), `scip-typescript` (TS SCIP),
   `scip-python` (Python SCIP) for type-aware call resolution.

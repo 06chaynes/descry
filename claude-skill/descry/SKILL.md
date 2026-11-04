@@ -83,7 +83,7 @@ under the project root. Before the first query in a session:
 
 ```bash
 descry status   # Is there a graph? How old is it?
-descry ensure   # Regenerate if missing or stale (respects max_stale_hours)
+descry ensure   # Regenerate if missing, stale (max_stale_hours) or files changed
 ```
 
 `descry ensure` is safe to call unconditionally — it no-ops if the graph is
@@ -92,12 +92,12 @@ refreshes SCIP indices and embeddings, which can take minutes on large
 Rust workspaces). If the user hasn't asked for indexing and no graph exists,
 prompt them before running `descry index`.
 
-Graph freshness is tracked by file mtime, and `descry ensure` rebuilds only
-a graph older than `[project] max_stale_hours` (24 by default). After the
-user edits code that changes structure (new symbols, renames), run
-`descry index` before querying again: `ensure` may report the graph ready
-while it still shows the old layout. Cached queriers, semantic searchers,
-and dedup caches all invalidate by mtime.
+Graph freshness is tracked by file mtime: `descry ensure` rebuilds a graph
+older than `[project] max_stale_hours` (24 by default), or one whose files
+changed or were removed since it was written. A file added since is not
+noticed: after the user adds files, run `descry index` before querying
+again. Cached queriers, semantic searchers, and dedup caches all invalidate
+by mtime.
 
 ## Commands — grouped by intent
 

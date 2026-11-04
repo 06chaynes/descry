@@ -4,6 +4,47 @@ All notable changes to Descry will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [semver](https://semver.org/) from 1.0.0.
 
+## [1.2.0] — 2026-11-04
+
+### Added
+
+- `descry --version`; the skill's CLI reference lists it.
+
+### Changed
+
+- An index publishes the graph only once its embeddings are written, so
+  searches during a re-index stay hybrid on the previous graph. Before, the
+  new graph appeared first: searches fell back to keyword-only until the
+  embeddings were done, one stalled for `[timeouts] embedding_seconds`
+  (60 s by default), and after ten minutes `semantic` reported the model
+  unavailable.
+- During a first index, a tool that needs the graph and `status` answer
+  "No graph yet: an index is building it", and the text header reads
+  `[Graph: BUILDING]`, instead of saying no graph exists.
+- An index of a project another process is indexing is refused as `busy`
+  (`index`, `ensure`, the web's index stream, and `descry-generate`).
+- `ensure` re-indexes when files the graph tracks changed or were removed
+  since it was written, as well as when it is older than `max_stale_hours`.
+  A file dated in the future is not counted as changed, there or in
+  `status`.
+- The graph is dated when its index began, so a file edited while an index
+  runs counts as changed since it; before, an edit made before the graph
+  was written was missed.
+
+### Security
+
+- Windows: a lock file in the cache directory (`embeddings.lock`,
+  `index.lock`) that the repository ships as a symlink is refused instead
+  of followed, so an index neither locks nor creates the file it names, as
+  on other platforms.
+
+### Documentation
+
+- README: the MCP server is `descry-mcp.exe` on Windows, and
+  `python -m descry.mcp_server` starts it on every platform. Install
+  lines quote the extra (`"descry-codegraph[all]"`) so zsh does not
+  read the brackets as a glob.
+
 ## [1.1.0] — 2026-11-03
 
 ### Added

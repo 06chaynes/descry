@@ -9,6 +9,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import sys
 import threading
 import time
 
@@ -16,12 +17,13 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
+from descry import _files
 from descry import embeddings as E
+from descry._files import file_lock
 from descry._graph import GraphSchemaError
 from descry.embeddings import (
     EmbeddingCacheMismatch,
     SemanticSearcher,
-    _file_lock,
     get_embeddings_status,
 )
 
@@ -158,11 +160,11 @@ def source_nodes(tmp_path):
 
 
 def _peak_lock_holders(lock_path):
-    """Most of four contending threads ever inside `_file_lock` at once."""
+    """Most of four contending threads ever inside `file_lock` at once."""
     inside, peak, guard = [0], [0], threading.Lock()
 
     def worker():
-        with _file_lock(lock_path, timeout=10.0):
+        with file_lock(lock_path, timeout=10.0):
             with guard:
                 inside[0] += 1
                 peak[0] = max(peak[0], inside[0])
@@ -181,7 +183,7 @@ def _peak_lock_holders(lock_path):
 class TestFileLock:
     def test_lock_file_survives_release(self, tmp_path):
         p = tmp_path / "x.lock"
-        with _file_lock(p):
+        with file_lock(p):
             pass
         assert p.exists(), "unlinking the lock destroys mutual exclusion"
 
@@ -189,7 +191,7 @@ class TestFileLock:
         p = tmp_path / "x.lock"
         seen = []
         for _ in range(2):
-            with _file_lock(p):
+            with file_lock(p):
                 seen.append(os.stat(p).st_ino)
         assert seen[0] == seen[1]
 
@@ -198,14 +200,14 @@ class TestFileLock:
         started, released = threading.Event(), threading.Event()
 
         def holder():
-            with _file_lock(p):
+            with file_lock(p):
                 started.set()
                 released.wait(5.0)
 
         t = threading.Thread(target=holder, daemon=True)
         t.start()
         assert started.wait(5.0)
-        with pytest.raises(TimeoutError), _file_lock(p, timeout=0.2):
+        with pytest.raises(TimeoutError), file_lock(p, timeout=0.2):
             pass
         released.set()
         t.join(5.0)
@@ -1120,13 +1122,13 @@ class TestFileLockWithoutFcntl:
 
         fake.locking = locking
         monkeypatch.setitem(sys.modules, "msvcrt", fake)
-        monkeypatch.setattr(E, "_fcntl", None)
+        monkeypatch.setattr(_files, "_fcntl", None)
 
     def test_lock_file_left_by_a_dead_holder_does_not_block(self, tmp_path):
         p = tmp_path / "embeddings.lock"
         p.write_text("")
         start = time.monotonic()
-        with _file_lock(p, timeout=5.0):
+        with file_lock(p, timeout=5.0):
             pass
         assert time.monotonic() - start < 1.0
 
@@ -1134,7 +1136,7 @@ class TestFileLockWithoutFcntl:
         p = tmp_path / "embeddings.lock"
         inodes = []
         for _ in range(2):
-            with _file_lock(p):
+            with file_lock(p):
                 inodes.append(os.stat(p).st_ino)
         assert p.exists()
         assert inodes[0] == inodes[1]
@@ -1262,6 +1264,76 @@ def test_a_service_that_loads_no_model_does_not_import_the_model_library():
         [sys.executable, "-c", probe], capture_output=True, text=True, check=True
     )
     assert out.stdout.strip() == "False"
+
+
+class TestTheIndexPublishesTheGraphWithItsVectors:
+    @pytest.fixture
+    def project(self, tmp_path, monkeypatch):
+        root = tmp_path / "p"
+        root.mkdir()
+        (root / ".git").mkdir()
+        (root / "a.py").write_text('def alpha():\n    """Add numbers."""\n')
+        for name in ("XDG_STATE_HOME", "LOCALAPPDATA"):
+            monkeypatch.setenv(name, str(tmp_path / "state"))
+        monkeypatch.setenv("DESCRY_CACHE_DIR", str(tmp_path / "cache"))
+        monkeypatch.setenv("DESCRY_NO_SCIP", "1")
+        monkeypatch.delenv("DESCRY_NO_EMBEDDINGS", raising=False)
+        monkeypatch.setattr(sys, "argv", ["descry-generate", str(root)])
+        return tmp_path / "cache" / "codebase_graph.json"
+
+    def test_the_graph_appears_only_with_vectors_that_load_for_it(
+        self, project, fake_model, monkeypatch
+    ):
+        from descry.generate import main
+
+        seen = []
+
+        class Recording(SemanticSearcher):
+            def __init__(self, graph_path, **kwargs):
+                seen.append((graph_path, project.exists()))
+                super().__init__(graph_path, **kwargs)
+
+        monkeypatch.setattr(E, "SemanticSearcher", Recording)
+        main()
+        assert seen == [(seen[0][0], False)]
+        assert seen[0][0] != str(project)
+        assert sorted(p.name for p in project.parent.glob(".*.tmp")) == []
+
+        fake_model["encodes"].clear()
+        SemanticSearcher(
+            str(project),
+            cache_dir=str(project.parent),
+            source_root=str(project.parent.parent / "p"),
+        )
+        assert fake_model["encodes"] == []
+
+    def test_the_graph_is_dated_when_the_walk_began(self, project, monkeypatch):
+        from descry.generate import CodeGraphBuilder, main
+
+        walked = []
+        walk = CodeGraphBuilder.process_directory
+
+        def timed(builder):
+            walk(builder)
+            walked.append(time.time())
+
+        monkeypatch.setenv("DESCRY_NO_EMBEDDINGS", "1")
+        monkeypatch.setattr(CodeGraphBuilder, "process_directory", timed)
+        main()
+        assert project.stat().st_mtime < walked[0]
+
+    def test_a_second_indexer_is_refused_while_one_runs(self, project, capsys):
+        from descry.generate import main
+
+        project.parent.mkdir()
+        with (
+            file_lock(project.parent / "index.lock", timeout=1),
+            pytest.raises(SystemExit) as caught,
+        ):
+            main()
+        assert caught.value.code == 2
+        assert "another index of this project is running" in capsys.readouterr().err
+        assert not project.exists()
 
 
 class TestKeptVectors:

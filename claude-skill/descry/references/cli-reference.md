@@ -7,9 +7,10 @@ the detected project root. Freshness is managed via `descry status` /
 ## Global discovery
 
 ```bash
+descry --version            # installed version
 descry health               # version, graph status, SCIP/embeddings/git state
 descry status               # just the graph: exists? nodes? edges? stale?
-descry ensure               # regenerate only if missing or stale
+descry ensure               # regenerate only if missing, unusable, stale or files changed
 descry index [path]         # force full rebuild (SCIP + embeddings)
 descry embedding-models     # registered embedding models, and the one selected
 ```

@@ -72,7 +72,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Descry Ensure",
 		description:
 			"Ensure the codebase graph exists and is fresh. Call this FIRST before other descry queries. " +
-			"Regenerates if missing or older than max_age_hours. Returns graph status with node/edge counts. " +
+			"Regenerates if missing, older than max_age_hours, or if files it indexed changed since. Returns graph status with node/edge counts. " +
 			"WARNING: May take 30-60 seconds if regeneration is needed.",
 		parameters: Type.Object({
 			max_age_hours: Type.Optional(Type.Number({ description: "Max graph age in hours before regeneration (default: the project's max_stale_hours)" })),

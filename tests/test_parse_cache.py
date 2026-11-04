@@ -167,6 +167,35 @@ def test_a_shipped_graph_directory_is_refused_not_crashed(
     assert "is a directory, not the graph file" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("shape", ["symlink", "directory"])
+def test_a_shipped_index_lock_is_refused_not_crashed(
+    tmp_path, monkeypatch, capsys, shape
+):
+    """An `index.lock` shipped as a symlink or a directory is refused with an
+    error, not a traceback, and nothing it names is written."""
+    import sys
+
+    from descry.generate import main
+
+    root = _project(tmp_path, FILES)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("kept\n")
+    if shape == "symlink":
+        (cache / "index.lock").symlink_to(victim)
+    else:
+        (cache / "index.lock").mkdir()
+    monkeypatch.setenv("DESCRY_CACHE_DIR", str(cache))
+    monkeypatch.setattr(sys, "argv", ["descry-generate", str(root)])
+    with pytest.raises(SystemExit) as caught:
+        main()
+    assert caught.value.code == 2
+    assert "cannot lock" in capsys.readouterr().err
+    assert victim.read_text() == "kept\n"
+    assert not (cache / "codebase_graph.json").exists()
+
+
 def test_a_shipped_entry_directory_does_not_stop_an_index(tmp_path):
     """A shipped entry that is a directory is ignored, not unlinked."""
     root = _project(tmp_path, FILES)

@@ -150,7 +150,7 @@ async def descry_health() -> CallToolResult:
 
 @mcp.tool()
 async def descry_ensure(max_age_hours: float | None = None) -> CallToolResult:
-    """Ensure the codebase graph exists and is fresh. Call this FIRST before other descry queries. Regenerates if missing or older than max_age_hours (default: the project's configured max_stale_hours). Returns graph status with node/edge counts. WARNING: May take 30-60 seconds if regeneration is needed."""
+    """Ensure the codebase graph exists and is fresh. Call this FIRST before other descry queries. Regenerates if missing, older than max_age_hours (default: the project's configured max_stale_hours), or if files it indexed changed since. Returns graph status with node/edge counts. WARNING: May take 30-60 seconds if regeneration is needed."""
     # Fenced like descry_index: a regeneration returns the indexer's output.
     svc = _svc()
     answer = await svc.ensure_answer(max_age_hours)

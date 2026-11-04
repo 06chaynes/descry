@@ -32,16 +32,16 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
-      - name: Verify tag matches pyproject version
+      - name: Verify tag matches package version
         # A manual run that targets PyPI must be dispatched from the release tag.
         if: github.event_name == 'push' || inputs.target == 'pypi'
         env:
           GIT_TAG: ${{ github.ref_name }}
         run: |
-          PKG_VERSION=$(python -c "import tomllib; print(tomllib.loads(open('pyproject.toml','rb').read().decode())['project']['version'])")
+          PKG_VERSION=$(PYTHONPATH=src python -c "import descry; print(descry.__version__)")
           TAG_VERSION="${GIT_TAG#v}"
           if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::tag $GIT_TAG does not match pyproject version $PKG_VERSION"
+            echo "::error::tag $GIT_TAG does not match package version $PKG_VERSION"
             exit 1
           fi
       - name: Build sdist + wheel

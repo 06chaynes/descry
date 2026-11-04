@@ -17,7 +17,7 @@ from collections import Counter
 from pathlib import Path
 from xml.etree import ElementTree
 
-from descry._files import create_sibling
+from descry._files import create_sibling, file_lock
 from descry._parse_cache import ParseCache, _decode, _encode
 from descry._parsing import _split_callee, logger
 from descry._reads import Reads, print_of, record, whole_print
@@ -1331,12 +1331,6 @@ class CodeGraphBuilder:
             except OSError:
                 pass
             raise
-        logger.info(
-            "Graph exported to %s. Stats: %d nodes, %d edges",
-            output_path,
-            len(self.nodes),
-            len(self.edges),
-        )
 
 
 def main():
@@ -1393,11 +1387,30 @@ def main():
     cache_dir = config.cache_dir
     if cache_dir.exists() and not cache_dir.is_dir():
         parser.error(f"{cache_dir} is a file, not a directory; the cache needs one")
-    graph_path = cache_dir / "codebase_graph.json"
+    graph_path = config.graph_path
     if graph_path.exists() and not graph_path.is_file():
         parser.error(f"{graph_path} is a directory, not the graph file")
     cache_dir.mkdir(parents=True, exist_ok=True)
 
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(file_lock(config.index_lock_path, timeout=0))
+        except TimeoutError:
+            parser.error("another index of this project is running")
+        except OSError as e:
+            parser.error(f"cannot lock {config.index_lock_path}: {e}")
+        _index(target, project_root, config)
+
+
+def _index(target, project_root, config):
+    """Build the graph of `target` under `config` and publish it with its
+    embeddings: the graph is written under a temporary name, embedded there,
+    and moved into place last, so no reader loads a graph whose vectors are
+    not there yet. The move keeps the file's time and bytes, which key the
+    vectors. The graph is dated when the walk began, so a file edited during
+    the run counts as changed since the index."""
+    cache_dir, graph_path = config.cache_dir, config.graph_path
+    started = time.time()
     builder = CodeGraphBuilder(
         target,
         excluded_dirs=config.excluded_dirs,
@@ -1454,32 +1467,46 @@ def main():
             "scip-dart)"
         )
 
-    builder.export(str(graph_path), scip_index=scip_index)
+    fd, staged = create_sibling(graph_path)
+    os.close(fd)
+    try:
+        builder.export(str(staged), scip_index=scip_index)
+        os.utime(staged, (started, started))
 
-    if config.enable_embeddings:
-        try:
-            from descry.embeddings import EMBEDDINGS_AVAILABLE, SemanticSearcher
+        if config.enable_embeddings:
+            try:
+                from descry.embeddings import EMBEDDINGS_AVAILABLE, SemanticSearcher
 
-            if EMBEDDINGS_AVAILABLE:
-                logger.info("Generating embeddings for semantic search...")
-                searcher = SemanticSearcher(
-                    str(graph_path),
-                    cache_dir=str(config.cache_dir),
-                    force_rebuild=True,
-                    model_name=config.embedding_model,
-                    source_root=str(config.project_root),
-                )
-                logger.info(
-                    f"Embeddings generated: {len(searcher.nodes)} nodes indexed"
-                )
-            else:
-                logger.debug(
-                    "Embeddings: sentence-transformers not available, skipping"
-                )
-        except ImportError:
-            logger.debug("Embeddings: module not available, skipping")
-        except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch; indexing continues without embeddings
-            logger.warning(f"Embeddings: Failed to generate ({e})")
+                if EMBEDDINGS_AVAILABLE:
+                    logger.info("Generating embeddings for semantic search...")
+                    searcher = SemanticSearcher(
+                        str(staged),
+                        cache_dir=str(config.cache_dir),
+                        force_rebuild=True,
+                        model_name=config.embedding_model,
+                        source_root=str(config.project_root),
+                    )
+                    logger.info(
+                        f"Embeddings generated: {len(searcher.nodes)} nodes indexed"
+                    )
+                else:
+                    logger.debug(
+                        "Embeddings: sentence-transformers not available, skipping"
+                    )
+            except ImportError:
+                logger.debug("Embeddings: module not available, skipping")
+            except Exception as e:  # noqa: BLE001 — boundary over sentence-transformers/torch; indexing continues without embeddings
+                logger.warning(f"Embeddings: Failed to generate ({e})")
+
+        os.replace(staged, graph_path)
+    finally:
+        staged.unlink(missing_ok=True)
+    logger.info(
+        "Graph exported to %s. Stats: %d nodes, %d edges",
+        graph_path,
+        len(builder.nodes),
+        len(builder.edges),
+    )
 
 
 if __name__ == "__main__":

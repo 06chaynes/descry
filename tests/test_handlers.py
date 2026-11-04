@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from descry import handlers
+from descry._files import file_lock
 from descry.handlers import (
     _DEFAULT_CODE_EXTENSIONS,
     _DEFAULT_SYNTAX_LANG_MAP,
@@ -690,6 +691,24 @@ class TestOneIndexRunAtATime:
         assert await busy.ensure() == "An index run is already in progress"
 
     @pytest.mark.asyncio
+    async def test_another_process_indexing_refuses_a_run_and_names_the_build(
+        self, svc
+    ):
+        svc.config.graph_path.unlink()
+        with file_lock(svc.config.index_lock_path, timeout=1):
+            refused = await svc.ensure_answer()
+            events = [event async for event in svc.index_stream()]
+            missing = await svc.callers_answer("x")
+            status = await svc.status()
+            header = await svc._format_response("x")
+        assert (refused["ok"], refused["reason"]) == (False, "busy")
+        assert events[-1]["message"] == "An index run is already in progress"
+        assert missing["error"].startswith("No graph yet: an index is building it")
+        assert status.startswith("No graph yet: an index is building it")
+        assert header.startswith("[Graph: BUILDING]")
+        assert (await svc.callers_answer("x"))["error"].startswith("Graph not found")
+
+    @pytest.mark.asyncio
     async def test_concurrent_runs_start_one_indexer(self, svc):
         stop_signals = (signal.SIGINT, signal.SIGTERM)
         before = [signal.getsignal(signum) for signum in stop_signals]
@@ -945,7 +964,7 @@ class TestGraphRemovedBetweenTwoLooks:
     @pytest.mark.asyncio
     async def test_health_and_status_report_no_graph(self, svc):
         assert json.loads(await svc.health())["status"] == "no_graph"
-        assert (await svc.status()).startswith("Graph: NOT FOUND")
+        assert (await svc.status()).startswith("Graph not found")
 
 
 class TestEnsure:
@@ -975,6 +994,33 @@ class TestEnsure:
     @pytest.mark.asyncio
     async def test_default_age_limit_leaves_a_fresh_enough_graph_alone(self, svc):
         svc.config.max_stale_hours = 24
+        assert (await svc.ensure()).startswith("Graph ready")
+        assert svc.indexed == []
+
+    @pytest.mark.asyncio
+    async def test_a_tracked_file_changed_since_the_index_refreshes(self, svc):
+        app = svc.config.project_root / "app.py"
+        app.write_text("def hello():\n    pass\n")
+        _write_graph(svc.config, [{"id": "FILE:app.py", "type": "File"}])
+        assert (await svc.ensure()).startswith("Graph ready")
+        assert svc.indexed == []
+
+        earlier = time.time() - 60
+        os.utime(svc.config.graph_path, (earlier, earlier))
+        refreshed = await svc.ensure_answer()
+        assert (refreshed["action"], refreshed["summary"]) == (
+            "refreshed",
+            "Refreshed graph (1 file(s) changed since index).",
+        )
+        assert svc.indexed == ["."]
+
+    @pytest.mark.asyncio
+    async def test_a_tracked_file_dated_in_the_future_does_not_refresh(self, svc):
+        app = svc.config.project_root / "app.py"
+        app.write_text("def hello():\n    pass\n")
+        _write_graph(svc.config, [{"id": "FILE:app.py", "type": "File"}])
+        tomorrow = time.time() + 24 * 3600
+        os.utime(app, (tomorrow, tomorrow))
         assert (await svc.ensure()).startswith("Graph ready")
         assert svc.indexed == []
 
@@ -1905,7 +1951,8 @@ async def test_status_counts_files_changed_since_the_index(tmp_path):
     )
     for name in ("same.py", "newer.py", "../outside.py"):
         (project / name).write_text("def f(): pass\n")
-    written = config.graph_path.stat().st_mtime
+    written = time.time() - 120
+    os.utime(config.graph_path, (written, written))
     os.utime(project / "same.py", (written - 60, written - 60))
     for name in ("newer.py", "../outside.py"):
         os.utime(project / name, (written + 60, written + 60))

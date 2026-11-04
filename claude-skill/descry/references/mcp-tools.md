@@ -23,7 +23,7 @@ This is descry's prompt-injection defense — preserve it when quoting.
 ### Freshness and diagnostics
 - `descry_health` — version, graph status, feature availability.
 - `descry_status` — graph existence / freshness only.
-- `descry_ensure` — regenerate iff missing or stale.
+- `descry_ensure` — regenerate iff missing, unusable, stale or files it indexed changed.
 - `descry_index(path=".")` — authoritative rebuild. A `path` below the
   project root narrows which files are walked; the result still replaces
   the root's graph. Paths outside the root are rejected.

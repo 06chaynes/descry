@@ -24,7 +24,7 @@ from pathlib import Path
 from descry import __version__
 from descry._answers import fail
 from descry._env import env_flag
-from descry._files import open_regular
+from descry._files import lock_held, open_regular
 from descry._graph import GraphSchemaError, load_graph_with_schema
 from descry.query import (
     _DEFAULT_TEST_FILE_SUFFIXES,
@@ -449,6 +449,11 @@ class DescryConfig:
     @property
     def graph_path(self) -> Path:
         return self.cache_dir / "codebase_graph.json"
+
+    @property
+    def index_lock_path(self) -> Path:
+        """The lock an indexer holds for its whole run."""
+        return self.cache_dir / "index.lock"
 
     @property
     def max_file_bytes(self) -> int:
@@ -1050,6 +1055,7 @@ def refused(answer: dict) -> ServiceError:
 
 
 _GRAPH_NOT_FOUND = "Graph not found. Run descry ensure first."
+_GRAPH_BUILDING = "No graph yet: an index is building it. Try again when it finishes."
 _INDEX_BUSY = "An index run is already in progress"
 # What turns embeddings off: the environment or `.descry.toml`
 _EMBEDDINGS_DISABLED = (
@@ -1251,14 +1257,15 @@ class DescryService:
 
     def _changed_since_index(self, mtime: float) -> int:
         """How many of the files the graph tracks changed on disk since it
-        was written, its mtime the boundary: newer or gone. A path the graph
-        names outside the project is not looked at."""
-        root, count = self.config.project_root.resolve(), 0
+        was written, its mtime the boundary: newer or gone. A file dated in
+        the future is not counted, since no index could ever be newer. A path
+        the graph names outside the project is not looked at."""
+        root, count, now = self.config.project_root.resolve(), 0, time.time()
         for path in self._graph_cache.get("paths") or ():
             try:
                 target = (root / path).resolve()
                 if target.is_relative_to(root):
-                    count += target.stat().st_mtime > mtime
+                    count += mtime < target.stat().st_mtime <= now
             except FileNotFoundError:
                 count += 1
             except (OSError, RuntimeError):
@@ -1331,6 +1338,13 @@ class DescryService:
                 }
             return self._querier_cache["instance"]
 
+    def _begin_index(self) -> bool:
+        """Take this service's index lock, unless it or another process is
+        indexing the project; True when taken."""
+        return not lock_held(self.config.index_lock_path) and self._index_lock.acquire(
+            blocking=False
+        )
+
     def _no_graph(self) -> dict:
         """The failure of a tool that needs a graph it cannot load."""
         return fail("no_graph", self._no_graph_error())
@@ -1340,7 +1354,15 @@ class DescryService:
         error = self._querier_cache["error"]
         if error:
             return f"Graph unusable ({error}). Run descry index to rebuild it."
-        return _GRAPH_NOT_FOUND
+        return self._missing_graph_error()
+
+    def _indexing(self) -> bool:
+        """Whether this service or another process is indexing the project."""
+        return self._index_lock.locked() or lock_held(self.config.index_lock_path)
+
+    def _missing_graph_error(self) -> str:
+        """Why there is no graph file: an index is building it, or none ran."""
+        return _GRAPH_BUILDING if self._indexing() else _GRAPH_NOT_FOUND
 
     async def _get_git_analyzer(self):
         async with self._git_cache_lock:
@@ -1419,7 +1441,8 @@ class DescryService:
 
         exists, age_str, age_hours = self._get_graph_status()
         if not exists:
-            return f"[Graph: NOT FOUND]\n\n{content}"
+            state = "BUILDING" if self._indexing() else "NOT FOUND"
+            return f"[Graph: {state}]\n\n{content}"
 
         await self._update_cache()
         stale = (
@@ -1653,7 +1676,7 @@ class DescryService:
 
         A graph that cannot be loaded counts no nodes or edges, and `error`
         says why. `changed_since_index` counts the files the graph tracks
-        that are newer than it or gone. `scip` is `{state, indexers, cached}` with `state` one of
+        that are newer than it (and not dated in the future) or gone. `scip` is `{state, indexers, cached}` with `state` one of
         "enabled", "disabled", "unavailable" or "not_loaded"; `embeddings`
         is `{state, nodes, model}` with `state` one of "ready", "stale",
         "missing", "disabled" or "unavailable".
@@ -1747,7 +1770,7 @@ class DescryService:
     async def status_text(self, answer: dict) -> str:
         """The text of a `status_answer`."""
         if not answer["exists"]:
-            return "Graph: NOT FOUND. Run descry index first."
+            return self._missing_graph_error()
         if answer["error"]:
             return f"Graph: UNUSABLE ({answer['error']})"
         stale = " (STALE - run descry index)" if answer["stale"] else ""
@@ -1790,7 +1813,8 @@ class DescryService:
 
         `max_age_hours` defaults to `[project] max_stale_hours`. `action` is
         "ready" when the graph was left alone, "refreshed" when it was stale
-        and "generated" when there was none that could be used; `summary`
+        or files it tracks changed since it was written, and "generated" when
+        there was none that could be used; `summary`
         says which in words; `graph` is the graph's status after it. The
         index report, None when "ready", is `_report`, for the text.
         On failure `reason` is "invalid" when `max_age_hours` is not an age,
@@ -1815,7 +1839,12 @@ class DescryService:
             summary = f"Refreshed stale graph ({age_hours:.0f}h old)."
         else:
             await self._update_cache()
-            if not self._graph_cache["error"]:
+            if self._graph_cache["error"]:
+                action, summary = "generated", "Rebuilt unusable graph."
+            elif changed := self._changed_since_index(self._graph_cache["mtime"]):
+                action = "refreshed"
+                summary = f"Refreshed graph ({changed} file(s) changed since index)."
+            else:
                 return {
                     "ok": True,
                     "action": "ready",
@@ -1823,7 +1852,6 @@ class DescryService:
                     "graph": public(await self.status_answer()),
                     "_report": None,
                 }
-            action, summary = "generated", "Rebuilt unusable graph."
 
         result = await self.index(".")
         if isinstance(result, ServiceError):
@@ -1914,7 +1942,7 @@ class DescryService:
         if error := self.config.cache_dir_error():
             return ServiceError(error)
 
-        if not self._index_lock.acquire(blocking=False):
+        if not self._begin_index():
             return ServiceError(_INDEX_BUSY, reason="busy")
         # Read before reset_caches() below discards it.
         model_was_loaded = self._semantic_cache["instance"] is not None
@@ -2847,7 +2875,7 @@ class DescryService:
                 ),
             )
         elif not self.config.graph_path.exists():
-            reason, error = "no_graph", _GRAPH_NOT_FOUND
+            reason, error = "no_graph", self._missing_graph_error()
         elif (searcher := await self._get_semantic_searcher()) is None:
             # A failed load has set the error, the kind of what it raised, and
             # a load that succeeds clears it.
@@ -3057,7 +3085,7 @@ class DescryService:
             yield {"type": "done", "success": False, "message": error}
             return
         argv, env = self._indexer_child(str(self.config.project_root))
-        if not self._index_lock.acquire(blocking=False):
+        if not self._begin_index():
             yield {"type": "done", "success": False, "message": _INDEX_BUSY}
             return
         try:

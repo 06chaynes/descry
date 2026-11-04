@@ -104,7 +104,7 @@ yourself, which is also loaded unpinned.
 
 ```bash
 # Install with all optional features
-pip install descry-codegraph[all]
+pip install "descry-codegraph[all]"
 
 # Index your project
 cd your-project
@@ -164,6 +164,8 @@ Or with a specific Python path:
 
 Descry uses the standard MCP stdio transport. Any MCP-compatible host can spawn `descry-mcp` as a subprocess.
 
+On Windows the executable is `descry-mcp.exe`. `python -m descry.mcp_server`, with the Python descry is installed in, starts the same server on every platform.
+
 ## Tools
 
 Descry provides 19 tools, available through all interfaces:
@@ -172,7 +174,7 @@ Descry provides 19 tools, available through all interfaces:
 |------|-------------|
 | `health` | Diagnostic check — version, graph status, feature availability |
 | `status` | Graph existence and freshness |
-| `ensure` | Ensure graph exists and is fresh (regenerates if stale) |
+| `ensure` | Ensure graph exists and is fresh (regenerates if stale or files changed) |
 | `index` | Regenerate graph, SCIP indices, and embeddings |
 | `search` | Search symbol names and docstrings (keyword + semantic) |
 | `semantic` | Pure semantic search using embeddings only |
@@ -349,19 +351,19 @@ pip install descry-codegraph
 ### With MCP server
 
 ```bash
-pip install descry-codegraph[mcp]
+pip install "descry-codegraph[mcp]"
 ```
 
 ### With Web UI
 
 ```bash
-pip install descry-codegraph[web]
+pip install "descry-codegraph[web]"
 ```
 
 ### With semantic search
 
 ```bash
-pip install descry-codegraph[embeddings]
+pip install "descry-codegraph[embeddings]"
 ```
 
 To select `embeddinggemma-2`, install its extra instead (adds Pillow and
@@ -374,7 +376,7 @@ pip install "descry-codegraph[embeddinggemma-2]"
 ### Everything
 
 ```bash
-pip install descry-codegraph[all]
+pip install "descry-codegraph[all]"
 ```
 
 ### Choosing a torch build
@@ -428,7 +430,7 @@ Requires [uv](https://github.com/astral-sh/uv) and [just](https://github.com/cas
 
 3. **Query** — All tools query the cached graph. Keyword search uses TF-IDF scoring. Semantic search uses sentence-transformer embeddings. Call-graph traversal follows edges in the graph.
 
-4. **Freshness** — `ensure` regenerates the graph when its age exceeds `[project] max_stale_hours` (default 24), or the `--max-age-hours` flag (CLI) / `max_age_hours` argument (MCP) when one is given. The same setting drives the "STALE" badge in `descry status`. The MCP server pre-warms the graph on startup.
+4. **Freshness** — `ensure` regenerates the graph when files it indexed changed or were removed since it was written, and when its age exceeds `[project] max_stale_hours` (default 24), or the `--max-age-hours` flag (CLI) / `max_age_hours` argument (MCP) when one is given. The same setting drives the "STALE" badge in `descry status`. The MCP server pre-warms the graph on startup.
 
 ## Design Notes
 

@@ -10,7 +10,6 @@ Usage:
         results = searcher.search("authentication logic", limit=10)
 """
 
-import contextlib
 import hashlib
 import hmac
 import importlib.util
@@ -19,89 +18,13 @@ import json
 import logging
 import os
 import re
-import stat
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from descry._files import create_sibling, open_regular, remove_orphans
+from descry._files import create_sibling, file_lock, open_regular, remove_orphans
 from descry._parse_cache import signing_key
 from descry.query import _read_file_cached, source_path
-
-try:
-    import fcntl as _fcntl  # Unix only
-except ImportError:
-    _fcntl = None
-
-
-@contextlib.contextmanager
-def _file_lock(lock_path: Path, timeout: float = 600.0):
-    """Cross-process advisory lock.
-
-    Uses fcntl.flock on Unix and msvcrt.locking on Windows. Both are held on
-    an open handle, so the OS releases them when the holder exits.
-
-    The lock file is never unlinked. Removing it would break mutual
-    exclusion: a waiter blocked on the old inode and a newcomer that
-    recreates the path hold locks on two different inodes and both enter.
-    An empty lock file is cheap; correctness is not.
-
-    The cache directory may have come with the repository, so the lock file
-    is opened without following a symlink or waiting on a FIFO, never
-    truncated, and refused unless it is a regular file.
-    """
-    if _fcntl is not None:
-        poll_seconds = 0.05
-
-        def lock(f):
-            _fcntl.flock(f, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-
-        def unlock(f):
-            _fcntl.flock(f, _fcntl.LOCK_UN)
-
-    else:
-        # Windows fallback: lock the first byte of the (always empty) lock file.
-        import msvcrt
-
-        poll_seconds = 0.1
-
-        def lock(f):
-            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-
-        def unlock(f):
-            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_APPEND
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
-    fd = os.open(lock_path, flags, 0o666)
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        os.close(fd)
-        raise OSError(f"embeddings lock {lock_path} is not a regular file")
-    with os.fdopen(fd, "a", encoding="utf-8") as f:
-        # Poll non-blocking so the timeout is honoured; a blocking lock would
-        # wait forever regardless of the argument.
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                lock(f)
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        f"Timed out waiting for embeddings lock at {lock_path}"
-                    ) from None
-                time.sleep(poll_seconds)
-        try:
-            yield
-        finally:
-            unlock(f)
-
 
 logger = logging.getLogger(__name__)
 
@@ -665,7 +588,7 @@ class SemanticSearcher:
         # Cold path: acquire a cross-process lock, recheck, then generate.
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.cache_dir / "embeddings.lock"
-        with _file_lock(lock_path):
+        with file_lock(lock_path):
             if not force_rebuild and self._load_cached():
                 return
 

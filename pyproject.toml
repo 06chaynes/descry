@@ -1,6 +1,6 @@
 [project]
 name = "descry-codegraph"
-version = "1.1.0"
+dynamic = ["version"]
 description = "Codebase knowledge graph: polyglot indexer, semantic search, call-graph analysis"
 requires-python = ">=3.11"
 authors = [{name = "Christian Haynes"}]
@@ -71,6 +71,9 @@ extend-exclude = ["src/descry/scip/pb2.py"]
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/descry/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/descry"]

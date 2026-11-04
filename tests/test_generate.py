@@ -31627,7 +31627,8 @@ class TestCommandLine:
             "-v", str(root), cwd=root, DESCRY_CACHE_DIR=cache, DESCRY_LOG_LEVEL="ERROR"
         )
 
-        assert "INFO: Graph exported" in default.stderr
+        graph = os.path.join(cache, "codebase_graph.json")
+        assert f"INFO: Graph exported to {graph}. Stats" in default.stderr
         assert quiet.returncode == 0
         assert "INFO:" not in quiet.stderr
         assert "INFO: Graph exported" in verbose.stderr

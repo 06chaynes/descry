@@ -30,7 +30,7 @@ MCP `descry_health`; web `GET /api/health`; CLI `usage: descry health [--json]`
 
 ## ensure
 
-Ensure the codebase graph exists and is fresh. Call this FIRST before other descry queries. Regenerates if missing or older than max_age_hours (default: the project's configured max_stale_hours). Returns graph status with node/edge counts. WARNING: May take 30-60 seconds if regeneration is needed.
+Ensure the codebase graph exists and is fresh. Call this FIRST before other descry queries. Regenerates if missing, older than max_age_hours (default: the project's configured max_stale_hours), or if files it indexed changed since. Returns graph status with node/edge counts. WARNING: May take 30-60 seconds if regeneration is needed.
 
 | parameter | type | default |
 |---|---|---|

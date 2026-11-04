@@ -54,8 +54,9 @@ answers; a call dropped as one out of the project is not among them.
 
 ## Keeping up with the source
 
-An index is a snapshot. `status` says how old it is; `ensure` builds it
-again when it is older than `[project] max_stale_hours`. An index after a
-change parses only the files that changed, and resolves again only the
-calls of files whose resolution read something that changed, so its
+An index is a snapshot. `status` says how old it is and how many of its
+files changed since; `ensure` builds it again when it is older than
+`[project] max_stale_hours` or files it holds changed or were removed. An
+index after a change parses only the files that changed, and resolves again
+only the calls of files whose resolution read something that changed, so its
 answers are those a full index would give.

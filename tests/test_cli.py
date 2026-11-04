@@ -10,7 +10,7 @@ from typing import ClassVar
 
 import pytest
 
-from descry import cli
+from descry import __version__, cli
 from descry._answers import fail
 from descry.handlers import DescryService, ServiceError
 
@@ -51,6 +51,19 @@ class TestCliHelp:
         assert result.returncode == 0
         # Each subcommand prints its own usage line, not the root parser's.
         assert f"usage: {' '.join(['descry', *args])} " in result.stdout
+
+
+class TestCliVersion:
+    def test_version(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "descry.cli", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.returncode == 0
+        assert result.stdout == f"descry {__version__}\n"
 
 
 class TestCliNoCommand:

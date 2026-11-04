@@ -11,9 +11,8 @@ import time
 import pytest
 
 from descry import _files
-from descry._files import create_sibling
+from descry._files import create_sibling, file_lock, lock_held
 from descry._graph import CURRENT_SCHEMA
-from descry.embeddings import _file_lock
 from descry.generate import CodeGraphBuilder
 from descry.handlers import DescryConfig, DescryService, ServiceError
 from descry.scip.adapter import CommandSpec, DiscoveredProject
@@ -93,7 +92,7 @@ def test_lock_is_not_written_through_a_symlink(tmp_path, victim):
     lock = tmp_path / "embeddings.lock"
     lock.symlink_to(victim)
 
-    with pytest.raises(OSError), _file_lock(lock, timeout=1):
+    with pytest.raises(OSError), file_lock(lock, timeout=1):
         pass
 
     assert victim.read_text() == "precious\n"
@@ -103,7 +102,7 @@ def test_lock_refuses_a_fifo(tmp_path):
     lock = tmp_path / "embeddings.lock"
     os.mkfifo(lock)
 
-    with pytest.raises(OSError), _file_lock(lock, timeout=1):
+    with pytest.raises(OSError), file_lock(lock, timeout=1):
         pass
 
 
@@ -111,10 +110,45 @@ def test_lock_file_is_not_truncated(tmp_path):
     lock = tmp_path / "embeddings.lock"
     lock.write_text("kept\n")
 
-    with _file_lock(lock, timeout=1):
+    with file_lock(lock, timeout=1):
         pass
 
     assert lock.read_text() == "kept\n"
+
+
+def test_lock_held_is_seen_and_a_missing_lock_is_not_made(tmp_path, victim):
+    lock = tmp_path / "index.lock"
+    assert not lock_held(lock)
+    assert not lock.exists()
+    with file_lock(lock, timeout=1):
+        assert lock_held(lock)
+    assert not lock_held(lock)
+
+    lock.unlink()
+    lock.symlink_to(victim)
+    assert not lock_held(lock)
+    assert victim.read_text() == "precious\n"
+
+
+def test_without_nofollow_a_lock_symlink_is_neither_followed_nor_made(
+    tmp_path, victim, monkeypatch
+):
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    lock, dangling = tmp_path / "index.lock", tmp_path / "embeddings.lock"
+    lock.symlink_to(victim)
+    dangling.symlink_to(tmp_path / "made")
+    for path in (lock, dangling):
+        with (
+            pytest.raises(OSError, match="not a regular file"),
+            file_lock(path, timeout=0),
+        ):
+            pass
+    with pytest.raises(OSError, match="not a regular file"):
+        _files.open_regular(lock)
+    assert victim.read_text() == "precious\n"
+    assert not (tmp_path / "made").exists()
+    with file_lock(tmp_path / "fresh.lock", timeout=0):
+        assert lock_held(tmp_path / "fresh.lock")
 
 
 class _Writer:

@@ -61,10 +61,10 @@ def web_project(tmp_path, monkeypatch):
         ],
         "edges": [],
     }
+    (tmp_path / "app.py").write_text("def hello():\n    return 'hi'\n")
     cache = tmp_path / ".descry_cache"
     cache.mkdir()
     (cache / "codebase_graph.json").write_text(json.dumps(graph))
-    (tmp_path / "app.py").write_text("def hello():\n    return 'hi'\n")
 
     # Reset the module-global config + querier caches so each test sees
     # a fresh view pinned at tmp_path.
@@ -629,6 +629,7 @@ class TestServiceBackedEndpoints:
         """A graph two hours old; returns the list of index runs asked for."""
         graph = web_project / ".descry_cache" / "codebase_graph.json"
         two_hours_ago = time.time() - 2 * 3600
+        os.utime(web_project / "app.py", (two_hours_ago, two_hours_ago))
         os.utime(graph, (two_hours_ago, two_hours_ago))
         calls = []
 
@@ -688,7 +689,7 @@ class TestServiceBackedEndpoints:
             "edges": 0,
             "languages": ["python"],
             "stale": False,
-            "changed_since_index": 1,
+            "changed_since_index": 0,
             "error": None,
         }
         health = client.get("/api/health").json()["graph"]
@@ -1210,9 +1211,7 @@ class TestGraphEndpoints:
         )
         assert body["markdown"].startswith("### Call Flow: `hello` (forward)")
         text = asyncio.run(web_server._get_service().flow("hello", depth=2))
-        assert text == (
-            f"[1n/0e | 0.0h ago | 1 file(s) changed since index]\n\n{body['markdown']}"
-        )
+        assert text == f"[1n/0e | 0.0h ago]\n\n{body['markdown']}"
 
 
 class TestPathEndpoint:

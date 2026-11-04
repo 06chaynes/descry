@@ -140,9 +140,9 @@ Requires an OpenAPI spec: set `[cross_lang] openapi_path = "..."` in
 - **Don't** use `descry search` for behavior-worded queries; `descry semantic`
   is built for that and will do better.
 - **Don't** bypass `status` on a stale graph. Out-of-date graphs
-  produce plausible-looking wrong answers. After edits that change
-  structure, `descry index` (not `ensure`, which rebuilds only a graph
-  older than `max_stale_hours`) brings the graph current.
+  produce plausible-looking wrong answers. After edits, `descry ensure`
+  rebuilds a graph whose files changed or were removed; after adding
+  files, `descry index` brings the graph current.
 - **Don't** shell out to grep when the question is structural. Even one
   descry call beats three Greps for "who calls X".
 
