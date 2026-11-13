@@ -4,6 +4,18 @@ All notable changes to Descry will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [semver](https://semver.org/) from 1.0.0.
 
+## [1.2.1] — 2026-11-13
+
+### Fixed
+
+- Python: an index no longer ends with `RecursionError` on a class statement
+  in a method whose base is written through `self` or `cls`
+  (`class Extra(self.form_class)`). The base is read in the scope around the
+  class statement, as Python evaluates it.
+- Python: an index no longer ends with `TypeError: unhashable type: 'list'`
+  where a method assigns an attribute that a base declares as a property
+  with a setter and then reads it.
+
 ## [1.2.0] — 2026-11-04
 
 ### Added

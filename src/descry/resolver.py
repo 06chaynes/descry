@@ -5823,9 +5823,18 @@ class CallResolver:
     def _py_std_key(self, name, scope_id):
         """What the Python name ``name``, written in ``scope_id`` or as an
         origin path, is called in the standard library's data."""
+        scope_id = name and self._py_written_in(name, scope_id)
         value = self._value(name, scope_id, set()) if name else None
         library = isinstance(value, tuple) and value[0] == "library"
         return value[1] if library else None
+
+    def _py_written_in(self, name, scope_id):
+        """Scope the Python name ``name``, written for ``scope_id``, is read
+        in: a class statement's bases are evaluated around it, so `self` and
+        `cls` there are those of the nearest scope that is no class."""
+        if name.split(".")[0] not in ("self", "cls"):
+            return scope_id
+        return next(s for s in self._scopes(scope_id) if not self._is_class(s))
 
     def _blanket(self, name):
         """The blanket impls that are for the outside type ``name``: those
@@ -6508,7 +6517,8 @@ class CallResolver:
                 if mine in self._ancestors(hit.rpartition("::")[0])
             )
             self._candidates_now = sorted(derived) or None
-        if called or kind != "self":
+        if called or kind != "self" or python:
+            # A Python attribute is kept as the origins of its values.
             return None
         return self._part(value, f"{self._name(ref)}@{name}", ref)
 
@@ -6547,7 +6557,7 @@ class CallResolver:
         if lang == "python":
             # A base class is written as its origin path.
             if (scope_id, name) not in self.base_types:
-                value = self._value(name, scope_id, set())
+                value = self._value(name, self._py_written_in(name, scope_id), set())
                 found = None
                 if value == _EXTERNAL or value and value[0] == "library":
                     found = _EXTERNAL

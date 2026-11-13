@@ -3223,6 +3223,60 @@ class TestPythonCallResolution:
         )
         assert "REF:x.use" in _calls(builder, "FILE:m.py::matched")
 
+    def test_self_in_a_base_is_the_method_s_self(self, tmp_path):
+        """The bases of a class statement are evaluated around it: in a
+        method, `self.form_class` is read on the method's class."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Form:
+                    def is_valid(self): ...
+
+                class Case:
+                    form_class = Form
+
+                    def test(self):
+                        class Extra(self.form_class):
+                            pass
+
+                        Extra().is_valid()
+                """
+            },
+        )
+        assert _bases(builder, "FILE:m.py::Case::test::Extra") == ["FILE:m.py::Form"]
+        assert _calls(builder, "FILE:m.py::Case::test") == [
+            "FILE:m.py::Case::test::Extra",
+            "FILE:m.py::Form::is_valid",
+        ]
+
+    def test_an_attribute_a_base_has_a_property_and_setter_for(self, tmp_path):
+        """An attribute assigned where a base declares it as a property
+        with a setter is of a value not told."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Base:
+                    @property
+                    def choices(self):
+                        return self._choices
+
+                    @choices.setter
+                    def choices(self, value):
+                        self._choices = value
+
+                class Child(Base):
+                    def __init__(self):
+                        self.choices = []
+                        self.choices.extend([1])
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::Child::__init__") == [
+            "REF:self.choices.extend"
+        ]
+
 
 class TestRustCallResolution:
     def test_a_method_two_traits_give_a_type_is_the_trait_in_scope_s(self, tmp_path):
