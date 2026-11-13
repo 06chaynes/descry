@@ -3354,6 +3354,49 @@ class TestPythonCallResolution:
             ["FILE:m.py::Form::is_valid"]
         ]
 
+    def test_the_body_of_if_type_checking_never_runs(self, tmp_path):
+        """Past `if TYPE_CHECKING: ... else: ...` a name both arms bind holds
+        what the `else` binds; one only the body binds holds that."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                import logging
+                from typing import TYPE_CHECKING
+
+                class Mine:
+                    def __init__(self): ...
+
+                if TYPE_CHECKING:
+                    Handler = logging.StreamHandler[str]
+                    Buffer = logging.Handler
+                    Only = Mine
+                else:
+                    Handler = logging.StreamHandler
+                    Buffer = Mine
+
+                class A(Handler):
+                    def __init__(self):
+                        super().__init__()
+
+                class B(Buffer):
+                    def __init__(self):
+                        super().__init__()
+
+                class C(Only):
+                    def __init__(self):
+                        super().__init__()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::A::__init__") == []
+        assert _calls(builder, "FILE:m.py::B::__init__") == [
+            "FILE:m.py::Mine::__init__"
+        ]
+        assert _calls(builder, "FILE:m.py::C::__init__") == [
+            "FILE:m.py::Mine::__init__"
+        ]
+
 
 class TestRustCallResolution:
     def test_a_method_two_traits_give_a_type_is_the_trait_in_scope_s(self, tmp_path):

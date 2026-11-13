@@ -18,6 +18,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   lacks stays unresolved with its candidates; before, it was dropped as a
   call into the library.
 
+- Python: past `if TYPE_CHECKING: ... else: ...` a name both arms bind holds
+  what the `else` binds, since the body never runs. Before, the name had no
+  known value.
+
 ### Fixed
 
 - Python: an index no longer ends with `RecursionError` where a class's base
