@@ -919,6 +919,15 @@ class PythonParser(BaseParser):
             on = [
                 s for w, s in zip(ways, spans) if not (w and isinstance(w[-1], leaves))
             ]
+            test = getattr(node, "test", None)
+            if (
+                isinstance(node, ast.If)
+                and "TYPE_CHECKING"
+                in (getattr(test, "id", ""), getattr(test, "attr", ""))
+                and self._origin(test, node.lineno) == "@typing.TYPE_CHECKING"
+            ):
+                # A type checker reads the body; it never runs.
+                on = [s for s in on if s is not spans[0]]
             for name in self._bound_names(
                 frame_lines, frame_order, first[0], _py_end(node)[0]
             ):
@@ -1008,6 +1017,7 @@ class PythonParser(BaseParser):
                             assigned.setdefault(target.attr, set()).add(origin)
                             held.add(origin)
                 self.bindings.pop()
+        self.builder.py_properties[class_id] = sorted(properties)
         self.builder.assigned[class_id] = {
             name: sorted(origins)
             for name, origins in instance.items()

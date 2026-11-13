@@ -1373,6 +1373,7 @@ class CallResolver:
         self.c_specializations = {}
         self._bounding = set()  # type parameters whose bounds are being read
         self._reading = set()  # (class, attribute) whose values are being read
+        self._naming = set()  # (scope, Python name) being read as a type
         self._holding = set()  # constants whose held functions are being read
         self._ahead_of = set()  # calls being resolved ahead of their turn
         for node_id, node in self.nodes.items():
@@ -5823,18 +5824,24 @@ class CallResolver:
     def _py_std_key(self, name, scope_id):
         """What the Python name ``name``, written in ``scope_id`` or as an
         origin path, is called in the standard library's data."""
-        scope_id = name and self._py_written_in(name, scope_id)
-        value = self._value(name, scope_id, set()) if name else None
+        value = self._py_named(name, scope_id) if name else None
         library = isinstance(value, tuple) and value[0] == "library"
         return value[1] if library else None
 
-    def _py_written_in(self, name, scope_id):
-        """Scope the Python name ``name``, written for ``scope_id``, is read
-        in: a class statement's bases are evaluated around it, so `self` and
-        `cls` there are those of the nearest scope that is no class."""
-        if name.split(".")[0] not in ("self", "cls"):
-            return scope_id
-        return next(s for s in self._scopes(scope_id) if not self._is_class(s))
+    def _py_named(self, name, scope_id):
+        """Value of the Python type name ``name`` written for ``scope_id``.
+        A class statement's bases are evaluated around it, so `self` and
+        `cls` there are those of the nearest scope that is no class; a name
+        whose value leads back to itself is of none."""
+        key = scope_id, name
+        if key in self._naming:
+            return None
+        if name.split(".")[0] in ("self", "cls"):
+            scope_id = next(s for s in self._scopes(scope_id) if not self._is_class(s))
+        self._naming.add(key)
+        value = self._value(name, scope_id, set())
+        self._naming.discard(key)
+        return value
 
     def _blanket(self, name):
         """The blanket impls that are for the outside type ``name``: those
@@ -6557,7 +6564,7 @@ class CallResolver:
         if lang == "python":
             # A base class is written as its origin path.
             if (scope_id, name) not in self.base_types:
-                value = self._value(name, self._py_written_in(name, scope_id), set())
+                value = self._py_named(name, scope_id)
                 found = None
                 if value == _EXTERNAL or value and value[0] == "library":
                     found = _EXTERNAL
@@ -9553,13 +9560,23 @@ class CallResolver:
         ):
             # The base is one of several imports of its name.
             return None
-        # A JavaScript base that an expression gives, or a value of the
-        # project that is no type, is of a type not told.
+        # A JavaScript or Python base that an expression gives, or a value
+        # of the project that is no type, is of a type not told.
         root = base.split(".")[0]
         untold = lang == "typescript" and (
             not re.fullmatch(r"[\w$]+(?:\.[\w$]+)*", base)
             or self._lexical(root, declaration, skip_classes=True)
             or isinstance(self._imported(root, declaration), list)
+        )
+        untold = (
+            untold
+            or lang == "python"
+            and (
+                root in ("self", "cls", "?")
+                or self._lexical(
+                    root.removesuffix("()"), declaration, skip_classes=True
+                )
+            )
         )
         return None if untold else []
 
@@ -9757,7 +9774,11 @@ class CallResolver:
         if self.lang(owner_id) not in ("python", "typescript"):
             return self._find_member(owner_id, name)
         hit, complete = self._find_member(owner_id, name, seen=set())
-        if (owner_id, name) in self._reading:
+        owner = hit and hit.rpartition("::")[0]
+        if (owner_id, name) in self._reading or (
+            # A data descriptor of the class is read before the instance's own.
+            name in self.builder.py_properties.get(owner, ())
+        ):
             return hit, complete
         written = self._instance_values(owner_id, name)
         if not written:

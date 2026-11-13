@@ -3250,31 +3250,151 @@ class TestPythonCallResolution:
             "FILE:m.py::Form::is_valid",
         ]
 
-    def test_an_attribute_a_base_has_a_property_and_setter_for(self, tmp_path):
-        """An attribute assigned where a base declares it as a property
-        with a setter is of a value not told."""
+    def test_a_property_of_a_base_is_read_before_what_the_instance_is_assigned(
+        self, tmp_path
+    ):
+        """A property is a data descriptor: assigned in a subclass, with a
+        setter or without, a read of the attribute is still the getter's
+        value. A method is shadowed by the assignment, so its read is not
+        told."""
         builder = _index(
             tmp_path,
             {
                 "m.py": """
+                class Box:
+                    def open(self): ...
+
                 class Base:
                     @property
-                    def choices(self):
-                        return self._choices
+                    def box(self) -> Box:
+                        return self._box
 
-                    @choices.setter
-                    def choices(self, value):
-                        self._choices = value
+                    @box.setter
+                    def box(self, value):
+                        self._box = value
+
+                    @property
+                    def plain(self):
+                        return Box()
+
+                    def run(self): ...
 
                 class Child(Base):
                     def __init__(self):
-                        self.choices = []
-                        self.choices.extend([1])
+                        self.box = []
+                        self.plain = 1
+                        self.run = Box()
+
+                    def use(self):
+                        self.box.open()
+                        self.plain.open()
+                        self.run.open()
+
+                def outside(child: Child):
+                    child.box.open()
                 """
             },
         )
-        assert _calls(builder, "FILE:m.py::Child::__init__") == [
-            "REF:self.choices.extend"
+        assert _calls(builder, "FILE:m.py::Child::use") == [
+            "FILE:m.py::Box::open",
+            "FILE:m.py::Box::open",
+            "REF:self.run.open",
+        ]
+        assert _calls(builder, "FILE:m.py::outside") == ["FILE:m.py::Box::open"]
+
+    def test_a_base_that_leads_back_to_its_class_names_no_type(self, tmp_path):
+        """`E`'s base is read through `Holder`, which inherits `E`: the base
+        is of no type told, and the index ends."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                def make():
+                    return Holder()
+
+                class E(make().kind):
+                    pass
+
+                class Holder(E):
+                    pass
+
+                def use():
+                    Holder().kind.run()
+                """
+            },
+        )
+        assert _bases(builder, "FILE:m.py::E") == ["REF:kind"]
+        assert _calls(builder, "FILE:m.py::use") == ["FILE:m.py::Holder"]
+
+    def test_a_base_an_expression_gives_is_of_a_type_not_told(self, tmp_path):
+        """A base read off a value whose type is not known may be any type:
+        a member the class lacks stays unresolved with its candidates
+        instead of being dropped as the library's."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Form:
+                    def is_valid(self): ...
+
+                def build(kinds):
+                    class Made(kinds.form):
+                        pass
+
+                    Made().is_valid()
+                """
+            },
+        )
+        edges = [
+            e
+            for e in builder.edges
+            if e["source"] == "FILE:m.py::build" and e["target"] == "REF:is_valid"
+        ]
+        assert [e["metadata"]["candidates"] for e in edges] == [
+            ["FILE:m.py::Form::is_valid"]
+        ]
+
+    def test_the_body_of_if_type_checking_never_runs(self, tmp_path):
+        """Past `if TYPE_CHECKING: ... else: ...` a name both arms bind holds
+        what the `else` binds; one only the body binds holds that."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                import logging
+                from typing import TYPE_CHECKING
+
+                class Mine:
+                    def __init__(self): ...
+
+                if TYPE_CHECKING:
+                    Handler = logging.StreamHandler[str]
+                    Buffer = logging.Handler
+                    Only = Mine
+                else:
+                    Handler = logging.StreamHandler
+                    Buffer = Mine
+
+                class A(Handler):
+                    def __init__(self):
+                        super().__init__()
+
+                class B(Buffer):
+                    def __init__(self):
+                        super().__init__()
+
+                class C(Only):
+                    def __init__(self):
+                        super().__init__()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::A::__init__") == []
+        assert _calls(builder, "FILE:m.py::B::__init__") == [
+            "FILE:m.py::Mine::__init__"
+        ]
+        assert _calls(builder, "FILE:m.py::C::__init__") == [
+            "FILE:m.py::Mine::__init__"
         ]
 
 

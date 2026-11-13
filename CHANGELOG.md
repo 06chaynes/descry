@@ -4,6 +4,29 @@ All notable changes to Descry will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [semver](https://semver.org/) from 1.0.0.
 
+## [1.2.2] — 2026-11-13
+
+### Changed
+
+- Python: a property that a base declares is read before what a subclass's
+  methods assign to the attribute, with a setter or without: `self.box.open()`
+  is a call on what the getter returns. Before, the assignment hid the
+  property and the call stayed unresolved.
+- Python: a class whose base is the value of an expression, or a value of the
+  project that is no type (`class Made(kinds.form)`, a base passed as a
+  parameter), has a base of a type not told. A call of a member the class
+  lacks stays unresolved with its candidates; before, it was dropped as a
+  call into the library.
+
+- Python: past `if TYPE_CHECKING: ... else: ...` a name both arms bind holds
+  what the `else` binds, since the body never runs. Before, the name had no
+  known value.
+
+### Fixed
+
+- Python: an index no longer ends with `RecursionError` where a class's base
+  is read through a value whose type inherits that class.
+
 ## [1.2.1] — 2026-11-13
 
 ### Fixed

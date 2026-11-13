@@ -527,6 +527,8 @@ class CodeGraphBuilder:
         # Python class ID -> {name its body binds last by an assignment: the
         # name of the function called on its `def` that is the value, if any}
         self.py_class_assigned = {}
+        # Python class ID -> the methods a decorator makes data descriptors
+        self.py_properties = {}
         # Function ID -> its signatures as written, one for each overload:
         # the bound of each type parameter, the parameters, the return type
         # and, by argument position, the declared types of the parameters
