@@ -1008,6 +1008,7 @@ class PythonParser(BaseParser):
                             assigned.setdefault(target.attr, set()).add(origin)
                             held.add(origin)
                 self.bindings.pop()
+        self.builder.py_properties[class_id] = sorted(properties)
         self.builder.assigned[class_id] = {
             name: sorted(origins)
             for name, origins in instance.items()
