@@ -919,9 +919,12 @@ class PythonParser(BaseParser):
             on = [
                 s for w, s in zip(ways, spans) if not (w and isinstance(w[-1], leaves))
             ]
+            test = getattr(node, "test", None)
             if (
                 isinstance(node, ast.If)
-                and self._origin(node.test, node.lineno) == "@typing.TYPE_CHECKING"
+                and "TYPE_CHECKING"
+                in (getattr(test, "id", ""), getattr(test, "attr", ""))
+                and self._origin(test, node.lineno) == "@typing.TYPE_CHECKING"
             ):
                 # A type checker reads the body; it never runs.
                 on = [s for s in on if s is not spans[0]]
