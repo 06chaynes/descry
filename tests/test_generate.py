@@ -4821,6 +4821,9 @@ class TestPythonCallResolution:
             "FILE:m.py::Lid",
         ]
 
+    @pytest.mark.skipif(
+        sys.version_info < (3, 12), reason="3.11's ast.parse refuses the chain"
+    )
     def test_an_elif_chain_of_any_length_is_read(self, tmp_path):
         """A chain of `elif` longer than the interpreter's recursion limit
         is followed and its definitions found."""

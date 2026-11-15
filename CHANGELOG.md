@@ -148,8 +148,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `descry-generate` refuses a path that is no directory; it wrote an empty
   graph. As in `descry index`, one outside the project root is refused as
   outside it.
-- Python: a file with an `elif` chain of a thousand arms or more is parsed;
-  it failed with `RecursionError` and was left out of the graph.
+- Python: a file with an `elif` chain of a thousand arms or more is parsed
+  on Python 3.12 and later, whose `ast` builds it; it failed with
+  `RecursionError` and was left out of the graph.
 
 ## [1.2.2] — 2026-11-13
 
