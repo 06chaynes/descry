@@ -9,6 +9,8 @@ import time
 
 import pytest
 
+from descry.generate import _PARSER_RAISED
+
 # The tests run without the variables that configure descry, so the shell
 # they run from does not change what they test; a test sets its own.
 for _name in (
@@ -20,6 +22,17 @@ for _name in (
     "DESCRY_SCIP_TIMEOUT",
 ):
     os.environ.pop(_name, None)
+
+
+@pytest.fixture(autouse=True)
+def parsers_do_not_raise(caplog):
+    """Fail a test whose index logged a parser that raised on a file: the
+    indexer goes on without the file."""
+    yield
+    raised = [
+        r.getMessage() for r in caplog.get_records("call") if r.msg == _PARSER_RAISED
+    ]
+    assert not raised, raised
 
 
 @pytest.fixture

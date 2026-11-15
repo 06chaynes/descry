@@ -1618,7 +1618,8 @@ class RustParser(BaseParser):
                 for field, written in held.items():
                     # Each field the struct's own line declares, `self.0` and
                     # `self.t`, as the scan files one on a line of its own
-                    key, value = (match[1], str(field)), f"{written}()"
+                    key = match[1], str(field)
+                    value = f"{_RUST_BORROW_RE.sub('', written)}()"
                     self.fields.setdefault(key, set()).add(value)
                     self._field_lines.setdefault(key, {})[lineno] = value
                 if opens_block(line):

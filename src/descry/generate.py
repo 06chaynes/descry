@@ -368,6 +368,10 @@ _UNRECORDED = {
 _OWN_STATE = _DERIVED_STATE | {"nodes", "edges"}
 
 
+# Logged for a file whose parser raised; the tests fail on it.
+_PARSER_RAISED = "Failed to parse %s: %r"
+
+
 class CodeGraphBuilder:
     def __init__(
         self,
@@ -529,6 +533,12 @@ class CodeGraphBuilder:
         self.py_class_assigned = {}
         # Python class ID -> the methods a decorator makes data descriptors
         self.py_properties = {}
+        # Python class ID -> {attribute: {origin path a method wrote to it
+        # that names a definition local to the method: the class or method
+        # each write of that origin to the attribute is read in}}
+        self.py_local = {}
+        # Python class ID -> the origin path of the metaclass it names
+        self.py_metaclass = {}
         # Function ID -> its signatures as written, one for each overload:
         # the bound of each type parameter, the parameters, the return type
         # and, by argument position, the declared types of the parameters
@@ -805,7 +815,7 @@ class CodeGraphBuilder:
                         self.max_parse_seconds,
                     )
                 except Exception as e:  # noqa: BLE001 — boundary over every parser
-                    logger.warning(f"Failed to parse {rel_path}: {e!r}")
+                    logger.warning(_PARSER_RAISED, rel_path, e)
                 # A parse cut short is not kept: a later one may finish.
                 if parsed and self.parse_cache:
                     self.parse_cache.store(rel_path, content, module, shell._state())
@@ -1381,6 +1391,8 @@ def main():
     project_root = Path(args.project_root or target).resolve()
     if not Path(target).resolve().is_relative_to(project_root):
         parser.error(f"{target!r} is outside the project root {project_root}")
+    if not Path(target).is_dir():
+        parser.error(f"{target!r} is not a directory")
     # The root comes from the arguments, not from the working directory.
     config = DescryConfig.from_env(project_root)
     if error := config.cache_dir_error():

@@ -39,6 +39,12 @@ _PY_TUPLES = (("outside", "builtins.tuple"), ("outside", "typing.Tuple"))
 
 _PY_CLASS_OBJECTS = (("outside", "builtins.type"), ("outside", "typing.Type"))
 
+# What a Python method returns that makes an instance of the `cls` it is
+# passed, and what it returns that calls the class it is called on
+_PY_NEW = {"cls.__new__()"}
+_PY_TYPE_CALL = {"type.__call__()", "super().__call__()"}
+_PY_OWN_CLASS_CALLED = {"cls()", "self.__class__()", "self.class()"}
+
 
 def c_specialization(name, arguments):
     """How a C++ specialization of the template ``name`` is named, by the
@@ -1284,6 +1290,7 @@ class CallResolver:
     # all a file's resolution reads is then read while it is resolved.
     _FILE_MEMOS = (
         "alias_blocks",  # see _aliases_named
+        "alternatives",  # (`%N` key, scope ID) -> the value of each origin it holds
         "dotnet_owners",  # C# class -> it and the types it derives from
         "base_types",  # (Python class ID, origin path of a base) -> see _type_named
         "blanket_members",  # see _blanket_member
@@ -1293,6 +1300,7 @@ class CallResolver:
         "java_fields",  # (class ID, name) -> the field read by it there
         "java_scoped",  # (scope, type name) -> the type it names there
         "loaded",  # Ruby file ID -> the files it loads
+        "made",  # Python class ID -> see _py_made
         "_macro_events_of",  # see _macro_events
         # (function, arguments passed, type arguments written) -> the
         # signature a call of it is of
@@ -2800,6 +2808,23 @@ class CallResolver:
                     return None, _UNRESOLVED
                 if qualifier and len(instances) == 1 and instances != [template]:
                     qualifier = [*qualifier[:-1], instances[0]]
+        if (
+            origin
+            and lang == "python"
+            and re.fullmatch(r"%\??\d+", origin)
+            and self._value(origin, scope_id, set()) is None
+        ):
+            # A called name that the ways to the call bind differently calls
+            # a definition one of them gives, else is a variable of no value
+            # told.
+            arms = (
+                self._value(o, scope_id, set()) for o in self.builder.literals[origin]
+            )
+            defs = {v[1] for v in arms if isinstance(v, tuple) and v[0] == "def"}
+            if defs:
+                self._candidates_now = sorted(defs)
+                return None, _UNRESOLVED
+            origin = f"={callee}"
         if origin is not None:
             verdict = self._resolve_origin(origin, scope_id)
             if verdict is None:
@@ -4855,6 +4880,13 @@ class CallResolver:
             last = index == len(steps) - 1 and not read
             if value == _EXTERNAL and rust and step == "?":
                 continue
+            if step[0] == "=":
+                # `=__add__`: an augmented assignment calls the in-place
+                # method where a project class has one, else the operator's.
+                inplace = f"__i{step[3:]}"
+                mine = isinstance(value, tuple) and value[0] == "self"
+                found = mine and self._attr(value, inplace, called=True)
+                step = inplace if found else step[1:]
             if python and step == "await":
                 # What awaiting gives: the type argument the data says an
                 # awaitable of the library hands on; a project function's
@@ -4935,6 +4967,22 @@ class CallResolver:
                     continue
             if python:
                 value = self._class_object(value)
+            made = python and isinstance(value, tuple) and value[0] in ("cls", "def")
+            if (
+                made
+                and steps[index : index + 2] == ["__new__", "()"]
+                and self._is_class(value[1])
+            ):
+                # The parser writes `__new__` on the class it is passed,
+                # which it makes an instance of.
+                value = ("returned", ("self", value[1]))
+                continue
+            if step == "class" and not (
+                isinstance(value, tuple) and value[0] == "self"
+            ):
+                # `type(x)` is `x.__class__`, but of an instance of a
+                # project class, where it reads no `__class__` of the class.
+                step = "__class__"
             if (
                 python
                 and step != "()"
@@ -5041,6 +5089,9 @@ class CallResolver:
                     # A static method is called on the type or on a value; a
                     # Rust one on the type written with its arguments.
                     known, held = library.member(value, step, table="statics")
+                    if python and step == "__new__":
+                        # It makes an instance of the class it is passed.
+                        held = None
                 if (
                     lang == "dotnet"
                     and not known
@@ -5240,7 +5291,17 @@ class CallResolver:
             elif step != "?":
                 # A value of a generic type carries its type arguments, as
                 # does the type written with them, `Boxed<Dog>.new`.
-                self._receiver = value[1] if value[0] == "self" else None
+                # A Python method called on a class is passed that class.
+                on = (
+                    value[0] == "self"
+                    or python
+                    and (
+                        value[0] == "cls"
+                        or value[0] == "def"
+                        and self._is_class(value[1])
+                    )
+                )
+                self._receiver = value[1] if on else None
                 if value[0] in ("self", "def") and len(value) > 2:
                     self._receiver = ("self", *value[1:])
                 field = value[0] == "def" and self.nodes[value[1]]["type"] == "Constant"
@@ -5280,8 +5341,9 @@ class CallResolver:
             if hit:
                 return hit, source
         standard = isinstance(value, tuple) and value[0] == "outside"
-        if python and (standard or origin.startswith(":") and not steps):
-            # A value of a standard type, or of a type that is no class.
+        if python and (standard or origin.startswith((":", "&")) and not steps):
+            # A value of a standard type, or told to be of a type that is no
+            # class.
             self._result = _OPAQUE
             return None, _EXTERNAL
         # A call of a value held in a variable, or returned by another call.
@@ -5416,15 +5478,88 @@ class CallResolver:
             if declared and isinstance(value, tuple) and value[0] == "literal":
                 # The type reads the members the object leads to none of.
                 value = (*value[:2], self._plain_value(f"{declared}()", source_id))
-        elif root.startswith("%"):
-            # `%N`: what the origins the parser holds under the key all give
-            # (the arms of a Rust `if` or `match`); not known where they part.
-            held = [
-                self._value(o, source_id, set(seen))
-                for o in self.builder.literals[root]
-            ]
-            agreed = {v[:2] if isinstance(v, tuple) else v for v in held}
-            value = held[0] if len(agreed) == 1 and isinstance(held[0], tuple) else None
+        elif re.fullmatch(r"[%&]\??\d+", root):
+            key = root, source_id
+            if key not in self.alternatives:
+                # The keys it holds are read first, each before those that
+                # hold it, so none is read through another.
+                inner, todo = set(), [root]
+                while todo:
+                    for held in re.findall(
+                        r"[%&]\??\d+", " ".join(self.builder.literals[todo.pop()])
+                    ):
+                        if (
+                            held,
+                            source_id,
+                        ) not in self.alternatives and held not in inner:
+                            inner.add(held)
+                            todo.append(held)
+                for held in sorted(inner, key=lambda held: int(held.lstrip("%&?"))):
+                    self._value(held, source_id, set())
+            held = self.alternatives.get(key)
+            if not held:
+                # A key among the origins gives the values it holds.
+                arms = self.builder.literals[root]
+                origins, written = (
+                    (arms[:1], arms[1]) if root[0] == "&" else (arms, None)
+                )
+                held = [
+                    value
+                    for o in origins
+                    for value in self.alternatives.get((o, source_id))
+                    or [self._value(o, source_id, set(seen))]
+                ]
+                if written:
+                    # `&N`: what an `isinstance` test passed: each value
+                    # tested that is the project's and of a class that
+                    # inherits the one tested for, or tested for none of the
+                    # project's; an instance of a class that neither inherits
+                    # nor is inherited by one whose test may pass otherwise
+                    # than by inheritance, and that class; else an instance
+                    # of the class.
+                    told = self._value(written, source_id, set(seen))
+                    of = (
+                        told[1]
+                        if isinstance(told, tuple) and told[0] == "self"
+                        else None
+                    )
+                    held = [
+                        each
+                        for value in held
+                        for each in (
+                            [value]
+                            if isinstance(value, tuple)
+                            and value[0] in ("self", "def", "cls", "module")
+                            and (
+                                not of
+                                or value[0] == "self"
+                                and of in self._lineage(value[1], set())
+                            )
+                            else [value, told]
+                            if of
+                            and isinstance(value, tuple)
+                            and value[0] == "self"
+                            and value[1] not in self._lineage(of, set())
+                            and not self._py_by_inheritance(of)
+                            else [told]
+                        )
+                    ]
+                held = list(dict.fromkeys(held))
+            if not seen:
+                self.alternatives[key] = held
+            first, value = held[0], None
+            if all(v == _EXTERNAL for v in held) or all(
+                isinstance(v, tuple) and v[:2] == first[:2] for v in held
+            ):
+                # `%N`: what the origins the parser holds under the key all
+                # give (the arms of a Rust `if` or `match`), the library's
+                # where each is; not known where they part.
+                value = first
+                if len(set(held)) > 1 and self.lang(source_id) == "python":
+                    # Rust's arms are of one type; Python's, of one type with
+                    # arguments that differ, are of arguments not known.
+                    unknown = [(None,) * len(first[2])] if first[0] == "outside" else []
+                    value = (*first[:2], *unknown)
         elif root.startswith("~"):
             value = self._fixture_value(root[1:], source_id, seen)
         elif root.startswith(">"):
@@ -5699,7 +5834,9 @@ class CallResolver:
             # A variable bound to itself has no value.
             self.variables[key] = None
             origins = self.builder.fields[owner_id][name]
-            values = {self._value(origin, owner_id, set()) for origin in origins}
+            values = {
+                v for origin in origins for v in self._py_held(origin, owner_id, name)
+            }
             outside = (v == _EXTERNAL or v and v[0] == "outside" for v in values)
             if len(values) == 1:
                 self.variables[key] = values.pop()
@@ -5707,10 +5844,18 @@ class CallResolver:
                 self.variables[key] = ("outside", "builtins.object", ())
         return self.variables[key]
 
+    def _py_held(self, origin, owner_id, name):
+        """Values of the origin path ``origin`` that the Python module or
+        class ``owner_id`` holds under ``name``, read where each is written:
+        in the methods that wrote it, else in ``owner_id``."""
+        local = self.builder.py_local.get(owner_id, {}).get(name, {})
+        scopes = local.get(origin, (owner_id,))
+        return {self._value(origin, scope, set()) for scope in scopes}
+
     def _starred(self, file_id, name, seen):
         """``(values, outside)``: the values that the modules ``file_id``
         imports every public name of have under ``name``, and whether one of
-        those modules is not the project's."""
+        those modules is not the project's or binds it to no known value."""
         found, outside = set(), False
         for target in self.builder.imports.get(file_id, {}):
             if (
@@ -5738,6 +5883,8 @@ class CallResolver:
                 exported = listed is None or name in listed
             value = self._attr(module, name, seen) if exported else None
             found.add(value)
+            bound = exported and name in self.builder.fields.get(module_id, ())
+            outside |= value is None and bound
             # A name an export list not written out holds may not be bound.
             outside |= value is not None and listed is None and module_id in exports
         return found - {None}, outside
@@ -6358,7 +6505,14 @@ class CallResolver:
             if root in self.py_modules.get(f"{ref}.{name}", ()):
                 return ("module", f"{ref}.{name}", root)
             file_id = self.py_modules[ref][root]
-            hit = self.members.get(file_id, {}).get(name)
+            bound = self.builder.fields.get(file_id, {}).get(name, ())
+            # A definition the module binds again, or that a function binds
+            # as `global`, is a variable of it.
+            hit = (
+                len(bound) <= 1
+                and "?" not in bound
+                and self.members.get(file_id, {}).get(name)
+            )
             if hit:
                 return ("def", hit)
             seen = set() if seen is None else seen
@@ -6430,6 +6584,18 @@ class CallResolver:
             # value's arguments.
             return self._returned_type(declared["value_type"], hit, value)
         python = self.lang(ref) == "python"
+        if python and name in ("class", "__class__"):
+            lineage = list(self._lineage(ref, set()))
+            if any("__class__" in self.builder.assigned.get(c, ()) for c in lineage):
+                # A method that assigns it changes the class of the instance.
+                return None
+            if name == "class" or (
+                not hit and not any(self._assigns(c, name) for c in lineage)
+            ):
+                # The class of an instance, which `type(x)` reads whatever
+                # the class defines and `x.__class__` where it defines no
+                # `__class__`; that of a class is its metaclass.
+                return ("cls", ref) if kind == "self" else None
         if hit and not called and self.nodes[hit]["type"] == "Method":
             # Java keeps a field that shares a method's name under `field_`;
             # a Rust one is read as its struct declares it.
@@ -6564,10 +6730,13 @@ class CallResolver:
         if lang == "python":
             # A base class is written as its origin path.
             if (scope_id, name) not in self.base_types:
-                value = self._py_named(name, scope_id)
+                value = self._class_object(self._py_named(name, scope_id))
                 found = None
                 if value == _EXTERNAL or value and value[0] == "library":
                     found = _EXTERNAL
+                elif value and value[0] == "cls":
+                    # `type(x)` names the class `x` is an instance of.
+                    found = value[1]
                 elif value and value[0] == "def" and self._is_class(value[1]):
                     found = value[1]
                 self.base_types[scope_id, name] = found
@@ -7846,6 +8015,13 @@ class CallResolver:
         ``receiver`` where that is known."""
         kind, ref = value[:2]
         if kind == "cls" or (kind == "def" and self.nodes[ref]["type"] == "Class"):
+            if self.lang(ref) == "python":
+                if ref not in self.made:
+                    # Not told while it is read: a `__new__` may call its class.
+                    self.made[ref] = None
+                    self.made[ref] = self._py_made(ref)
+                if self.made[ref] is not True:
+                    return self.made[ref]
             return ("self", ref, *value[2:])
         if kind == "def" and self._rust_variant(ref):
             # A Rust variant called builds a value of its enum.
@@ -7880,6 +8056,49 @@ class CallResolver:
             return "outside", "types.CoroutineType", (None, None, returned)
         return self._python_called(ref, returns, receiver)
 
+    def _py_by_inheritance(self, class_id):
+        """Whether `isinstance` with the Python class ``class_id`` passes
+        only for an instance of a class that inherits it: no class of its
+        lineage has a metaclass, or a base outside the project but
+        `object`, whose test may be another."""
+        root = "library", _ROOT["python"]
+        return not any(
+            base in self.builder.py_metaclass
+            or self._type_named(written, base) in (None, _EXTERNAL)
+            and self._py_named(written, base) != root
+            for base in self._lineage(class_id, set())
+            for written in self.bases.get(base, ())
+        )
+
+    def _py_made(self, class_id):
+        """What calling the Python class ``class_id`` gives: True for an
+        instance of it, else what the `__new__` it defines returns. None
+        where that is a base's and gives anything but what a `__new__` made
+        or an instance of the class called (`-> Self`), or a metaclass of the
+        class or of a base defines a `__call__`
+        returning anything but what `type.__call__` makes of the class."""
+        for base in self._lineage(class_id, set()):
+            origin = self.builder.py_metaclass.get(base)
+            meta = origin and self._value(origin, base.rpartition("::")[0], set())
+            if not (self._is_class_value(meta) and meta[0] == "def"):
+                continue
+            for above in self._lineage(meta[1], set()):
+                call = f"{above}::__call__"
+                made = set(self.builder.fields.get(call, {}).get("()", ()))
+                if call in self.nodes and not (made and made <= _PY_TYPE_CALL):
+                    return None
+        new = self._find_member(class_id, "__new__")[0]
+        returned = set(self.builder.fields.get(new, {}).get("()", ()))
+        if not new or returned == _PY_NEW:
+            return True
+        if returned > _PY_NEW:
+            return None
+        returns = self.nodes[new]["metadata"].get("return_type") or ""
+        made = self._python_called(new, returns, class_id)
+        if new.rpartition("::")[0] != class_id and made != ("self", class_id):
+            return None
+        return made
+
     def _python_called(self, ref, returns, receiver):
         """What running the Python function ``ref``, annotated ``returns``,
         on ``receiver`` gives."""
@@ -7898,11 +8117,17 @@ class CallResolver:
                     (self._variable(ref, maker),),
                 )
         taken = self.nodes[ref]["metadata"].get("param_types") or [""]
-        fluent = held.get("()") == ["self"]
-        if self._is_class(scope_id) and (fluent or returns == taken[0] != "Any"):
+        made = set(held.get("()", ()))
+        owner = receiver or scope_id
+        if self._is_class(scope_id) and (
+            made in ({"self"}, _PY_NEW) or returns == taken[0] != "Any"
+        ):
             # What its `self` is, or is annotated as, is the type it is
-            # called on.
-            return ("self", receiver or scope_id)
+            # called on, as is what `__new__` makes of its `cls`.
+            return ("self", owner)
+        if made and made <= _PY_OWN_CLASS_CALLED and isinstance(owner, str):
+            # What calling the class it is called on gives
+            return self._is_class(scope_id) and self._called(("cls", owner))
         if "()" in held:
             return self._variable(ref, "()")
         return self._annotated(returns, scope_id, receiver)
@@ -9792,8 +10017,10 @@ class CallResolver:
             if read:
                 held.add(self._find_member(owner_id, read[1], seen=set())[0])
             elif value and self.lang(declaration) == "python":
-                found = self._value(value, declaration, set())
-                held.add(found[1] if found and found[0] == "def" else None)
+                held.update(
+                    found[1] if found and found[0] == "def" else None
+                    for found in self._py_held(value, declaration, name)
+                )
             else:
                 held.add(None)
         self._reading.discard((owner_id, name))

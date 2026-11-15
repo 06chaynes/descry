@@ -2,18 +2,16 @@
 
 import ast
 import re
-from bisect import bisect_left, bisect_right, insort
 from collections import deque
+from itertools import count
 from operator import itemgetter
 
 from descry import _stdlib
 from descry._parsing import (
     BaseParser,
     SymbolTable,
-    _apart,
     _bracketed_parts,
     _code_units,
-    _disagree,
     _scip_columns,
     logger,
     merge_import,
@@ -22,17 +20,17 @@ from descry._parsing import (
 )
 
 _PY_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+_PY_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+# The values a `%N` holds as its own before it holds the keys as they are
+_PY_HELD = 16
+# The steps an origin is written with before a `%N` of its own stands for it
+_PY_STEPS = 16
 
 
 def _py_start(node):
     """The line and column ``node`` starts at, its decorators included."""
     first = (getattr(node, "decorator_list", None) or [node])[0]
     return first.lineno, first.col_offset
-
-
-def _py_end(node):
-    """The line and column ``node`` ends at."""
-    return node.end_lineno, node.end_col_offset
 
 
 # Compound statements whose blocks can hold definitions and imports.
@@ -59,74 +57,18 @@ def _py_block_statements(node):
         yield from case.body
 
 
-def _py_breaks(body):
-    """Whether a `break` the statements in ``body`` run leaves the loop
-    they are the body of; one inside a nested loop leaves that loop."""
-    todo = list(body)
-    while todo:
-        stmt = todo.pop()
-        if isinstance(stmt, ast.Break):
-            return True
-        if not isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
-            todo += [
-                s
-                for s in ast.iter_child_nodes(stmt)
-                if isinstance(s, (ast.stmt, ast.match_case, ast.ExceptHandler))
-            ]
-    return False
-
-
-def _py_ways(node):
-    """The ways through ``node``, a compound statement that runs a body
-    only where its head allows, as the statements each runs; an empty one
-    runs none. None for any other statement."""
-    if isinstance(node, ast.If):
-        return [node.body, node.orelse]
-    if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
-        ways = [node.orelse, node.body + node.orelse]
-        if _py_breaks(node.body):
-            # A `break` leaves the loop before its `else` runs.
-            ways.append(node.body)
-        return ways
-    if isinstance(node, (ast.Try, ast.TryStar)) and node.handlers:
-        return [node.body + node.orelse, *(h.body for h in node.handlers)]
-    if isinstance(node, ast.Match):
-        return [*(case.body for case in node.cases), []]
-    return None
-
-
 _PY_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
 
-# Nodes whose `name` they bind: `except E as name`, `case ... as name`, `*name`.
-_PY_NAME_BINDERS = (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)
+# The origins of the constant that is true only for a type checker
+_PY_TYPE_CHECKING = ("@typing.TYPE_CHECKING", "@typing_extensions.TYPE_CHECKING")
 
+# The methods Python passes the class without a decorator saying so
+_PY_CLASS_TAKING = ("__new__", "__init_subclass__", "__class_getitem__")
 
-# The nodes ``PythonParser._push_bindings`` reads a binding, a narrowing or
-# a returned value from
-_PY_BINDING_NODES = (
-    *_PY_DEFINITIONS,
-    *_PY_COMPREHENSIONS,
-    *_PY_NAME_BINDERS,
-    ast.Assign,
-    ast.AnnAssign,
-    ast.NamedExpr,
-    ast.Import,
-    ast.ImportFrom,
-    ast.For,
-    ast.AsyncFor,
-    ast.With,
-    ast.AsyncWith,
-    ast.Lambda,
-    ast.If,
-    ast.IfExp,
-    ast.While,
-    ast.Assert,
-    ast.Match,
-    ast.Return,
-    ast.Yield,
-    ast.YieldFrom,
-)
+# The key, no name, under which a state holds that only a type checker
+# reads what runs in it
+_PY_CHECKER = ""
 
 
 # The builtin type of what each literal and display builds
@@ -273,14 +215,46 @@ def _py_targets(target, origin):
         yield from _py_targets(target.value, "?")
 
 
+def _py_simple_statements(statements):
+    """Yield the statements among ``statements`` that hold no block of
+    them, and those in the blocks of the others, in the order written."""
+    todo = deque(statements)
+    while todo:
+        stmt = todo.popleft()
+        if isinstance(stmt, _PY_COMPOUND_STMTS):
+            todo.extendleft(reversed(list(_py_block_statements(stmt))))
+        else:
+            yield stmt
+
+
 def _py_nested_definitions(statements):
     """Yield the definitions among ``statements``, looking through compound
     statements but not into other definitions."""
-    for stmt in statements:
+    for stmt in _py_simple_statements(statements):
         if isinstance(stmt, _PY_DEFINITIONS):
             yield stmt
-        elif isinstance(stmt, _PY_COMPOUND_STMTS):
-            yield from _py_nested_definitions(_py_block_statements(stmt))
+
+
+def _py_bound_names(statements):
+    """Yield the names ``statements`` bind, looking through compound
+    statements but not into definitions."""
+    for stmt in _py_simple_statements(statements):
+        if isinstance(stmt, _PY_DEFINITIONS):
+            yield stmt.name
+        elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            yield from (name for name, _ in _py_import_bindings(stmt))
+        else:
+            yield from (
+                node.id
+                for node in ast.walk(stmt)
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+            )
+
+
+class _PyFrame(dict):
+    """A frame of ``PythonParser.bindings``: each name -> the origins it is
+    bound to; ``inner``, the names the body binds, and ``stored``, those it
+    and the parameters bind to a value, not by `def`, `class` or `import`."""
 
 
 class PythonParser(BaseParser):
@@ -301,21 +275,48 @@ class PythonParser(BaseParser):
         self.add_file_node(rel_path, content)
         self.source_lines = source_lines(content)
         self.class_ids = set()
+        self.function_ids = set()
         self.import_targets = {}
         # name -> "import" where the module's import of it rebinds its
         # definition, "either" where which one binds is not told
         self.import_binding = {}
         self.bindings = []
-        # id() of a name read in a comprehension, a lambda or a narrowed
-        # block -> origin of what it is bound to there
+        # id() of a name that is read -> origin of what it holds there
         self.scoped = {}
-        # ``(start, end, ways)`` of each `if` and `match`: where it is and
-        # the spans of the statements of each of its ways
-        self.branches = []
+        # (`%` or `&`, the origins a key of ``builder.literals`` holds) -> the key
+        self.arms = {}
+        # `&N` -> the value it was tested on
+        self.tested = {}
+        # id() of each definition that follows, in the block it is a
+        # statement of, another of its name
+        self.redefined = set()
+        # id() of each definition a class body holds -> the names the body binds
+        self.class_bound = {
+            id(definition): names
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+            for names in [set(_py_bound_names(node.body))]
+            for definition in _py_nested_definitions(node.body)
+        }
+        # The names the file declares `global`
+        self.rebound = {
+            name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Global)
+            for name in node.names
+        }
+        # Whether a star import may bind any name of the file
+        self.starred = any(
+            alias.name == "*"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        )
         self._push_bindings(tree.body)
-        self.builder.fields[file_id] = {
-            name: sorted({origin for _, origin in bound})
-            for name, bound in self.bindings[0].items()
+        # A name bound only as `global`, by a function or after a star
+        # import, has no known value.
+        self.builder.fields[file_id] = {name: ["?"] for name in self.rebound} | {
+            name: sorted(bound) for name, bound in self.bindings[0].items()
         }
         self.visit_node(tree, file_id)
         self.builder.imports[file_id] = self.import_targets
@@ -388,7 +389,11 @@ class PythonParser(BaseParser):
             for base in node.bases:
                 if isinstance(base, ast.Subscript):
                     base = base.value
+                origin = self._origin(base, node.lineno)
                 base_name = self._get_attribute_name(base)
+                if not base_name and origin.endswith(".class"):
+                    # `type(x)`, named as written
+                    base_name = ast.unparse(base)
                 if base_name:
                     resolved_base = self.builder.current_scope.resolve(base_name)
                     self.builder.add_edge(
@@ -396,7 +401,7 @@ class PythonParser(BaseParser):
                         f"REF:{resolved_base}",
                         "INHERITS",
                         {
-                            "origin": self._origin(base, node.lineno),
+                            "origin": origin,
                             # The base's own position: SCIP resolves the
                             # edge at its occurrence, not by bare name.
                             "lineno": base.lineno,
@@ -404,6 +409,10 @@ class PythonParser(BaseParser):
                         },
                     )
 
+            for keyword in node.keywords:
+                if keyword.arg == "metaclass":
+                    origin = self._origin(keyword.value, node.lineno)
+                    self.builder.py_metaclass[class_id] = origin
             # The class binds its name for what is written after it.
             self.builder.current_scope.add_import(node.name)
             self.builder.fields[class_id] = self._class_attrs(node, class_id)
@@ -453,6 +462,8 @@ class PythonParser(BaseParser):
             if node.returns:
                 signature += f" -> {ast.unparse(node.returns)}"
 
+            again = func_id in self.function_ids and id(node) not in self.redefined
+            self.function_ids.add(func_id)
             self.builder.add_node(
                 func_id,
                 node_type,
@@ -465,16 +476,21 @@ class PythonParser(BaseParser):
                 return_type=return_type,
                 param_types=param_types,
             )
-            metadata = self.builder.nodes[-1]["metadata"]
+            metadata = self.builder.nodes_by_id[func_id]["metadata"]
             self.builder.add_edge(parent_id, func_id, "DEFINES")
 
             self._record_decorators(node, func_id)
             if node.decorator_list and not is_method:
                 # The name is bound to what the outermost decorator returns.
                 made = self._origin(node.decorator_list[0], node.lineno)
-                self.builder.fields.setdefault(parent_id, {})[node.name] = [f"{made}()"]
+                bound = self.builder.fields.setdefault(parent_id, {})
+                bound[node.name] = sorted(
+                    f"{made}()" if origin == node.name else origin
+                    for origin in bound.get(node.name, [node.name])
+                )
 
             self._push_bindings(node.body, node, is_method)
+            returns = self._returns(node)
             origins, yields = self._returned_origins()
             if isinstance(node, ast.AsyncFunctionDef) and not yields:
                 # Calling it gives a coroutine, which `await` runs.
@@ -492,20 +508,27 @@ class PythonParser(BaseParser):
             # which hands the `with` block what the generator yields
             managers = _stdlib.section("python", "context_managers")
             manager = next((m for m in managers if f"@{m}" in made), None)
-            plain = not (
-                node.returns or yields or made - {"staticmethod", "classmethod"}
-            )
+            plain = not (returns or yields or made - {"staticmethod", "classmethod"})
             # An async generator's item is what its awaited `__anext__` gives.
             step = (
                 "__anext__().await"
                 if isinstance(node, ast.AsyncFunctionDef)
                 else "__next__()"
             )
-            if manager and node.returns:
-                origins = [f"{self._instance_origin(node.returns)}.{step}"]
+            if manager and returns:
+                origins = [f"{self._instance_origin(returns)}.{step}"]
+            held = self.builder.fields.setdefault(func_id, {})
+            key = manager or "()"
+            if again:
+                # A second definition under the name, on another way: what
+                # either gives
+                origins = key in held and origins and sorted({*origins, *held[key]})
+                held.pop(key, None)
             if origins and (plain or manager):
-                held = self.builder.fields.setdefault(func_id, {})
-                held[manager or "()"] = origins
+                held[key] = origins
+            elif node.returns and not returns:
+                # Neither what it returns nor its annotation is known.
+                held["()"] = ["?"]
             self.visit_body_for_calls(node.body, func_id)
 
             for child in _py_nested_definitions(node.body):
@@ -535,7 +558,7 @@ class PythonParser(BaseParser):
                 self.visit_node(child, parent_id)
 
         elif isinstance(node, _PY_COMPOUND_STMTS):
-            for child in _py_block_statements(node):
+            for child in _py_simple_statements([node]):
                 self.visit_node(child, parent_id)
 
     def visit_body_for_calls(self, body, parent_func_id):
@@ -577,15 +600,22 @@ class PythonParser(BaseParser):
 
     def _record_callee(self, func_node, parent_func_id, lineno):
         func_name = self._get_attribute_name(func_node)
-        if func_name:
-            resolved_name = self.builder.current_scope.resolve(func_name)
-            origin = self._origin(func_node, lineno)
+        origin = self._origin(func_node, lineno)
+        if func_name or "?" not in origin:
+            # What an expression that is no name gives is called as written.
+            resolved_name = (
+                self.builder.current_scope.resolve(func_name)
+                if func_name
+                else ast.unparse(func_node)
+            )
             if isinstance(func_node, ast.Name):
                 # A variable that is called holds a value, `=name`, which
                 # returns `Type` where it is annotated as a callable that
                 # does: `=name>Type`.
                 annotated = re.fullmatch(r":(?:\w+::)*Callable\[(.+)\]", origin)
-                if origin == "?":
+                if origin == "?" and func_name not in self.bindings[-1].get(
+                    func_name, ()
+                ):
                     origin = f"={func_name}"
                 elif annotated:
                     origin = f"={func_name}>{_bracketed_parts(annotated[1])[-1]}"
@@ -612,29 +642,28 @@ class PythonParser(BaseParser):
         if isinstance(node, ast.Name):
             if id(node) in self.scoped:
                 return self.scoped[id(node)]
-            read = getattr(node, "lineno", lineno), getattr(node, "col_offset", 0)
-            for depth, frame in enumerate(reversed(self.bindings)):
+            for frame in reversed(self.bindings):
                 if node.id in frame:
-                    bound = frame[node.id]
-                    # The last made, of those of an outer frame, else of
-                    # those made before the read on a way to it
-                    if depth:
-                        return bound[-1][1]
-                    below = bisect_right(bound, read, key=itemgetter(0))
-                    return next(
-                        (
-                            bound[at][1]
-                            for at in reversed(range(below))
-                            if not _apart(self.branches, bound[at][0], read)
-                        ),
-                        "?",
-                    )
+                    return frame[node.id][-1]
             imported = self.import_targets.get(node.id)
             return f"@{imported}" if isinstance(imported, str) else node.id
         if isinstance(node, ast.Attribute):
             return f"{self._origin(node.value, lineno)}.{node.attr}"
         if isinstance(node, ast.Call):
-            return f"{self._origin(node.func, lineno)}()"
+            made = self._origin(node.func, lineno)
+            first = self._origin(node.args[0], lineno) if node.args else "?"
+            if "type" not in self.rebound and not any(
+                "type" in frame for frame in self.bindings
+            ):
+                if made == "type" and len(node.args) == 1 and not node.keywords:
+                    # The builtin's `type(x)` is the class of `x`.
+                    return f"{first}.class"
+                if made == "type.__call__" and first not in ("self", "cls"):
+                    return "?"
+            if node.args and made.endswith(".__new__"):
+                # `__new__` makes an instance of the class it is passed.
+                made = f"{first}.__new__"
+            return f"{made}()"
         if isinstance(node, ast.Await):
             return f"{self._origin(node.value, lineno)}.await"
         literal = _PY_LITERALS.get(type(node))
@@ -668,7 +697,7 @@ class PythonParser(BaseParser):
         yields, none where one of them has no origin path, and whether it
         yields."""
         origins, yields = set(), False
-        for node in self.exits:
+        for node in self.exits.values():
             if isinstance(node, ast.YieldFrom):
                 iterated = self._origin(node.value, node.lineno)
                 origins.add(f"{iterated}.__iter__().__next__()")
@@ -695,59 +724,715 @@ class PythonParser(BaseParser):
                 self.scoped[id(read)] = bound[read.id]
 
     def _push_bindings(self, body, func=None, is_method=False):
-        """Push a frame mapping each name bound in ``body`` (and by the
-        parameters of ``func``) to its ``((line, column), origin)``
-        bindings, at where each takes effect: the end of what binds it, or
-        the start of the body a parameter, a loop, a `with` or an `except`
-        binds it for, in the order of where they take effect. Module-level
-        imports go to ``import_targets``."""
-        frame = {}
+        """Push a frame mapping each name ``body`` (and the parameters of
+        ``func``) binds to the origins it is bound to, the last of them what
+        it holds where the body ends, and record in ``scoped`` what each
+        name ``body`` reads holds where it is read. The statements are
+        followed as they run, in ``env``: each name -> ``(origin,
+        narrowed)``, what it is bound to and what a test passed on the way
+        tells of it, either None. A way through a statement is run, kept as
+        the names it changed, and undone; the ways that go on are joined
+        past the statement. Module-level imports go to ``import_targets``."""
+        frame = _PyFrame()
         self.bindings.append(frame)
-
-        def put(name, at, origin):
-            insort(frame.setdefault(name, []), (at, origin), key=itemgetter(0))
-
-        def bind(target, at, origin):
-            for name, bound in _py_targets(target, origin):
-                put(name, at, bound)
-
-        def iterated(value, loop, lineno):
-            """Origin of what ``loop`` binds on each pass over ``value``."""
-            step = "__iter__().__next__()"
-            if isinstance(loop, ast.AsyncFor) or getattr(loop, "is_async", 0):
-                step = "__aiter__().__anext__().await"
-            return f"{self._origin(value, lineno)}.{step}"
-
-        def checked(test):
-            """Yield ``(name, origin of an instance of the class)`` for
-            each `isinstance(name, Class)` that holds where ``test`` does."""
-            conjunction = isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And)
-            for check in test.values if conjunction else [test]:
-                if (
-                    isinstance(check, ast.Call)
-                    and isinstance(check.func, ast.Name)
-                    and check.func.id == "isinstance"
-                    and len(check.args) == 2
-                    and isinstance(check.args[0], ast.Name)
-                ):
-                    yield check.args[0], self._instance_origin(check.args[1])
-
-        def narrow(blocks, name, origin):
-            """Type ``name`` where ``blocks`` read it, unless they rebind
-            it."""
-            reads = [
-                read
-                for block in blocks
-                for read in ast.walk(block)
-                if isinstance(read, ast.Name) and read.id == name.id
-            ]
-            if "?" not in origin and all(isinstance(r.ctx, ast.Load) for r in reads):
-                self.scoped.update((id(read), origin) for read in reads)
-
+        self.exits = {}  # id() -> the `return` and `yield` nodes of ``body``
+        params = []
         if func is not None:
             args = func.args
             params = [*args.posonlyargs, *args.args, *args.kwonlyargs]
             params += [a for a in (args.vararg, args.kwarg) if a]
+        inner, outer = set(), set()
+        stored = {arg.arg for arg in params}
+        todo = deque(body)
+        while todo:
+            node = todo.popleft()
+            if isinstance(node, (ast.Lambda, *_PY_COMPREHENSIONS)) or (
+                isinstance(node, ast.Assign) and _py_is_none(node.value)
+            ):
+                continue
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                if func is not None:
+                    inner.update(name for name, _ in _py_import_bindings(node))
+                continue
+            if isinstance(node, (ast.Global, ast.Nonlocal)):
+                outer.update(node.names)
+            if isinstance(node, (ast.Yield, ast.YieldFrom)):
+                # A `yield` makes a generator of the function wherever it is.
+                self.exits[id(node)] = node
+            names = {getattr(node, "name", None), getattr(node, "rest", None)}
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                names.add(node.id)
+            names.discard(None)
+            inner |= names
+            if not isinstance(node, _PY_DEFINITIONS):
+                stored |= names
+                todo.extend(ast.iter_child_nodes(node))
+        inner -= outer
+        frame.inner, frame.stored = inner, stored
+        # The names the frame binds: one of them read where no way to the
+        # read has bound it holds nothing known.
+        local = inner | {arg.arg for arg in params}
+        # name -> ("def" or "import", whether a conditional holds it, where
+        # it is written) of each binding of it at module level; a star
+        # import, which may bind any name, is filed under `*`
+        module_bound = {}
+        env, log = {}, []  # ``log``: each change of ``env`` as (name, value before)
+        nothing = None, None
+        sinks = []  # name -> the origins bound in it, per `try` being run
+        loops = []  # (where in ``log`` it began, the changes at each `continue`, at each `break`), per loop being run
+        conditional = 0  # the statements being run that may skip a block
+        apart = 0  # the class bodies, comprehensions and lambdas being read
+        lambdas = 0  # the lambdas being read
+        watched = {}  # name -> ID of a read of it that runs later -> (the read, the origins it may hold then)
+        # The names bound elsewhere too, which hold no known value: those
+        # the frame or a function nested in it declares `global` or
+        # `nonlocal`, and a module's that a function declares `global`
+        loose = outer if func else set(self.rebound)
+
+        def known(origin):
+            """``origin``, or `?` where it is no key and has no known value."""
+            return (
+                "?" if "?" in origin and origin not in self.builder.literals else origin
+            )
+
+        def either(origins):
+            """The origin of a name that holds one of ``origins``: `%N`, the
+            entry of ``builder.literals`` that holds each, where the
+            resolver finds what they agree on; `%?N` where one of them is
+            not known, which reads as `?` does. A `%N` among them gives its
+            own, unless that makes more than ``_PY_HELD``; one origin is
+            its own."""
+            literals = self.builder.literals
+            origins = {known(origin) for origin in origins}
+            if len(origins) == 1:
+                return origins.pop()
+            held = {
+                known(arm)
+                for origin in origins
+                for arm in (
+                    literals[origin]
+                    if origin[0] == "%" and origin in literals
+                    else [origin]
+                )
+            }
+            if len(held) > _PY_HELD:
+                held = origins
+            if len(held) == 1:
+                return held.pop()
+            unknown = any("?" in arm for arm in held)
+            return kept("%?" if unknown else "%", tuple(sorted(held)))
+
+        def kept(sigil, origins):
+            """The key of ``builder.literals`` that holds ``origins``."""
+            if (sigil, origins) not in self.arms:
+                key = f"{sigil}{self.builder.serial(self.builder.literals)}"
+                self.builder.literals[key] = list(origins)
+                self.arms[sigil, origins] = key
+            return self.arms[sigil, origins]
+
+        def apply(changes):
+            for name, value in changes.items():
+                log.append((name, env.get(name, nothing)))
+                env[name] = value
+
+        def undo(mark):
+            while len(log) > mark:
+                name, env[name] = log.pop()
+
+        def changed(mark):
+            """What ``env`` holds of each name changed since ``mark``."""
+            return {name: env[name] for name, _ in log[mark:]}
+
+        def passed(origin, value):
+            """Whether ``origin`` is ``value`` as tests of it passed it."""
+            while origin in self.tested:
+                origin = self.tested[origin]
+                if origin == value:
+                    return True
+            return False
+
+        def joined(ways):
+            """The changes of ``env`` that give what holds where any of
+            ``ways``, each the changes of one or None, may have run: a name
+            they bind differently is bound to what each that binds it tells
+            or holds of it, and one they bind alike is told what each
+            tells or holds. What only a type checker reads never runs: it
+            gives only the names nothing else binds. None where there is
+            no way."""
+            ways = [way for way in ways if way is not None]
+            seen = [
+                any(way.get(_PY_CHECKER, env.get(_PY_CHECKER, nothing))) for way in ways
+            ]
+            if any(seen) and not all(seen):
+                runs = joined(way for way, checker in zip(ways, seen) if not checker)
+                for way in ways:
+                    for name, value in way.items():
+                        if name not in runs and not any(env.get(name, nothing)):
+                            runs[name] = value
+                return {**runs, _PY_CHECKER: nothing}
+            changes = {}
+            for name in dict.fromkeys(name for way in ways for name in way):
+                values = {way.get(name, env.get(name, nothing)) for way in ways}
+                value = next(iter(values))
+                if len(values) > 1:
+                    origins = {told or origin for origin, told in values}
+                    if name in origins:
+                        # A definition of the name and an import of it:
+                        # ``import_binding`` tells which binds.
+                        origins -= {told for origin, told in values if not origin}
+                    here = env.get(name, nothing)
+                    before = here[1] or here[0]
+                    if not all(name in way for way in ways):
+                        # What a way made of the value a test of it passed
+                        # joins the value, where another way leaves it.
+                        origins -= {
+                            origin for origin in origins if passed(origin, before)
+                        }
+                    if len({origin for origin, _ in values}) > 1:
+                        value = either(origins - {None}), None
+                    elif all(
+                        origin == before or passed(origin, before) for origin in origins
+                    ):
+                        # Each way holds what was held before.
+                        value = here
+                    elif value[0] is None:
+                        # A name bound outside the function, or a module's
+                        # import, is told nothing.
+                        value = None, None
+                    else:
+                        value = value[0], either(origins)
+                changes[name] = value
+            return changes if ways else None
+
+        def merge(ways):
+            """Whether any of ``ways`` goes on, ``env`` then what they join to."""
+            changes = joined(ways)
+            apply(changes or {})
+            return changes is not None
+
+        def way(mark, changes, statements):
+            """What ``statements``, run where ``changes`` are made, leave
+            changed since ``mark``, None where they do not go on."""
+            here = len(log)
+            apply(changes)
+            left = changed(mark) if run(statements) else None
+            undo(here)
+            return left
+
+        def put(name, origin):
+            if not apart:
+                if name in loose:
+                    origin = "?"
+                elif origin.count(".") > _PY_STEPS and "?" not in origin:
+                    origin = kept("%", (origin,))
+                bound = frame.setdefault(name, [])
+                if origin not in bound:
+                    bound.append(origin)
+                for sink in sinks:
+                    sink.setdefault(name, set()).add(origin)
+                for _, seen in watched.get(name, {}).values():
+                    seen.add(origin)
+            apply({name: (origin, None)})
+
+        def watch(node):
+            """Record the read ``node``, which runs when what holds it is
+            called: its name may hold then what it does here or is bound
+            to from here on."""
+            if func and node.id in local:
+                origin, narrowed = env.get(node.id, nothing)
+                reads = watched.setdefault(node.id, {})
+                reads.setdefault(id(node), (node, set()))[1].add(narrowed or origin)
+
+        def later(node):
+            """Watch the names read in the functions of the definition
+            ``node``, and leave open those they bind as `nonlocal`."""
+            todo = [(node, False)]
+            while todo:
+                part, inside = todo.pop()
+                inside = inside or isinstance(part, _PY_FUNCTIONS)
+                if isinstance(part, ast.Nonlocal):
+                    for name in local.intersection(part.names):
+                        loose.add(name)
+                        put(name, "?")
+                elif inside and isinstance(part, ast.Name):
+                    watch(part)
+                todo.extend((child, inside) for child in ast.iter_child_nodes(part))
+
+        def maybe(changes):
+            """Bind what ``changes`` bind, where what made them may not
+            have run."""
+            here = len(log)
+            for name, (origin, _) in changes.items():
+                put(name, origin)
+            bound = changed(here)
+            undo(here)
+            merge([{}, bound])
+
+        def bind(target, origin):
+            for name, bound in _py_targets(target, origin):
+                put(name, bound)
+
+        def partly(sink):
+            """The changes of ``env`` where a block that bound ``sink`` ran
+            in part."""
+            return {
+                name: (
+                    either([*bound, *filter(None, env.get(name, nothing)[:1])]),
+                    None,
+                )
+                for name, bound in sink.items()
+            }
+
+        def iterated(value, loop):
+            """Origin of what ``loop`` binds on each pass over ``value``."""
+            step = "__iter__().__next__()"
+            if isinstance(loop, ast.AsyncFor) or getattr(loop, "is_async", 0):
+                step = "__aiter__().__anext__().await"
+            return f"{self._origin(value, value.lineno)}.{step}"
+
+        def valued(node, lineno):
+            """Origin of the value of the expression ``node``: either arm's
+            of a conditional expression, any operand's of `and` and `or`."""
+            if isinstance(node, (ast.IfExp, ast.BoolOp)):
+                parts = getattr(node, "values", None) or (node.body, node.orelse)
+                return either(valued(part, lineno) for part in parts)
+            return self._origin(node, lineno)
+
+        def read(node):
+            """Evaluate the expressions of ``node``: record what each name
+            they read holds, and bind what they bind."""
+            nonlocal apart, lambdas
+            todo = [node]
+            while todo:
+                node = todo.pop()
+                if isinstance(node, ast.Name):
+                    origin, narrowed = env.get(node.id, nothing)
+                    if not isinstance(node.ctx, ast.Load):
+                        continue
+                    if origin or narrowed:
+                        self.scoped[id(node)] = narrowed or origin
+                    elif node.id in local:
+                        self.scoped[id(node)] = "?"
+                    if lambdas:
+                        watch(node)
+                elif isinstance(node, (ast.BoolOp, ast.IfExp)) or (
+                    len(getattr(node, "comparators", ())) > 1
+                ):
+                    merge(cond(node))
+                elif isinstance(node, ast.NamedExpr):
+                    read(node.value)
+                    bind(node.target, valued(node.value, node.lineno))
+                elif isinstance(node, ast.Lambda):
+                    # Its body runs when it is called, and binds its own names.
+                    read(node.args)
+                    here = len(log)
+                    apart += 1
+                    apply(
+                        {
+                            arg.arg: ("?", None)
+                            for arg in ast.walk(node.args)
+                            if isinstance(arg, ast.arg)
+                        }
+                    )
+                    lambdas += 1
+                    read(node.body)
+                    lambdas -= 1
+                    apart -= 1
+                    undo(here)
+                elif isinstance(node, _PY_COMPREHENSIONS):
+                    here = len(log)
+                    apart += 1
+                    targets = set()
+                    # A generator expression runs when it is iterated, but
+                    # for its first iterable.
+                    waits = isinstance(node, ast.GeneratorExp)
+                    for at, generator in enumerate(node.generators):
+                        read(generator.iter)
+                        lambdas += waits and not at
+                        origin = iterated(generator.iter, generator)
+                        bind(generator.target, origin)
+                        targets.update(n for n, _ in _py_targets(generator.target, ""))
+                        for test in generator.ifs:
+                            apply(cond(test)[0])
+                    for part in ast.iter_child_nodes(node):
+                        if not isinstance(part, ast.comprehension):
+                            read(part)
+                    apart -= 1
+                    lambdas -= waits
+                    bound = changed(here)
+                    undo(here)
+                    # A `:=` in it binds the name for what holds it, where
+                    # a pass ran.
+                    maybe(
+                        {
+                            name: (origin, None)
+                            for name, (origin, _) in bound.items()
+                            if name not in targets
+                            and origin != env.get(name, nothing)[0]
+                        }
+                    )
+                else:
+                    parts = list(ast.iter_child_nodes(node))
+                    if isinstance(node, ast.Dict):
+                        # Each key is evaluated before its value.
+                        pairs = zip(node.keys, node.values)
+                        parts = [part for pair in pairs for part in pair if part]
+                    elif isinstance(node, ast.arguments):
+                        # Defaults are evaluated before those of the
+                        # keyword-only parameters.
+                        rest = [part for part in parts if part not in node.defaults]
+                        parts = [*node.defaults, *rest]
+                    elif isinstance(node, ast.AnnAssign):
+                        # The value is evaluated first, a local's annotation
+                        # not at all.
+                        parts = [node.value, node.target]
+                        parts += [] if func else [node.annotation]
+                        parts = list(filter(None, parts))
+                    todo.extend(
+                        part
+                        for part in reversed(parts)
+                        if not isinstance(part, ast.stmt)
+                    )
+
+        def tested(node, written):
+            """The change of ``env`` where the name ``node`` reads is told
+            to be of the class ``written``: `&N`, each value it may hold
+            where that is of the class, else an instance of the class. A
+            name bound elsewhere too is told nothing."""
+            told = self._instance_origin(written)
+            name = node.id
+            origin, narrowed = env.get(name, nothing)
+            if not re.fullmatch(r":[\w:]+", told) or (
+                name in loose | self.rebound - local
+            ):
+                return {}
+            if self._bound_to_value(told[1:].split("::")[0], self.bindings[1:]):
+                return {}
+            held = narrowed or origin or name not in local and self._origin(node, 0)
+            held = known(held or "?")
+            if held not in self.tested or self.builder.literals[held][1] != told:
+                held, on = kept("&", (held, told)), held
+                self.tested[held] = on
+            return {name: (origin, held)}
+
+        def cond(test):
+            """``(held, other)``: the changes of ``env`` past ``test``,
+            where it holds and where it does not. ``env`` is left as it
+            was."""
+            if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                return cond(test.operand)[::-1]
+            mark = len(log)
+            if isinstance(test, ast.IfExp):
+                ends = []
+                for changes, part in zip(cond(test.test), (test.body, test.orelse)):
+                    apply(changes)
+                    ends.append([{**changed(mark), **end} for end in cond(part)])
+                    undo(mark)
+                return tuple(map(joined, zip(*ends)))
+            chained = len(getattr(test, "comparators", ())) > 1
+            if isinstance(test, ast.BoolOp) or chained:
+                # An operand is evaluated where those before it did not
+                # settle the result; `a < b < c` is `a < b and b < c`.
+                parts = (
+                    [ast.Tuple([test.left, test.comparators[0]]), *test.comparators[1:]]
+                    if chained
+                    else test.values
+                )
+                order = -1 if isinstance(getattr(test, "op", None), ast.Or) else 1
+                settled = []
+                for part in parts:
+                    held, other = cond(part)[::order]
+                    settled.append({**changed(mark), **other})
+                    apply(held)
+                held = changed(mark)
+                undo(mark)
+                return (held, joined(settled))[::order]
+            read(test)
+            held = other = changed(mark)
+            if (
+                "TYPE_CHECKING" in (getattr(test, "id", ""), getattr(test, "attr", ""))
+                and self._origin(test, test.lineno) in _PY_TYPE_CHECKING
+            ):
+                held = {**other, _PY_CHECKER: (None, True)}
+            elif (
+                isinstance(test, ast.Call)
+                and isinstance(test.func, ast.Name)
+                and test.func.id == "isinstance"
+                and len(test.args) == 2
+                and isinstance(test.args[0], ast.Name)
+            ):
+                held = {**other, **tested(test.args[0], test.args[1])}
+            undo(mark)
+            return held, other
+
+        def loop(node):
+            """Whether the loop ``node`` goes on. Its body is run until
+            what holds where a pass starts is what the passes before it
+            leave."""
+            origin = None
+            if not isinstance(node, ast.While):
+                read(node.iter)
+                origin = iterated(node.iter, node)
+            mark = len(log)
+            head, unknown = {}, {}
+            sink = {}
+            sinks.append(sink)
+            for attempt in count():
+                apply(head)
+                done = head
+                if origin:
+                    bind(node.target, origin)
+                else:
+                    held, other = cond(node.test)
+                    done = {**head, **other}
+                    apply(held)
+                loops.append((mark, [], []))
+                end = changed(mark) if run(node.body) else None
+                _, again, out = loops.pop()
+                undo(mark)
+                after = {**joined([{}, end, *again]), **unknown}
+                if after == head:
+                    break
+                if attempt > 1:
+                    # A name each pass binds to something new holds what
+                    # it did before the loop or a value not known.
+                    for name, value in after.items():
+                        if value != head.get(name):
+                            was, told = env.get(name, nothing)
+                            unknown[name] = either(["?", told or was or "?"]), None
+                    after = {**after, **unknown}
+                head = after
+            sinks.pop()
+            # A read that runs later may run on a later pass, past what any
+            # part of the body binds.
+            for name, bound in sink.items():
+                for _, seen in watched.get(name, {}).values():
+                    seen |= bound
+            return merge([way(mark, done, node.orelse), *out])
+
+        def run(statements):
+            """Whether ``statements``, run in ``env``, go on past their
+            last."""
+            nonlocal conditional, apart
+            defined = set()
+            for node in statements:
+                lineno = node.lineno
+                mark = len(log)
+                skips = isinstance(
+                    node, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Match)
+                ) or bool(getattr(node, "handlers", ()))
+                conditional += skips
+                goes = True
+                if isinstance(node, ast.If):
+                    ways = []
+                    while True:
+                        held, other = cond(node.test)
+                        ways.append(way(mark, held, node.body))
+                        apply(other)
+                        if [type(s) for s in node.orelse] != [ast.If]:
+                            break
+                        node = node.orelse[0]
+                    ways.append(way(mark, {}, node.orelse))
+                    undo(mark)
+                    goes = merge(ways)
+                elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+                    goes = loop(node)
+                elif isinstance(node, (ast.Try, ast.TryStar)):
+                    sink = {}
+                    sinks.append(sink)
+                    jumps = (loops or [()])[-1][1:]
+                    before = [len(left) for left in jumps]
+                    end = changed(mark) if run(node.body) else None
+                    undo(mark)
+                    raised = partly(sink)
+                    ways = [None if end is None else way(mark, end, node.orelse)]
+                    ways += [way(mark, raised, [handler]) for handler in node.handlers]
+                    sinks.pop()
+                    # `finally` runs whatever ran before it, a `continue`
+                    # or a `break` too, and what it binds holds past it.
+                    apply(partly(sink))
+                    here = len(log)
+                    through = [left[at:] for left, at in zip(jumps, before)]
+                    ended = run(node.finalbody)
+                    bound = changed(here)
+                    undo(mark)
+                    for left, at, crossing in zip(jumps, before, through):
+                        left[at : at + len(crossing)] = [
+                            {**changes, **bound} for changes in crossing if ended
+                        ]
+                    goes = merge(ways) and ended
+                    apply(bound)
+                elif isinstance(node, ast.ExceptHandler):
+                    read(node)
+                    if node.name:
+                        put(node.name, "?")
+                    goes = run(node.body)
+                elif isinstance(node, ast.Match):
+                    read(node.subject)
+                    mark = len(log)
+                    ways = []
+                    for case in node.cases:
+                        missed = changed(mark)
+                        read(case.pattern)
+                        captured = {}
+                        for part in ast.walk(case.pattern):
+                            name = getattr(part, "name", getattr(part, "rest", None))
+                            if name:
+                                origin = "?"
+                                if isinstance(
+                                    getattr(part, "pattern", 0), ast.MatchClass
+                                ):
+                                    origin = self._instance_origin(part.pattern.cls)
+                                captured[name] = origin
+                        pattern = getattr(case.pattern, "pattern", None) or case.pattern
+                        if isinstance(pattern, ast.MatchClass) and isinstance(
+                            node.subject, ast.Name
+                        ):
+                            apply(tested(node.subject, pattern.cls))
+                            told = env.get(node.subject.id, nothing)[1]
+                            if told and getattr(case.pattern, "name", None):
+                                captured[case.pattern.name] = told
+                        for capture in captured.items():
+                            put(*capture)
+                        other = None
+                        if case.guard:
+                            # A guard that fails leaves what the pattern
+                            # and it bound to the cases after it.
+                            held, other = cond(case.guard)
+                            other = {**changed(mark), **other}
+                            apply(held)
+                        elif isinstance(pattern, ast.MatchAs):
+                            missed = None  # it matches anything
+                        ways.append(way(mark, {}, case.body))
+                        undo(mark)
+                        if missed is None:
+                            break
+                        apply(joined([missed, other]))
+                    else:
+                        ways.append(changed(mark))
+                        undo(mark)
+                    goes = merge(ways)
+                elif isinstance(node, (ast.With, ast.AsyncWith)):
+                    # `async with` awaits what `__aenter__` gives.
+                    enter = (
+                        "__enter__()"
+                        if isinstance(node, ast.With)
+                        else "__aenter__().await"
+                    )
+                    for item in node.items:
+                        read(item)
+                        origin = f"{self._origin(item.context_expr, lineno)}.{enter}"
+                        bind(item.optional_vars, origin)
+                    here = len(log)
+                    sink = {}
+                    sinks.append(sink)
+                    end = changed(here) if run(node.body) else None
+                    sinks.pop()
+                    undo(here)
+                    # What is entered may take what the body raises: the
+                    # statements after it run past a body run in part.
+                    goes = merge([end, partly(sink)])
+                elif isinstance(node, ast.Assert):
+                    held, other = cond(node.test)
+                    if node.msg:
+                        apply(other)
+                        read(node.msg)
+                        undo(mark)
+                    apply(held)
+                elif isinstance(node, ast.Assign):
+                    read(node.value)
+                    for target in node.targets:
+                        read(target)
+                    if not _py_is_none(node.value):
+                        origin = valued(node.value, lineno)
+                        for target in node.targets:
+                            bind(target, origin)
+                elif isinstance(node, ast.AugAssign):
+                    origin, narrowed = env.get(getattr(node.target, "id", ""), nothing)
+                    read(node)
+                    if isinstance(node.target, ast.Name):
+                        # `=__add__`: the in-place method where what the
+                        # name holds has one, else the operator's. A library
+                        # type stays where that method gives its own type.
+                        held = narrowed or origin or "?"
+                        method = _PY_OPERATORS[type(node.op)]
+                        made = held.removeprefix("@builtins.")[:-2]
+                        if self.starred or any(made in f for f in self.bindings):
+                            made = ""
+                        methods = (
+                            _stdlib.load("python")["types"]
+                            .get(f"builtins.{made}", {})
+                            .get("methods", {})
+                        )
+                        gives = methods.get(f"__i{method[2:]}") or methods.get(method)
+                        if not gives or gives.partition("[")[0] not in (
+                            "typing.Self",
+                            made,
+                        ):
+                            put(node.target.id, f"{held}.={method}()")
+                elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                    for name, target in _py_import_bindings(node):
+                        if func is not None or apart or name in loose:
+                            put(name, f"@{target}")
+                            continue
+                        entry = ("import", conditional > 0, _py_start(node))
+                        bound = module_bound.setdefault(
+                            "*" if target.endswith(".*") else name, []
+                        )
+                        if entry not in bound:
+                            bound.append(entry)
+                        if conditional:
+                            # An import a conditional holds and another of
+                            # its ways may bind: which one is not told. It
+                            # merges with the targets already there.
+                            merge_import(self.import_targets, name, target)
+                        else:
+                            # An unconditional import rebinds the name:
+                            # the later one is what binds after it.
+                            self.import_targets[name] = target
+                        # What the name is told to be on this way, for
+                        # where another assigns it.
+                        apply({name: (None, f"@{target}")})
+                else:
+                    read(node)
+                    if isinstance(node, _PY_DEFINITIONS):
+                        if isinstance(node, ast.ClassDef):
+                            apart += 1
+                            run(node.body)
+                            apart -= 1
+                            undo(mark)
+                        if not apart:
+                            later(node)
+                        if node.name in defined:
+                            self.redefined.add(id(node))
+                        defined.add(node.name)
+                        if not apart:
+                            # A `def` or `class` binds its name for what is
+                            # written after it, which shadows an import of
+                            # the name.
+                            frame.pop(node.name, None)
+                            if func is None:
+                                entry = ("def", conditional > 0, _py_start(node))
+                                bound = module_bound.setdefault(node.name, [])
+                                if entry not in bound:
+                                    bound.append(entry)
+                        put(node.name, node.name)
+                    elif isinstance(node, ast.AnnAssign):
+                        bind(node.target, self._instance_origin(node.annotation))
+                    elif isinstance(node, (ast.Break, ast.Continue)):
+                        begun, *left = loops[-1]
+                        left[isinstance(node, ast.Break)].append(changed(begun))
+                    if isinstance(node, ast.Return):
+                        self.exits[id(node)] = node
+                    goes = not isinstance(
+                        node, (ast.Return, ast.Raise, ast.Break, ast.Continue)
+                    )
+                conditional -= skips
+                if not goes:
+                    return False
+            return True
+
+        if func is not None:
             decorators = {d.id for d in func.decorator_list if isinstance(d, ast.Name)}
             positional = len(args.posonlyargs) + len(args.args)
             # pytest passes a test or fixture the fixtures its parameters
@@ -770,176 +1455,35 @@ class PythonParser(BaseParser):
                     index == 0
                     and positional
                     and is_method
-                    and "staticmethod" not in decorators
+                    and ("staticmethod" not in decorators or func.name == "__new__")
                 ):
-                    origin = "cls" if "classmethod" in decorators else "self"
+                    held = "classmethod" in decorators or func.name in _PY_CLASS_TAKING
+                    origin = "cls" if held else "self"
                 elif arg is args.vararg:
                     origin = "@builtins.tuple()"
                 elif arg is args.kwarg:
                     origin = "@builtins.dict()"
                 elif arg.annotation:
                     origin = self._instance_origin(arg.annotation)
+                    if self._unreadable(origin, self.class_bound.get(id(func), set())):
+                        origin = "?"
                 elif injected and arg.arg not in parametrized:
                     origin = f"~{arg.arg}"
                 else:
                     origin = "?"
-                frame[arg.arg] = [(_py_start(func.body[0]), origin)]
-
-        found, branching = [], []
-        # name -> ("def" or "import", whether a conditional holds it, where
-        # it is written) of each binding of it at module level; a star
-        # import, which may bind any name, is filed under `*`
-        module_bound = {}
-
-        def ways_of(node):
-            """The ways of each conditional statement whose spans hold
-            ``node``, as ``(statement, way)``: which it may run in."""
-            start = _py_start(node)
-            return {
-                (at, way)
-                for at, (_, _, _, spans) in enumerate(branching)
-                for way, held in enumerate(spans)
-                for span in held
-                if span[0] <= start < span[1]
-            }
-
-        self.exits = []  # the `return` and `yield` nodes of ``body``
-        todo = deque(body)
-        while todo:
-            node = todo.popleft()
-            if isinstance(node, _PY_BINDING_NODES):
-                found.append(node)
-            if ways := _py_ways(node):
-                spans = [[(_py_start(s), _py_end(s)) for s in way] for way in ways]
-                first = min(span[0] for way in spans for span in way)
-                branching.append((node, first, ways, spans))
-                if isinstance(node, (ast.If, ast.Match)):
-                    self.branches.append((first, _py_end(node), spans))
-            if not isinstance(node, _PY_DEFINITIONS):
-                todo.extend(ast.iter_child_nodes(node))
-        for node in sorted(found, key=lambda n: n.lineno):
-            lineno = node.lineno
-            if isinstance(node, _PY_DEFINITIONS):
-                frame.pop(node.name, None)
-                # A `def` or `class` binds its name for what is written
-                # after it, which shadows an import of the name.
-                put(node.name, _py_end(node), node.name)
-                if func is None:
-                    module_bound.setdefault(node.name, []).append(
-                        ("def", bool(ways_of(node)), _py_start(node))
-                    )
-            elif isinstance(node, ast.Assign) and not _py_is_none(node.value):
-                origin = self._origin(node.value, lineno)
-                for target in node.targets:
-                    bind(target, _py_end(node), origin)
-            elif isinstance(node, ast.AnnAssign):
-                origin = self._instance_origin(node.annotation)
-                bind(node.target, _py_end(node), origin)
-            elif isinstance(node, ast.NamedExpr):
-                bind(node.target, _py_end(node), self._origin(node.value, lineno))
-            elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                for name, target in _py_import_bindings(node):
-                    if func is None:
-                        conditional = bool(ways_of(node))
-                        module_bound.setdefault(
-                            "*" if target.endswith(".*") else name, []
-                        ).append(("import", conditional, _py_start(node)))
-                        if conditional:
-                            # An import a conditional holds and another of
-                            # its ways may bind: which one is not told. It
-                            # merges with the targets already there.
-                            merge_import(self.import_targets, name, target)
-                        else:
-                            # An unconditional import rebinds the name:
-                            # the later one is what binds after it.
-                            self.import_targets[name] = target
-                    else:
-                        put(name, _py_end(node), f"@{target}")
-            elif isinstance(node, (ast.For, ast.AsyncFor)):
-                origin = iterated(node.iter, node, lineno)
-                bind(node.target, _py_start(node.body[0]), origin)
-            elif isinstance(node, _PY_COMPREHENSIONS):
-                for generator in node.generators:
-                    origin = iterated(generator.iter, generator, lineno)
-                    self._bind_scoped(node, generator.target, origin)
-            elif isinstance(node, (ast.With, ast.AsyncWith)):
-                # `async with` awaits what `__aenter__` gives.
-                enter = (
-                    "__enter__()"
-                    if isinstance(node, ast.With)
-                    else "__aenter__().await"
-                )
-                for item in node.items:
-                    origin = f"{self._origin(item.context_expr, lineno)}.{enter}"
-                    bind(item.optional_vars, _py_start(node.body[0]), origin)
-            elif isinstance(node, ast.Lambda):
-                for arg in ast.walk(node.args):
-                    if isinstance(arg, ast.arg):
-                        self._bind_scoped(node.body, ast.Name(arg.arg), "?")
-            elif isinstance(node, (ast.If, ast.IfExp, ast.While)):
-                held = node.body if isinstance(node.body, list) else [node.body]
-                for name, origin in checked(node.test):
-                    narrow([node.test, *held], name, origin)
-            elif isinstance(node, ast.Assert):
-                for name, origin in checked(node.test):
-                    if name.id in frame and "?" not in origin:
-                        bind(name, _py_end(node), origin)
-            elif isinstance(node, ast.Match) and isinstance(node.subject, ast.Name):
-                for case in node.cases:
-                    pattern = getattr(case.pattern, "pattern", None) or case.pattern
-                    if isinstance(pattern, ast.MatchClass):
-                        origin = self._instance_origin(pattern.cls)
-                        narrow(case.body, node.subject, origin)
-            elif isinstance(node, _PY_NAME_BINDERS) and node.name:
-                origin = "?"
-                if isinstance(getattr(node, "pattern", None), ast.MatchClass):
-                    origin = self._instance_origin(node.pattern.cls)
-                held = getattr(node, "body", None)
-                at = _py_start(held[0]) if held else _py_end(node)
-                put(node.name, at, origin)
-            elif isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom)):
-                self.exits.append(node)
-        # Past a statement that runs a body only where its head allows, a
-        # name holds what each way through it that goes on past it and has
-        # the name bound gives, where they agree, else no known value. Inner
-        # statements go first.
-        # Line -> the names ``frame`` binds on it, and its keys sorted: only
-        # a name bound inside a branch can disagree through it.
-        frame_lines = {}
+                put(arg.arg, origin)
+        run(body)
+        for reads in watched.values():
+            for node, seen in reads.values():
+                seen.discard(None)
+                if seen:
+                    self.scoped[id(node)] = either(seen) if len(seen) > 1 else min(seen)
         for name, bound in frame.items():
-            for at, _ in bound:
-                frame_lines.setdefault(at[0], set()).add(name)
-        frame_order = sorted(frame_lines)
-        for node, first, ways, spans in sorted(
-            branching, key=lambda b: (_py_end(b[0]), -b[1][0])
-        ):
-            leaves = (ast.Return, ast.Raise)
-            if not isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
-                leaves += (ast.Continue, ast.Break)
-            on = [
-                s for w, s in zip(ways, spans) if not (w and isinstance(w[-1], leaves))
-            ]
-            test = getattr(node, "test", None)
-            if (
-                isinstance(node, ast.If)
-                and "TYPE_CHECKING"
-                in (getattr(test, "id", ""), getattr(test, "attr", ""))
-                and self._origin(test, node.lineno) == "@typing.TYPE_CHECKING"
-            ):
-                # A type checker reads the body; it never runs.
-                on = [s for s in on if s is not spans[0]]
-            for name in self._bound_names(
-                frame_lines, frame_order, first[0], _py_end(node)[0]
-            ):
-                # What the statement binds, and the last bound before it
-                bound = frame[name]
-                part = bound[
-                    max(
-                        bisect_left(bound, first, key=itemgetter(0)) - 1, 0
-                    ) : bisect_right(bound, _py_end(node), key=itemgetter(0))
-                ]
-                if _disagree(part, first, on):
-                    put(name, _py_end(node), "?")
+            origin = env[name][1] or env[name][0]
+            if origin:
+                if origin in bound:
+                    bound.remove(origin)
+                bound.append(origin)
         if func is None:
             written, listed = _py_all(body)
             if written:
@@ -969,10 +1513,14 @@ class PythonParser(BaseParser):
         annotated to return, else to the origins of the values other than
         `None` that its body and its methods assign to it. Record those its
         methods assign to the instance, `self.name = ...`, but for a
-        property's, which its setter takes, as ``class_id``'s."""
+        property's, which its setter takes, as ``class_id``'s, and for each
+        origin a method wrote, the methods it is read in, where Python
+        evaluates it."""
         attrs = {}
         assigned = {}
         instance, properties = {}, set()
+        # (attribute, origin) -> the class or method each write is read in
+        scopes = {}
         for stmt in class_node.body:
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 origin = self._instance_origin(stmt.annotation)
@@ -982,18 +1530,27 @@ class PythonParser(BaseParser):
                 for target in stmt.targets:
                     if isinstance(target, ast.Name):
                         assigned.setdefault(target.id, set()).add(origin)
+                        scopes.setdefault((target.id, origin), set()).add(class_id)
             elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 made = [self._origin(d, stmt.lineno) for d in stmt.decorator_list]
                 read = any(map(_py_attribute, made))
                 if read:
                     properties.add(stmt.name)
-                if read and stmt.returns:
-                    origin = self._instance_origin(stmt.returns)
-                    attrs.setdefault(stmt.name, origin)
                 self._push_bindings(stmt.body, stmt, is_method=True)
+                returns = self._returns(stmt)
+                if read and returns:
+                    attrs.setdefault(stmt.name, self._instance_origin(returns))
                 returned, yields = self._returned_origins()
-                if read and not stmt.returns and not yields:
+                wrote = set()
+                if read and not returns and not yields:
                     assigned.setdefault(stmt.name, set()).update(returned)
+                    wrote.update((stmt.name, origin) for origin in returned)
+                # What a function nested in the method binds is not read.
+                nested = {
+                    id(inner)
+                    for definition in _py_nested_definitions(stmt.body)
+                    for inner in ast.walk(definition)
+                }
                 for node in ast.walk(stmt):
                     if isinstance(node, ast.Assign):
                         targets, value = node.targets, node.value
@@ -1012,12 +1569,25 @@ class PythonParser(BaseParser):
                             origin = self._instance_origin(value)
                             attrs.setdefault(target.attr, origin)
                             held.add(origin)
+                            if id(node) not in nested:
+                                wrote.add((target.attr, origin))
                         elif not _py_is_none(value):
-                            origin = self._origin(value, node.lineno)
+                            origin = "?"
+                            if id(node) not in nested:
+                                origin = self._origin(value, node.lineno)
                             assigned.setdefault(target.attr, set()).add(origin)
                             held.add(origin)
+                            wrote.add((target.attr, origin))
+                for name, origin in wrote:
+                    scopes.setdefault((name, origin), set()).add(
+                        f"{class_id}::{stmt.name}"
+                    )
                 self.bindings.pop()
         self.builder.py_properties[class_id] = sorted(properties)
+        local = self.builder.py_local[class_id] = {}
+        for (name, origin), read_in in scopes.items():
+            if read_in != {class_id}:
+                local.setdefault(name, {})[origin] = sorted(read_in)
         self.builder.assigned[class_id] = {
             name: sorted(origins)
             for name, origins in instance.items()
@@ -1030,6 +1600,32 @@ class PythonParser(BaseParser):
             for name, origins in held.items()
             if not any("?" in origin for origin in origins)
         }
+
+    def _bound_to_value(self, name, frames):
+        """Whether the innermost of the function ``frames`` that binds
+        ``name`` binds it to a value, not by `def`, `class` or `import`."""
+        for frame in reversed(frames):
+            if name in frame.inner | frame.stored:
+                return name in frame.stored
+        return False
+
+    def _unreadable(self, written, around=frozenset()):
+        """Whether the annotation ``written`` of the function whose frame is
+        the last pushed names no class descry can read: it is evaluated
+        where the function is defined, and writes a name its body or
+        ``around`` binds, or one the function enclosing it binds to a
+        value."""
+        names = set(re.findall(r"\w+", written))
+        return bool(names & (self.bindings[-1].inner | around)) or any(
+            self._bound_to_value(name, self.bindings[1:-1]) for name in names
+        )
+
+    def _returns(self, func):
+        """The return annotation of ``func``, whose frame is the last pushed,
+        or None where it is unreadable."""
+        if func.returns and not self._unreadable(ast.unparse(func.returns)):
+            return func.returns
+        return None
 
     def _get_attribute_name(self, node):
         if isinstance(node, ast.Name):

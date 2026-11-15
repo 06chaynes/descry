@@ -52,6 +52,61 @@ matches when the lookup finds them; `callers` of such a name lists the
 calls written with it that the graph keeps unresolved, which no definition
 answers; a call dropped as one out of the project is not among them.
 
+A scope that defines one name more than once (a function under `if` and
+again under `else`) has one node for it, with the signature and line of
+the first definition. A call of the name reaches that node, the calls each
+definition makes are the node's, and in Python it returns what either
+definition returns; where the later one always replaces the first, what
+that one returns.
+
+In Python a local name is followed through the statements of its function,
+and a call on it resolves only where every way to the call gives it one
+type; a read in a nested function, a lambda or a generator expression holds
+what the name may when that runs. A name bound elsewhere too is not told:
+one a function declares `nonlocal` and binds, and one of a module that any
+function of its file declares `global`, however the module binds it; a
+call on either is unresolved, an `isinstance` test of it tells nothing. A
+name a loop binds from its own earlier value (`node = node.parent`) holds,
+where the loop's third pass still changes it, a value descry does not
+know. A function reads any other name of its module as the module leaves
+it bound, so a call made while the module still runs, before a later
+statement binds the name again, is read as made on the later binding.
+
+An annotated assignment (`x: Base = make()`) binds the name to an instance
+of the class it is annotated with, whatever the value; a later plain
+assignment binds it to what that gives. A name a function reads is read in
+that function, and what a method assigns to an attribute in that method, but
+for its annotations, which are evaluated where the function is defined.
+Where the function's body or the class body defining it binds a name a
+parameter's annotation writes, or a function enclosing it binds one to a
+value, the parameter holds a value descry does not know; where the body
+binds a name the return annotation writes, or an enclosing function binds
+one to a value, the function returns what its `return` statements give, and
+a generator a value descry does not know. An `isinstance` test, an `assert`
+of one or a class pattern tells each value the name may hold apart; one of a
+class written as a name that the function, or the nearest function enclosing
+it that binds the name, binds to a value tells nothing. A value descry
+knows, of a class that inherits the one tested for, stays of its own class,
+as does a class, function or module of the project tested for a class
+outside it. An instance of a class that neither inherits nor is inherited by
+the project class tested for may be of either where the class tested for, or
+one it inherits, has a metaclass or a base outside the project, whose test
+may pass it (a runtime-checkable `Protocol`, an ABC's `register`, a
+metaclass's `__instancecheck__`); else it is read as an instance of the
+class tested for. A value descry does not know is read as an instance of the
+class tested for, so a call on it resolves to that class's method, which a
+subclass may override. Such values include a parameter's, an attribute's,
+what a call from outside the project or one descry does not follow gives,
+what an operator gives on such a value, an element of an unpacked tuple or
+of what a loop iterates, what a pattern captures below the top of its case,
+the name `except … as` binds, a copy of a name bound elsewhere too, a name a
+way to the read leaves unbound, and what a name holds past the loop's third
+pass or as a step on from a name of several values. Where the values part,
+the call is unresolved. Where a way that passed the test meets one that did
+not bind the name, or each way only tested it, the value tested is again the
+value it was tested on, so past the test's block the name is read as it was
+before the test, told what earlier tests told.
+
 ## Keeping up with the source
 
 An index is a snapshot. `status` says how old it is and how many of its

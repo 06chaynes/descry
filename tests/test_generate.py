@@ -1686,7 +1686,7 @@ class TestPythonCallResolution:
             },
         )
         assert _bases(builder, "FILE:main.py::Child") == ["FILE:main.py::Base"]
-        assert _bases(builder, "FILE:main.py::Base") == ["REF:pkg.one.Base"]
+        assert _bases(builder, "FILE:main.py::Base") == ["FILE:pkg/one.py::Base"]
         assert _bases(builder, "FILE:main.py::ViaCond") == ["REF:Cond"]
         assert _calls(builder, "FILE:main.py::ViaCond::call_extra") == [
             "REF:self.extra"
@@ -1824,11 +1824,11 @@ class TestPythonCallResolution:
         assert _calls(builder, "FILE:main.py::plain") == ["FILE:main.py::plain::Plain"]
 
     def test_a_body_its_head_may_skip_leaves_the_value_open(self, tmp_path):
-        """A name a body of an `if`, a loop or a `try` assigns, on the head's
-        line or below it, holds after the statement what every way through
-        gives where they agree, else no known value. A way that leaves does
-        not count, a way of an `if` does not see what another assigns, and a
-        `with` body always runs."""
+        """A name a body of an `if`, a loop, a `try` or a `with` assigns, on
+        the head's line or below it, holds after the statement what every
+        way through gives where they agree, else no known value. A way that
+        leaves does not count, a way of an `if` does not see what another
+        assigns, and what a `with` enters may take what its body raises."""
         builder = _index(
             tmp_path,
             {
@@ -1870,6 +1870,11 @@ class TestPythonCallResolution:
                     with m: x = B()
                     x.use()
 
+                def fresh(m):
+                    with m:
+                        x = B()
+                    x.use()
+
                 def leaving():
                     x = A()
                     try:
@@ -1880,7 +1885,7 @@ class TestPythonCallResolution:
                 """
             },
         )
-        for name in ("same_line", "below", "attempt"):
+        for name in ("same_line", "below", "attempt", "entered"):
             assert _calls(builder, f"FILE:a.py::{name}") == [
                 "FILE:a.py::A",
                 "FILE:a.py::B",
@@ -1894,7 +1899,11 @@ class TestPythonCallResolution:
         assert _calls(builder, "FILE:a.py::agreed") == ["FILE:a.py::B"] * 2 + [
             "FILE:a.py::B::use"
         ]
-        for name in ("entered", "leaving"):
+        assert _calls(builder, "FILE:a.py::fresh") == [
+            "FILE:a.py::B",
+            "FILE:a.py::B::use",
+        ]
+        for name in ("leaving",):
             assert _calls(builder, f"FILE:a.py::{name}") == [
                 "FILE:a.py::A",
                 "FILE:a.py::B",
@@ -3397,6 +3406,1999 @@ class TestPythonCallResolution:
             "FILE:m.py::Mine::__init__"
         ]
 
+    def test_an_attribute_assigned_a_definition_local_to_the_method(self, tmp_path):
+        """What a method assigns to the instance is read where it is
+        written: a function or class declared in the method is that one,
+        not a name from outside."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Box:
+                    def open(self): ...
+
+                class A:
+                    def __init__(self):
+                        def made():
+                            return Box()
+
+                        class Local:
+                            def go(self): ...
+
+                        self.made = made
+                        self.kind = Local
+                        self.held = Local()
+
+                    def run(self):
+                        self.made().open()
+                        self.kind().go()
+                        self.held.go()
+                """
+            },
+        )
+        local = "FILE:m.py::A::__init__"
+        assert _calls(builder, "FILE:m.py::A::run") == [
+            f"{local}::Local",
+            f"{local}::Local::go",
+            f"{local}::Local::go",
+            f"{local}::made",
+            "FILE:m.py::Box::open",
+        ]
+
+    def test_a_base_written_as_the_type_of_a_value_is_its_class(self, tmp_path):
+        """`type(self)` and `self.__class__`, as a base or called, name the
+        class the method is declared in; the type of a class is its
+        metaclass, which is not told."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Form:
+                    def is_valid(self): ...
+
+                class Case(Form):
+                    def build(self):
+                        class One(type(self)):
+                            pass
+
+                        class Two(self.__class__):
+                            pass
+
+                        One().is_valid()
+                        Two().is_valid()
+                        type(self)().is_valid()
+
+                class Meta(type(Form)):
+                    pass
+                """
+            },
+        )
+        build = "FILE:m.py::Case::build"
+        assert _bases(builder, f"{build}::One") == ["FILE:m.py::Case"]
+        assert _bases(builder, f"{build}::Two") == ["FILE:m.py::Case"]
+        assert _bases(builder, "FILE:m.py::Meta") == ["REF:type(Form)"]
+        assert _calls(builder, build).count("FILE:m.py::Form::is_valid") == 3
+
+    def test_a_name_the_ways_bind_differently_holds_what_they_agree_on(self, tmp_path):
+        """Past an `if`, a name its ways bind to different expressions
+        holds the value where each gives the same one; where they part, a
+        call on it stays unresolved and a call of it is of a variable."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Box:
+                    def open(self): ...
+                    def copy(self): return Box()
+
+                class Lid:
+                    def open(self): ...
+
+                def same(box: Box, fresh):
+                    if fresh:
+                        held = Box()
+                    else:
+                        held = box.copy()
+                    held.open()
+
+                def parts(fresh):
+                    if fresh:
+                        held = Box()
+                    else:
+                        held = Lid()
+                    held.open()
+
+                def library(fresh, items):
+                    if fresh:
+                        held = {}
+                    else:
+                        held = dict(items)
+                    held.copy()
+
+                def called(wrap):
+                    def run():
+                        return 1
+
+                    if wrap:
+                        run = wrap(run)
+                    run()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::same") == [
+            "FILE:m.py::Box",
+            "FILE:m.py::Box::copy",
+            "FILE:m.py::Box::open",
+        ]
+        assert "REF:held.open" in _calls(builder, "FILE:m.py::parts")
+        assert _calls(builder, "FILE:m.py::library") == []
+        assert "REF:run" in _calls(builder, "FILE:m.py::called")
+
+    def test_new_called_on_a_library_class_makes_what_it_is_passed(self, tmp_path):
+        """`object.__new__(cls)` and `str.__new__(cls)` are instances of
+        `cls`, no instance of the library's class."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Text(str):
+                    def __new__(cls, text):
+                        made = str.__new__(cls, text)
+                        made.mark()
+                        other = object.__new__(cls)
+                        other.mark()
+                        return made
+
+                    def mark(self): ...
+                """
+            },
+        )
+        assert (
+            _calls(builder, "FILE:m.py::Text::__new__") == ["FILE:m.py::Text::mark"] * 2
+        )
+
+    def test_names_are_followed_as_the_statements_run(self, tmp_path):
+        """A name holds what the ways that reach a read leave in it: what
+        `finally` binds past a `try`; what it held before an `elif` chain
+        with no `else`; what a body run in part bound, in its handler and
+        past it; not what an arm that leaves the pass bound; what later
+        passes of a loop bind, where a pass reads it first. A `:=` Python
+        may skip leaves what was there as well, and a lambda's binds
+        nothing outside it. The statements after a `with` whose body raises
+        run. A test that fails before a `raise` tells what holds past it,
+        and one that holds, what does until the name is bound again. A
+        class body's names are followed too, and a module's name that is
+        imported on one way and assigned on another is either."""
+        builder = _index(
+            tmp_path,
+            {
+                "other.py": """
+                class Shared:
+                    def open(self): ...
+
+                shared = Shared()
+                """,
+                "m.py": """
+                import contextlib
+
+
+                class Box:
+                    def open(self): ...
+                    def next(self) -> "Lid": ...
+
+
+                class Lid:
+                    def open(self): ...
+
+
+                class Cap:
+                    def open(self): ...
+
+
+                def finally_binds(risky):
+                    held = Lid()
+                    try:
+                        held = Box()
+                        risky()
+                    except ValueError:
+                        raise
+                    finally:
+                        held = Cap()
+                    held.open()
+
+
+                def elif_without_else(first, second):
+                    held = Lid()
+                    if first:
+                        held = Box()
+                    elif second:
+                        held = Box()
+                    held.open()
+
+
+                def body_in_part(risky):
+                    held = Lid()
+                    try:
+                        held = Box()
+                        risky()
+                        return
+                    except ValueError:
+                        held.open()
+                    held.open()
+
+
+                def leaves_the_pass(items, skip):
+                    for item in items:
+                        held = Lid()
+                        if skip:
+                            held = Box()
+                            continue
+                        held.open()
+
+
+                def later_passes(items):
+                    held = Box()
+                    for item in items:
+                        held.open()
+                        held = Lid()
+
+
+                def skipped(low, high, items, value):
+                    held = Lid()
+                    if low < high < (held := Box()):
+                        held.open()
+                    held.open()
+                    kept = Lid()
+                    [(kept := Box()) for item in items]
+                    kept.open()
+                    made = Lid()
+                    later = lambda: (made := Box())
+                    made.open()
+                    match value:
+                        case 1 if (seen := Box()):
+                            seen.open()
+                        case _:
+                            seen = Lid()
+                    seen.open()
+
+
+                def raised_inside(raises, risky):
+                    held = Lid()
+                    with raises(ValueError):
+                        held = Box()
+                        raise ValueError
+                    held.open()
+
+
+                def unless(value):
+                    if not isinstance(value, Box):
+                        raise TypeError
+                    value.open()
+
+
+                def rebound_where_checked(value):
+                    if isinstance(value, Box):
+                        value = value.next()
+                    value.open()
+
+
+                class Body:
+                    if contextlib:
+                        kind = Box
+                    else:
+                        kind = Lid
+                    made = kind()
+
+                    def run(self):
+                        self.made.open()
+
+
+                try:
+                    from other import shared
+                except ImportError:
+                    shared = Cap()
+
+
+                def reads_shared():
+                    shared.open()
+                """,
+            },
+        )
+
+        def calls(name):
+            return _calls(builder, f"FILE:m.py::{name}")
+
+        assert "FILE:m.py::Cap::open" in calls("finally_binds")
+        assert "REF:held.open" in calls("elif_without_else")
+        assert calls("body_in_part").count("REF:held.open") == 2
+        assert "FILE:m.py::Lid::open" in calls("leaves_the_pass")
+        assert "REF:held.open" in calls("later_passes")
+        assert calls("skipped") == [
+            *["FILE:m.py::Box"] * 4,
+            *["FILE:m.py::Box::open"] * 2,
+            *["FILE:m.py::Lid"] * 4,
+            "FILE:m.py::Lid::open",
+            "REF:held.open",
+            "REF:kept.open",
+            "REF:seen.open",
+        ]
+        assert "REF:held.open" in calls("raised_inside")
+        assert calls("unless") == ["FILE:m.py::Box::open"]
+        assert "FILE:m.py::Box::next" in calls("rebound_where_checked")
+        assert calls("Body::run") == ["REF:self.made.open"]
+        assert _candidates(builder, "FILE:m.py::reads_shared") == {
+            "REF:other.shared.open": [
+                "FILE:m.py::Box::open",
+                "FILE:m.py::Cap::open",
+                "FILE:m.py::Lid::open",
+                "FILE:other.py::Shared::open",
+            ]
+        }
+
+    def test_a_read_that_runs_later_holds_what_the_name_may_then(self, tmp_path):
+        """A name of a function read in a function or lambda nested in it
+        holds what it does where that is defined and what it is bound to
+        from there on; one the nested function binds as `nonlocal` holds no
+        known value from there on. A name the nested one binds is its own,
+        and one made in a loop may run past what a later pass binds."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class A:
+                    def go(self): ...
+
+                class B:
+                    def go(self): ...
+
+                def early():
+                    x = A()
+
+                    def inner():
+                        x.go()
+
+                    inner()
+                    x = B()
+
+                def once():
+                    x = A()
+
+                    def inner():
+                        x.go()
+
+                    return inner
+
+                def before():
+                    def inner():
+                        x.go()
+
+                    x = A()
+                    return inner
+
+                def held():
+                    x = A()
+                    f = lambda: x.go()
+                    x = B()
+                    return f
+
+                def own(xs):
+                    x = A()
+                    return lambda x: x.go(), lambda: [x.go() for x in xs]
+
+                def passes(xs):
+                    x = A()
+                    for f in xs:
+                        x = B()
+                        f()
+                        x = A()
+                        f = lambda: x.go()
+
+                def method():
+                    x = A()
+
+                    class K:
+                        x = B()
+
+                        def run(self):
+                            x.go()
+
+                    return K
+
+                def rebinds():
+                    x = A()
+                    x.go()
+
+                    def inner():
+                        nonlocal x
+                        x = B()
+
+                    inner()
+                    x.go()
+                """
+            },
+        )
+
+        def calls(name):
+            return _calls(builder, f"FILE:m.py::{name}")
+
+        assert calls("early::inner") == ["REF:x.go"]
+        assert calls("once::inner") == ["FILE:m.py::A::go"]
+        assert calls("before::inner") == ["FILE:m.py::A::go"]
+        assert calls("held") == ["FILE:m.py::A", "FILE:m.py::B", "REF:x.go"]
+        assert calls("own") == ["FILE:m.py::A", "REF:x.go", "REF:x.go"]
+        assert "REF:x.go" in calls("passes")
+        assert calls("method::K::run") == ["FILE:m.py::A::go"]
+        assert calls("rebinds") == [
+            "FILE:m.py::A",
+            "FILE:m.py::A::go",
+            "FILE:m.py::rebinds::inner",
+            "REF:x.go",
+        ]
+
+    def test_a_name_bound_elsewhere_too_holds_no_known_value(self, tmp_path):
+        """A name a function declares `global` or `nonlocal` and binds is
+        not told in it, before or after the binding, nor is the module's
+        name where another function reads it, nor what an `isinstance`
+        test of it passed."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Box:
+                    def open(self): ...
+
+                class Lid:
+                    def open(self): ...
+
+                G = Box()
+
+                def before():
+                    global G
+                    G.open()
+                    G = Lid()
+                    G.open()
+
+                def elsewhere():
+                    before()
+                    G.open()
+
+                def tested():
+                    if isinstance(G, Box):
+                        before()
+                        G.open()
+
+                def outer():
+                    h = Box()
+
+                    def inner():
+                        nonlocal h
+                        for _ in range(2):
+                            h.open()
+                            h = Lid()
+
+                    return inner
+                """
+            },
+        )
+
+        def calls(name):
+            return _calls(builder, f"FILE:m.py::{name}")
+
+        assert calls("before") == ["FILE:m.py::Lid", "REF:G.open", "REF:G.open"]
+        assert calls("elsewhere") == ["FILE:m.py::before", "REF:G.open"]
+        assert calls("tested") == ["FILE:m.py::before", "REF:G.open"]
+        assert calls("outer::inner") == ["FILE:m.py::Lid", "REF:h.open"]
+
+    def test_a_name_its_module_binds_elsewhere_too_is_not_told_where_imported(
+        self, tmp_path
+    ):
+        """A definition or a variable that a function of its module binds
+        as `global` is not told in a file that imports it, by name, through
+        the module or with a star."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Box:
+                    def open(self): ...
+
+                def handler():
+                    return Box()
+
+                G = Box()
+
+                def install(other, lid):
+                    global handler, G
+                    handler = other
+                    G = lid
+                """,
+                "named.py": """
+                from m import G, handler
+                import m
+
+                def by_name():
+                    handler().open()
+                    G.open()
+
+                def through():
+                    m.handler().open()
+                """,
+                "starred.py": """
+                from m import *
+
+                def star():
+                    handler().open()
+                    G.open()
+                """,
+            },
+        )
+
+        assert _calls(builder, "FILE:named.py::by_name") == [
+            "REF:m.G.open",
+            "REF:m.handler",
+            "REF:open",
+        ]
+        assert _calls(builder, "FILE:named.py::through") == [
+            "REF:m.handler",
+            "REF:open",
+        ]
+        assert _calls(builder, "FILE:starred.py::star") == [
+            "REF:G.open",
+            "REF:handler",
+            "REF:open",
+        ]
+
+    def test_a_class_tested_for_keeps_each_value_the_name_may_hold(self, tmp_path):
+        """A name of the module, of an enclosing function or bound one of
+        two values keeps, where a class is tested for, each value that
+        inherits it; a capture holds what the subject does. An imported
+        name its module binds as `global` is not told."""
+        builder = _index(
+            tmp_path,
+            {
+                "base.py": """
+                class Base:
+                    def open(self): ...
+                """,
+                "m.py": """
+                from base import Base as Imported
+                from base import Base
+
+                class Sub(Base):
+                    def open(self): ...
+
+                class Sub2(Base):
+                    def open(self): ...
+
+                MOD = Sub()
+
+                def install():
+                    global Imported
+                    Imported = Sub
+
+                def imported():
+                    Imported().open()
+
+                def module_name():
+                    assert isinstance(MOD, Base)
+                    MOD.open()
+
+                def closure():
+                    h = Sub()
+
+                    def inner():
+                        if isinstance(h, Base):
+                            h.open()
+
+                    return inner
+
+                def union(c):
+                    h = Sub() if c else Sub2()
+                    if not isinstance(h, Base):
+                        return
+                    h.open()
+
+                def capture():
+                    match MOD:
+                        case Base() as b:
+                            b.open()
+                """,
+            },
+        )
+
+        def calls(name):
+            return _calls(builder, f"FILE:m.py::{name}")
+
+        assert calls("imported") == ["REF:base.Base", "REF:open"]
+        assert calls("module_name") == ["FILE:m.py::Sub::open"]
+        assert calls("closure::inner") == ["FILE:m.py::Sub::open"]
+        assert calls("union") == ["FILE:m.py::Sub", "FILE:m.py::Sub2", "REF:h.open"]
+        assert calls("capture") == ["FILE:m.py::Sub::open"]
+
+    def test_a_class_tested_for_narrows_each_value_apart(self, tmp_path):
+        """A value not known is read as the class told and a known one
+        keeps its own, so a name of both is not told; a test for a base
+        keeps a subclass told before it, one for a library class what the
+        name holds; a name bound only as `global` has no known value."""
+        builder = _index(
+            tmp_path,
+            {
+                "base.py": """
+                class Box:
+                    def open(self): ...
+
+                def make():
+                    return Box()
+                """,
+                "m.py": """
+                from base import *
+
+                class Base:
+                    def open(self): ...
+
+                class Sub(Base):
+                    def open(self): ...
+
+                class Rows(list):
+                    def open(self): ...
+
+                def install(other):
+                    global make, CACHE
+                    make = other
+                    CACHE = Sub()
+
+                def starred():
+                    make().open()
+
+                def only_global():
+                    CACHE.open()
+
+                def mixed(c, p):
+                    h = Sub() if c else p
+                    if isinstance(h, Base):
+                        h.open()
+
+                def either_operand(p):
+                    h = p or Sub()
+                    assert isinstance(h, Base)
+                    h.open()
+
+                def narrower_first(p):
+                    if isinstance(p, Sub):
+                        if isinstance(p, Base):
+                            p.open()
+
+                def library_class():
+                    h = Rows()
+                    if isinstance(h, list):
+                        h.open()
+
+                def annotated():
+                    h = Base()
+                    d = {}
+                    d[h.open()]: int = (h := Sub())
+                """,
+            },
+        )
+
+        def opened(name):
+            calls = _calls(builder, f"FILE:m.py::{name}")
+            return [call for call in calls if call.endswith("open")]
+
+        assert _calls(builder, "FILE:m.py::starred") == ["REF:make", "REF:open"]
+        assert opened("only_global") == ["REF:CACHE.open"]
+        assert opened("mixed") == ["REF:h.open"]
+        assert opened("either_operand") == ["REF:h.open"]
+        assert opened("narrower_first") == ["FILE:m.py::Sub::open"]
+        assert opened("library_class") == ["FILE:m.py::Rows::open"]
+        assert opened("annotated") == ["FILE:m.py::Sub::open"]
+
+    def test_a_value_tested_joins_the_one_it_was_tested_on(self, tmp_path):
+        """Tests for one class and another, each followed by a binding of
+        the name to itself, leave the name what it was: no key is written
+        per test."""
+        steps = "\n".join(
+            f"    if isinstance(h, {told}):\n        h = h"
+            for told in ("Sub", "Base") * 50
+        )
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": "class Base:\n    def open(self): ...\n"
+                "class Sub(Base):\n    def open(self): ...\n"
+                "class Sub2(Sub):\n    def open(self): ...\n"
+                f"def chain(c):\n    h = Sub() if c else Sub2()\n{steps}\n"
+                "    h.open()\n"
+            },
+        )
+
+        assert len(builder.literals) < 10
+        assert "REF:h.open" in _calls(builder, "FILE:m.py::chain")
+
+    def test_a_long_chain_of_tested_names_is_resolved(self, tmp_path):
+        """A name tested, bound from itself and tested again, many times
+        over, is read without one key being read through the next."""
+        steps = "\n".join(
+            "    assert isinstance(h, Base)\n    h = h.same()" for _ in range(400)
+        )
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": "class Base:\n"
+                "    def same(self) -> 'Base': ...\n"
+                "    def open(self): ...\n"
+                f"def chain(h):\n{steps}\n    h.open()\n"
+            },
+        )
+
+        assert "FILE:m.py::Base::open" in _calls(builder, "FILE:m.py::chain")
+
+    def test_type_a_function_binds_as_global_is_not_the_builtin(self, tmp_path):
+        """`type(x)` is not read as the class of `x` in a file where a
+        function binds `type` as `global`."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Box:
+                    def open(self): ...
+
+                def rebind(other):
+                    global type
+                    type = other
+
+                def use():
+                    type(Box())().open()
+                """
+            },
+        )
+
+        assert "FILE:m.py::Box::open" not in _calls(builder, "FILE:m.py::use")
+
+    @pytest.mark.parametrize(
+        "step",
+        [
+            "    h = h.same()",
+            "    h = h.same()\n    if isinstance(h, Base):\n        h = h",
+        ],
+    )
+    def test_a_name_bound_from_itself_keeps_a_short_origin(self, tmp_path, step):
+        """A name bound from its own value statement after statement, tested
+        or not, holds an origin no longer than a few steps."""
+        steps = "\n".join(step for _ in range(2000))
+        (tmp_path / "m.py").write_text(
+            "class Base:\n"
+            "    def same(self) -> 'Base': ...\n"
+            "    def open(self): ...\n"
+            f"def chain(h: Base):\n{steps}\n    h.open()\n"
+        )
+        builder = CodeGraphBuilder(tmp_path)
+        builder.process_directory()
+        written = [edge["target"] for edge in builder.edges]
+        written += [arm for arms in builder.literals.values() for arm in arms]
+        builder.resolve_references()
+
+        assert "FILE:m.py::Base::open" in _calls(builder, "FILE:m.py::chain")
+        assert max(map(len, written)) < 200
+
+    def test_a_name_bound_anew_on_each_way_holds_no_more_per_way(self, tmp_path):
+        """A name each of many tests binds anew keeps its values under keys
+        that grow with the ways, not with the ways' square."""
+
+        def literals(ways):
+            makes = "".join(f"def make{n}() -> Box: ...\n" for n in range(ways))
+            steps = "".join(f"    if c:\n        h = make{n}()\n" for n in range(ways))
+            builder = _index(
+                tmp_path / str(ways),
+                {
+                    "m.py": f"class Box:\n    def open(self): ...\n{makes}"
+                    f"def chain(c):\n    h = Box()\n{steps}    h.open()\n"
+                },
+            )
+            assert "FILE:m.py::Box::open" in _calls(builder, "FILE:m.py::chain")
+            return sum(map(len, builder.literals.values()))
+
+        assert literals(400) < 3 * literals(200)
+
+    def test_a_class_or_function_tested_as_callable_is_called(self, tmp_path):
+        """A class tested for `type`, or a function for `Callable`, is still
+        the one called."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                from typing import Callable
+
+                class Box:
+                    def open(self): ...
+
+                def make():
+                    return Box()
+
+                def run():
+                    k = Box
+                    if isinstance(k, type):
+                        k().open()
+                    f = make
+                    if isinstance(f, Callable):
+                        f().open()
+                """
+            },
+        )
+
+        assert _calls(builder, "FILE:m.py::run") == [
+            "FILE:m.py::Box",
+            "FILE:m.py::Box::open",
+            "FILE:m.py::Box::open",
+            "FILE:m.py::make",
+        ]
+
+    def test_a_name_bound_alike_where_one_way_tested_it_holds_both(self, tmp_path):
+        """A name bound to itself past a test, and on the other way bound
+        to a new value of the same text, holds each."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Base:
+                    def open(self): ...
+
+                class Sub(Base):
+                    def open(self): ...
+
+                def make() -> Base: ...
+
+                def run():
+                    h = make()
+                    if isinstance(h, Sub):
+                        h = h
+                    else:
+                        h = make()
+                    h.open()
+                """
+            },
+        )
+
+        assert "REF:h.open" in _calls(builder, "FILE:m.py::run")
+
+    def test_a_later_test_leaves_what_an_earlier_test_told(self, tmp_path):
+        """Past a test whose block does not bind the name, it is what an
+        earlier test told."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Base:
+                    def open(self): ...
+
+                class Sub(Base):
+                    def open(self): ...
+
+                class SubSub(Sub):
+                    def open(self): ...
+
+                def make() -> Base: ...
+
+                def run():
+                    h = make()
+                    if not isinstance(h, Sub):
+                        return
+                    if isinstance(h, SubSub):
+                        pass
+                    h.open()
+                """
+            },
+        )
+
+        assert _calls(builder, "FILE:m.py::run") == [
+            "FILE:m.py::Sub::open",
+            "FILE:m.py::make",
+        ]
+
+    def test_a_module_tested_for_module_type_is_the_module(self, tmp_path):
+        builder = _index(
+            tmp_path,
+            {
+                "helpers.py": "class Box:\n    def open(self): ...\n"
+                "def make():\n    return Box()\n",
+                "m.py": """
+                from types import ModuleType
+                import helpers
+
+                def run():
+                    h = helpers
+                    if isinstance(h, ModuleType):
+                        h.make().open()
+                """,
+            },
+        )
+
+        assert _calls(builder, "FILE:m.py::run") == [
+            "FILE:helpers.py::Box::open",
+            "FILE:helpers.py::make",
+        ]
+
+    def test_an_instance_tested_for_a_class_of_a_check_its_own_may_be_either(
+        self, tmp_path
+    ):
+        """An instance of a class unrelated to the one tested for passes a
+        `Protocol`'s or a metaclass's test as itself; a plain class's test
+        it fails."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                from typing import Protocol, runtime_checkable
+
+                @runtime_checkable
+                class Openable(Protocol):
+                    def open(self): ...
+
+                class Meta(type):
+                    def __instancecheck__(cls, value):
+                        return True
+
+                class Anything(metaclass=Meta):
+                    def open(self): ...
+
+                class Plain:
+                    def open(self): ...
+
+                class File:
+                    def open(self): ...
+
+                def run():
+                    f = File()
+                    if isinstance(f, Openable):
+                        f.open()
+                    if isinstance(f, Anything):
+                        f.open()
+
+                def plain(c):
+                    f = File() if c else Plain()
+                    if isinstance(f, Plain):
+                        f.open()
+                """
+            },
+        )
+
+        assert "FILE:m.py::Openable::open" not in _calls(builder, "FILE:m.py::run")
+        assert "FILE:m.py::Anything::open" not in _calls(builder, "FILE:m.py::run")
+        assert "FILE:m.py::Plain::open" in _calls(builder, "FILE:m.py::plain")
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            "".join("        h = h.same()\n" for _ in range(20))
+            + "        self.x = h\n",
+            (
+                "        h = step(h)\n        if not isinstance(h, Local): return\n"
+                "        self.x = h\n"
+            ),
+            "        self.x: Local = h\n",
+        ],
+        ids=["chain", "told", "annotated"],
+    )
+    def test_an_attribute_a_method_assigns_from_a_long_chain_of_its_class(
+        self, tmp_path, write
+    ):
+        """An attribute a method assigns a long chain of steps on a class
+        defined in that method, a value a test tells that class, or a value
+        annotated with it, holds that class's instance."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": "class Local:\n    def open(self): ...\n"
+                "def step(h):\n    return h.same()\n"
+                "class Holder:\n    def fill(self):\n"
+                "        class Local:\n"
+                "            def open(self): ...\n"
+                "            def same(self): return self\n"
+                f"        h = Local()\n{write}"
+                "    def use(self):\n        self.x.open()\n"
+            },
+        )
+
+        assert _calls(builder, "FILE:m.py::Holder::use") == [
+            "FILE:m.py::Holder::fill::Local::open"
+        ]
+
+    @pytest.mark.parametrize(
+        "fill",
+        [
+            """
+            def fill(self, h: Local):
+                class Local:
+                    def open(self): ...
+                h.open()
+                self.x = h
+            """,
+            """
+            class Local:
+                def open(self): ...
+            def fill(self, h: Local):
+                h.open()
+                self.x = h
+            """,
+            """
+            def fill(self, h):
+                Local = Other
+                if isinstance(h, Local):
+                    h.open()
+                    self.x = h
+            """,
+            """
+            def fill(self, h):
+                Local = Other
+                def inner():
+                    if isinstance(h, Local):
+                        h.open()
+                inner()
+            """,
+            """
+            def fill(self, h):
+                Local = Other
+                def inner(g: Local):
+                    g.open()
+                inner(h)
+            """,
+            """
+            def make(self) -> "list[Local]":
+                Local = Other
+                yield Local()
+            def fill(self):
+                for x in self.make():
+                    x.open()
+            """,
+        ],
+        ids=[
+            "parameter",
+            "class-body",
+            "bound",
+            "enclosing",
+            "enclosing-parameter",
+            "generator",
+        ],
+    )
+    def test_a_class_named_by_a_name_bound_elsewhere_is_not_known(self, tmp_path, fill):
+        """A parameter's annotation is evaluated where its function is
+        defined, so a name the function or its class body binds is not read
+        there; nor is a class an `isinstance` test writes as a name the
+        function binds to a value. The value is not known."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": "class Local:\n    def open(self): ...\n"
+                "class Other:\n    def open(self): ...\n"
+                "class Holder:\n"
+                + textwrap.indent(textwrap.dedent(fill), "    ")
+                + "    def use(self):\n        self.x.open()\n"
+            },
+        )
+
+        calls = [
+            e["target"]
+            for e in builder.edges
+            if e["source"].startswith("FILE:m.py::Holder::")
+            and e["relation"].startswith("CALLS")
+        ]
+        assert not [c for c in calls if c.endswith("::open")], calls
+
+    @pytest.mark.parametrize(
+        ("make", "opened"),
+        [
+            (
+                """
+                def make(self) -> Local:
+                    class Local:
+                        def open(self): ...
+                    return Local()
+                """,
+                "FILE:m.py::Ret::make::Local::open",
+            ),
+            (
+                """
+                def make(self):
+                    Local = Other
+                    def inner() -> Local:
+                        return Local()
+                    return inner()
+                """,
+                "FILE:m.py::Other::open",
+            ),
+        ],
+        ids=["body", "enclosing"],
+    )
+    def test_a_return_annotation_of_a_name_the_body_binds_is_not_what_it_returns(
+        self, tmp_path, make, opened
+    ):
+        """A return annotation is evaluated where the function is defined;
+        where the body binds a name it writes, or the function enclosing it
+        binds one to a value, the function returns what its `return`
+        statements give."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": "class Local:\n    def open(self): ...\n"
+                "class Other:\n    def open(self): ...\n"
+                "class Ret:\n"
+                + textwrap.indent(textwrap.dedent(make), "    ")
+                + "    def use(self):\n        self.make().open()\n"
+            },
+        )
+
+        assert opened in _calls(builder, "FILE:m.py::Ret::use")
+
+    def test_a_parameter_annotated_with_its_own_name_is_of_that_class(self, tmp_path):
+        """A parameter is not bound where its annotation is evaluated."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": "class Sample:\n    def hello(self): ...\n"
+                "def run(Sample: Sample):\n    Sample.hello()\n"
+            },
+        )
+
+        assert _calls(builder, "FILE:m.py::run") == ["FILE:m.py::Sample::hello"]
+
+    def test_a_definition_its_module_binds_again_is_its_variable(self, tmp_path):
+        """A function, decorated or not, that its module binds again is read
+        through the module as the variable; one bound once as itself."""
+        builder = _index(
+            tmp_path,
+            {
+                "mod.py": """
+                import lib
+
+                def deco(f):
+                    return f
+
+                @deco
+                def once(): ...
+
+                @deco
+                def again(): ...
+
+                again = lib.other
+
+                def joined(): ...
+
+                if lib.flag:
+                    joined = (lambda: 1) if lib.flag else joined
+                """,
+                "use.py": """
+                import mod
+
+                def run():
+                    mod.once()
+                    mod.again()
+                    mod.joined()
+                """,
+            },
+        )
+
+        assert _calls(builder, "FILE:use.py::run") == [
+            "FILE:mod.py::once",
+            "REF:mod.again",
+            "REF:mod.joined",
+        ]
+
+    def test_defaults_annotations_and_augmented_values_in_order(self, tmp_path):
+        """A default is read before those of the keyword-only parameters,
+        what an augmented assignment's name holds before its value, a
+        local's annotation not at all."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Box:
+                    def open(self): ...
+
+                    def __add__(self, other):
+                        return Box()
+
+                class Lid:
+                    def open(self): ...
+
+                def defaults():
+                    h = Box()
+                    return lambda a=(h := Lid()), *, b=h.open(): 0
+
+                def augmented():
+                    h = Box()
+                    h += (h := Lid()) and 1
+                    h.open()
+
+                def annotated():
+                    h = Box()
+                    k: (h := Lid()) = 1
+                    h.open()
+                """
+            },
+        )
+
+        def opened(name):
+            calls = _calls(builder, f"FILE:m.py::{name}")
+            return [call for call in calls if call.endswith("open")]
+
+        assert opened("defaults") == ["FILE:m.py::Lid::open"]
+        assert opened("augmented") == ["FILE:m.py::Box::open"]
+        assert opened("annotated") == ["FILE:m.py::Box::open"]
+
+    def test_a_library_value_augmented_stays_where_the_operator_gives_its_type(
+        self, tmp_path
+    ):
+        """A `str` built with `+=` in a loop stays one; a class a star
+        import may bind under a library type's name is not read as that
+        type."""
+        builder = _index(
+            tmp_path,
+            {
+                "shadow.py": """
+                class Box:
+                    def open(self): ...
+
+                class list:
+                    def __iadd__(self, other):
+                        return Box()
+
+                    def open(self): ...
+                """,
+                "starred.py": """
+                from shadow import *
+
+                def shadowed():
+                    h = list()
+                    h += [1]
+                    h.open()
+                """,
+                "m.py": """
+                class Text:
+                    def upper(self): ...
+
+                def text(parts):
+                    s = ""
+                    for part in parts:
+                        s += part
+                    s.upper()
+                """,
+            },
+        )
+
+        assert _calls(builder, "FILE:starred.py::shadowed") == [
+            "FILE:shadow.py::Box::open",
+            "FILE:shadow.py::list",
+        ]
+        assert _calls(builder, "FILE:m.py::text") == []
+
+    def test_a_class_tested_for_keeps_what_the_name_is_known_to_hold(self, tmp_path):
+        """A name known to hold an instance of a class that inherits the
+        one an `isinstance` test, an `assert` or a class pattern tells is
+        still of its own class; one of no known class is of the one told."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Base:
+                    def open(self): ...
+
+                class Sub(Base):
+                    def open(self): ...
+
+                def known():
+                    h = Sub()
+                    if isinstance(h, Base):
+                        h.open()
+
+                def leaves():
+                    h = Sub()
+                    if not isinstance(h, Base):
+                        return
+                    h.open()
+
+                def asserted():
+                    h = Sub()
+                    assert isinstance(h, Base)
+                    h.open()
+
+                def matched():
+                    h = Sub()
+                    match h:
+                        case Base():
+                            h.open()
+
+                def parameter(h):
+                    if isinstance(h, Base):
+                        h.open()
+                """
+            },
+        )
+        for name in ("known", "leaves", "asserted", "matched"):
+            assert _calls(builder, f"FILE:m.py::{name}") == [
+                "FILE:m.py::Sub",
+                "FILE:m.py::Sub::open",
+            ]
+        assert _calls(builder, "FILE:m.py::parameter") == ["FILE:m.py::Base::open"]
+
+    def test_what_is_evaluated_first_is_read_first(self, tmp_path):
+        """A dict display's key is read before its value and an
+        assignment's value before its targets; an augmented assignment
+        binds what the in-place method gives where the class has one, else
+        the operator's, and leaves a library value whose in-place method
+        gives itself as it was; a generator expression reads a name as it is when
+        the generator runs, but in its first iterable."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Lid:
+                    def open(self): ...
+                    def append(self, item): ...
+                    def add(self, item): ...
+
+                class Box:
+                    def __add__(self, other):
+                        return Lid()
+
+                    def open(self): ...
+
+                class Bag(Box):
+                    def __iadd__(self, other):
+                        return self
+
+                    def open(self): ...
+
+                def display():
+                    h = Box()
+                    return {1: (h := Lid()), h.open(): 2}
+
+                def assigned(d):
+                    h = Box()
+                    d[h.open()] = (h := Lid())
+
+                def plus():
+                    h = Box()
+                    h += 1
+                    h.open()
+
+                def inplace():
+                    h = Bag()
+                    h += 1
+                    h.open()
+
+                def joined(c):
+                    h = Box() if c else Bag()
+                    h += 1
+                    if c:
+                        h = Box()
+                    h.open()
+
+                def gathered(xs):
+                    rows = []
+                    seen = set()
+                    for x in xs:
+                        rows += [x]
+                        seen |= {x}
+                        rows.append(x)
+                        seen.add(x)
+
+                def drained(r):
+                    h = Box()
+                    gen = (h.open() for _ in r)
+                    h = Lid()
+                    return list(gen)
+
+                def iterable():
+                    h = Box()
+                    gen = (item for item in h.open())
+                    h = Lid()
+                    return list(gen)
+                """
+            },
+        )
+
+        def calls(name):
+            return _calls(builder, f"FILE:m.py::{name}")
+
+        assert calls("display") == [
+            "FILE:m.py::Box",
+            "FILE:m.py::Lid",
+            "FILE:m.py::Lid::open",
+        ]
+        assert calls("assigned") == [
+            "FILE:m.py::Box",
+            "FILE:m.py::Lid",
+            "FILE:m.py::Lid::open",
+        ]
+        assert calls("plus") == ["FILE:m.py::Box", "FILE:m.py::Lid::open"]
+        assert calls("inplace") == ["FILE:m.py::Bag", "FILE:m.py::Bag::open"]
+        assert "REF:h.open" in calls("joined")
+        assert calls("gathered") == []
+        assert calls("drained") == ["FILE:m.py::Box", "FILE:m.py::Lid", "REF:h.open"]
+        assert calls("iterable") == [
+            "FILE:m.py::Box",
+            "FILE:m.py::Box::open",
+            "FILE:m.py::Lid",
+        ]
+
+    def test_an_elif_chain_of_any_length_is_read(self, tmp_path):
+        """A chain of `elif` longer than the interpreter's recursion limit
+        is followed and its definitions found."""
+        arms = "".join(f"elif kind == {n}:\n    def made(): ...\n" for n in range(3000))
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": f"def one(): ...\nkind = 0\nif kind:\n    held = one\n{arms}"
+                "def after():\n    one()\n"
+            },
+        )
+        assert "FILE:m.py::made" in builder.nodes_by_id
+        assert _calls(builder, "FILE:m.py::after") == ["FILE:m.py::one"]
+
+    def test_what_makes_an_instance_is_the_class_it_is_passed(self, tmp_path):
+        """`__new__` makes an instance of the class it is passed: of
+        another class where that is written, of the class called where it
+        is the `cls` of a `__new__` or of a method called on a subclass.
+        A `__new__` annotated with what it returns gives that; a class
+        whose metaclass defines `__call__` gives a value not told, unless
+        that returns what `type.__call__` makes of the class. A `__new__`
+        that calls its own class gives none."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                from typing import Self
+
+                class Other:
+                    def go(self): ...
+
+                class Given:
+                    def __new__(cls):
+                        return object.__new__(Other)
+
+                    def go(self): ...
+
+                class Swapped:
+                    def __new__(cls):
+                        if cls is Swapped:
+                            cls = Kept
+                        return super().__new__(cls)
+
+                    def go(self): ...
+
+                class Kept(Swapped):
+                    def go(self): ...
+
+                class Annotated:
+                    def __new__(cls) -> Self:
+                        return cls.registry[cls]
+
+                    def go(self): ...
+
+                class Built:
+                    def __new__(cls):
+                        return cls.build()
+
+                    @classmethod
+                    def build(cls):
+                        return super().__new__(cls)
+
+                    def go(self): ...
+
+                class Wide:
+                    @classmethod
+                    def make(cls):
+                        return cls()
+
+                    def go(self): ...
+
+                class Narrow(Wide):
+                    def go(self): ...
+
+                class Meta(type):
+                    def __call__(cls):
+                        return Other()
+
+                class Called(metaclass=Meta):
+                    def go(self): ...
+
+                class Below(Called):
+                    def go(self): ...
+
+                class Again:
+                    def __new__(cls):
+                        return cls.build()
+
+                    @classmethod
+                    def build(cls):
+                        return cls()
+
+                    def go(self): ...
+
+                class Counting(type):
+                    def __call__(cls, *args, **kwargs):
+                        cls.made = True
+                        return type.__call__(cls, *args, **kwargs)
+
+                class Passing(Counting):
+                    def __call__(cls, *args, **kwargs):
+                        return super().__call__(*args, **kwargs)
+
+                class Counted(metaclass=Passing):
+                    def go(self): ...
+
+                class Elsewhere(type):
+                    def __call__(cls):
+                        return type.__call__(Other)
+
+                class Moved(metaclass=Elsewhere):
+                    def go(self): ...
+
+                def given():
+                    Given().go()
+
+                def swapped():
+                    Swapped().go()
+
+                def annotated():
+                    Annotated().go()
+
+                def built():
+                    Built().go()
+
+                def narrow():
+                    Narrow.make().go()
+
+                def written():
+                    Built.__new__(Built)
+
+                def called():
+                    Below().go()
+
+                def again():
+                    Again().go()
+
+                def counted():
+                    Counted().go()
+
+                def moved():
+                    Moved().go()
+                """
+            },
+        )
+
+        def calls(name):
+            return _calls(builder, f"FILE:m.py::{name}")
+
+        assert calls("given") == ["FILE:m.py::Given", "FILE:m.py::Other::go"]
+        assert calls("swapped") == ["FILE:m.py::Swapped", "REF:go"]
+        assert "FILE:m.py::Annotated::go" in calls("annotated")
+        assert "FILE:m.py::Built::go" in calls("built")
+        assert calls("narrow") == ["FILE:m.py::Narrow::go", "FILE:m.py::Wide::make"]
+        assert calls("written") == ["FILE:m.py::Built::__new__"]
+        assert calls("called") == ["FILE:m.py::Below", "REF:go"]
+        assert calls("again") == ["FILE:m.py::Again", "REF:go"]
+        assert calls("counted") == ["FILE:m.py::Counted", "FILE:m.py::Counted::go"]
+        assert calls("moved") == ["FILE:m.py::Moved", "REF:go"]
+
+    def test_a_class_gives_what_its_new_returns(self, tmp_path):
+        """Calling a class gives an instance of it where its `__new__`, its
+        own or a base's, returns what a `__new__` made, or a base's is
+        annotated `Self`; where it may return anything else, what the call
+        gives is not told."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Many:
+                    def is_valid(self): ...
+
+                class One:
+                    def __new__(cls, *args, many=False):
+                        if many:
+                            return Many()
+                        return super().__new__(cls)
+
+                    def is_valid(self): ...
+
+                class Sub(One):
+                    pass
+
+                class Plain:
+                    def __new__(cls):
+                        made = super().__new__(cls)
+                        return made
+
+                    def go(self): ...
+
+                class Looked:
+                    def __new__(cls, registry):
+                        return registry[cls]
+
+                    def go(self): ...
+
+                class Tracked:
+                    def __new__(cls, *args) -> Self:
+                        obj = object.__new__(cls)
+                        return obj
+
+                class Request(Tracked):
+                    def send(self): ...
+
+                class Named:
+                    def __new__(cls) -> "Named":
+                        return object.__new__(cls)
+
+                class Response(Named):
+                    def read(self): ...
+
+                def use():
+                    Sub(many=True).is_valid()
+                    Plain().go()
+                    Looked({}).go()
+                    Request().send()
+                    Response().read()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::use") == [
+            "FILE:m.py::Looked",
+            "FILE:m.py::Plain",
+            "FILE:m.py::Plain::go",
+            "FILE:m.py::Request",
+            "FILE:m.py::Request::send",
+            "FILE:m.py::Response",
+            "FILE:m.py::Sub",
+            "REF:go",
+            "REF:is_valid",
+            "REF:read",
+        ]
+
+    def test_an_attribute_is_read_where_each_write_of_it_is(self, tmp_path):
+        """A method's local definition answers only the writes that method
+        made: another method's write of the same name, a returned value and
+        the arms of a conditional are read where they are written; what a
+        function nested in a method writes is not read."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Local:
+                    def go(self): ...
+
+                def make():
+                    return Local()
+
+                class A:
+                    def setup(self):
+                        class Local:
+                            def go(self): ...
+
+                        self.mine = Local
+
+                    def other(self):
+                        self.theirs = Local
+
+                    def run(self):
+                        self.mine().go()
+                        self.theirs().go()
+
+                class B:
+                    def make(self):
+                        class Local:
+                            def go(self): ...
+
+                        return Local
+
+                    def setup(self, fresh):
+                        self.kind = Local
+                        if fresh:
+                            held = Local()
+                        else:
+                            held = make()
+                        self.held = held
+
+                    def run(self):
+                        self.kind().go()
+                        self.held.go()
+
+                class C:
+                    def setup(self, fresh):
+                        class Local:
+                            def go(self): ...
+
+                        if fresh:
+                            held = Local()
+                        else:
+                            held = make()
+                        self.held = held
+
+                        def later():
+                            class Local:
+                                def go(self): ...
+
+                            self.late = Local
+
+                    def run(self):
+                        self.held.go()
+                        self.late().go()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::A::run") == [
+            "FILE:m.py::A::setup::Local",
+            "FILE:m.py::A::setup::Local::go",
+            "FILE:m.py::Local",
+            "FILE:m.py::Local::go",
+        ]
+        assert _calls(builder, "FILE:m.py::B::run") == [
+            "FILE:m.py::Local",
+            "FILE:m.py::Local::go",
+            "FILE:m.py::Local::go",
+        ]
+        assert _calls(builder, "FILE:m.py::C::run") == ["REF:go", "REF:self.held.go"]
+
+    def test_the_type_of_a_value_only_where_type_and_class_are_python_s(self, tmp_path):
+        """`type(x)` is the class of `x` only where `type` is the builtin,
+        whatever `__class__` its class defines; `x.__class__` only where no
+        class of `x` defines one. Neither is told where a method assigns
+        `__class__` to the instance."""
+        builder = _index(
+            tmp_path,
+            {
+                "a.py": """
+                class Real:
+                    def act(self): ...
+
+                class Proxy:
+                    __class__ = property(lambda self: Real)
+
+                    def act(self): ...
+
+                    def run(self):
+                        self.__class__.act(self)
+
+                class Sub(Proxy):
+                    def run(self):
+                        type(self).act(self)
+
+                class Changed:
+                    def change(self):
+                        self.__class__ = Real
+
+                    def act(self): ...
+
+                    def run(self):
+                        type(self).act(self)
+                        self.__class__.act(self)
+                """,
+                "b.py": """
+                class Base:
+                    def go(self): ...
+
+                class Other:
+                    def go(self): ...
+
+                def type(value):
+                    return Base
+
+                def use(other: Other):
+                    type(other).go()
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:a.py::Proxy::run") == []
+        assert _calls(builder, "FILE:a.py::Sub::run") == ["FILE:a.py::Proxy::act"]
+        assert _calls(builder, "FILE:a.py::Changed::run") == [
+            "REF:act",
+            "REF:self.__class__.act",
+        ]
+        assert _calls(builder, "FILE:b.py::use") == [
+            "FILE:b.py::Base::go",
+            "FILE:b.py::type",
+        ]
+
+    def test_what_a_name_holds_past_the_ways_that_bind_it(self, tmp_path):
+        """Past a conditional a name holds what the ways that go on give:
+        not what a way that returns or raises bound, the type without its
+        arguments where those differ, each arm of an `elif`; what is bound
+        from the name after it holds the same. A `:=` that may be skipped
+        leaves what was there as well, but binds for the body of an `and`
+        it is an operand of. A name two arms define, or one a way rebinds,
+        calls one of them; one defined again in the same block is the later
+        definition."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Box:
+                    def open(self): ...
+
+                class Lid:
+                    def open(self): ...
+
+                def boxes() -> list[Box]: ...
+                def lids() -> list[Lid]: ...
+                def make_box() -> Box: ...
+
+                def leaves(fresh):
+                    if fresh:
+                        held = Box()
+                    else:
+                        held = Lid()
+                        raise ValueError
+                    held.open()
+
+                def arguments(fresh):
+                    if fresh:
+                        held = boxes()
+                    else:
+                        held = lids()
+                    held[0].open()
+                    held.sort()
+
+                def chain(kind):
+                    if kind == 1:
+                        held = Box()
+                    elif kind == 2:
+                        held = make_box()
+                    else:
+                        held = Box()
+                    held.open()
+
+                def copied(fresh):
+                    if fresh:
+                        held = Box()
+                    else:
+                        held = Lid()
+                    other = held
+                    other.open()
+
+                def walrus(fresh):
+                    held = Lid()
+                    if fresh and (held := Box()):
+                        held.open()
+                    held.open()
+
+                def defined(fresh):
+                    if fresh:
+                        def run(): return Box()
+                    else:
+                        def run(): return Lid()
+                    run().open()
+
+                def again():
+                    def run(): return Box()
+                    def run(): return Lid()
+                    run().open()
+
+                def rebound(fresh):
+                    def handler(): ...
+                    if fresh:
+                        handler = make_box
+                    handler()
+                """
+            },
+        )
+        assert "FILE:m.py::Box::open" in _calls(builder, "FILE:m.py::leaves")
+        assert _calls(builder, "FILE:m.py::arguments") == [
+            "FILE:m.py::boxes",
+            "FILE:m.py::lids",
+            "REF:open",
+        ]
+        assert "FILE:m.py::Box::open" in _calls(builder, "FILE:m.py::chain")
+        assert "REF:other.open" in _calls(builder, "FILE:m.py::copied")
+        assert _calls(builder, "FILE:m.py::walrus") == [
+            "FILE:m.py::Box",
+            "FILE:m.py::Box::open",
+            "FILE:m.py::Lid",
+            "REF:held.open",
+        ]
+        assert "REF:open" in _calls(builder, "FILE:m.py::defined")
+        assert "FILE:m.py::Lid::open" in _calls(builder, "FILE:m.py::again")
+        candidates = [
+            e["metadata"].get("candidates")
+            for e in builder.edges
+            if e["source"] == "FILE:m.py::rebound" and e["target"] == "REF:handler"
+        ]
+        assert candidates == [["FILE:m.py::make_box", "FILE:m.py::rebound::handler"]]
+
+    def test_a_way_a_checker_reads_or_a_test_narrows(self, tmp_path):
+        """The way `if not TYPE_CHECKING` leaves to a type checker never
+        runs, `typing_extensions`' constant as `typing`'s; past a statement
+        one of whose ways ends the function, a name its `isinstance` test
+        checks is of that class where the body leaves it."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                from typing import TYPE_CHECKING
+                import typing_extensions
+
+                class Source:
+                    def go(self): ...
+
+                class Fake:
+                    def go(self): ...
+
+                def unless():
+                    if not TYPE_CHECKING:
+                        kind = Source
+                    else:
+                        kind = Fake
+                    kind().go()
+
+                def extensions():
+                    if typing_extensions.TYPE_CHECKING:
+                        kind = Fake
+                    else:
+                        kind = Source
+                    kind().go()
+
+                def narrowed(data):
+                    if isinstance(data, str):
+                        data = Source()
+                    elif isinstance(data, Source):
+                        pass
+                    else:
+                        raise TypeError
+                    held = data
+                    held.go()
+
+                def plain(data: Fake):
+                    if isinstance(data, Source):
+                        pass
+                    data.go()
+                """
+            },
+        )
+        source = ["FILE:m.py::Source", "FILE:m.py::Source::go"]
+        assert _calls(builder, "FILE:m.py::unless") == source
+        assert _calls(builder, "FILE:m.py::extensions") == source
+        assert _calls(builder, "FILE:m.py::narrowed") == source
+        assert _calls(builder, "FILE:m.py::plain") == ["FILE:m.py::Fake::go"]
+
+    def test_what_a_call_returns_is_called(self, tmp_path):
+        """A call of what an expression that is no name gives calls that
+        value: the function a function returns, the class, the `__call__`
+        of an instance."""
+        builder = _index(
+            tmp_path,
+            {
+                "m.py": """
+                class Source:
+                    def go(self): ...
+
+                class Runner:
+                    def __call__(self): ...
+
+                    def kind(self):
+                        return Source
+
+                def wrap(view):
+                    def inner(): ...
+                    return inner
+
+                def use(runner: Runner, table):
+                    Runner()()
+                    wrap(use)()
+                    runner.kind()().go()
+                    type(runner)()
+                    table["key"]()
+                """
+            },
+        )
+        assert _calls(builder, "FILE:m.py::use") == [
+            "FILE:m.py::Runner",
+            "FILE:m.py::Runner",
+            "FILE:m.py::Runner::__call__",
+            "FILE:m.py::Runner::kind",
+            "FILE:m.py::Source",
+            "FILE:m.py::Source::go",
+            "FILE:m.py::wrap",
+            "FILE:m.py::wrap::inner",
+        ]
+
 
 class TestRustCallResolution:
     def test_a_method_two_traits_give_a_type_is_the_trait_in_scope_s(self, tmp_path):
@@ -4043,6 +6045,63 @@ class TestRustCallResolution:
         assert _calls(builder, "FILE:src/lib.rs::Wrapper::of") == [
             "FILE:src/lib.rs::Wait::id"
         ]
+
+    def test_a_borrowed_field_is_of_the_type_it_borrows(self, tmp_path):
+        """As rustc: a method called on a field declared `&'a T`, `&'a mut T`
+        or `&'static T`, on the struct's line or its own, is T's."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "p"\n',
+                "src/lib.rs": """
+                pub struct Own;
+                impl Own { pub fn id(&self) {} }
+                pub struct Line<'a> { c: &'a Own, d: &'a mut Own }
+                impl<'a> Line<'a> { pub fn of(&self) { self.c.id(); self.d.id(); } }
+                pub struct Tuple<'a>(&'a Own);
+                impl<'a> Tuple<'a> { pub fn of(&self) { self.0.id() } }
+                pub struct Static { c: &'static Own }
+                impl Static { pub fn of(&self) { self.c.id() } }
+                pub struct Lines<'a> {
+                    c: &'a Own,
+                }
+                impl<'a> Lines<'a> { pub fn of(&self) { self.c.id() } }
+                """,
+            },
+        )
+        for owner, calls in (("Line", 2), ("Tuple", 1), ("Static", 1), ("Lines", 1)):
+            assert (
+                _calls(builder, f"FILE:src/lib.rs::{owner}::of")
+                == ["FILE:src/lib.rs::Own::id"] * calls
+            )
+
+    def test_arms_of_a_type_no_source_defines_are_the_library_s(self, tmp_path):
+        """Arms that all give a value of a type the project does not define
+        are read as one such value: the call is dropped. A library type the
+        project implements a trait for keeps it; arms that part stay
+        unresolved."""
+        builder = _index(
+            tmp_path,
+            {
+                "Cargo.toml": '[package]\nname = "p"\n',
+                "src/lib.rs": """
+                pub trait Shout { fn shout(&self); }
+                impl Shout for String { fn shout(&self) {} }
+                pub struct Other;
+                impl Other { pub fn shout(&self) {} }
+                pub fn one() { let t = Kind::A; t.shout(); }
+                pub fn arms(b: bool) { let t = if b { Kind::A } else { Kind::B }; t.shout(); }
+                pub fn known(b: bool) { let t = if b { String::new() } else { String::new() }; t.shout(); }
+                pub fn part(b: bool) { let t = if b { Kind::A } else { Other }; t.shout(); }
+                """,
+            },
+        )
+        assert _calls(builder, "FILE:src/lib.rs::one") == []
+        assert _calls(builder, "FILE:src/lib.rs::arms") == []
+        assert _calls(builder, "FILE:src/lib.rs::known") == [
+            "FILE:src/lib.rs::String::shout"
+        ]
+        assert _calls(builder, "FILE:src/lib.rs::part") == ["REF:t.shout"]
 
     def test_a_pattern_on_one_line_binds_before_the_line_goes_on(self, tmp_path):
         """As rustc: a `let` pattern ending in `;` before more code, the
@@ -31627,7 +33686,7 @@ class TestProcessDirectory:
         assert opened == ["app.py"]
 
     def test_parser_failure_is_contained_to_its_file(
-        self, regex_builder, tmp_path, monkeypatch
+        self, regex_builder, tmp_path, monkeypatch, caplog
     ):
         """A parser raising on one file does not stop the walk."""
         (tmp_path / "a_bad.rs").write_text("fn broken() {}\n")
@@ -31640,6 +33699,8 @@ class TestProcessDirectory:
         regex_builder.process_directory()
 
         assert "FILE:b_good.py::fine" in {n["id"] for n in regex_builder.nodes}
+        assert "a_bad.rs" in caplog.text
+        caplog.clear()
 
     def test_walk_outside_the_id_base_is_refused(self, tmp_path):
         """Node IDs are relative to the project root; a file outside it gets
@@ -31754,18 +33815,30 @@ class TestCommandLine:
         assert result.returncode == 0, result.stderr
         assert self._ids(cache) == {"FILE:app.py", "FILE:app.py::hello"}
 
-    def test_path_outside_the_project_root_is_refused(self, root, elsewhere, tmp_path):
+    @pytest.mark.parametrize("name", ["", "missing"])
+    def test_path_outside_the_project_root_is_refused(
+        self, root, elsewhere, tmp_path, name
+    ):
         cache = tmp_path / "cache"
         result = _run_indexer(
             "--project-root",
             str(root),
-            str(elsewhere),
+            str(elsewhere / name),
             cwd=root,
             DESCRY_CACHE_DIR=str(cache),
         )
 
         assert result.returncode == 2
         assert "outside the project root" in result.stderr
+        assert not cache.exists()
+
+    @pytest.mark.parametrize("name", ["missing", "app.py"])
+    def test_path_that_is_no_directory_is_refused(self, root, tmp_path, name):
+        cache = tmp_path / "cache"
+        result = _run_indexer(str(root / name), cwd=root, DESCRY_CACHE_DIR=str(cache))
+
+        assert result.returncode == 2
+        assert "is not a directory" in result.stderr
         assert not cache.exists()
 
     def test_other_libraries_info_is_not_shown(self):
@@ -35213,6 +37286,10 @@ class TestPythonExportsAndCoroutines:
                     c.close()
                     w = await coro()
                     w.go()
+
+                async def closed():
+                    raise ValueError
+                    yield W()
                 """,
             },
         )
@@ -35221,6 +37298,9 @@ class TestPythonExportsAndCoroutines:
             "FILE:a.py::coro",
             "FILE:a.py::coro",
         ]
+        # A `yield` no statement reaches still makes a generator of it.
+        closed = next(n for n in builder.nodes if n["id"] == "FILE:a.py::closed")
+        assert "coroutine" not in closed["metadata"]
 
 
 class TestRustNamesInScope:

@@ -4,6 +4,153 @@ All notable changes to Descry will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [semver](https://semver.org/) from 1.0.0.
 
+## [1.2.3] — 2026-11-15
+
+### Changed
+
+- Python: a name is read as what it holds where it is read, following the
+  statements as they run: the arms of `if`, `elif`, `else` and `match`,
+  loops with their `break`, `continue` and `else`, `try` with its handlers,
+  `else` and `finally`, `with`, and what Python may skip (an operand of
+  `and` or `or`, an arm of a conditional expression, a later operand of a
+  chained comparison, a `name := value` in any of them). A way that
+  returns, raises, breaks or continues gives nothing to what follows it,
+  and the body of a `try` or a `with` may have run in part, since what a
+  `with` enters may take what its body raises.
+  Where every way to a read gives the name one value it holds it, a type
+  without its arguments where only those differ. Where they part, a call on
+  the name stays unresolved, and a call of the name lists the definitions
+  the ways give as candidates. Before, a name bound in an arm had no known
+  value past the conditional, or the value of its last arm, and a call of
+  it resolved to a definition of that name in the function.
+- Python: a name of a function read in a function or a lambda nested in it
+  holds what it may when that runs: what it holds where the nested one is
+  defined, and what it is bound to from there on. A generator expression
+  is read so too, but for its first iterable. Before, it was read as what
+  the outer function bound last, a generator expression as where it is
+  written.
+- Python: a name a function declares `nonlocal` and binds has no known
+  value in that function, nor in the function it is the `nonlocal` of from
+  the definition on. A module's name that a function of its file declares
+  `global` has none wherever it is read, in a file that imports it too,
+  whether the module binds it by assignment, definition or import, a star
+  import too, or not at all. Before, it was read as what the function bound
+  last, or as the module bound it, or dropped as the library's. A name a
+  module imported with a star binds to no known value is unresolved, not
+  dropped as the library's.
+- Python: a name an `isinstance` test checks is of that class in the block
+  the test guards, until it is bound again, and past the statement where the
+  other way leaves (`if not isinstance(x, Form): return`). The values the
+  name may hold are told apart: one descry knows, of a project class that
+  inherits the one tested for or is tested for a library class, stays of its
+  own class, a name of the module or of an enclosing function too; an
+  instance of a project class that neither inherits nor is inherited by a
+  project class tested for that has a metaclass or a base outside the
+  project may be of either (a runtime-checkable `Protocol`, an ABC's
+  `register`); one it does not know is read as of the class tested for;
+  where they part, a call on the name is unresolved. A class tested for
+  after a subclass of it leaves the subclass. A class pattern that captures
+  at the top of its case (`case Form() as f`) binds what its subject holds.
+  Before, the name was read as of the class tested for last. Where a way
+  that passed the test meets one that did not bind the name, or each way
+  only tested it, the name is read as it was before the test, told what
+  earlier tests told. A name assigned a conditional expression, or an `and`
+  or `or`, holds any operand's value; before, none.
+- Python: `name += value` binds the name to what the in-place method gives
+  where its class defines one, else to what the operator's gives; a value
+  of a builtin type whose method gives that type (a list, a set, a `str`)
+  stays what it was. Before, the name kept what it held.
+- Python: `type(x)`, where `type` is the builtin, is the class of `x`, and
+  so is `x.__class__` where no class of `x` defines `__class__` and no
+  method assigns it: `type(self).build()` and `self.__class__(...)` resolve,
+  and `class One(type(self))` has the method's class as its base. The type
+  of a class is its metaclass, which stays not told; a base written
+  `type(x)` that is not told is kept as an unresolved base under that text.
+- Python: what a method assigns to an attribute is read in the method, as
+  Python evaluates it: an attribute assigned a class or function defined in
+  that method holds it (`self.Serializer = Local` in a test's setup), as does
+  one assigned a value a test tells such a class or annotated with it, so a
+  call through the attribute resolves. Before, the name was read in the
+  class: a module-level definition of that name was taken, or the call was
+  dropped as external.
+- Python: annotations are evaluated where the function is defined, not in
+  it. A parameter annotated with a name the function's body, or the class
+  body defining the function, binds, or one a function enclosing it binds to
+  a value, holds a value not known; it was read in the function, where the
+  name may be another class. A function whose return annotation writes a
+  name its body binds, or one a function enclosing it binds to a value,
+  returns what its `return` statements give, a generator a value not known;
+  it was read as the annotation. An `isinstance` test of a
+  class written as a name that the function, or the nearest function
+  enclosing it that binds the name, binds to a value (`Kind = Other`) tells
+  nothing; it told the class a definition of that name elsewhere gives.
+- Python: calling a class gives what its `__new__` returns: an instance of
+  the class where every return is what a `__new__` made of the `cls` it
+  was passed or the `__new__` is annotated `Self`, else what the `__new__`
+  the class itself defines returns or is annotated with. Where a base's
+  `__new__` may return anything else, the value is not told (a serializer
+  whose `__new__` returns a list serializer for `many=True`), as it is for
+  a class with a metaclass of the project that defines `__call__`, unless
+  that returns `type.__call__(cls, ...)` or `super().__call__(...)`.
+  Before, it was always an instance of the class.
+- Python: `Base.__new__(Other)` makes an instance of the class it is passed,
+  whichever class `__new__` is read from. Before, on a library class it was
+  dropped as a call into the library.
+- Python: a call of what an expression that is no name gives is recorded and
+  resolved: `Middleware(get_response)(request)` calls the class's `__call__`,
+  `cache_page(3)(view)` the function the factory returns, `type(self)()` the
+  class. Before, no call was recorded for it.
+- Python: a function defined under one name in two arms returns what either
+  definition returns; one defined again where the first always ran returns
+  what the later one does. `docs/CERTAINTY.md` says what such a name is in
+  the graph: one node, of the first definition's signature.
+- Rust: what every arm of an `if` or `match` gives as a value of a type no
+  source of the project defines is read as one such value is: a call on it
+  is dropped as the library's. Before, it stayed unresolved, with the
+  project's methods of that name as candidates.
+
+### Fixed
+
+- Rust: a method called through `self` on a field that the struct's own
+  line declares borrowed (`&'a T`, `&'a mut T`, `&'static T`) is T's, as
+  for a field declared on a line of its own; it was unresolved.
+
+- Python: an assignment's value is read before its targets, as Python
+  evaluates them (`d[h.key()] = (h := other)`).
+- Python: what the name of an augmented assignment holds is read before
+  its value (`h += (h := other)`), an annotated assignment's value before
+  its target, and a local's annotation is not evaluated.
+- Python: `if not TYPE_CHECKING` leaves its `else` to the type checker, and
+  `typing_extensions.TYPE_CHECKING` is read as `typing`'s.
+- Python: a classmethod that returns `cls()`, called on a subclass, gives an
+  instance of the subclass, not of the class that defines it.
+- Python: a call of a name that one way binds to a value not told and
+  another defines as a function stays unresolved; it resolved to the
+  function.
+- Python: a name a module imports on one way and assigns on another is not
+  read as the import.
+- Python: an attribute written through `self` in a function nested in a
+  method has a value not told, not a module-level definition of the name
+  written there.
+- Python: a class tested for `type`, or a function for `Callable`, and
+  then called resolves to that class or function, and a module tested for
+  `ModuleType` is read as the module; the call was dropped.
+- Python: a name bound from its own value statement after statement
+  (`h = h.same()`) is parsed in time linear in the statements; 3,000 such
+  statements took nearly three minutes.
+- Python: a function its module binds again, by assignment or as a
+  decorated function, is read through the module and where imported by
+  name as what the module binds; it resolved to the function. A decorated
+  function the module assigns again keeps that assignment; it was read as
+  only what the decorator returns.
+- Python: `type(x)` in a file where a function binds `type` as `global` is
+  not read as the class of `x`.
+- `descry-generate` refuses a path that is no directory; it wrote an empty
+  graph. As in `descry index`, one outside the project root is refused as
+  outside it.
+- Python: a file with an `elif` chain of a thousand arms or more is parsed;
+  it failed with `RecursionError` and was left out of the graph.
+
 ## [1.2.2] — 2026-11-13
 
 ### Changed
